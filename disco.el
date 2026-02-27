@@ -40,6 +40,8 @@ If token is missing, prompt for it once in current session."
   "Clear all in-memory caches used by disco.el."
   (interactive)
   (disco-state-reset)
+  (disco-api-reset-rate-limit-state)
+  (disco-http-reset-queue-state)
   (message "disco: in-memory state reset"))
 
 (provide 'disco)

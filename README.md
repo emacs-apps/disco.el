@@ -16,6 +16,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
 - Live room updates with create/update/delete dispatch (polling-based gateway-like engine).
+- Request serialization and rate-limit-aware retries for Discord REST calls.
 
 ## Dependencies
 
@@ -27,7 +28,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco.el`: package entrypoint.
 - `disco-customize.el`: user options and token command.
 - `disco-api.el`: synchronous REST requests.
-- `disco-http.el`: HTTP wrapper built on required `plz` backend.
+- `disco-http.el`: synchronous HTTP wrapper on `plz` with serialized request queue.
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-gateway.el`: live update engine and event dispatch hook.
 - `disco-root.el`: root dashboard buffer.
@@ -36,7 +37,8 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Design Notes
 
 - Initial implementation intentionally keeps synchronous request flow to simplify debugging and establish API correctness first.
-- HTTP transport is fully based on `plz` (curl-backed).
+- HTTP transport is fully based on `plz` (curl-backed), with optional in-process serialization to avoid burst traffic.
+- REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
 - Live updates currently use polling and emit gateway-like message events; full WebSocket Gateway transport is the next protocol milestone.
 - Rate-limit handling currently surfaces 429 with retry metadata to the user; full bucket scheduler is planned next.
 
@@ -46,3 +48,4 @@ This repository currently contains an MVP scaffold designed with these reference
 2. Replace polling transport with Gateway dispatch stream while keeping current event hook API.
 3. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
 4. Introduce async request queue + rate-limit bucket management.
+5. Add observability commands for queue depth and active rate-limit windows.

@@ -1,69 +1,203 @@
-;;; disco-http.el --- HTTP backend abstraction for disco.el -*- lexical-binding: t; -*-
+;;; disco-http.el --- HTTP transport for disco.el -*- lexical-binding: t; -*-
 
 ;; Author: disco.el contributors
 
 ;;; Commentary:
 
-;; HTTP wrapper built on top of plz/curl.
-;; Return shape is stable across requests: plist with
-;; :status, :body, :headers and optional :error.
+;; This module provides a synchronous HTTP transport wrapper built on plz.
+;;
+;; Return value format is a plist with:
+;; - :status  integer HTTP status (0 for transport-level failures)
+;; - :body    response body string
+;; - :headers header alist, key as lower-cased symbols
+;; - :error   raw Lisp error object (only on transport failures)
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'subr-x)
 (require 'plz)
 
 (declare-function plz "ext:plz")
 (declare-function plz-response-status "ext:plz")
 (declare-function plz-response-body "ext:plz")
-(declare-function plz-response-p "ext:plz")
+(declare-function plz-response-headers "ext:plz")
 (declare-function plz-error-response "ext:plz")
+(declare-function plz-queue "ext:plz")
+(declare-function make-plz-queue "ext:plz")
+(declare-function plz-run "ext:plz")
+(declare-function plz-clear "ext:plz")
+(declare-function plz-length "ext:plz")
+(declare-function plz-queue-limit "ext:plz")
+(declare-function plz-queue-active "ext:plz")
+(declare-function plz-queue-requests "ext:plz")
+
+(defgroup disco-http nil
+  "HTTP transport options for disco.el."
+  :group 'disco)
+
+(defcustom disco-http-serialize-requests t
+  "If non-nil, execute HTTP requests through a serialized in-process queue.
+
+This avoids concurrent burst traffic from timers and interactive commands."
+  :type 'boolean
+  :group 'disco-http)
+
+(defcustom disco-http-queue-limit 1
+  "Maximum number of concurrent requests in disco's plz queue.
+
+Value 1 enforces strict serialization."
+  :type 'integer
+  :group 'disco-http)
+
+(defcustom disco-http-queue-poll-interval 0.02
+  "Seconds between queue turn checks while waiting."
+  :type 'number
+  :group 'disco-http)
+
+(defcustom disco-http-queue-wait-timeout 120
+  "Max seconds a request waits in local queue before signaling timeout."
+  :type 'integer
+  :group 'disco-http)
+
+(defvar disco-http--plz-queue nil
+  "Shared plz queue used when request serialization is enabled.")
+
+(defvar disco-http--plz-queue-limit nil
+  "Last applied `disco-http-queue-limit' for queue reinitialization.")
 
 (defun disco-http--method-symbol (method)
   "Convert METHOD string into plz method symbol."
   (intern (downcase method)))
 
+(defun disco-http--normalize-headers (headers)
+  "Normalize HEADERS alist to lower-cased symbol keys."
+  (mapcar
+   (lambda (header)
+     (let ((key (car header))
+           (value (cdr header)))
+       (cons (if (symbolp key)
+                 (intern (downcase (symbol-name key)))
+               key)
+             value)))
+   (or headers '())))
+
+(defun disco-http--response->plist (response)
+  "Convert plz RESPONSE into disco transport plist."
+  (list :status (or (plz-response-status response) 0)
+        :body (or (plz-response-body response) "")
+        :headers (disco-http--normalize-headers (plz-response-headers response))))
+
+(defun disco-http--error->plist (err)
+  "Convert transport ERR into disco transport plist."
+  (let* ((response (and (fboundp 'plz-error-response)
+                        (ignore-errors (plz-error-response err))))
+         (status (and response (ignore-errors (plz-response-status response))))
+         (body (and response (ignore-errors (plz-response-body response))))
+         (headers (and response (ignore-errors (plz-response-headers response)))))
+    (list :status (or status 0)
+          :body (or body "")
+          :headers (disco-http--normalize-headers headers)
+          :error err
+          :error-message (error-message-string err))))
+
 (defun disco-http--request-plz (method url headers body timeout)
-  "Execute HTTP request via plz and return normalized plist."
-  (let (done result err)
-    (plz (disco-http--method-symbol method) url
-      :headers headers
-      :body body
-      :body-type 'text
-      :as 'response
-      :timeout timeout
-      :connect-timeout timeout
-      :then (lambda (response)
-              (setq result
-                    (list :status (plz-response-status response)
-                          :body (or (plz-response-body response) "")
-                          :headers nil)
-                    done t))
-      :else (lambda (plz-error)
-              (let* ((response (and (fboundp 'plz-error-response)
-                                    (ignore-errors (plz-error-response plz-error))))
-                     (status (when (and response (plz-response-p response))
-                               (plz-response-status response)))
-                     (body-text (when (and response (plz-response-p response))
-                                  (or (plz-response-body response) ""))))
-                (setq err (list :status status :body body-text :raw plz-error)
-                      done t))))
+  "Execute one synchronous HTTP request with plz."
+  (condition-case err
+      (disco-http--response->plist
+       (plz (disco-http--method-symbol method) url
+         :headers headers
+         :body body
+         :body-type 'text
+         :as 'response
+         :then 'sync
+         :timeout timeout
+         :connect-timeout timeout))
+    (error
+     (disco-http--error->plist err))))
+
+(defun disco-http--ensure-queue ()
+  "Return active plz queue, creating or reinitializing when needed."
+  (when (or (null disco-http--plz-queue)
+            (not (equal disco-http--plz-queue-limit disco-http-queue-limit)))
+    (setq disco-http--plz-queue (make-plz-queue :limit (max 1 disco-http-queue-limit)))
+    (setq disco-http--plz-queue-limit (max 1 disco-http-queue-limit)))
+  disco-http--plz-queue)
+
+(defun disco-http--request-plz-queued (method url headers body timeout)
+  "Execute one request using the shared asynchronous plz queue.
+
+This function blocks until request completion to preserve disco's
+synchronous API contract."
+  (let* ((queue (disco-http--ensure-queue))
+         (done nil)
+         (result nil)
+         (start-time (float-time)))
+    (plz-queue
+     queue
+     (disco-http--method-symbol method)
+     url
+     :headers headers
+     :body body
+     :body-type 'text
+     :as 'response
+     :timeout timeout
+     :connect-timeout timeout
+     :then (lambda (response)
+             (setq result (disco-http--response->plist response)
+                   done t))
+     :else (lambda (err)
+             (setq result (disco-http--error->plist err)
+                   done t)))
+    (plz-run queue)
     (while (not done)
-      (accept-process-output nil 0.05))
-    (if err
-        ;; Return an HTTP-like result to let higher layer do unified handling.
-        (list :status (or (plist-get err :status) 0)
-              :body (or (plist-get err :body) "")
-              :headers nil
-              :error (plist-get err :raw))
-      result)))
+      (when (> (- (float-time) start-time) disco-http-queue-wait-timeout)
+        (setq result (list :status 0
+                           :body ""
+                           :headers nil
+                           :error-message (format "disco: HTTP queue wait timeout after %.1fs"
+                                                  disco-http-queue-wait-timeout)))
+        (setq done t))
+      (accept-process-output nil disco-http-queue-poll-interval))
+    result))
+
+(defun disco-http-queue-stats ()
+  "Return current queue stats as plist."
+  (let* ((queue (and disco-http--plz-queue disco-http--plz-queue))
+         (active (if queue (length (plz-queue-active queue)) 0))
+         (pending (if queue (length (plz-queue-requests queue)) 0)))
+    (list :enabled disco-http-serialize-requests
+          :queue-created (and queue t)
+          :limit (if queue (plz-queue-limit queue) (max 1 disco-http-queue-limit))
+          :active active
+          :pending pending
+          :outstanding (+ active pending))))
+
+(defun disco-http-describe-queue ()
+  "Display queue runtime status in minibuffer."
+  (interactive)
+  (let* ((stats (disco-http-queue-stats))
+         (enabled (plist-get stats :enabled))
+         (limit (plist-get stats :limit))
+         (active (plist-get stats :active))
+         (pending (plist-get stats :pending))
+         (outstanding (plist-get stats :outstanding)))
+    (message "disco-http queue: enabled=%s limit=%s active=%s pending=%s outstanding=%s"
+             enabled limit active pending outstanding)))
+
+(defun disco-http-reset-queue-state ()
+  "Reset local HTTP queue bookkeeping state." 
+  (when disco-http--plz-queue
+    (ignore-errors (plz-clear disco-http--plz-queue)))
+  (setq disco-http--plz-queue nil)
+  (setq disco-http--plz-queue-limit nil))
 
 (cl-defun disco-http-request (&key method url headers body timeout)
-  "Execute an HTTP request and return plist with :status :body :headers.
+  "Execute HTTP request and return plist with :status :body :headers.
 
 METHOD is uppercase string (for example: GET)."
-  (disco-http--request-plz method url headers body timeout))
+  (if (not disco-http-serialize-requests)
+      (disco-http--request-plz method url headers body timeout)
+    (disco-http--request-plz-queued method url headers body timeout)))
 
 (provide 'disco-http)
 

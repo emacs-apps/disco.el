@@ -9,12 +9,194 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'json)
+(require 'seq)
 (require 'subr-x)
 (require 'disco-customize)
 (require 'disco-http)
 
 (define-error 'disco-api-error "Disco API error")
+
+(defvar disco-api--global-rate-limit-until 0.0
+  "Unix timestamp until which global requests must wait.")
+
+(defvar disco-api--route-rate-limit-until (make-hash-table :test #'equal)
+  "Hash route-key -> unix timestamp deadline.")
+
+(defvar disco-api--route-bucket-map (make-hash-table :test #'equal)
+  "Hash route-key -> bucket-id.")
+
+(defvar disco-api--bucket-rate-limit-until (make-hash-table :test #'equal)
+  "Hash bucket-id -> unix timestamp deadline.")
+
+(defun disco-api--blocked-entries (table)
+  "Return sorted list of active blocked entries in TABLE.
+
+Each element is (KEY . remaining-seconds)."
+  (let ((now (disco-api--now))
+        entries)
+    (maphash
+     (lambda (key deadline)
+       (let ((remaining (- deadline now)))
+         (when (> remaining 0)
+           (push (cons key remaining) entries))))
+     table)
+    (sort entries (lambda (a b) (> (cdr a) (cdr b))))))
+
+(defun disco-api-rate-limit-snapshot ()
+  "Return current rate-limit snapshot as plist."
+  (let* ((now (disco-api--now))
+         (global-block (max 0 (- disco-api--global-rate-limit-until now)))
+         (route-blocks (disco-api--blocked-entries disco-api--route-rate-limit-until))
+         (bucket-blocks (disco-api--blocked-entries disco-api--bucket-rate-limit-until)))
+    (list :global-block global-block
+          :route-block-count (length route-blocks)
+          :bucket-block-count (length bucket-blocks)
+          :route-bucket-map-count (hash-table-count disco-api--route-bucket-map)
+          :route-blocks route-blocks
+          :bucket-blocks bucket-blocks)))
+
+(defun disco-api-describe-rate-limits ()
+  "Show current rate-limit state in a dedicated buffer."
+  (interactive)
+  (let* ((snapshot (disco-api-rate-limit-snapshot))
+         (global-block (plist-get snapshot :global-block))
+         (route-blocks (plist-get snapshot :route-blocks))
+         (bucket-blocks (plist-get snapshot :bucket-blocks))
+         (buf (get-buffer-create "*disco-rate-limit*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Global block: %.3fs\n" global-block))
+        (insert (format "Blocked routes: %d\n" (length route-blocks)))
+        (insert (format "Blocked buckets: %d\n" (length bucket-blocks)))
+        (insert (format "Route->bucket mappings: %d\n\n"
+                        (plist-get snapshot :route-bucket-map-count)))
+        (insert "Top route blocks:\n")
+        (if route-blocks
+            (dolist (entry (seq-take route-blocks 20))
+              (insert (format "  %s => %.3fs\n" (car entry) (cdr entry))))
+          (insert "  (none)\n"))
+        (insert "\nTop bucket blocks:\n")
+        (if bucket-blocks
+            (dolist (entry (seq-take bucket-blocks 20))
+              (insert (format "  %s => %.3fs\n" (car entry) (cdr entry))))
+          (insert "  (none)\n"))
+        (special-mode)))
+    (pop-to-buffer buf)))
+
+(defun disco-api-reset-rate-limit-state ()
+  "Reset cached rate-limit tracking state." 
+  (setq disco-api--global-rate-limit-until 0.0)
+  (clrhash disco-api--route-rate-limit-until)
+  (clrhash disco-api--route-bucket-map)
+  (clrhash disco-api--bucket-rate-limit-until))
+
+(defun disco-api--now ()
+  "Return current unix timestamp as float." 
+  (float-time))
+
+(defun disco-api--route-key (method endpoint)
+  "Build stable route key from METHOD and ENDPOINT."
+  (format "%s %s" method endpoint))
+
+(defun disco-api--header (headers key)
+  "Return header KEY value from HEADERS, supporting symbol/string forms." 
+  (let ((sym (if (symbolp key)
+                 key
+               (intern (downcase key))))
+        (str (if (symbolp key)
+                 (symbol-name key)
+               key)))
+    (or (cdr (assq sym headers))
+        (cdr (assoc str headers)))))
+
+(defun disco-api--to-number (value)
+  "Convert VALUE to number when possible, else nil." 
+  (cond
+   ((numberp value)
+    (float value))
+   ((and (stringp value)
+         (string-match-p "\\`[0-9]+\\(?:\\.[0-9]+\\)?\\'" value))
+    (string-to-number value))
+   (t nil)))
+
+(defun disco-api--remaining-zero-p (value)
+  "Return non-nil if VALUE represents 0 remaining requests." 
+  (or (equal value "0")
+      (equal value 0)
+      (equal value 0.0)))
+
+(defun disco-api--json-true-p (value)
+  "Return non-nil if VALUE semantically represents JSON true." 
+  (or (eq value t)
+      (equal value "true")
+      (eq value 'true)))
+
+(defun disco-api--extract-retry-after (headers body)
+  "Extract retry-after seconds from HEADERS or BODY.
+
+Return a number (seconds) or nil."
+  (or (disco-api--to-number (disco-api--header headers 'retry-after))
+      (and (listp body)
+           (disco-api--to-number (alist-get 'retry_after body)))))
+
+(defun disco-api--route-deadline (route-key)
+  "Return current effective deadline for ROUTE-KEY." 
+  (let* ((route-deadline (or (gethash route-key disco-api--route-rate-limit-until) 0.0))
+         (bucket-id (gethash route-key disco-api--route-bucket-map))
+         (bucket-deadline (if bucket-id
+                              (or (gethash bucket-id disco-api--bucket-rate-limit-until) 0.0)
+                            0.0)))
+    (max route-deadline bucket-deadline)))
+
+(defun disco-api--wait-for-rate-limit (route-key)
+  "Sleep until ROUTE-KEY is no longer blocked by rate-limit state." 
+  (let* ((deadline (max disco-api--global-rate-limit-until
+                        (disco-api--route-deadline route-key)))
+         (sleep-time (- deadline (disco-api--now))))
+    (when (> sleep-time 0)
+      (sleep-for sleep-time))))
+
+(defun disco-api--set-route-deadline (route-key deadline &optional bucket-id)
+  "Set DEADLINE for ROUTE-KEY, optionally under BUCKET-ID." 
+  (if bucket-id
+      (puthash bucket-id deadline disco-api--bucket-rate-limit-until)
+    (puthash route-key deadline disco-api--route-rate-limit-until)))
+
+(defun disco-api--update-rate-limit-state (route-key status headers body)
+  "Update in-memory rate-limit state from one response.
+
+ROUTE-KEY identifies the API route.
+STATUS, HEADERS, BODY come from transport layer."
+  (let* ((now (disco-api--now))
+         (bucket-id (disco-api--header headers 'x-ratelimit-bucket))
+         (remaining (disco-api--header headers 'x-ratelimit-remaining))
+         (reset-after (disco-api--to-number
+                       (disco-api--header headers 'x-ratelimit-reset-after)))
+         (retry-after (disco-api--extract-retry-after headers body))
+         (global-header (disco-api--header headers 'x-ratelimit-global))
+         (global-body (and (listp body) (alist-get 'global body))))
+    (when bucket-id
+      (puthash route-key bucket-id disco-api--route-bucket-map))
+
+    ;; Proactive cooldown when bucket is exhausted.
+    (when (and (disco-api--remaining-zero-p remaining)
+               reset-after
+               (> reset-after 0))
+      (disco-api--set-route-deadline
+       route-key
+       (+ now reset-after disco-rate-limit-safety-margin)
+       bucket-id))
+
+    ;; Authoritative cooldown on 429 responses.
+    (when (and (= status 429) retry-after)
+      (let ((deadline (+ now retry-after disco-rate-limit-safety-margin)))
+        (if (or (disco-api--json-true-p global-body)
+                (equal global-header "true"))
+            (setq disco-api--global-rate-limit-until deadline)
+          (disco-api--set-route-deadline route-key deadline bucket-id))))))
 
 (defun disco-api--auth-header ()
   "Return Authorization header value from `disco-token'."
@@ -53,13 +235,6 @@ Return nil for empty or non-JSON body."
           (json-read-from-string body-text)
         (error nil)))))
 
-(defun disco-api--extract-retry-after (headers body)
-  "Extract retry-after from HEADERS or BODY.
-
-HEADERS is lower-case alist produced by `disco-http-request'."
-  (or (cdr (assoc "retry-after" headers))
-      (and (listp body) (alist-get 'retry_after body))))
-
 (defun disco-api--request (method endpoint &optional payload query unauthenticated)
   "Execute METHOD request to ENDPOINT.
 
@@ -77,32 +252,41 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
              `(("Authorization" . ,(disco-api--auth-header))))))
          (data (when payload (disco-api--json-encode payload)))
          (url (disco-api--build-url endpoint query))
-         (response (disco-http-request :method method :url url :headers headers :body data :timeout disco-http-timeout))
-         (status (or (plist-get response :status) 0))
-         (raw-body (or (plist-get response :body) ""))
-         (response-headers (or (plist-get response :headers) nil))
-         (body (disco-api--decode-json raw-body)))
-    (cond
-     ((and (>= status 200) (< status 300))
-      body)
-     ((= status 429)
-      (signal
-       'disco-api-error
-       (list (format "rate limited (429), retry-after=%s"
-                     (or (disco-api--extract-retry-after response-headers body)
-                         "unknown"))
-             status
-             body)))
-     (t
-      (signal
-       'disco-api-error
-       (list (format "HTTP %d %s"
-                     status
-                     (or (and (listp body) (alist-get 'message body))
-                         (and (not (string-empty-p raw-body)) raw-body)
-                         "request failed"))
-             status
-             body))))))
+         (route-key (disco-api--route-key method endpoint))
+         (attempt 0))
+    (catch 'disco-api-return
+      (while t
+        (disco-api--wait-for-rate-limit route-key)
+        (let* ((response (disco-http-request :method method :url url :headers headers :body data :timeout disco-http-timeout))
+               (status (or (plist-get response :status) 0))
+               (raw-body (or (plist-get response :body) ""))
+               (response-headers (or (plist-get response :headers) nil))
+               (body (disco-api--decode-json raw-body))
+               (retry-after (disco-api--extract-retry-after response-headers body)))
+          (disco-api--update-rate-limit-state route-key status response-headers body)
+          (cond
+           ((and (>= status 200) (< status 300))
+            (throw 'disco-api-return body))
+           ((= status 429)
+            (if (>= attempt disco-rate-limit-max-retries)
+                (signal
+                 'disco-api-error
+                 (list (format "rate limited (429), retries exhausted, retry-after=%s"
+                               (or retry-after "unknown"))
+                       status
+                       body))
+              (setq attempt (1+ attempt))
+              (sleep-for (or retry-after 1.0))))
+           (t
+            (signal
+             'disco-api-error
+             (list (format "HTTP %d %s"
+                           status
+                           (or (and (listp body) (alist-get 'message body))
+                               (and (not (string-empty-p raw-body)) raw-body)
+                               "request failed"))
+                   status
+                   body)))))))))
 
 (defun disco-api-current-user ()
   "Fetch current user object."

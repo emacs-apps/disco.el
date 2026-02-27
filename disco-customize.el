@@ -50,6 +50,16 @@ Use `disco-set-token' to set this in the current session."
   :type 'integer
   :group 'disco)
 
+(defcustom disco-rate-limit-max-retries 2
+  "Maximum retries for 429 responses in one API call."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-rate-limit-safety-margin 0.15
+  "Extra seconds added after server-provided reset/retry windows."
+  :type 'number
+  :group 'disco)
+
 (defcustom disco-user-agent "Mozilla/5.0 (X11; Linux x86_64) Emacs disco.el"
   "User-Agent sent to Discord API."
   :type 'string
