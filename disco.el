@@ -3,7 +3,7 @@
 ;; Author: disco.el contributors
 ;; Keywords: comm
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "27.1") (plz "0.8"))
 
 ;;; Commentary:
 

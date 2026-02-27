@@ -17,12 +17,17 @@ This repository currently contains an MVP scaffold designed with these reference
 - Send plain text message with `C-c C-c` in room buffer.
 - Live room updates with create/update/delete dispatch (polling-based gateway-like engine).
 
+## Dependencies
+
+- Emacs 27.1+
+- `plz` (required): HTTP transport backend
+
 ## File Layout
 
 - `disco.el`: package entrypoint.
 - `disco-customize.el`: user options and token command.
 - `disco-api.el`: synchronous REST requests.
-- `disco-http.el`: HTTP backend abstraction (`url` by default, optional `plz`).
+- `disco-http.el`: HTTP wrapper built on required `plz` backend.
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-gateway.el`: live update engine and event dispatch hook.
 - `disco-root.el`: root dashboard buffer.
@@ -31,7 +36,7 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Design Notes
 
 - Initial implementation intentionally keeps synchronous request flow to simplify debugging and establish API correctness first.
-- HTTP backend defaults to built-in `url.el`; `plz` is optional, selected via `disco-http-backend` when available.
+- HTTP transport is fully based on `plz` (curl-backed).
 - Live updates currently use polling and emit gateway-like message events; full WebSocket Gateway transport is the next protocol milestone.
 - Rate-limit handling currently surfaces 429 with retry metadata to the user; full bucket scheduler is planned next.
 
