@@ -43,10 +43,12 @@ This repository currently contains an MVP scaffold designed with these reference
 
 ## Gateway Configuration
 
+- `disco-gateway-version`: gateway API version (default now aligned to `v10`).
 - `disco-gateway-identify-intents`: optional identify intents bitmask.
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
 - `disco-gateway-reconnect-delay`: base reconnect delay.
+- `disco-gateway-max-reconnect-attempts`: hard cap for consecutive reconnects (`nil` for unlimited).
 - `disco-gateway-reconnect-max-delay`: max reconnect delay cap.
 - `disco-gateway-reconnect-multiplier`: exponential backoff multiplier.
 - `disco-gateway-reconnect-jitter`: reconnect delay randomization ratio.

@@ -40,7 +40,7 @@ Use `disco-set-token' to set this in the current session."
   :type 'boolean
   :group 'disco)
 
-(defcustom disco-gateway-version 9
+(defcustom disco-gateway-version 10
   "Discord Gateway API version used in websocket URL query."
   :type 'integer
   :group 'disco)
@@ -53,6 +53,13 @@ Use `disco-set-token' to set this in the current session."
 (defcustom disco-gateway-reconnect-delay 3
   "Seconds to wait before reconnecting gateway after disconnect/error."
   :type 'integer
+  :group 'disco)
+
+(defcustom disco-gateway-max-reconnect-attempts 10
+  "Maximum number of consecutive reconnect attempts before gateway stops.
+
+Set to nil to allow unlimited reconnect attempts."
+  :type '(choice (const :tag "Unlimited" nil) integer)
   :group 'disco)
 
 (defcustom disco-gateway-reconnect-max-delay 60

@@ -123,20 +123,23 @@ If CLEAR-SESSION is non-nil, clear resume values first."
   "Reset reconnect backoff state after stable session recovery."
   (setq disco-gateway--reconnect-attempt 0))
 
-(defun disco-gateway--next-reconnect-delay ()
-  "Compute exponential backoff reconnect delay with jitter."
-  (let* ((attempt disco-gateway--reconnect-attempt)
+(defun disco-gateway--backoff-delay-for-attempt (attempt)
+  "Compute jittered reconnect delay for ATTEMPT (1-based)."
+  (let* ((exp-index (max 0 (1- attempt)))
          (base (max 0.1 (float disco-gateway-reconnect-delay)))
          (multiplier (max 1.0 (float disco-gateway-reconnect-multiplier)))
          (max-delay (max base (float disco-gateway-reconnect-max-delay)))
-         (raw (min max-delay (* base (expt multiplier attempt))))
+         (raw (min max-delay (* base (expt multiplier exp-index))))
          (jitter-ratio (max 0.0 (float disco-gateway-reconnect-jitter)))
          (jitter-amplitude (* raw jitter-ratio))
          (offset (* (- (* 2.0 (disco-gateway--rand-unit)) 1.0)
-                    jitter-amplitude))
-         (delay (max 0.1 (+ raw offset))))
-    (setq disco-gateway--reconnect-attempt (1+ disco-gateway--reconnect-attempt))
-    delay))
+                    jitter-amplitude)))
+    (max 0.1 (+ raw offset))))
+
+(defun disco-gateway--next-reconnect-delay ()
+  "Compute exponential backoff reconnect delay with jitter."
+  (setq disco-gateway--reconnect-attempt (1+ disco-gateway--reconnect-attempt))
+  (disco-gateway--backoff-delay-for-attempt disco-gateway--reconnect-attempt))
 
 (defun disco-gateway--send-op (op d)
   "Send one gateway payload with OP and D."
@@ -212,18 +215,30 @@ This shape follows Discord gateway identify expectations."
 
 (defun disco-gateway--schedule-reconnect (&optional delay)
   "Schedule reconnect after DELAY seconds."
-  (let ((effective-delay (or delay (disco-gateway--next-reconnect-delay))))
-    (when (timerp disco-gateway--reconnect-timer)
-      (cancel-timer disco-gateway--reconnect-timer))
-    (setq disco-gateway--reconnect-timer
-          (run-at-time
-           effective-delay
-           nil
-           (lambda ()
-             (setq disco-gateway--reconnect-timer nil)
-             (unless disco-gateway--stopping
-               (disco-gateway--connect)))))
-    (message "disco: scheduling gateway reconnect in %.2fs" effective-delay)))
+  (let* ((attempt (1+ disco-gateway--reconnect-attempt))
+         (max-attempts disco-gateway-max-reconnect-attempts))
+    (if (and (integerp max-attempts)
+             (> attempt max-attempts))
+        (progn
+          (setq disco-gateway--stopping t)
+          (disco-gateway--disconnect-internal nil)
+          (message "disco: reached max reconnect attempts (%d), gateway stopped"
+                   max-attempts))
+      (setq disco-gateway--reconnect-attempt attempt)
+      (let ((effective-delay (or delay (disco-gateway--backoff-delay-for-attempt attempt))))
+        (when (timerp disco-gateway--reconnect-timer)
+          (cancel-timer disco-gateway--reconnect-timer))
+        (setq disco-gateway--reconnect-timer
+              (run-at-time
+               effective-delay
+               nil
+               (lambda ()
+                 (setq disco-gateway--reconnect-timer nil)
+                 (unless disco-gateway--stopping
+                   (disco-gateway--connect)))))
+        (message "disco: scheduling gateway reconnect in %.2fs (attempt %d)"
+                 effective-delay
+                 attempt)))))
 
 (defun disco-gateway--channel-watched-p (channel-id)
   "Return non-nil if CHANNEL-ID has active watchers."
@@ -386,6 +401,8 @@ State is kept newest-first to match REST message list ordering."
   "Start gateway transport if enabled and needed."
   (interactive)
   (setq disco-gateway--stopping nil)
+  (unless (timerp disco-gateway--reconnect-timer)
+    (disco-gateway--reset-reconnect-backoff))
   (when (and disco-enable-live-updates
              (> (hash-table-count disco-gateway--watch-counts) 0))
     (disco-gateway--connect)))
