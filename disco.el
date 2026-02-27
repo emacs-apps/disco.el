@@ -18,6 +18,7 @@
 (require 'disco-customize)
 (require 'disco-state)
 (require 'disco-api)
+(require 'disco-http)
 (require 'disco-gateway)
 (require 'disco-room)
 (require 'disco-root)
@@ -43,6 +44,18 @@ If token is missing, prompt for it once in current session."
   (disco-api-reset-rate-limit-state)
   (disco-http-reset-queue-state)
   (message "disco: in-memory state reset"))
+
+;;;###autoload
+(defun disco-describe-http-queue ()
+  "Show current HTTP queue runtime status."
+  (interactive)
+  (disco-http-describe-queue))
+
+;;;###autoload
+(defun disco-describe-rate-limits ()
+  "Show current in-memory Discord rate-limit windows."
+  (interactive)
+  (disco-api-describe-rate-limits))
 
 (provide 'disco)
 

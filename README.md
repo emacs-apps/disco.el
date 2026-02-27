@@ -22,6 +22,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 - Emacs 27.1+
 - `plz` (required): HTTP transport backend
+- `websocket` (planned for next milestone): required when switching from polling to true Discord Gateway WebSocket transport
 
 ## File Layout
 
@@ -34,12 +35,17 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-root.el`: root dashboard buffer.
 - `disco-room.el`: room buffer render/send/refresh flow.
 
+## Runtime Observability
+
+- `M-x disco-describe-http-queue`: show current queue limit/active/pending counts.
+- `M-x disco-describe-rate-limits`: open a buffer showing global/route/bucket cooldown state.
+
 ## Design Notes
 
 - Initial implementation intentionally keeps synchronous request flow to simplify debugging and establish API correctness first.
 - HTTP transport is fully based on `plz` (curl-backed), with optional in-process serialization to avoid burst traffic.
 - REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
-- Live updates currently use polling and emit gateway-like message events; full WebSocket Gateway transport is the next protocol milestone.
+- Live updates currently use polling and emit gateway-like message events; full WebSocket Gateway transport is the next protocol milestone (will use `websocket` package).
 - Rate-limit handling currently surfaces 429 with retry metadata to the user; full bucket scheduler is planned next.
 
 ## Next Milestones
@@ -47,5 +53,5 @@ This repository currently contains an MVP scaffold designed with these reference
 1. Add true Gateway websocket lifecycle (`/gateway`, Hello/Heartbeat/Identify/Resume).
 2. Replace polling transport with Gateway dispatch stream while keeping current event hook API.
 3. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
-4. Introduce async request queue + rate-limit bucket management.
-5. Add observability commands for queue depth and active rate-limit windows.
+4. Add true Gateway transport using `websocket`, preserving current event hook contract.
+5. Add queue prioritization/backpressure so user actions are favored over background polling.
