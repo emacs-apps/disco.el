@@ -292,6 +292,10 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
   "Fetch current user object."
   (disco-api--request "GET" "/users/@me" nil nil nil))
 
+(defun disco-api-gateway ()
+  "Fetch gateway connection object containing websocket URL."
+  (disco-api--request "GET" "/gateway" nil nil t))
+
 (defun disco-api-user-guilds ()
   "Fetch current user's guilds list."
   (disco-api--request "GET" "/users/@me/guilds" nil '(("limit" . "200")) nil))

@@ -3,7 +3,7 @@
 ;; Author: disco.el contributors
 ;; Keywords: comm
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (plz "0.8"))
+;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16"))
 
 ;;; Commentary:
 
@@ -40,6 +40,7 @@ If token is missing, prompt for it once in current session."
 (defun disco-reset-session-state ()
   "Clear all in-memory caches used by disco.el."
   (interactive)
+  (disco-gateway-stop)
   (disco-state-reset)
   (disco-api-reset-rate-limit-state)
   (disco-http-reset-queue-state)
@@ -56,6 +57,12 @@ If token is missing, prompt for it once in current session."
   "Show current in-memory Discord rate-limit windows."
   (interactive)
   (disco-api-describe-rate-limits))
+
+;;;###autoload
+(defun disco-describe-gateway ()
+  "Show current gateway transport status."
+  (interactive)
+  (disco-gateway-describe-status))
 
 (provide 'disco)
 

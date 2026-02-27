@@ -40,13 +40,32 @@ Use `disco-set-token' to set this in the current session."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-gateway-version 9
+  "Discord Gateway API version used in websocket URL query."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-gateway-encoding "json"
+  "Discord Gateway payload encoding used in websocket URL query."
+  :type 'string
+  :group 'disco)
+
+(defcustom disco-gateway-reconnect-delay 3
+  "Seconds to wait before reconnecting gateway after disconnect/error."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-live-update-interval 3
-  "Polling interval in seconds for live room updates."
+  "Legacy polling interval kept for backward compatibility.
+
+Current gateway transport is websocket-based and does not use this value."
   :type 'integer
   :group 'disco)
 
 (defcustom disco-live-update-message-limit 30
-  "Per-poll message window size used by live update engine."
+  "Legacy polling message window kept for backward compatibility.
+
+Current gateway transport is websocket-based and does not use this value."
   :type 'integer
   :group 'disco)
 
