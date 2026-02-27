@@ -50,6 +50,24 @@ Use `disco-set-token' to set this in the current session."
   :type 'string
   :group 'disco)
 
+(defcustom disco-gateway-transport-compression 'zlib-stream
+  "Optional transport compression mode for Discord Gateway.
+
+Supported values:
+- nil: no transport compression
+- zlib-stream: compressed binary frames with shared zlib context"
+  :type '(choice (const :tag "Disabled" nil)
+                 (const :tag "zlib-stream" zlib-stream))
+  :group 'disco)
+
+(defcustom disco-gateway-zlib-max-buffer-bytes (* 64 1024 1024)
+  "Maximum buffered compressed bytes for zlib-stream context.
+
+When this threshold is reached, disco will reconnect to reset stream state
+and avoid unbounded memory growth."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-gateway-reconnect-delay 3
   "Seconds to wait before reconnecting gateway after disconnect/error."
   :type 'integer

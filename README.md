@@ -44,6 +44,8 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Gateway Configuration
 
 - `disco-gateway-version`: gateway API version (default now aligned to `v10`).
+- `disco-gateway-transport-compression`: optional transport compression (`zlib-stream` or disabled).
+- `disco-gateway-zlib-max-buffer-bytes`: safety cap for accumulated compressed stream bytes.
 - `disco-gateway-identify-intents`: optional identify intents bitmask.
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
@@ -60,6 +62,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - HTTP transport is fully based on `plz` (curl-backed), with optional in-process serialization to avoid burst traffic.
 - REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
+- Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Gateway reconnect uses exponential backoff with jitter for transport failures, and randomized delay handling for `INVALID_SESSION`.
 - Identify payload supports optional intents/capabilities/presence fields through customization.
 - Rate-limit handling currently surfaces 429 with retry metadata to the user; full bucket scheduler is planned next.

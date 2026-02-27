@@ -49,6 +49,15 @@ Event schema:
 (defvar disco-gateway--reconnect-timer nil)
 (defvar disco-gateway--reconnect-attempt 0)
 
+(defconst disco-gateway--zlib-suffix (string 0 0 255 255)
+  "Z_SYNC_FLUSH suffix used by Discord zlib-stream transport.")
+
+(defvar disco-gateway--zlib-stream-buffer ""
+  "Accumulated compressed bytes for current gateway connection.")
+
+(defvar disco-gateway--zlib-stream-output-bytes 0
+  "Previously produced decompressed byte count from stream buffer.")
+
 (defun disco-gateway-running-p ()
   "Return non-nil when gateway transport is active or connecting."
   (or disco-gateway--connecting
@@ -74,6 +83,78 @@ Event schema:
         (json-false :false))
     (json-read-from-string text)))
 
+(defun disco-gateway--zlib-reset-state ()
+  "Reset zlib-stream state for one websocket connection."
+  (setq disco-gateway--zlib-stream-buffer "")
+  (setq disco-gateway--zlib-stream-output-bytes 0))
+
+(defun disco-gateway--transport-compression-string ()
+  "Return gateway transport compression query value as string or nil."
+  (when disco-gateway-transport-compression
+    (if (symbolp disco-gateway-transport-compression)
+        (symbol-name disco-gateway-transport-compression)
+      disco-gateway-transport-compression)))
+
+(defun disco-gateway--bytes-end-with-zlib-suffix-p (bytes)
+  "Return non-nil when BYTES ends with Z_SYNC_FLUSH suffix."
+  (let ((len (length bytes)))
+    (and (>= len 4)
+         (= (aref bytes (- len 4)) 0)
+         (= (aref bytes (- len 3)) 0)
+         (= (aref bytes (- len 2)) 255)
+         (= (aref bytes (- len 1)) 255))))
+
+(defun disco-gateway--zlib-stream-decompress-delta ()
+  "Decompress accumulated zlib-stream bytes and return newly produced JSON text."
+  (let ((buf (generate-new-buffer " *disco-gateway-zlib*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (set-buffer-multibyte nil)
+          (insert disco-gateway--zlib-stream-buffer)
+          (let ((ret (zlib-decompress-region (point-min) (point-max) t)))
+            (unless ret
+              (error "disco: zlib-stream decompression failed"))
+            (let* ((output (buffer-string))
+                   (output-len (length output))
+                   (previous-len (min disco-gateway--zlib-stream-output-bytes output-len))
+                   (delta (substring output previous-len)))
+              (setq disco-gateway--zlib-stream-output-bytes output-len)
+              (decode-coding-string delta 'utf-8 t))))
+      (kill-buffer buf))))
+
+(defun disco-gateway--handle-zlib-stream-bytes (bytes)
+  "Process received compressed BYTES chunk for zlib-stream mode.
+
+Return decoded JSON text when a full payload is ready, otherwise nil."
+  (let ((raw bytes))
+    (setq disco-gateway--zlib-stream-buffer
+          (concat disco-gateway--zlib-stream-buffer raw))
+
+    (if (and (integerp disco-gateway-zlib-max-buffer-bytes)
+             (> (length disco-gateway--zlib-stream-buffer)
+                disco-gateway-zlib-max-buffer-bytes))
+        (progn
+          (message "disco: zlib buffer exceeded %d bytes, reconnecting"
+                   disco-gateway-zlib-max-buffer-bytes)
+          (disco-gateway--reconnect 1 nil)
+          (disco-gateway--zlib-reset-state)
+          nil)
+      (when (disco-gateway--bytes-end-with-zlib-suffix-p disco-gateway--zlib-stream-buffer)
+        (disco-gateway--zlib-stream-decompress-delta)))))
+
+(defun disco-gateway--frame-json-text (frame)
+  "Decode websocket FRAME into JSON text when possible.
+
+Return nil if FRAME does not yet contain a complete payload."
+  (pcase (websocket-frame-opcode frame)
+    ('text
+     (websocket-frame-text frame))
+    ('binary
+     (if (eq disco-gateway-transport-compression 'zlib-stream)
+         (disco-gateway--handle-zlib-stream-bytes (websocket-frame-payload frame))
+       (decode-coding-string (websocket-frame-payload frame) 'utf-8 t)))
+    (_ nil)))
+
 (defun disco-gateway--disconnect-internal (&optional clear-session preserve-reconnect-timer)
   "Disconnect gateway transport.
 
@@ -89,6 +170,7 @@ If CLEAR-SESSION is non-nil, drop resume-related values too."
   (setq disco-gateway--connecting nil)
   (setq disco-gateway--heartbeat-interval-ms nil)
   (setq disco-gateway--awaiting-heartbeat-ack nil)
+  (disco-gateway--zlib-reset-state)
 
   (when disco-gateway--ws
     (ignore-errors (websocket-close disco-gateway--ws))
@@ -343,12 +425,16 @@ State is kept newest-first to match REST message list ordering."
   "Compute websocket URL for gateway connect."
   (let* ((source (or disco-gateway--resume-url
                      (alist-get 'url (disco-api-gateway))))
-         (separator (if (and source (string-match-p "\\?" source)) "&" "?")))
+         (separator (if (and source (string-match-p "\\?" source)) "&" "?"))
+         (compression (disco-gateway--transport-compression-string)))
     (unless (and source (stringp source))
       (error "disco: unable to resolve gateway websocket URL"))
     (concat source separator
             "v=" (number-to-string disco-gateway-version)
-            "&encoding=" disco-gateway-encoding)))
+            "&encoding=" disco-gateway-encoding
+            (if compression
+                (concat "&compress=" compression)
+              ""))))
 
 (defun disco-gateway--ensure-token ()
   "Signal user error if gateway token is missing."
@@ -367,17 +453,19 @@ State is kept newest-first to match REST message list ordering."
             (websocket-open
              url
              :on-open (lambda (_ws)
+                        (disco-gateway--zlib-reset-state)
                         (setq disco-gateway--connecting nil)
                         (message "disco: gateway websocket opened"))
              :on-message (lambda (_ws frame)
-                           (when (eq (websocket-frame-opcode frame) 'text)
-                             (condition-case err
-                                 (disco-gateway--handle-payload
-                                  (disco-gateway--json-decode
-                                   (websocket-frame-text frame)))
-                               (error
-                                (message "disco: gateway payload error: %s"
-                                         (error-message-string err))))))
+                           (condition-case err
+                               (let ((payload-text (disco-gateway--frame-json-text frame)))
+                                 (when (and payload-text
+                                            (not (string-empty-p (string-trim payload-text))))
+                                   (disco-gateway--handle-payload
+                                    (disco-gateway--json-decode payload-text))))
+                             (error
+                              (message "disco: gateway payload error: %s"
+                                       (error-message-string err)))))
              :on-close (lambda (_ws)
                          (setq disco-gateway--ws nil)
                          (setq disco-gateway--connecting nil)
@@ -385,12 +473,14 @@ State is kept newest-first to match REST message list ordering."
                            (cancel-timer disco-gateway--heartbeat-timer)
                            (setq disco-gateway--heartbeat-timer nil))
                          (setq disco-gateway--awaiting-heartbeat-ack nil)
+                         (disco-gateway--zlib-reset-state)
                          (unless (or disco-gateway--stopping
                                      (timerp disco-gateway--reconnect-timer))
                            (message "disco: gateway websocket closed, reconnecting")
                            (disco-gateway--schedule-reconnect nil)))
              :on-error (lambda (_ws _type err)
                          (setq disco-gateway--connecting nil)
+                         (disco-gateway--zlib-reset-state)
                          (message "disco: gateway websocket error: %s"
                                   (error-message-string err))
                          (unless (or disco-gateway--stopping
