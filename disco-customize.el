@@ -55,18 +55,52 @@ Use `disco-set-token' to set this in the current session."
   :type 'integer
   :group 'disco)
 
-(defcustom disco-live-update-interval 3
-  "Legacy polling interval kept for backward compatibility.
-
-Current gateway transport is websocket-based and does not use this value."
+(defcustom disco-gateway-reconnect-max-delay 60
+  "Maximum delay in seconds used by reconnect backoff."
   :type 'integer
   :group 'disco)
 
-(defcustom disco-live-update-message-limit 30
-  "Legacy polling message window kept for backward compatibility.
+(defcustom disco-gateway-reconnect-multiplier 2.0
+  "Exponential multiplier applied to reconnect backoff delay."
+  :type 'number
+  :group 'disco)
 
-Current gateway transport is websocket-based and does not use this value."
-  :type 'integer
+(defcustom disco-gateway-reconnect-jitter 0.2
+  "Jitter ratio applied to reconnect delay.
+
+For example, 0.2 randomizes delay in the range of +/-20%."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-gateway-invalid-session-min-delay 1.0
+  "Minimum randomized delay in seconds for Opcode 9 Invalid Session reconnect."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-gateway-invalid-session-max-delay 5.0
+  "Maximum randomized delay in seconds for Opcode 9 Invalid Session reconnect."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-gateway-identify-intents nil
+  "Optional intents bitmask sent in Identify payload.
+
+When nil, omit intents from Identify payload."
+  :type '(choice (const :tag "Unset" nil) integer)
+  :group 'disco)
+
+(defcustom disco-gateway-identify-capabilities nil
+  "Optional capabilities bitmask sent in Identify payload.
+
+When nil, omit capabilities from Identify payload."
+  :type '(choice (const :tag "Unset" nil) integer)
+  :group 'disco)
+
+(defcustom disco-gateway-identify-presence nil
+  "Optional presence object sent in Identify payload.
+
+Provide this as an alist matching Discord Gateway presence schema."
+  :type '(choice (const :tag "Unset" nil) sexp)
   :group 'disco)
 
 (defcustom disco-rate-limit-max-retries 2

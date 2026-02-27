@@ -39,7 +39,18 @@ This repository currently contains an MVP scaffold designed with these reference
 
 - `M-x disco-describe-http-queue`: show current queue limit/active/pending counts.
 - `M-x disco-describe-rate-limits`: open a buffer showing global/route/bucket cooldown state.
-- `M-x disco-describe-gateway`: show websocket state, watched channel count, and resume/session info.
+- `M-x disco-describe-gateway`: show websocket state, watched channel count, resume/session info, and reconnect backoff state.
+
+## Gateway Configuration
+
+- `disco-gateway-identify-intents`: optional identify intents bitmask.
+- `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
+- `disco-gateway-identify-presence`: optional identify presence object (alist).
+- `disco-gateway-reconnect-delay`: base reconnect delay.
+- `disco-gateway-reconnect-max-delay`: max reconnect delay cap.
+- `disco-gateway-reconnect-multiplier`: exponential backoff multiplier.
+- `disco-gateway-reconnect-jitter`: reconnect delay randomization ratio.
+- `disco-gateway-invalid-session-min-delay` / `disco-gateway-invalid-session-max-delay`: randomized reconnect window for opcode 9.
 
 ## Design Notes
 
@@ -47,11 +58,13 @@ This repository currently contains an MVP scaffold designed with these reference
 - HTTP transport is fully based on `plz` (curl-backed), with optional in-process serialization to avoid burst traffic.
 - REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
+- Gateway reconnect uses exponential backoff with jitter for transport failures, and randomized delay handling for `INVALID_SESSION`.
+- Identify payload supports optional intents/capabilities/presence fields through customization.
 - Rate-limit handling currently surfaces 429 with retry metadata to the user; full bucket scheduler is planned next.
 
 ## Next Milestones
 
-1. Improve gateway resiliency (exponential reconnect backoff, richer invalid-session handling, startup race hardening).
-2. Expand dispatch handling beyond message events (channel/guild mutations and unread state).
-3. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
-4. Add queue prioritization/backpressure so user actions are favored over background work.
+1. Expand dispatch handling beyond message events (channel/guild mutations and unread state).
+2. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
+3. Add queue prioritization/backpressure so user actions are favored over background work.
+4. Add persisted session recovery (resume state restore across Emacs restarts).
