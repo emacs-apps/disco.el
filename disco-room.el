@@ -11,10 +11,12 @@
 (require 'subr-x)
 (require 'time-date)
 (require 'disco-api)
+(require 'disco-gateway)
 (require 'disco-state)
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
+(defvar-local disco-room--gateway-handler nil)
 
 (defun disco-room--buffer-name (channel-name channel-id)
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
@@ -60,6 +62,38 @@
     (disco-room-render)
     (message "disco: loaded %d messages" (length messages))))
 
+(defun disco-room--handle-gateway-event (event)
+  "Handle one EVENT plist from `disco-gateway-event-hook'."
+  (when (and (equal (plist-get event :channel-id) disco-room--channel-id)
+             (memq (plist-get event :type)
+                   '(message-create message-update message-delete)))
+    (let ((at-bottom (= (point) (point-max))))
+      (disco-room-render)
+      (when at-bottom
+        (goto-char (point-max))))))
+
+(defun disco-room--attach-live-updates ()
+  "Attach this room buffer to live update event stream."
+  (when disco-room--gateway-handler
+    (remove-hook 'disco-gateway-event-hook disco-room--gateway-handler))
+  (let ((room-buffer (current-buffer)))
+    (setq disco-room--gateway-handler
+          (lambda (event)
+            (when (buffer-live-p room-buffer)
+              (with-current-buffer room-buffer
+                (disco-room--handle-gateway-event event))))))
+  (add-hook 'disco-gateway-event-hook disco-room--gateway-handler)
+  (disco-gateway-watch-channel disco-room--channel-id)
+  (add-hook 'kill-buffer-hook #'disco-room--detach-live-updates nil t))
+
+(defun disco-room--detach-live-updates ()
+  "Detach this room buffer from live update event stream."
+  (when disco-room--gateway-handler
+    (remove-hook 'disco-gateway-event-hook disco-room--gateway-handler)
+    (setq disco-room--gateway-handler nil))
+  (when disco-room--channel-id
+    (disco-gateway-unwatch-channel disco-room--channel-id)))
+
 (defun disco-room-send-message ()
   "Prompt and send a message to current room."
   (interactive)
@@ -89,6 +123,7 @@
       (disco-room-mode)
       (setq disco-room--channel-id channel-id)
       (setq disco-room--channel-name channel-name)
+      (disco-room--attach-live-updates)
       (disco-room-refresh))
     (pop-to-buffer buf)))
 

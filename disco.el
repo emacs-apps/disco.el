@@ -18,6 +18,7 @@
 (require 'disco-customize)
 (require 'disco-state)
 (require 'disco-api)
+(require 'disco-gateway)
 (require 'disco-room)
 (require 'disco-root)
 
@@ -29,6 +30,8 @@ If token is missing, prompt for it once in current session."
   (interactive)
   (unless (and disco-token (not (string-empty-p disco-token)))
     (call-interactively #'disco-set-token))
+  (when disco-enable-live-updates
+    (disco-gateway-start))
   (disco-root-open)
   (disco-root-refresh))
 

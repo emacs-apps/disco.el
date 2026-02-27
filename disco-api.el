@@ -11,9 +11,8 @@
 
 (require 'json)
 (require 'subr-x)
-(require 'url)
-(require 'url-http)
 (require 'disco-customize)
+(require 'disco-http)
 
 (define-error 'disco-api-error "Disco API error")
 
@@ -40,12 +39,26 @@
         (json-key-type 'symbol))
     (json-encode payload)))
 
-(defun disco-api--extract-retry-after ()
-  "Extract Retry-After header from current response buffer."
-  (save-excursion
-    (goto-char (point-min))
-    (when (re-search-forward "^Retry-After: \\([0-9.]+\\)$" nil t)
-      (match-string 1))))
+(defun disco-api--decode-json (body-text)
+  "Decode BODY-TEXT into alist/list JSON value.
+
+Return nil for empty or non-JSON body."
+  (if (or (null body-text) (string-empty-p body-text))
+      nil
+    (let ((json-object-type 'alist)
+          (json-array-type 'list)
+          (json-key-type 'symbol)
+          (json-false :false))
+      (condition-case _
+          (json-read-from-string body-text)
+        (error nil)))))
+
+(defun disco-api--extract-retry-after (headers body)
+  "Extract retry-after from HEADERS or BODY.
+
+HEADERS is lower-case alist produced by `disco-http-request'."
+  (or (cdr (assoc "retry-after" headers))
+      (and (listp body) (alist-get 'retry_after body))))
 
 (defun disco-api--request (method endpoint &optional payload query unauthenticated)
   "Execute METHOD request to ENDPOINT.
@@ -53,8 +66,7 @@
 PAYLOAD is an alist encoded as JSON for request body.
 QUERY is an alist for query parameters.
 If UNAUTHENTICATED is non-nil, omit Authorization header."
-  (let* ((url-request-method method)
-         (url-request-extra-headers
+  (let* ((headers
           (append
            `(("Content-Type" . "application/json")
              ("Accept" . "application/json")
@@ -63,50 +75,34 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
              ("Accept-Language" . ,disco-locale))
            (unless unauthenticated
              `(("Authorization" . ,(disco-api--auth-header))))))
-         (url-request-data (when payload (disco-api--json-encode payload)))
+         (data (when payload (disco-api--json-encode payload)))
          (url (disco-api--build-url endpoint query))
-         (buffer (url-retrieve-synchronously url t t disco-http-timeout)))
-    (unless buffer
-      (signal 'disco-api-error (list "request failed: empty response" method endpoint)))
-    (with-current-buffer buffer
-      (unwind-protect
-          (progn
-            (goto-char (point-min))
-            (unless (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
-              (signal 'disco-api-error (list "request failed: invalid HTTP response" method endpoint)))
-            (let ((status (string-to-number (match-string 1))))
-              (goto-char (point-min))
-              (re-search-forward "^$" nil 'move)
-              (let* ((json-object-type 'alist)
-                     (json-array-type 'list)
-                     (json-key-type 'symbol)
-                     (json-false :false)
-                     (body
-                      (condition-case _
-                          (json-read)
-                        (error nil))))
-                (cond
-                 ((and (>= status 200) (< status 300))
-                  body)
-                 ((= status 429)
-                  (signal
-                   'disco-api-error
-                   (list (format "rate limited (429), retry-after=%s"
-                                 (or (disco-api--extract-retry-after)
-                                     (and (listp body) (alist-get 'retry_after body))
-                                     "unknown"))
-                         status
-                         body)))
-                 (t
-                  (signal
-                   'disco-api-error
-                   (list (format "HTTP %d %s"
-                                 status
-                                 (or (and (listp body) (alist-get 'message body))
-                                     "request failed"))
-                         status
-                         body)))))))
-        (kill-buffer buffer)))))
+         (response (disco-http-request :method method :url url :headers headers :body data :timeout disco-http-timeout))
+         (status (or (plist-get response :status) 0))
+         (raw-body (or (plist-get response :body) ""))
+         (response-headers (or (plist-get response :headers) nil))
+         (body (disco-api--decode-json raw-body)))
+    (cond
+     ((and (>= status 200) (< status 300))
+      body)
+     ((= status 429)
+      (signal
+       'disco-api-error
+       (list (format "rate limited (429), retry-after=%s"
+                     (or (disco-api--extract-retry-after response-headers body)
+                         "unknown"))
+             status
+             body)))
+     (t
+      (signal
+       'disco-api-error
+       (list (format "HTTP %d %s"
+                     status
+                     (or (and (listp body) (alist-get 'message body))
+                         (and (not (string-empty-p raw-body)) raw-body)
+                         "request failed"))
+             status
+             body))))))
 
 (defun disco-api-current-user ()
   "Fetch current user object."

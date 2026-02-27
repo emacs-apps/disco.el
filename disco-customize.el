@@ -35,6 +35,21 @@ Use `disco-set-token' to set this in the current session."
   :type 'integer
   :group 'disco)
 
+(defcustom disco-enable-live-updates t
+  "If non-nil, enable periodic room updates while room buffers are open."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-live-update-interval 3
+  "Polling interval in seconds for live room updates."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-live-update-message-limit 30
+  "Per-poll message window size used by live update engine."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-user-agent "Mozilla/5.0 (X11; Linux x86_64) Emacs disco.el"
   "User-Agent sent to Discord API."
   :type 'string
