@@ -68,6 +68,14 @@ and avoid unbounded memory growth."
   :type 'integer
   :group 'disco)
 
+(defcustom disco-fetch-guild-active-threads nil
+  "If non-nil, query active threads endpoint during root refresh.
+
+This endpoint may not be available for all account types. Failures are
+logged and ignored, so enabling this is safe but optional."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-gateway-reconnect-delay 3
   "Seconds to wait before reconnecting gateway after disconnect/error."
   :type 'integer

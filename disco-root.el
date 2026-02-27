@@ -18,30 +18,87 @@
 (defconst disco-root-buffer-name "*disco*"
   "Main root buffer name.")
 
-(defun disco-root--insert-channel-button (channel)
-  "Insert clickable line for CHANNEL alist."
+(defun disco-root--displayable-channel-p (channel)
+  "Return non-nil when CHANNEL should appear in root buffer."
+  (memq (alist-get 'type channel) '(0 5 10 11 12 15 16)))
+
+(defun disco-root--openable-channel-p (channel)
+  "Return non-nil when CHANNEL can be opened as a room timeline."
+  (memq (alist-get 'type channel) '(0 5 10 11 12)))
+
+(defun disco-root--thread-parent-channel-p (channel)
+  "Return non-nil when CHANNEL can contain visible threads in UI."
+  (memq (alist-get 'type channel) '(0 5 15 16)))
+
+(defun disco-root--channel-label (channel)
+  "Return display label for CHANNEL."
+  (let ((name (or (alist-get 'name channel) "(no-name)"))
+        (channel-type (alist-get 'type channel)))
+    (pcase channel-type
+      ((or 10 11 12) (format "[thread] %s" name))
+      (15 (format "[forum] %s" name))
+      (16 (format "[media] %s" name))
+      ((or 0 5) (format "#%s" name))
+      (_ (format "[type-%s] %s" channel-type name)))))
+
+(defun disco-root--insert-channel-line (channel indent)
+  "Insert one CHANNEL at INDENT spaces."
   (let ((channel-id (alist-get 'id channel))
         (channel-name (or (alist-get 'name channel) "(no-name)"))
-        (channel-type (alist-get 'type channel)))
-    ;; Type 0 (text) and 5 (news) are message-centric for MVP.
-    (when (member channel-type '(0 5))
-      (insert-text-button
-       (format "    #%s\n" channel-name)
-       'action (lambda (_)
-                 (disco-room-open channel-id channel-name))
-       'follow-link t
-       'help-echo (format "Open channel %s" channel-id)))))
+        (label (disco-root--channel-label channel))
+        (padding (make-string indent ?\s)))
+    (if (disco-root--openable-channel-p channel)
+        (insert-text-button
+         (format "%s%s\n" padding label)
+         'action (lambda (_)
+                   (disco-room-open channel-id channel-name))
+         'follow-link t
+         'help-echo (format "Open channel %s" channel-id))
+      (insert (format "%s%s\n" padding label)))))
+
+(defun disco-root--insert-parent-threads (parent-channel rendered-thread-ids)
+  "Insert threads under PARENT-CHANNEL and mark IDs in RENDERED-THREAD-IDS."
+  (let ((parent-id (alist-get 'id parent-channel)))
+    (dolist (thread (disco-state-parent-threads parent-id))
+      (let ((thread-id (alist-get 'id thread)))
+        (when (and thread-id (disco-root--displayable-channel-p thread))
+          (puthash thread-id t rendered-thread-ids)
+          (disco-root--insert-channel-line thread 8))))))
+
+(defun disco-root--guild-visible-parent-channels (guild-id)
+  "Return non-thread display channels for GUILD-ID."
+  (let (parents)
+    (dolist (channel (or (disco-state-guild-channels guild-id) '()))
+      (when (and (disco-root--displayable-channel-p channel)
+                 (not (disco-state-channel-thread-p channel)))
+        (push channel parents)))
+    (nreverse parents)))
 
 (defun disco-root--insert-guild (guild)
   "Insert one GUILD and its channels in root buffer."
   (let* ((guild-id (alist-get 'id guild))
          (guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
-         (channels (or (disco-state-guild-channels guild-id) '())))
+         (parents (disco-root--guild-visible-parent-channels guild-id))
+         (rendered-thread-ids (make-hash-table :test #'equal)))
     (insert (format "%s\n" guild-name))
-    (if channels
-        (dolist (channel channels)
-          (disco-root--insert-channel-button channel))
+    (if parents
+        (dolist (channel parents)
+          (disco-root--insert-channel-line channel 4)
+          (when (disco-root--thread-parent-channel-p channel)
+            (disco-root--insert-parent-threads channel rendered-thread-ids)))
       (insert "    (no channels loaded)\n"))
+
+    (let (orphan-threads)
+      (dolist (thread (disco-state-guild-threads guild-id))
+        (let ((thread-id (alist-get 'id thread)))
+          (when (and thread-id (not (gethash thread-id rendered-thread-ids)))
+            (push thread orphan-threads))))
+      (setq orphan-threads (nreverse orphan-threads))
+      (when orphan-threads
+        (insert "    [threads]\n")
+        (dolist (thread orphan-threads)
+          (disco-root--insert-channel-line thread 8))))
+
     (insert "\n")))
 
 (defun disco-root-render ()
@@ -49,7 +106,7 @@
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "disco.el\n")
-    (insert "g: refresh   RET/mouse-1: open channel   q: quit\n\n")
+    (insert "g: refresh   RET/mouse-1: open channel/thread   q: quit\n\n")
     (let ((guilds (or (disco-state-guilds) '())))
       (if guilds
           (dolist (guild guilds)
@@ -68,9 +125,25 @@
       (let* ((guild-id (alist-get 'id guild))
              (channels (disco-api-guild-channels guild-id)))
         (setq channel-count (+ channel-count (length channels)))
-        (disco-state-put-channels guild-id channels)))
-    (disco-root-render)
-    (message "disco: loaded %d guilds and %d channels" guild-count channel-count)))
+        (disco-state-put-channels guild-id channels)
+
+        (when disco-fetch-guild-active-threads
+          (condition-case err
+              (let ((active (disco-api-guild-active-threads guild-id)))
+                (dolist (thread (or (alist-get 'threads active) '()))
+                  (disco-state-upsert-channel thread)))
+            (error
+             (message "disco: active thread fetch failed for guild %s: %s"
+                      guild-id (error-message-string err)))))))
+
+    (let ((thread-count 0))
+      (dolist (guild guilds)
+        (let ((guild-id (alist-get 'id guild)))
+          (setq thread-count (+ thread-count
+                                (length (disco-state-guild-threads guild-id))))))
+      (disco-root-render)
+      (message "disco: loaded %d guilds, %d channels (%d threads)"
+               guild-count channel-count thread-count))))
 
 (defvar disco-root-mode-map
   (let ((map (make-sparse-keymap)))

@@ -386,7 +386,21 @@ State is kept newest-first to match REST message list ordering."
        (when (and channel-id message-id (disco-gateway--channel-watched-p channel-id))
          (disco-gateway--delete-message channel-id message-id)
          (disco-gateway--emit
-          (list :type 'message-delete :channel-id channel-id :message-id message-id)))))))
+          (list :type 'message-delete :channel-id channel-id :message-id message-id)))))
+    ("THREAD_CREATE"
+     (disco-state-upsert-channel data))
+    ("THREAD_UPDATE"
+     (disco-state-upsert-channel data))
+    ("THREAD_DELETE"
+     (let ((thread-id (alist-get 'id data)))
+       (when thread-id
+         (disco-state-delete-channel thread-id))))
+    ("THREAD_LIST_SYNC"
+     (let ((guild-id (alist-get 'guild_id data))
+           (channel-ids (alist-get 'channel_ids data))
+           (threads (alist-get 'threads data)))
+       (when guild-id
+         (disco-state-sync-threads guild-id channel-ids (or threads '())))))))
 
 (defun disco-gateway--handle-payload (payload)
   "Handle one decoded gateway PAYLOAD."

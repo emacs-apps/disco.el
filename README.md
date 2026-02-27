@@ -13,6 +13,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Configure token in-session with `M-x disco-set-token`.
 - Start client with `M-x disco`.
 - Fetch and display guild/channel list in `*disco*`.
+- Fetch and display thread channels nested under their parent channels.
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
@@ -49,6 +50,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway-identify-intents`: optional identify intents bitmask.
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
+- `disco-fetch-guild-active-threads`: optionally fetch `/guilds/{id}/threads/active` during root refresh.
 - `disco-gateway-reconnect-delay`: base reconnect delay.
 - `disco-gateway-max-reconnect-attempts`: hard cap for consecutive reconnects (`nil` for unlimited).
 - `disco-gateway-reconnect-max-delay`: max reconnect delay cap.
@@ -63,13 +65,15 @@ This repository currently contains an MVP scaffold designed with these reference
 - REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
+- Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.
 - Gateway reconnect uses exponential backoff with jitter for transport failures, and randomized delay handling for `INVALID_SESSION`.
 - Identify payload supports optional intents/capabilities/presence fields through customization.
 - Rate-limit handling currently surfaces 429 with retry metadata to the user; full bucket scheduler is planned next.
 
 ## Next Milestones
 
-1. Expand dispatch handling beyond message events (channel/guild mutations and unread state).
-2. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
-3. Add queue prioritization/backpressure so user actions are favored over background work.
-4. Add persisted session recovery (resume state restore across Emacs restarts).
+1. Add thread-focused commands (create/join/archive, active vs archived filters, parent/thread navigation).
+2. Expand dispatch handling beyond messages/threads (channel/guild mutations and unread state).
+3. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
+4. Add queue prioritization/backpressure so user actions are favored over background work.
+5. Add persisted session recovery (resume state restore across Emacs restarts).

@@ -304,6 +304,12 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
   "Fetch channels in GUILD-ID."
   (disco-api--request "GET" (format "/guilds/%s/channels" guild-id) nil nil nil))
 
+(defun disco-api-guild-active-threads (guild-id)
+  "Fetch active threads object for GUILD-ID.
+
+Response is an alist with keys including `threads' and `members'."
+  (disco-api--request "GET" (format "/guilds/%s/threads/active" guild-id) nil nil nil))
+
 (defun disco-api-channel-messages (channel-id &optional before limit)
   "Fetch messages in CHANNEL-ID.
 
