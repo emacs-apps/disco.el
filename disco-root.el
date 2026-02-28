@@ -18,9 +18,6 @@
 (require 'disco-state)
 (require 'disco-transient)
 
-(declare-function disco-gateway-watch-global "disco-gateway")
-(declare-function disco-gateway-unwatch-global "disco-gateway")
-
 (defconst disco-root-buffer-name "*disco*"
   "Main root buffer name.")
 
@@ -33,7 +30,8 @@
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root rerender."
   (memq event-type
-        '(channel-create channel-update channel-delete
+        '(message-create
+          channel-create channel-update channel-delete
           guild-create guild-update guild-delete
           thread-create thread-update thread-delete thread-list-sync)))
 
@@ -113,25 +111,30 @@
 (defun disco-root--channel-label (channel)
   "Return display label for CHANNEL."
   (let ((name (or (alist-get 'name channel) "(no-name)"))
-        (channel-type (alist-get 'type channel)))
+        (channel-type (alist-get 'type channel))
+        (unread (disco-state-channel-unread-count (alist-get 'id channel))))
+    (let ((unread-suffix (if (> unread 0)
+                             (format " [%d]" unread)
+                           "")))
     (pcase channel-type
       ((or 10 11 12)
        (let ((tags (disco-root--thread-status-tags channel)))
-         (format "[thread] %s%s"
+         (format "[thread] %s%s%s"
                  name
                  (if (string-empty-p tags)
                      ""
-                   (format " (%s)" tags)))))
+                   (format " (%s)" tags))
+                 unread-suffix)))
       ((or 0 5 15 16)
        (let* ((thread-count (disco-root--thread-count-under-parent channel))
               (suffix (if (> thread-count 0)
                           (format " (%d threads)" thread-count)
                         "")))
          (pcase channel-type
-           ((or 0 5) (format "#%s%s" name suffix))
-           (15 (format "[forum] %s%s" name suffix))
-           (16 (format "[media] %s%s" name suffix)))))
-      (_ (format "[type-%s] %s" channel-type name)))))
+           ((or 0 5) (format "#%s%s%s" name suffix unread-suffix))
+           (15 (format "[forum] %s%s%s" name suffix unread-suffix))
+           (16 (format "[media] %s%s%s" name suffix unread-suffix)))))
+      (_ (format "[type-%s] %s%s" channel-type name unread-suffix))))))
 
 (defun disco-root--guild-name-by-id (guild-id)
   "Return guild display name for GUILD-ID."
@@ -287,6 +290,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
         (insert-text-button
          (format "%s%s\n" padding label)
          'action (lambda (_)
+                   (disco-state-clear-channel-unread channel-id)
                    (disco-room-open channel-id channel-name))
          'follow-link t
          'help-echo (format "Open channel %s" channel-id))

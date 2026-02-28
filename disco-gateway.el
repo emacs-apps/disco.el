@@ -38,6 +38,7 @@ Event schema:
 - :guild-id string for guild/channel/thread events
 - :message message object for create/update
 - :message-id string for message delete
+- :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
 - :guild guild object for guild events
 - :threads list for thread-list-sync")
@@ -430,10 +431,19 @@ State is kept newest-first to match REST message list ordering."
        (disco-gateway--emit-channel-event 'channel-delete data)))
     ("MESSAGE_CREATE"
      (let ((channel-id (alist-get 'channel_id data)))
-       (when (and channel-id (disco-gateway--channel-watched-p channel-id))
-         (disco-gateway--upsert-message channel-id data)
-         (disco-gateway--emit
-          (list :type 'message-create :channel-id channel-id :message data)))))
+       (when channel-id
+         (let ((watched (disco-gateway--channel-watched-p channel-id)))
+           (when watched
+             (disco-gateway--upsert-message channel-id data))
+           ;; Conservative unread model: only count messages for non-watched channels.
+           (when (and (not watched)
+                      (disco-state-channel channel-id))
+             (disco-state-increment-channel-unread channel-id 1))
+           (disco-gateway--emit
+            (list :type 'message-create
+                  :channel-id channel-id
+                  :message data
+                  :watched watched))))))
     ("MESSAGE_UPDATE"
      (let ((channel-id (alist-get 'channel_id data)))
        (when (and channel-id (disco-gateway--channel-watched-p channel-id))

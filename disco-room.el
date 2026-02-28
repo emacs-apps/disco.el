@@ -10,6 +10,7 @@
 
 (require 'subr-x)
 (require 'time-date)
+(require 'seq)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
@@ -18,6 +19,10 @@
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
 (defvar-local disco-room--guild-id nil)
+(defvar-local disco-room--oldest-message-id nil)
+(defvar-local disco-room--newest-message-id nil)
+(defvar-local disco-room--history-exhausted nil)
+(defvar-local disco-room--pending-reply-to nil)
 (defvar-local disco-room--gateway-handler nil)
 
 (defun disco-room--channel-object ()
@@ -82,6 +87,47 @@
 (defun disco-room--latest-message-id ()
   "Return newest known message ID for current room, or nil."
   (alist-get 'id (car (disco-state-messages disco-room--channel-id))))
+
+(defun disco-room--update-message-window-state (messages)
+  "Update pagination cursors from MESSAGES (newest-first list)."
+  (setq disco-room--newest-message-id (and messages (alist-get 'id (car messages))))
+  (setq disco-room--oldest-message-id
+        (and messages (alist-get 'id (car (last messages))))))
+
+(defun disco-room--merge-message-pages (existing older)
+  "Merge EXISTING newest-first messages with OLDER page, de-duplicated.
+
+Both EXISTING and OLDER are newest-first lists."
+  (let ((seen (make-hash-table :test #'equal))
+        merged)
+    (dolist (msg (append existing older))
+      (let ((message-id (alist-get 'id msg)))
+        (unless (and message-id (gethash message-id seen))
+          (when message-id
+            (puthash message-id t seen))
+          (push msg merged))))
+    (nreverse merged)))
+
+(defun disco-room--message-id-at-point ()
+  "Return message ID at point, or signal a user error.
+
+Message lines carry the `disco-message-id' text property."
+  (or (get-text-property (point) 'disco-message-id)
+      (get-text-property (line-beginning-position) 'disco-message-id)
+      (user-error "disco: point is not on a message line")))
+
+(defun disco-room--message-by-id (message-id)
+  "Return room message object for MESSAGE-ID, or nil."
+  (seq-find (lambda (msg)
+              (equal (alist-get 'id msg) message-id))
+            (or (disco-state-messages disco-room--channel-id) '())))
+
+(defun disco-room--message-at-point ()
+  "Return message object at point, or signal user error."
+  (let* ((message-id (disco-room--message-id-at-point))
+         (msg (disco-room--message-by-id message-id)))
+    (or msg
+        (user-error "disco: message not found in local room cache"))))
 
 (defun disco-room--read-thread-auto-archive-duration ()
   "Prompt for optional auto archive duration in minutes.
@@ -151,17 +197,29 @@ Returns nil when left blank."
   "Insert one message MSG in current buffer."
   (let ((timestamp (disco-room--format-time (or (alist-get 'timestamp msg) "")))
         (author (disco-room--message-author msg))
-        (content (or (alist-get 'content msg) "")))
-    (insert (format "[%s] %s: %s\n" timestamp author content))))
+        (content (or (alist-get 'content msg) ""))
+        (message-id (alist-get 'id msg))
+        (line-start (point)))
+    (insert (format "[%s] %s: %s\n" timestamp author content))
+    (add-text-properties
+     line-start
+     (point)
+     (list 'disco-message-id message-id))))
 
 (defun disco-room-render ()
   "Render timeline for current room buffer."
   (let ((inhibit-read-only t)
         (messages (disco-state-messages disco-room--channel-id)))
     (erase-buffer)
-    (insert (format "Channel: %s%s\n\n"
+    (insert (format "Channel: %s%s\n"
                     disco-room--channel-name
                     (disco-room--thread-header-suffix)))
+    (insert "g: refresh   M-<: older   r/e/d: reply/edit/delete   C-c C-c: send   q: quit\n")
+    (when disco-room--pending-reply-to
+      (insert (format "Replying to: %s (C-c C-k to cancel)\n" disco-room--pending-reply-to)))
+    (when disco-room--history-exhausted
+      (insert "(older history exhausted)\n"))
+    (insert "\n")
     ;; API returns newest-first by default; reverse for chat-like display.
     (dolist (msg (reverse messages))
       (disco-room--insert-message msg))
@@ -171,7 +229,10 @@ Returns nil when left blank."
   "Fetch and redraw latest messages for current room."
   (interactive)
   (let ((messages (disco-api-channel-messages disco-room--channel-id nil nil)))
+    (setq disco-room--history-exhausted nil)
     (disco-state-put-messages disco-room--channel-id messages)
+    (disco-room--update-message-window-state messages)
+    (disco-state-clear-channel-unread disco-room--channel-id)
     (disco-room-render)
     (message "disco: loaded %d messages" (length messages))))
 
@@ -242,9 +303,79 @@ REASON is shown in the minibuffer."
   (interactive)
   (let ((content (read-string "Message: ")))
     (unless (string-empty-p content)
-      (disco-api-send-message disco-room--channel-id content)
+      (disco-api-send-message
+       disco-room--channel-id
+       content
+       disco-room--pending-reply-to)
+      (setq disco-room--pending-reply-to nil)
       (disco-room-refresh)
       (message "disco: message sent"))))
+
+(defun disco-room-load-older-messages ()
+  "Load one older message page before the oldest loaded message."
+  (interactive)
+  (if disco-room--history-exhausted
+      (message "disco: no older messages available")
+    (let* ((before (or disco-room--oldest-message-id
+                       (user-error "disco: no oldest message cursor; refresh first")))
+           (existing (or (disco-state-messages disco-room--channel-id) '()))
+           (older (disco-api-channel-messages disco-room--channel-id before nil)))
+      (if (null older)
+          (progn
+            (setq disco-room--history-exhausted t)
+            (disco-room-render)
+            (message "disco: reached beginning of history"))
+        (let ((merged (disco-room--merge-message-pages existing older)))
+          (disco-state-put-messages disco-room--channel-id merged)
+          (disco-room--update-message-window-state merged)
+          (disco-room-render)
+          (message "disco: loaded %d older messages" (length older)))))))
+
+(defun disco-room-reply-to-message (&optional message-id)
+  "Set pending reply target MESSAGE-ID for next send.
+
+When called interactively, defaults to message under point."
+  (interactive
+   (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
+          (fallback (or at-point (disco-room--latest-message-id)))
+          (raw (read-string
+                (if fallback
+                    (format "Reply to message ID (default %s): " fallback)
+                  "Reply to message ID: "))))
+     (list (if (string-empty-p raw)
+               (or fallback
+                   (user-error "disco: no target message available"))
+             raw))))
+  (setq disco-room--pending-reply-to message-id)
+  (disco-room-render)
+  (message "disco: next message will reply to %s" message-id))
+
+(defun disco-room-cancel-reply ()
+  "Cancel pending reply target for next send."
+  (interactive)
+  (setq disco-room--pending-reply-to nil)
+  (disco-room-render)
+  (message "disco: reply target cleared"))
+
+(defun disco-room-edit-message ()
+  "Edit message at point in current room."
+  (interactive)
+  (let* ((msg (disco-room--message-at-point))
+         (message-id (alist-get 'id msg))
+         (old-content (or (alist-get 'content msg) ""))
+         (new-content (read-string (format "Edit message %s: " message-id) old-content)))
+    (disco-api-edit-message disco-room--channel-id message-id new-content)
+    (disco-room-refresh)
+    (message "disco: edited message %s" message-id)))
+
+(defun disco-room-delete-message ()
+  "Delete message at point in current room."
+  (interactive)
+  (let* ((message-id (disco-room--message-id-at-point)))
+    (when (y-or-n-p (format "Delete message %s? " message-id))
+      (disco-api-delete-message disco-room--channel-id message-id)
+      (disco-room-refresh)
+      (message "disco: deleted message %s" message-id))))
 
 (defun disco-room-create-thread-from-message (name message-id
                                                    &optional auto-archive-duration
@@ -284,7 +415,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
     (message "disco: created thread %s" name)))
 
 (defun disco-room-create-thread (name &optional type auto-archive-duration
-                                       invitable rate-limit-per-user)
+                                      invitable rate-limit-per-user)
   "Create detached thread NAME in current channel.
 
 TYPE is optional thread channel type.
@@ -353,7 +484,12 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 (defvar disco-room-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-room-refresh)
+    (define-key map (kbd "M-<") #'disco-room-load-older-messages)
+    (define-key map (kbd "r") #'disco-room-reply-to-message)
+    (define-key map (kbd "e") #'disco-room-edit-message)
+    (define-key map (kbd "d") #'disco-room-delete-message)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+    (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
     (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
@@ -378,6 +514,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
       (setq disco-room--channel-name channel-name)
       (let ((channel (disco-state-channel channel-id)))
         (setq disco-room--guild-id (and channel (alist-get 'guild_id channel))))
+      (disco-state-clear-channel-unread channel-id)
       (disco-room--attach-live-updates)
       (disco-room-refresh))
     (pop-to-buffer buf)))

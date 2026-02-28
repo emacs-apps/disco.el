@@ -105,13 +105,13 @@ Value 1 enforces strict serialization."
   (condition-case err
       (disco-http--response->plist
        (plz (disco-http--method-symbol method) url
-         :headers headers
-         :body body
-         :body-type 'text
-         :as 'response
-         :then 'sync
-         :timeout timeout
-         :connect-timeout timeout))
+            :headers headers
+            :body body
+            :body-type 'text
+            :as 'response
+            :then 'sync
+            :timeout timeout
+            :connect-timeout timeout))
     (error
      (disco-http--error->plist err))))
 

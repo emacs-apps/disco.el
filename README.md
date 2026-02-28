@@ -17,10 +17,12 @@ This repository currently contains an MVP scaffold designed with these reference
 - Browse archived thread lists per parent channel.
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
+- Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
 - Root buffer now live-syncs guild/channel/thread structure from gateway create/update/delete dispatch.
+- Root channel labels include lightweight unread counters from live message events.
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
@@ -54,6 +56,13 @@ This repository currently contains an MVP scaffold designed with these reference
 - Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
 - Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
 - Room transient (`?`): includes message send/refresh, thread create/join/leave/archive, and inspect actions.
+
+## Message Commands
+
+- Room buffer: `r` set reply target from message-at-point, `C-c C-k` clears pending reply.
+- Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
+- Room buffer: `M-<` loads older message page using `before` cursor pagination.
+- Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
 
 ## Gateway Configuration
 

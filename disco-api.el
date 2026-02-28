@@ -422,12 +422,37 @@ LIMIT defaults to `disco-message-fetch-limit'."
       (setq query (append query `(("before" . ,before)))))
     (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
 
-(defun disco-api-send-message (channel-id content)
-  "Send CONTENT into CHANNEL-ID."
+(defun disco-api-send-message (channel-id content &optional reply-to-message-id)
+  "Send CONTENT into CHANNEL-ID.
+
+When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message."
+  (let ((payload `((content . ,content))))
+    (when reply-to-message-id
+      (setq payload
+            (append payload
+                    `((message_reference . ((message_id . ,reply-to-message-id)))))))
+    (disco-api--request
+     "POST"
+     (format "/channels/%s/messages" channel-id)
+     payload
+     nil
+     nil)))
+
+(defun disco-api-edit-message (channel-id message-id content)
+  "Edit MESSAGE-ID in CHANNEL-ID with new CONTENT."
   (disco-api--request
-   "POST"
-   (format "/channels/%s/messages" channel-id)
+   "PATCH"
+   (format "/channels/%s/messages/%s" channel-id message-id)
    `((content . ,content))
+   nil
+   nil))
+
+(defun disco-api-delete-message (channel-id message-id)
+  "Delete MESSAGE-ID from CHANNEL-ID."
+  (disco-api--request
+   "DELETE"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   nil
    nil
    nil))
 

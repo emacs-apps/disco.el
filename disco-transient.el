@@ -20,7 +20,12 @@
 (declare-function disco-root-list-archived-threads "disco-root")
 
 (declare-function disco-room-refresh "disco-room")
+(declare-function disco-room-load-older-messages "disco-room")
 (declare-function disco-room-send-message "disco-room")
+(declare-function disco-room-reply-to-message "disco-room")
+(declare-function disco-room-cancel-reply "disco-room")
+(declare-function disco-room-edit-message "disco-room")
+(declare-function disco-room-delete-message "disco-room")
 (declare-function disco-room-create-thread-from-message "disco-room")
 (declare-function disco-room-create-thread "disco-room")
 (declare-function disco-room-join-thread "disco-room")
@@ -83,7 +88,12 @@
   "Room command menu for disco.el."
   [["Timeline"
     ("g" "Refresh room" disco-room-refresh)
-    ("c" "Send message" disco-room-send-message)]
+    ("o" "Load older" disco-room-load-older-messages)
+    ("c" "Send message" disco-room-send-message)
+    ("r" "Reply to message" disco-room-reply-to-message)
+    ("k" "Cancel reply" disco-room-cancel-reply)
+    ("e" "Edit at point" disco-room-edit-message)
+    ("d" "Delete at point" disco-room-delete-message)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message)
     ("n" "Create detached" disco-room-create-thread)

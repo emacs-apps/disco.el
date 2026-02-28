@@ -65,7 +65,7 @@ Supported values:
 - nil: no transport compression
 - zlib-stream: compressed binary frames with shared zlib context"
   :type '(choice (const :tag "Disabled" nil)
-                 (const :tag "zlib-stream" zlib-stream))
+          (const :tag "zlib-stream" zlib-stream))
   :group 'disco)
 
 (defcustom disco-gateway-zlib-max-buffer-bytes (* 64 1024 1024)

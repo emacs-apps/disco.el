@@ -28,6 +28,9 @@
 (defvar disco-state--messages-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> list of message objects.")
 
+(defvar disco-state--unread-counts-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> unread message count.")
+
 (defun disco-state-reset ()
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
@@ -35,7 +38,8 @@
   (clrhash disco-state--channels-by-id)
   (clrhash disco-state--threads-by-parent)
   (clrhash disco-state--thread-ids-by-guild)
-  (clrhash disco-state--messages-by-channel))
+  (clrhash disco-state--messages-by-channel)
+  (clrhash disco-state--unread-counts-by-channel))
 
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."
@@ -222,7 +226,8 @@
         (when (disco-state-channel-thread-p channel)
           (disco-state--remove-thread-indexes channel)))
       (remhash channel-id disco-state--channels-by-id)
-      (remhash channel-id disco-state--messages-by-channel))))
+      (remhash channel-id disco-state--messages-by-channel)
+      (remhash channel-id disco-state--unread-counts-by-channel))))
 
 (defun disco-state-sync-threads (guild-id parent-channel-ids threads)
   "Sync active THREADS for GUILD-ID.
@@ -248,6 +253,22 @@ Otherwise, replace threads only under the provided parent IDs."
 (defun disco-state-messages (channel-id)
   "Return messages list for CHANNEL-ID."
   (gethash channel-id disco-state--messages-by-channel))
+
+(defun disco-state-channel-unread-count (channel-id)
+  "Return unread count for CHANNEL-ID."
+  (gethash channel-id disco-state--unread-counts-by-channel 0))
+
+(defun disco-state-increment-channel-unread (channel-id &optional delta)
+  "Increase unread count for CHANNEL-ID by DELTA (default 1)."
+  (let* ((step (max 0 (or delta 1)))
+         (next (+ (disco-state-channel-unread-count channel-id) step)))
+    (puthash channel-id next disco-state--unread-counts-by-channel)
+    next))
+
+(defun disco-state-clear-channel-unread (channel-id)
+  "Reset unread count for CHANNEL-ID to zero."
+  (remhash channel-id disco-state--unread-counts-by-channel)
+  0)
 
 (provide 'disco-state)
 
