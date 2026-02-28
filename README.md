@@ -18,8 +18,9 @@ This repository currently contains an MVP scaffold designed with these reference
 - Fetch and display thread channels nested under their parent channels.
 - Browse archived thread lists per parent channel.
 - Open channel timeline.
+- Room timeline supports telega-inspired compact same-sender grouping, date separators, and unread divider rendering.
 - Send plain text message with `C-c C-c` in room buffer.
-- Send file attachments from room buffer (multipart upload) with `C-c C-f`, clear queued files with `C-c C-x`, then send via `RET`/`C-c C-c`.
+- Send file attachments from room buffer (multipart upload) with draft tokens: add via `C-c C-f`, remove token at point via `C-c C-d`, clear all via `C-c C-x`, then send via `RET`/`C-c C-c`.
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
 - Message rows render structured attachment metadata (image/video/file kind, size, dimensions when available).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
@@ -85,8 +86,9 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffer: `r` set reply target from message-at-point, `C-c C-k` clears pending reply.
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
+- Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
-- Room transient (`?`): includes attachment queue and reaction actions (`f`, `x`, `!`, `+`, `-`).
+- Room transient (`?`): includes attachment queue/token and reaction actions (`f`, `D`, `x`, `!`, `+`, `-`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration
@@ -115,7 +117,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
-- Room EWOC state keeps message-node indexes so chat events can update rows without full rerender.
+- Room EWOC state keeps message-node indexes; reaction events patch rows locally while create/update/delete rerender fully to preserve grouping/day/unread layout correctness.
 - Avatar fetch/render pipeline is asynchronous and rerenders room buffers when images become available.
 - Mention completion is token-boundary aware (start/whitespace + `@`), mirroring chat-client autocomplete behavior.
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.

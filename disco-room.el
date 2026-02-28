@@ -41,7 +41,13 @@
 (defvar-local disco-room--rendering nil)
 (defvar-local disco-room--ewoc nil)
 (defvar-local disco-room--message-node-table nil)
+(defvar-local disco-room--render-context-by-message-id nil)
 (defvar-local disco-room--pending-attachments nil)
+(defvar-local disco-room--attachment-token-table nil)
+(defvar-local disco-room--attachment-token-seq 0)
+
+(defconst disco-room--attachment-token-regexp "\\[file:\\([0-9]+\\)\\]"
+  "Regexp used to match attachment tokens in room draft input.")
 
 (defvar disco-room--avatar-image-cache (make-hash-table :test #'equal)
   "Global avatar image cache keyed by avatar cache key.
@@ -117,6 +123,29 @@ When nil, avatar fetches are uncapped per render pass
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-group-messages t
+  "When non-nil, collapse repeated message headers for same sender.
+
+Grouping applies when sender stays the same and timestamps are within
+`disco-room-group-messages-timespan' seconds."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-group-messages-timespan 120
+  "Maximum age gap in seconds for grouped same-sender messages."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-show-date-separators t
+  "When non-nil, insert date separator rows between day boundaries."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-show-unread-divider t
+  "When non-nil, render an unread divider before first unread message."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-room-show-attachment-urls nil
   "When non-nil, include raw attachment URLs in message rendering."
   :type 'boolean
@@ -140,6 +169,16 @@ When nil, avatar fetches are uncapped per render pass
 (defface disco-room-reaction-selected
   '((t :inherit success :weight bold))
   "Face used for reactions selected by the current user."
+  :group 'disco)
+
+(defface disco-room-date-separator
+  '((t :inherit font-lock-comment-face :weight bold))
+  "Face used for room date separator rows."
+  :group 'disco)
+
+(defface disco-room-unread-divider
+  '((t :inherit warning :weight bold))
+  "Face used for room unread divider row."
   :group 'disco)
 
 (defface disco-room-author-color-1
@@ -207,6 +246,7 @@ When nil, avatar fetches are uncapped per render pass
     (define-key map (kbd "M-n") #'disco-room-draft-next)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+    (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
     (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
     map)
   "Keymap active when point is inside the room draft region.")
@@ -301,6 +341,69 @@ When nil, avatar fetches are uncapped per render pass
   "Return current room draft string."
   (or disco-room--draft-input ""))
 
+(defun disco-room--next-attachment-token-id ()
+  "Return next unique attachment token id for current room buffer."
+  (setq disco-room--attachment-token-seq (1+ (or disco-room--attachment-token-seq 0)))
+  (number-to-string disco-room--attachment-token-seq))
+
+(defun disco-room--attachment-token-text (token-id)
+  "Return textual draft token representation for TOKEN-ID."
+  (format "[file:%s]" token-id))
+
+(defun disco-room--attachment-token-ids-in-text (text)
+  "Return attachment token ids found in TEXT, preserving first-seen order."
+  (let ((pos 0)
+        (ids '())
+        (seen (make-hash-table :test #'equal)))
+    (while (and (stringp text)
+                (< pos (length text))
+                (string-match disco-room--attachment-token-regexp text pos))
+      (let ((token-id (match-string 1 text)))
+        (unless (gethash token-id seen)
+          (puthash token-id t seen)
+          (push token-id ids)))
+      (setq pos (match-end 0)))
+    (nreverse ids)))
+
+(defun disco-room--attachment-by-token-id (token-id)
+  "Return attachment plist by TOKEN-ID from current room token table."
+  (and disco-room--attachment-token-table
+       (gethash token-id disco-room--attachment-token-table)))
+
+(defun disco-room--attachments-from-draft (&optional draft)
+  "Return ordered attachment list referenced by DRAFT token markers."
+  (let ((text (or draft (disco-room--current-draft)))
+        (attachments '()))
+    (dolist (token-id (disco-room--attachment-token-ids-in-text text))
+      (let ((attachment (disco-room--attachment-by-token-id token-id)))
+        (when attachment
+          (push (copy-tree attachment) attachments))))
+    (nreverse attachments)))
+
+(defun disco-room--draft-without-attachment-tokens (&optional draft)
+  "Return DRAFT string with attachment tokens removed."
+  (let* ((text (or draft (disco-room--current-draft)))
+         (without (replace-regexp-in-string disco-room--attachment-token-regexp "" text)))
+    (replace-regexp-in-string "[ \t][ \t]+" " " without)))
+
+(defun disco-room--sync-pending-attachments-from-draft (&optional draft)
+  "Refresh `disco-room--pending-attachments' using tokenized DRAFT references."
+  (setq disco-room--pending-attachments
+        (disco-room--attachments-from-draft draft)))
+
+(defun disco-room--prune-unused-attachment-tokens (&optional draft)
+  "Remove token table entries that are not referenced in DRAFT."
+  (let* ((text (or draft (disco-room--current-draft)))
+         (alive (make-hash-table :test #'equal)))
+    (dolist (token-id (disco-room--attachment-token-ids-in-text text))
+      (puthash token-id t alive))
+    (when disco-room--attachment-token-table
+      (maphash
+       (lambda (token-id _attachment)
+         (unless (gethash token-id alive)
+           (remhash token-id disco-room--attachment-token-table)))
+       disco-room--attachment-token-table))))
+
 (defun disco-room--input-region-bounds ()
   "Return current writable draft region as (START . END), or nil."
   (when (and (markerp disco-room--input-marker)
@@ -328,7 +431,9 @@ When nil, avatar fetches are uncapped per render pass
         (unless (equal text disco-room--draft-input)
           (setq disco-room--draft-input text)
           (setq disco-room--input-index nil)
-          (setq disco-room--input-pending nil))))))
+          (setq disco-room--input-pending nil))
+        (disco-room--prune-unused-attachment-tokens text)
+        (disco-room--sync-pending-attachments-from-draft text)))))
 
 (defun disco-room--after-change (beg end _old-len)
   "Keep draft state synced after editable-region changes from BEG to END."
@@ -342,6 +447,8 @@ When nil, avatar fetches are uncapped per render pass
 (defun disco-room--set-draft (text)
   "Set room draft TEXT and re-render room."
   (setq disco-room--draft-input (or text ""))
+  (disco-room--prune-unused-attachment-tokens disco-room--draft-input)
+  (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
   (disco-room-render))
 
 (defun disco-room--clear-draft ()
@@ -740,6 +847,96 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
       (format-time-string "%Y-%m-%d %H:%M"
                           (date-to-time iso8601))
     (error "unknown-time")))
+
+(defun disco-room--format-time-short (iso8601)
+  "Format ISO8601 into HH:MM local string."
+  (condition-case _
+      (format-time-string "%H:%M" (date-to-time iso8601))
+    (error "--:--")))
+
+(defun disco-room--message-time (msg)
+  "Return decoded time for MSG timestamp, or nil when unavailable."
+  (let ((raw (alist-get 'timestamp msg)))
+    (when (and (stringp raw) (not (string-empty-p raw)))
+      (condition-case _
+          (date-to-time raw)
+        (error nil)))))
+
+(defun disco-room--message-time-epoch (msg)
+  "Return float epoch seconds for MSG timestamp, or nil."
+  (let ((time (disco-room--message-time msg)))
+    (and time (float-time time))))
+
+(defun disco-room--message-day-key (msg)
+  "Return local calendar day key string for MSG timestamp, or nil."
+  (let ((time (disco-room--message-time msg)))
+    (and time (format-time-string "%Y-%m-%d" time))))
+
+(defun disco-room--message-day-label (day-key)
+  "Return pretty date label for DAY-KEY (YYYY-MM-DD)."
+  (if (not (stringp day-key))
+      "Unknown date"
+    (condition-case _
+        (format-time-string "%A, %Y-%m-%d" (date-to-time (concat day-key "T00:00:00")))
+      (error day-key))))
+
+(defun disco-room--same-sender-p (left right)
+  "Return non-nil when LEFT and RIGHT messages share sender identity."
+  (let ((left-id (disco-room--message-author-id left))
+        (right-id (disco-room--message-author-id right)))
+    (if (and left-id right-id)
+        (equal left-id right-id)
+      (equal (disco-room--message-author left)
+             (disco-room--message-author right)))))
+
+(defun disco-room--messages-compact-group-p (previous current)
+  "Return non-nil when CURRENT should be compact-grouped under PREVIOUS."
+  (and disco-room-group-messages
+       (listp previous)
+       (listp current)
+       (disco-room--same-sender-p previous current)
+       (let ((previous-time (disco-room--message-time-epoch previous))
+             (current-time (disco-room--message-time-epoch current)))
+         (and previous-time
+              current-time
+              (<= (abs (- current-time previous-time))
+                  (max 0 disco-room-group-messages-timespan))))))
+
+(defun disco-room--set-message-render-context (message-id context)
+  "Store render CONTEXT for MESSAGE-ID in current room buffer."
+  (when (and message-id disco-room--render-context-by-message-id)
+    (puthash message-id context disco-room--render-context-by-message-id)))
+
+(defun disco-room--message-render-context (msg)
+  "Return render context plist for MSG, or nil when missing."
+  (let ((message-id (and (listp msg) (alist-get 'id msg))))
+    (and message-id
+         disco-room--render-context-by-message-id
+         (gethash message-id disco-room--render-context-by-message-id))))
+
+(defun disco-room--insert-divider-row (text face)
+  "Insert read-only divider row TEXT with FACE."
+  (let ((start (point)))
+    (insert (format "%s\n" text))
+    (add-text-properties
+     start
+     (point)
+     (list 'read-only t
+           'face face
+           'front-sticky '(read-only)
+           'rear-nonsticky '(read-only)))))
+
+(defun disco-room--insert-date-separator-row (day-key)
+  "Insert date separator row for DAY-KEY."
+  (disco-room--insert-divider-row
+   (format "────────  %s  ────────" (disco-room--message-day-label day-key))
+   'disco-room-date-separator))
+
+(defun disco-room--insert-unread-divider-row ()
+  "Insert unread separator row."
+  (disco-room--insert-divider-row
+   "────────  Unread Messages  ────────"
+   'disco-room-unread-divider))
 
 (defun disco-room--message-author (msg)
   "Extract author name from message MSG alist."
@@ -1282,7 +1479,71 @@ otherwise selected flag is cleared and count is decreased."
     (setq updated-list (nreverse updated-list))
     (disco-state-put-messages disco-room--channel-id updated-list)
     (when updated-msg
-      (disco-room--upsert-message-node updated-msg))))
+      (disco-room--upsert-message-node updated-msg))
+    updated-msg))
+
+(defun disco-room--event-emoji->input (emoji)
+  "Normalize gateway EMOJI payload into reaction input string."
+  (cond
+   ((and (listp emoji) (alist-get 'id emoji))
+    (format "%s:%s"
+            (or (alist-get 'name emoji) "_")
+            (alist-get 'id emoji)))
+   ((and (listp emoji) (alist-get 'name emoji))
+    (alist-get 'name emoji))
+   ((stringp emoji)
+    emoji)
+   (t nil)))
+
+(defun disco-room--message-cleared-reactions (msg)
+  "Return MSG copy with all reactions removed."
+  (let ((updated (copy-tree msg)))
+    (setf (alist-get 'reactions updated nil 'remove) '())
+    (setf (alist-get 'reaction_counts updated nil 'remove) '())
+    updated))
+
+(defun disco-room--message-removed-reaction-emoji (msg emoji)
+  "Return MSG copy with reaction EMOJI removed completely."
+  (let* ((updated (copy-tree msg))
+         (reactions (copy-tree (disco-room--message-reactions msg)))
+         (next '()))
+    (dolist (reaction reactions)
+      (unless (disco-room--reaction-matches-input-p reaction emoji)
+        (push reaction next)))
+    (setf (alist-get 'reactions updated nil 'remove) (nreverse next))
+    updated))
+
+(defun disco-room--apply-live-reaction-event-partially (event)
+  "Apply reaction EVENT to local room state and EWOC incrementally.
+
+Return non-nil when a local message update was applied."
+  (let* ((event-type (plist-get event :type))
+         (message-id (plist-get event :message-id))
+         (emoji-input (disco-room--event-emoji->input (plist-get event :emoji))))
+    (pcase event-type
+      ('message-reaction-add
+       (and (stringp emoji-input)
+            (disco-room--update-message-locally
+             message-id
+             (lambda (msg)
+               (disco-room--message-with-reaction-delta msg emoji-input t)))))
+      ('message-reaction-remove
+       (and (stringp emoji-input)
+            (disco-room--update-message-locally
+             message-id
+             (lambda (msg)
+               (disco-room--message-with-reaction-delta msg emoji-input nil)))))
+      ('message-reaction-remove-all
+       (disco-room--update-message-locally
+        message-id
+        #'disco-room--message-cleared-reactions))
+      ('message-reaction-remove-emoji
+       (and (stringp emoji-input)
+            (disco-room--update-message-locally
+             message-id
+             (lambda (msg)
+               (disco-room--message-removed-reaction-emoji msg emoji-input)))))
+      (_ nil))))
 
 (defun disco-room--reply-reference-id (msg)
   "Return referenced message ID for MSG, or nil."
@@ -1307,7 +1568,12 @@ otherwise selected flag is cleared and count is decreased."
 
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
-  (let* ((timestamp (disco-room--format-time (or (alist-get 'timestamp msg) "")))
+  (let* ((context (or (disco-room--message-render-context msg) '()))
+         (compact (disco-room--json-true-p (plist-get context :compact)))
+         (insert-date (plist-get context :insert-date))
+         (insert-unread (disco-room--json-true-p (plist-get context :insert-unread)))
+         (timestamp (disco-room--format-time (or (alist-get 'timestamp msg) "")))
+         (short-time (disco-room--format-time-short (or (alist-get 'timestamp msg) "")))
          (author (disco-room--message-author msg))
          (author-face (disco-room--author-face msg))
          (content (disco-room--message-display-content msg))
@@ -1315,9 +1581,15 @@ otherwise selected flag is cleared and count is decreased."
          (message-id (alist-get 'id msg))
          line-start
          author-start)
+    (when insert-date
+      (disco-room--insert-date-separator-row insert-date))
+    (when insert-unread
+      (disco-room--insert-unread-divider-row))
     (when reply
       (let ((reply-start (point)))
-        (insert (format "  ↪ %s\n" reply))
+        (insert (if compact
+                    (format "    ↪ %s\n" reply)
+                  (format "  ↪ %s\n" reply)))
         (add-text-properties
          reply-start
          (point)
@@ -1326,13 +1598,18 @@ otherwise selected flag is cleared and count is decreased."
                'front-sticky '(read-only)
                'disco-message-id message-id))))
     (setq line-start (point))
-    (insert (propertize (format "[%s] " timestamp) 'face 'disco-room-timestamp))
-    (disco-room--insert-avatar msg)
-    (insert " ")
-    (setq author-start (point))
-    (insert author)
-    (add-text-properties author-start (point) (list 'face author-face))
-    (insert ":")
+    (if compact
+        (progn
+          (insert (propertize (format "    [%s] " short-time) 'face 'disco-room-timestamp))
+          (insert (propertize author 'face author-face))
+          (insert ":"))
+      (insert (propertize (format "[%s] " timestamp) 'face 'disco-room-timestamp))
+      (disco-room--insert-avatar msg)
+      (insert " ")
+      (setq author-start (point))
+      (insert author)
+      (add-text-properties author-start (point) (list 'face author-face))
+      (insert ":"))
     (if (string-empty-p content)
         (insert "\n")
       (insert (format " %s\n" content)))
@@ -1460,7 +1737,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-x: clear attachments   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -1490,8 +1767,37 @@ Return non-nil when handled without full room rerender."
                  (disco-room--input-footer-text draft)
                  t))
           ;; API returns newest-first by default; reverse for chat-like display.
-          (dolist (msg (reverse messages))
-            (disco-room--insert-message-node msg))
+          (let* ((ordered (reverse messages))
+                 (last-read-id (disco-state-channel-last-read-message-id disco-room--channel-id))
+                 (previous-msg nil)
+                 (previous-day nil)
+                 (unread-divider-inserted nil))
+            (setq disco-room--render-context-by-message-id (make-hash-table :test #'equal))
+            (dolist (msg ordered)
+              (let* ((message-id (alist-get 'id msg))
+                     (day-key (disco-room--message-day-key msg))
+                     (insert-date (and disco-room-show-date-separators
+                                       day-key
+                                       (not (equal day-key previous-day))))
+                     (compact (and previous-msg
+                                   (disco-room--messages-compact-group-p previous-msg msg)))
+                     (insert-unread
+                      (and disco-room-show-unread-divider
+                           (not unread-divider-inserted)
+                           (or (null last-read-id)
+                               (and (stringp message-id)
+                                    (stringp last-read-id)
+                                    (disco-state-snowflake< last-read-id message-id)))))
+                     (context (list :compact (and compact t)
+                                    :insert-date insert-date
+                                    :insert-unread (and insert-unread t))))
+                (when message-id
+                  (disco-room--set-message-render-context message-id context))
+                (when insert-unread
+                  (setq unread-divider-inserted t))
+                (setq previous-msg msg)
+                (setq previous-day day-key)
+                (disco-room--insert-message-node msg))))
           (disco-room--bind-input-region-from-footer)
           (when (markerp disco-room--input-marker)
             ;; Keep typing position at end of current draft.
@@ -1566,8 +1872,9 @@ REASON is shown in the minibuffer."
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-create message-update message-delete)))
       (let ((at-bottom (= (point) (point-max))))
-        (unless (disco-room--apply-live-message-event-partially event)
-          (disco-room-render))
+        ;; Message grouping/date/unread layout depends on surrounding rows,
+        ;; so message create/update/delete keeps a full room rerender.
+        (disco-room-render)
         (when (eq event-type 'message-create)
           (let* ((message (plist-get event :message))
                  (message-id (and (listp message) (alist-get 'id message))))
@@ -1579,9 +1886,8 @@ REASON is shown in the minibuffer."
                               message-reaction-remove
                               message-reaction-remove-all
                               message-reaction-remove-emoji)))
-      ;; Reaction dispatch payloads don't include full message objects;
-      ;; refresh to keep reaction chips in sync.
-      (disco-room-refresh)))))
+      (unless (disco-room--apply-live-reaction-event-partially event)
+        (disco-room-refresh))))))
 
 (defun disco-room--attach-live-updates ()
   "Attach this room buffer to live update event stream."
@@ -1616,6 +1922,68 @@ REASON is shown in the minibuffer."
         (append (seq-take labels 3)
                 (list (format "+%d more" (- (length labels) 3))))
       labels)))
+
+(defun disco-room--append-attachment-token-to-draft (token-id)
+  "Append attachment TOKEN-ID marker to current draft input."
+  (let* ((token-text (disco-room--attachment-token-text token-id))
+         (draft (disco-room--current-draft))
+         (separator (if (or (string-empty-p draft)
+                            (string-match-p "[ \t\n]\\'" draft))
+                        ""
+                      " ")))
+    (disco-room--set-draft (concat draft separator token-text))))
+
+(defun disco-room--remove-first-token-from-draft (draft token-id)
+  "Return DRAFT with first TOKEN-ID marker removed."
+  (let* ((token-text (disco-room--attachment-token-text token-id))
+         (regexp (regexp-quote token-text)))
+    (if (string-match regexp draft)
+        (concat (substring draft 0 (match-beginning 0))
+                (substring draft (match-end 0)))
+      draft)))
+
+(defun disco-room--attachment-token-bounds-at-point ()
+  "Return bounds of attachment token around point in input region, or nil."
+  (let ((bounds (disco-room--input-region-bounds))
+        (pos (point))
+        found)
+    (when (and bounds (disco-room--point-in-input-p pos))
+      (save-excursion
+        (goto-char (car bounds))
+        (while (and (not found)
+                    (re-search-forward disco-room--attachment-token-regexp (cdr bounds) t))
+          (when (and (<= (match-beginning 0) pos)
+                     (<= pos (match-end 0)))
+            (setq found (cons (match-beginning 0) (match-end 0))))))
+      found)))
+
+(defun disco-room-remove-attachment-token-at-point ()
+  "Remove attachment token at point, or prompt for one when point is outside token."
+  (interactive)
+  (let ((token-bounds (disco-room--attachment-token-bounds-at-point)))
+    (cond
+     (token-bounds
+      (let* ((token-text (buffer-substring-no-properties (car token-bounds) (cdr token-bounds)))
+             (token-id (and (string-match disco-room--attachment-token-regexp token-text)
+                            (match-string 1 token-text))))
+        (delete-region (car token-bounds) (cdr token-bounds))
+        (disco-room--sync-draft-from-buffer)
+        (when token-id
+          (remhash token-id disco-room--attachment-token-table))
+        (disco-room-render)
+        (message "disco: removed attachment token %s" (or token-id ""))))
+     (t
+      (let* ((ids (disco-room--attachment-token-ids-in-text (disco-room--current-draft)))
+             (picked (and ids
+                          (completing-read "Remove attachment token: " ids nil t))))
+        (unless (and (stringp picked) (not (string-empty-p picked)))
+          (user-error "disco: no attachment token at point"))
+        (let ((updated (disco-room--remove-first-token-from-draft
+                        (disco-room--current-draft)
+                        picked)))
+          (remhash picked disco-room--attachment-token-table)
+          (disco-room--set-draft updated)
+          (message "disco: removed attachment token %s" picked)))))))
 
 (defun disco-room--message-id-required-at-point ()
   "Return message ID at point, or signal user error."
@@ -1730,18 +2098,24 @@ DESCRIPTION is optional per-file description."
      (list path description)))
   (unless (file-readable-p path)
     (user-error "disco: file is not readable: %s" path))
-  (setq disco-room--pending-attachments
-        (append (or disco-room--pending-attachments '())
-                (list (list :path path
-                            :description description))))
-  (disco-room-render)
-  (message "disco: queued attachment %s" (file-name-nondirectory path)))
+  (let* ((token-id (disco-room--next-attachment-token-id))
+         (entry (list :token-id token-id
+                      :path path
+                      :description description)))
+    (puthash token-id entry disco-room--attachment-token-table)
+    (disco-room--append-attachment-token-to-draft token-id)
+    (message "disco: queued attachment %s as %s"
+             (file-name-nondirectory path)
+             (disco-room--attachment-token-text token-id))))
 
 (defun disco-room-clear-attachments ()
   "Clear queued attachments for next send in current room."
   (interactive)
   (setq disco-room--pending-attachments nil)
-  (disco-room-render)
+  (when disco-room--attachment-token-table
+    (clrhash disco-room--attachment-token-table))
+  (disco-room--set-draft
+   (string-trim-right (disco-room--draft-without-attachment-tokens)))
   (message "disco: cleared queued attachments"))
 
 (defun disco-room-send-message ()
@@ -1755,20 +2129,24 @@ When called with prefix argument, force draft edit in minibuffer first."
     (message "disco: send already in progress"))
    (t
     (let* ((current-draft (disco-room--current-draft))
-           (has-attachments (not (null disco-room--pending-attachments)))
+           (initial-has-attachments
+            (not (null (disco-room--attachments-from-draft current-draft))))
            (content (if (or current-prefix-arg
                             (and (string-empty-p (string-trim-right current-draft))
-                                 (not has-attachments)))
+                                 (not initial-has-attachments)))
                         (read-from-minibuffer "Message: " current-draft)
                       current-draft))
-           (normalized (string-trim-right (or content ""))))
+           (token-attachments (disco-room--attachments-from-draft content))
+           (has-attachments (not (null token-attachments)))
+           (content-without-tokens (disco-room--draft-without-attachment-tokens content))
+           (normalized (string-trim-right (or content-without-tokens ""))))
       (if (and (string-empty-p normalized)
                (not has-attachments))
           (message "disco: draft is empty")
         (let ((room-buffer (current-buffer))
               (channel-id disco-room--channel-id)
               (reply-to disco-room--pending-reply-to)
-              (attachments (copy-tree (or disco-room--pending-attachments '()))))
+              (attachments (copy-tree token-attachments)))
           (unless (string-empty-p normalized)
             (disco-room--input-history-push normalized))
           (setq disco-room--draft-input "")
@@ -1787,6 +2165,8 @@ When called with prefix argument, force draft edit in minibuffer first."
                      (setq disco-room--send-in-flight nil)
                      (setq disco-room--pending-reply-to nil)
                      (setq disco-room--pending-attachments nil)
+                     (when disco-room--attachment-token-table
+                       (clrhash disco-room--attachment-token-table))
                      (disco-room-refresh)
                      (message "disco: message with attachment(s) sent"))))
                :on-error
@@ -1794,7 +2174,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                  (when (disco-room--channel-buffer-p room-buffer channel-id)
                    (with-current-buffer room-buffer
                      (setq disco-room--send-in-flight nil)
-                     (setq disco-room--draft-input normalized)
+                     (setq disco-room--draft-input content)
                      (disco-room-render)
                      (message "disco: send failed: %s"
                               (disco-room--async-error-message err))))))
@@ -2241,6 +2621,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "-") #'disco-room-remove-reaction)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+    (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
     (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
@@ -2273,7 +2654,10 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--input-marker nil)
   (setq-local disco-room--rendering nil)
   (setq-local disco-room--ewoc nil)
+  (setq-local disco-room--render-context-by-message-id (make-hash-table :test #'equal))
   (setq-local disco-room--pending-attachments nil)
+  (setq-local disco-room--attachment-token-table (make-hash-table :test #'equal))
+  (setq-local disco-room--attachment-token-seq 0)
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (add-hook 'after-change-functions #'disco-room--after-change nil t))
 
