@@ -282,7 +282,12 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
              ("Accept-Language" . ,disco-locale))
            (unless unauthenticated
              `(("Authorization" . ,(disco-api--auth-header))))))
-         (data (when payload (disco-api--json-encode payload)))
+         (data (cond
+                ((eq payload :empty-object)
+                 "{}")
+                (payload
+                 (disco-api--json-encode payload))
+                (t nil)))
          (url (disco-api--build-url endpoint query))
          (route-key (disco-api--route-key method endpoint))
          (attempt 0))
@@ -486,7 +491,8 @@ Response may include a refreshed ack token."
     (disco-api--request
      "POST"
      (format "/channels/%s/messages/%s/ack" channel-id message-id)
-     (nreverse payload)
+     (let ((body (nreverse payload)))
+       (if body body :empty-object))
      nil
      nil)))
 

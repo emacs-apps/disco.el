@@ -16,6 +16,7 @@
 
 (require 'cl-lib)
 (require 'plz)
+(require 'subr-x)
 
 (defgroup disco-http nil
   "HTTP transport options for disco.el."
@@ -73,10 +74,45 @@ Value 1 enforces strict serialization."
         :body (or (plz-response-body response) "")
         :headers (disco-http--normalize-headers (plz-response-headers response))))
 
+(defun disco-http--extract-plz-error (err)
+  "Return plz error object from ERR, or nil.
+
+ERR may be a raw `plz-error' object or a condition-case tuple like
+`(plz-http-error PLZ-ERROR)'."
+  (cond
+   ((and (fboundp 'plz-error-p)
+         (ignore-errors (plz-error-p err)))
+    err)
+   ((and (consp err)
+         (symbolp (car err)))
+    (let ((payload (cadr err)))
+      (when (and (fboundp 'plz-error-p)
+                 (ignore-errors (plz-error-p payload)))
+        payload)))
+   (t nil)))
+
+(defun disco-http--error-message (err plz-err response)
+  "Return stable human-readable error message for transport ERR."
+  (let* ((plz-message (and plz-err
+                           (fboundp 'plz-error-message)
+                           (ignore-errors (plz-error-message plz-err))))
+         (response-body (and response
+                             (ignore-errors (plz-response-body response)))))
+    (or plz-message
+        (and (stringp response-body)
+             (not (string-empty-p response-body))
+             response-body)
+        (and (consp err)
+             (ignore-errors (error-message-string err)))
+        (and (stringp err) err)
+        (format "%S" err))))
+
 (defun disco-http--error->plist (err)
   "Convert transport ERR into disco transport plist."
-  (let* ((response (and (fboundp 'plz-error-response)
-                        (ignore-errors (plz-error-response err))))
+  (let* ((plz-err (disco-http--extract-plz-error err))
+         (response (and plz-err
+                        (fboundp 'plz-error-response)
+                        (ignore-errors (plz-error-response plz-err))))
          (status (and response (ignore-errors (plz-response-status response))))
          (body (and response (ignore-errors (plz-response-body response))))
          (headers (and response (ignore-errors (plz-response-headers response)))))
@@ -84,7 +120,7 @@ Value 1 enforces strict serialization."
           :body (or body "")
           :headers (disco-http--normalize-headers headers)
           :error err
-          :error-message (error-message-string err))))
+          :error-message (disco-http--error-message err plz-err response))))
 
 (defun disco-http--request-plz (method url headers body timeout)
   "Execute one synchronous HTTP request with plz."
