@@ -11,6 +11,7 @@
 (require 'subr-x)
 (require 'time-date)
 (require 'seq)
+(require 'ring)
 (require 'cl-lib)
 (require 'disco-api)
 (require 'disco-gateway)
@@ -28,6 +29,21 @@
 (defvar-local disco-room--refresh-generation 0)
 (defvar-local disco-room--refresh-in-flight nil)
 (defvar-local disco-room--older-in-flight nil)
+(defvar-local disco-room--draft-input "")
+(defvar-local disco-room--input-ring nil)
+(defvar-local disco-room--input-index nil)
+(defvar-local disco-room--input-pending nil)
+(defvar-local disco-room--send-in-flight nil)
+
+(defcustom disco-room-input-history-size 30
+  "Maximum number of draft entries kept in room input history."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-send-on-return t
+  "When non-nil, `RET' in room buffer sends current draft."
+  :type 'boolean
+  :group 'disco)
 
 (defun disco-room--channel-object ()
   "Return current room channel object from state."
@@ -107,6 +123,83 @@
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)
               (= disco-room--refresh-generation generation)))))
+
+(defun disco-room--channel-buffer-p (room-buffer channel-id)
+  "Return non-nil when ROOM-BUFFER is alive and still bound to CHANNEL-ID."
+  (and (buffer-live-p room-buffer)
+       (with-current-buffer room-buffer
+         (and (eq major-mode 'disco-room-mode)
+              (equal disco-room--channel-id channel-id)))))
+
+(defun disco-room--current-draft ()
+  "Return current room draft string."
+  (or disco-room--draft-input ""))
+
+(defun disco-room--set-draft (text)
+  "Set room draft TEXT and re-render room."
+  (setq disco-room--draft-input (or text ""))
+  (disco-room-render))
+
+(defun disco-room--clear-draft ()
+  "Clear room draft and reset draft history navigation state."
+  (setq disco-room--draft-input "")
+  (setq disco-room--input-index nil)
+  (setq disco-room--input-pending nil))
+
+(defun disco-room--input-history-push (input)
+  "Push INPUT into draft history ring when non-empty and distinct."
+  (let ((normalized (string-trim-right (or input ""))))
+    (unless (or (string-empty-p normalized)
+                (and disco-room--input-ring
+                     (> (ring-length disco-room--input-ring) 0)
+                     (equal normalized (ring-ref disco-room--input-ring 0))))
+      (ring-insert disco-room--input-ring normalized)))
+  (setq disco-room--input-index nil)
+  (setq disco-room--input-pending nil))
+
+(defun disco-room--input-history-goto (index)
+  "Switch draft view to history entry INDEX.
+
+When INDEX is nil, restore pending draft text."
+  (setq disco-room--input-index index)
+  (if (null index)
+      (setq disco-room--draft-input (or disco-room--input-pending ""))
+    (setq disco-room--draft-input (ring-ref disco-room--input-ring index)))
+  (disco-room-render))
+
+(defun disco-room-draft-prev (&optional n)
+  "Replace draft with N previous entries from draft history."
+  (interactive "p")
+  (let* ((step (max 1 (or n 1)))
+         (ring-size (and disco-room--input-ring (ring-length disco-room--input-ring))))
+    (cond
+     ((or (null ring-size) (= ring-size 0))
+      (message "disco: draft history is empty"))
+     (t
+      (unless (integerp disco-room--input-index)
+        (setq disco-room--input-pending (disco-room--current-draft))
+        (setq disco-room--input-index -1))
+      (let ((target (min (1- ring-size) (+ disco-room--input-index step))))
+        (disco-room--input-history-goto target))))))
+
+(defun disco-room-draft-next (&optional n)
+  "Replace draft with N newer entries from draft history."
+  (interactive "p")
+  (let ((step (max 1 (or n 1))))
+    (if (not (integerp disco-room--input-index))
+        (message "disco: already at latest draft")
+      (let ((target (- disco-room--input-index step)))
+        (if (< target 0)
+            (disco-room--input-history-goto nil)
+          (disco-room--input-history-goto target))))))
+
+(defun disco-room-edit-draft ()
+  "Edit current room draft in minibuffer and re-render room."
+  (interactive)
+  (let ((updated (read-from-minibuffer "Draft: " (disco-room--current-draft))))
+    (setq disco-room--input-index nil)
+    (setq disco-room--input-pending nil)
+    (disco-room--set-draft updated)))
 
 (defun disco-room--mark-read (&optional message-id)
   "Mark current room as read and acknowledge MESSAGE-ID.
@@ -265,19 +358,23 @@ Returns nil when left blank."
 (defun disco-room-render ()
   "Render timeline for current room buffer."
   (let ((inhibit-read-only t)
-        (messages (disco-state-messages disco-room--channel-id)))
+        (messages (disco-state-messages disco-room--channel-id))
+        (draft (disco-room--current-draft)))
     (erase-buffer)
     (insert (format "Channel: %s%s\n"
                     disco-room--channel-name
                     (disco-room--thread-header-suffix)))
-    (insert "g: refresh   M-<: older   r/e/d: reply/edit/delete   C-c C-c: send   q: quit")
+    (insert "g: refresh   M-<: older   r/e/d: reply/edit/delete   RET/C-c C-c: send   C-c ': draft   M-p/M-n: history   q: quit")
     (when disco-room--refresh-in-flight
       (insert "   [refreshing...]"))
     (when disco-room--older-in-flight
       (insert "   [loading older...]"))
+    (when disco-room--send-in-flight
+      (insert "   [sending...]"))
     (insert "\n")
     (when disco-room--pending-reply-to
       (insert (format "Replying to: %s (C-c C-k to cancel)\n" disco-room--pending-reply-to)))
+    (insert (format ">>> %s\n" draft))
     (when disco-room--history-exhausted
       (insert "(older history exhausted)\n"))
     (insert "\n")
@@ -345,7 +442,7 @@ REASON is shown in the minibuffer."
            (memq event-type
                  '(message-create message-update message-delete
                    channel-update thread-update)))
-     (let ((at-bottom (= (point) (point-max)))
+      (let ((at-bottom (= (point) (point-max)))
             (channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
@@ -382,17 +479,50 @@ REASON is shown in the minibuffer."
     (disco-gateway-unwatch-channel disco-room--channel-id)))
 
 (defun disco-room-send-message ()
-  "Prompt and send a message to current room."
+  "Send current draft message to this room asynchronously.
+
+When called with prefix argument, force draft edit in minibuffer first."
   (interactive)
-  (let ((content (read-string "Message: ")))
-    (unless (string-empty-p content)
-      (disco-api-send-message
-       disco-room--channel-id
-       content
-       disco-room--pending-reply-to)
-      (setq disco-room--pending-reply-to nil)
-      (disco-room-refresh)
-      (message "disco: message sent"))))
+  (cond
+   (disco-room--send-in-flight
+    (message "disco: send already in progress"))
+   (t
+    (let* ((current-draft (disco-room--current-draft))
+           (content (if (or current-prefix-arg
+                            (string-empty-p (string-trim-right current-draft)))
+                        (read-from-minibuffer "Message: " current-draft)
+                      current-draft))
+           (normalized (string-trim-right (or content ""))))
+      (if (string-empty-p normalized)
+          (message "disco: draft is empty")
+        (let ((room-buffer (current-buffer))
+              (channel-id disco-room--channel-id)
+              (reply-to disco-room--pending-reply-to))
+          (disco-room--input-history-push normalized)
+          (setq disco-room--draft-input "")
+          (setq disco-room--send-in-flight t)
+          (disco-room-render)
+          (disco-api-send-message-async
+           channel-id
+           normalized
+           :reply-to-message-id reply-to
+           :on-success
+           (lambda (_response)
+             (when (disco-room--channel-buffer-p room-buffer channel-id)
+               (with-current-buffer room-buffer
+                 (setq disco-room--send-in-flight nil)
+                 (setq disco-room--pending-reply-to nil)
+                 (disco-room-refresh)
+                 (message "disco: message sent"))))
+           :on-error
+           (lambda (err)
+             (when (disco-room--channel-buffer-p room-buffer channel-id)
+               (with-current-buffer room-buffer
+                 (setq disco-room--send-in-flight nil)
+                 (setq disco-room--draft-input normalized)
+                 (disco-room-render)
+                 (message "disco: send failed: %s"
+                          (disco-room--async-error-message err))))))))))))
 
 (defun disco-room-load-older-messages ()
   "Load one older message page before the oldest loaded message asynchronously."
@@ -466,25 +596,62 @@ When called interactively, defaults to message under point."
   (disco-room-render)
   (message "disco: reply target cleared"))
 
+(defun disco-room-return-dwim ()
+  "RET behavior for room buffer.
+
+When `disco-room-send-on-return' is non-nil, send current draft.
+Otherwise open draft editor."
+  (interactive)
+  (if disco-room-send-on-return
+      (disco-room-send-message)
+    (disco-room-edit-draft)))
+
 (defun disco-room-edit-message ()
   "Edit message at point in current room."
   (interactive)
   (let* ((msg (disco-room--message-at-point))
          (message-id (alist-get 'id msg))
          (old-content (or (alist-get 'content msg) ""))
-         (new-content (read-string (format "Edit message %s: " message-id) old-content)))
-    (disco-api-edit-message disco-room--channel-id message-id new-content)
-    (disco-room-refresh)
-    (message "disco: edited message %s" message-id)))
+         (new-content (read-string (format "Edit message %s: " message-id) old-content))
+         (room-buffer (current-buffer))
+         (channel-id disco-room--channel-id))
+    (disco-api-edit-message-async
+     channel-id
+     message-id
+     new-content
+     :on-success
+     (lambda (_response)
+       (when (disco-room--channel-buffer-p room-buffer channel-id)
+         (with-current-buffer room-buffer
+           (disco-room-refresh)
+           (message "disco: edited message %s" message-id))))
+     :on-error
+     (lambda (err)
+       (message "disco: edit failed for %s: %s"
+                message-id
+                (disco-room--async-error-message err))))))
 
 (defun disco-room-delete-message ()
   "Delete message at point in current room."
   (interactive)
   (let* ((message-id (disco-room--message-id-at-point)))
     (when (y-or-n-p (format "Delete message %s? " message-id))
-      (disco-api-delete-message disco-room--channel-id message-id)
-      (disco-room-refresh)
-      (message "disco: deleted message %s" message-id))))
+      (let ((room-buffer (current-buffer))
+            (channel-id disco-room--channel-id))
+        (disco-api-delete-message-async
+         channel-id
+         message-id
+         :on-success
+         (lambda (_response)
+           (when (disco-room--channel-buffer-p room-buffer channel-id)
+             (with-current-buffer room-buffer
+               (disco-room-refresh)
+               (message "disco: deleted message %s" message-id))))
+         :on-error
+         (lambda (err)
+           (message "disco: delete failed for %s: %s"
+                    message-id
+                    (disco-room--async-error-message err))))))))
 
 (defun disco-room-create-thread-from-message (name message-id
                                                    &optional auto-archive-duration
@@ -594,6 +761,10 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-room-refresh)
     (define-key map (kbd "M-<") #'disco-room-load-older-messages)
+    (define-key map (kbd "RET") #'disco-room-return-dwim)
+    (define-key map (kbd "C-c '") #'disco-room-edit-draft)
+    (define-key map (kbd "M-p") #'disco-room-draft-prev)
+    (define-key map (kbd "M-n") #'disco-room-draft-next)
     (define-key map (kbd "r") #'disco-room-reply-to-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
     (define-key map (kbd "d") #'disco-room-delete-message)
@@ -612,7 +783,12 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 (define-derived-mode disco-room-mode special-mode "Disco-Room"
   "Major mode for disco.el room buffers."
   (setq buffer-read-only t)
-  (setq truncate-lines t))
+  (setq truncate-lines t)
+  (setq-local disco-room--draft-input "")
+  (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))
+  (setq-local disco-room--input-index nil)
+  (setq-local disco-room--input-pending nil)
+  (setq-local disco-room--send-in-flight nil))
 
 (defun disco-room-open (channel-id channel-name)
   "Open room for CHANNEL-ID with CHANNEL-NAME."

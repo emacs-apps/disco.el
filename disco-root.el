@@ -52,6 +52,11 @@
 (defvar-local disco-root--refresh-in-flight nil
   "Non-nil while an async root refresh is in progress.")
 
+(defvar-local disco-root--sort-mode 'activity
+  "Root channel sorting mode.
+
+Supported values: `activity' and `name'.")
+
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root rerender."
   (memq event-type
@@ -251,6 +256,41 @@ Channels lacking this field are treated as visible to avoid false negatives."
              ((stringp b-last) nil)
              (t (string-lessp (or (alist-get 'id a) "")
                               (or (alist-get 'id b) ""))))))))
+
+(defun disco-root--channel-activity-score (channel)
+  "Return sortable activity score for CHANNEL.
+
+Higher score means channel should appear earlier in activity mode."
+  (+ (* 1000 (disco-state-channel-unread-count (alist-get 'id channel)))
+     (if (stringp (alist-get 'last_message_id channel))
+         (string-to-number (alist-get 'last_message_id channel))
+       0)))
+
+(defun disco-root--sort-channels (channels)
+  "Sort CHANNELS according to current root sort mode."
+  (let ((copy (copy-sequence (or channels '()))))
+    (pcase disco-root--sort-mode
+      ('name
+       (sort copy
+             (lambda (a b)
+               (string-lessp (disco-root--channel-display-name a)
+                             (disco-root--channel-display-name b)))))
+      (_
+       (sort copy
+             (lambda (a b)
+               (let ((a-score (disco-root--channel-activity-score a))
+                     (b-score (disco-root--channel-activity-score b)))
+                 (if (= a-score b-score)
+                     (string-lessp (disco-root--channel-display-name a)
+                                   (disco-root--channel-display-name b))
+                   (> a-score b-score)))))))))
+
+(defun disco-root-toggle-sort-mode ()
+  "Toggle root channel sort mode between activity and name."
+  (interactive)
+  (setq disco-root--sort-mode (if (eq disco-root--sort-mode 'activity) 'name 'activity))
+  (disco-root-render)
+  (message "disco: root sort mode -> %s" disco-root--sort-mode))
 
 (defun disco-root--insert-private-channels ()
   "Insert private-channel (DM/group DM) section into root buffer."
@@ -505,15 +545,80 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((channel-id (alist-get 'id channel))
         (channel-name (disco-root--channel-display-name channel))
         (label (disco-root--channel-label channel))
+        (unread-count (disco-state-channel-unread-count (alist-get 'id channel)))
         (padding (make-string indent ?\s)))
     (if (disco-root--openable-channel-p channel)
         (insert-text-button
          (format "%s%s\n" padding label)
          'action (lambda (_)
                    (disco-room-open channel-id channel-name))
+         'disco-channel-id channel-id
+         'disco-unread-count unread-count
          'follow-link t
          'help-echo (format "Open channel %s" channel-id))
       (insert (format "%s%s\n" padding label)))))
+
+(defun disco-root-button-forward (&optional n)
+  "Move point to next channel button by N steps."
+  (interactive "p")
+  (condition-case _
+      (forward-button (or n 1) t)
+    (error
+     (message "disco: no next channel"))))
+
+(defun disco-root-button-backward (&optional n)
+  "Move point to previous channel button by N steps."
+  (interactive "p")
+  (condition-case _
+      (backward-button (or n 1) t)
+    (error
+     (message "disco: no previous channel"))))
+
+(defun disco-root-open-at-point ()
+  "Open channel button at point.
+
+If point is not on a button, jump to the next button and open it."
+  (interactive)
+  (let ((button (button-at (point))))
+    (unless button
+      (condition-case _
+          (progn
+            (forward-button 1 t)
+            (setq button (button-at (point))))
+        (error
+         (setq button nil))))
+    (if button
+        (push-button (button-start button))
+      (user-error "disco: no openable channel at point"))))
+
+(defun disco-root--next-button-matching (predicate start limit)
+  "Return next button from START before LIMIT satisfying PREDICATE."
+  (let ((pos start)
+        found
+        next)
+    (while (and (not found)
+                (setq next (next-button pos))
+                (< (button-start next) limit))
+      (if (funcall predicate next)
+          (setq found next)
+        (setq pos (button-end next))))
+    found))
+
+(defun disco-root-next-unread ()
+  "Jump to next channel button with unread count > 0."
+  (interactive)
+  (let* ((origin (point))
+         (current-button (button-at origin))
+         (scan-start (if current-button
+                         (button-end current-button)
+                       origin))
+         (predicate (lambda (button)
+                      (> (or (button-get button 'disco-unread-count) 0) 0)))
+         (found (or (disco-root--next-button-matching predicate scan-start (point-max))
+                    (disco-root--next-button-matching predicate (point-min) origin))))
+    (if found
+        (goto-char (button-start found))
+      (message "disco: no unread channels"))))
 
 (defun disco-root--insert-parent-threads (parent-channel rendered-thread-ids)
   "Insert threads under PARENT-CHANNEL and mark IDs in RENDERED-THREAD-IDS."
@@ -531,7 +636,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
       (when (and (disco-root--displayable-channel-p channel)
                  (not (disco-state-channel-thread-p channel)))
         (push channel parents)))
-    (nreverse parents)))
+    (disco-root--sort-channels (nreverse parents))))
 
 (defun disco-root--insert-guild (guild)
   "Insert one GUILD and its channels in root buffer."
@@ -567,7 +672,8 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "disco.el\n")
-    (insert "g: refresh   A: archived threads   RET/mouse-1: open channel/thread   q: quit")
+    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   RET/mouse-1: open   n/p/TAB: nav   u: next unread   q: quit"
+                    disco-root--sort-mode))
     (when disco-root--refresh-in-flight
       (insert "   [refreshing...]"))
     (insert "\n\n")
@@ -701,6 +807,13 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-root-refresh)
     (define-key map (kbd "A") #'disco-root-list-archived-threads)
+    (define-key map (kbd "\\") #'disco-root-toggle-sort-mode)
+    (define-key map (kbd "RET") #'disco-root-open-at-point)
+    (define-key map (kbd "n") #'disco-root-button-forward)
+    (define-key map (kbd "p") #'disco-root-button-backward)
+    (define-key map (kbd "TAB") #'disco-root-button-forward)
+    (define-key map (kbd "<backtab>") #'disco-root-button-backward)
+    (define-key map (kbd "u") #'disco-root-next-unread)
     (define-key map (kbd "?") #'disco-root-transient)
     (define-key map (kbd "q") #'quit-window)
     map)

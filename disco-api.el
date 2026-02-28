@@ -667,6 +667,22 @@ When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message."
      nil
      nil)))
 
+(cl-defun disco-api-send-message-async (channel-id content
+                                                   &key reply-to-message-id
+                                                   on-success on-error)
+  "Send CONTENT into CHANNEL-ID asynchronously."
+  (let ((payload `((content . ,content))))
+    (when reply-to-message-id
+      (setq payload
+            (append payload
+                    `((message_reference . ((message_id . ,reply-to-message-id)))))))
+    (disco-api--request-async
+     "POST"
+     (format "/channels/%s/messages" channel-id)
+     :payload payload
+     :on-success on-success
+     :on-error on-error)))
+
 (defun disco-api-edit-message (channel-id message-id content)
   "Edit MESSAGE-ID in CHANNEL-ID with new CONTENT."
   (disco-api--request
@@ -676,6 +692,15 @@ When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message."
    nil
    nil))
 
+(cl-defun disco-api-edit-message-async (channel-id message-id content &key on-success on-error)
+  "Edit MESSAGE-ID in CHANNEL-ID asynchronously with new CONTENT."
+  (disco-api--request-async
+   "PATCH"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   :payload `((content . ,content))
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-delete-message (channel-id message-id)
   "Delete MESSAGE-ID from CHANNEL-ID."
   (disco-api--request
@@ -684,6 +709,14 @@ When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message."
    nil
    nil
    nil))
+
+(cl-defun disco-api-delete-message-async (channel-id message-id &key on-success on-error)
+  "Delete MESSAGE-ID from CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "DELETE"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
 
 (provide 'disco-api)
 

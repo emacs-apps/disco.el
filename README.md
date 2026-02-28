@@ -20,6 +20,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
+- Room draft composer line (`>>>`) with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
@@ -27,8 +28,10 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root channel labels include lightweight unread counters from live message events.
 - Room open/refresh/live message flow now acknowledges Discord channel read-state (`/ack`) and tracks per-channel last-read cursor.
 - Root and room refresh paths are now asynchronous to avoid blocking Emacs UI.
+- Send/edit/delete in room use asynchronous REST requests to reduce command-time blocking.
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
+- Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) and sort toggle (`\`).
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
 ## Dependencies
