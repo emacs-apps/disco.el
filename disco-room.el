@@ -52,6 +52,9 @@
 (defconst disco-room--attachment-token-regexp "\\[file:\\([0-9]+\\)\\]"
   "Regexp used to match attachment tokens in room draft input.")
 
+(defconst disco-room--message-flag-has-thread (ash 1 5)
+  "Bit mask indicating message has an associated starter thread.")
+
 (defvar disco-room--avatar-image-cache (make-hash-table :test #'equal)
   "Global avatar image cache keyed by avatar cache key.
 
@@ -742,6 +745,56 @@ Message lines carry the `disco-message-id' text property."
   (seq-find (lambda (msg)
               (equal (alist-get 'id msg) message-id))
             (or (disco-state-messages disco-room--channel-id) '())))
+
+(defun disco-room--message-flags (msg)
+  "Return normalized integer flags value from message MSG."
+  (let ((flags (alist-get 'flags msg)))
+    (cond
+     ((integerp flags) flags)
+     ((and (stringp flags)
+           (string-match-p "\\`[0-9]+\\'" flags))
+      (string-to-number flags))
+     (t 0))))
+
+(defun disco-room--message-has-thread-p (msg)
+  "Return non-nil when MSG is known to have a starter thread."
+  (let ((message-id (alist-get 'id msg))
+        (flags (disco-room--message-flags msg)))
+    (or (and (stringp message-id)
+             (listp (disco-state-channel message-id))
+             (disco-state-channel-thread-p (disco-state-channel message-id)))
+        (not (zerop (logand flags disco-room--message-flag-has-thread))))))
+
+(defun disco-room--thread-from-message (msg)
+  "Return thread channel object resolved from starter message MSG, or nil."
+  (let ((message-id (alist-get 'id msg)))
+    (when (stringp message-id)
+      (let ((channel (disco-state-channel message-id)))
+        (when (and (listp channel)
+                   (disco-state-channel-thread-p channel))
+          channel)))))
+
+(defun disco-room-open-thread-from-message-at-point ()
+  "Open starter thread associated with message at point.
+
+Discord starter threads reuse source message ID as thread channel ID." 
+  (interactive)
+  (let* ((msg (disco-room--message-at-point))
+         (message-id (alist-get 'id msg))
+         (thread (disco-room--thread-from-message msg))
+         (target-thread-id (or (and (listp thread) (alist-get 'id thread))
+                               (and (disco-room--message-has-thread-p msg)
+                                    (stringp message-id)
+                                    message-id)))
+         (target-thread-name (or (and (listp thread) (alist-get 'name thread))
+                                 (and (stringp message-id)
+                                      (format "thread:%s" message-id)))))
+    (unless (disco-room--message-has-thread-p msg)
+      (user-error "disco: message %s has no starter thread" message-id))
+    (unless target-thread-id
+      (user-error "disco: cannot resolve starter thread id from message %s" message-id))
+    (disco-room-open target-thread-id
+                     (or target-thread-name target-thread-id))))
 
 (defun disco-room--message-at-point ()
   "Return message object at point, or signal user error."
@@ -1945,7 +1998,8 @@ Return non-nil when a local message update was applied."
          (message-id (alist-get 'id msg))
          line-start
          author-start)
-    (when insert-date
+    (when (and (stringp insert-date)
+               (not (string-empty-p insert-date)))
       (disco-room--insert-date-separator-row insert-date))
     (when insert-unread
       (disco-room--insert-unread-divider-row))
@@ -2000,6 +2054,27 @@ Return non-nil when a local message update was applied."
         (disco-room--insert-prefixed-lines "    ↪ " reply 'shadow))
       (unless (string-empty-p content)
         (disco-room--insert-prefixed-lines "    " content)))
+    (when (disco-room--message-has-thread-p msg)
+      (let* ((message-id (alist-get 'id msg))
+             (thread (disco-room--thread-from-message msg))
+             (target-thread-id (or (and (listp thread) (alist-get 'id thread))
+                                   (and (stringp message-id) message-id)))
+             (target-thread-name (or (and (listp thread) (alist-get 'name thread))
+                                     (and (stringp message-id)
+                                          (format "thread:%s" message-id)))))
+        (insert "    ")
+        (if target-thread-id
+            (disco-ui-insert-action-button
+             "[Open thread]"
+             (lambda ()
+               (disco-room-open
+                target-thread-id
+                (or target-thread-name target-thread-id)))
+             :face 'disco-room-message-meta
+             :help-echo "Open starter thread for this message")
+          (insert (propertize "[Thread id unavailable]"
+                              'face 'shadow)))
+        (insert "\n")))
     (disco-room--insert-message-attachments msg)
     (disco-room--insert-message-reactions msg)
     (add-text-properties
@@ -2127,7 +2202,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -2167,8 +2242,9 @@ Return non-nil when handled without full room rerender."
               (let* ((message-id (alist-get 'id msg))
                      (day-key (disco-room--message-day-key msg))
                      (insert-date (and disco-room-show-date-separators
-                                       day-key
-                                       (not (equal day-key previous-day))))
+                                       (stringp day-key)
+                                       (not (equal day-key previous-day))
+                                       day-key))
                      (compact (and previous-msg
                                    (disco-room--messages-compact-group-p previous-msg msg)))
                      (insert-unread
@@ -3136,6 +3212,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
+    (define-key map (kbd "C-c C-t o") #'disco-room-open-thread-from-message-at-point)
     (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
     (define-key map (kbd "C-c C-t r") #'disco-room-rename-thread)
     (define-key map (kbd "C-c C-t k") #'disco-room-toggle-thread-locked)

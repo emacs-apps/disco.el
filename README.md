@@ -23,6 +23,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Send plain text message with `C-c C-c` in room buffer.
 - Send file attachments from room buffer (multipart upload) with draft tokens: add via `C-c C-f`, remove token at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
+- Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
 - Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, open/copy-url actions, and inline image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
@@ -91,6 +92,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
 - Room transient (`?`): includes attachment queue/token and reaction actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`).
+- Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration

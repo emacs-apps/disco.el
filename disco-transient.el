@@ -36,6 +36,7 @@
 (declare-function disco-room-add-reaction "disco-room")
 (declare-function disco-room-remove-reaction "disco-room")
 (declare-function disco-room-create-thread-from-message "disco-room")
+(declare-function disco-room-open-thread-from-message-at-point "disco-room")
 (declare-function disco-room-create-thread "disco-room")
 (declare-function disco-room-rename-thread "disco-room")
 (declare-function disco-room-toggle-thread-locked "disco-room")
@@ -120,6 +121,7 @@
    ("-" "Remove reaction" disco-room-remove-reaction)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message)
+    ("o" "Open msg thread" disco-room-open-thread-from-message-at-point)
     ("n" "Create detached" disco-room-create-thread)
     ("R" "Rename thread" disco-room-rename-thread)
     ("L" "Toggle locked" disco-room-toggle-thread-locked)
