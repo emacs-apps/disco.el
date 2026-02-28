@@ -71,6 +71,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root buffer: `A` opens archived thread browser for a selected parent channel.
 - Root buffer: `RET` on forum/media opens parent-thread list; that list fetches active threads via `/channels/{id}/threads/search` (`archived=false`) on open and on `g`.
 - Archived thread buffer: `g` refreshes from first page, `n` loads next page, `RET`/mouse opens selected thread.
+- Archived thread fetch gracefully skips sources that return expected permission-denied (`Missing Access`) responses for current account/permissions.
 - Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
 - Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
 - Room transient (`?`): includes message send/refresh, thread create/join/leave/archive, and inspect actions.

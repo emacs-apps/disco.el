@@ -151,6 +151,9 @@ Supported values: `all', `unread', and `dms'.")
 (defconst disco-root--permission-view-channel-bit (ash 1 10)
   "Permission bit mask for VIEW_CHANNEL.")
 
+(defconst disco-root--permission-manage-threads-bit (ash 1 34)
+  "Permission bit mask for MANAGE_THREADS.")
+
 (defun disco-root--parse-decimal-integer (value)
   "Parse decimal integer VALUE and return integer or nil."
   (cond
@@ -181,6 +184,43 @@ Channels lacking this field are treated as visible to avoid false negatives."
         (if (integerp bits)
             (not (zerop (logand bits disco-root--permission-view-channel-bit)))
           t))))))
+
+(defun disco-root--channel-has-permission-p (channel permission-bit)
+  "Return non-nil when CHANNEL has PERMISSION-BIT in computed permissions.
+
+If permissions are missing or unparsable, return t to avoid false negatives."
+  (let ((permissions (alist-get 'permissions channel)))
+    (if (null permissions)
+        t
+      (let ((bits (disco-root--parse-decimal-integer permissions)))
+        (if (integerp bits)
+            (not (zerop (logand bits permission-bit)))
+          t)))))
+
+(defun disco-root--archived-source-fetch-allowed-p (source-name parent-channel)
+  "Return non-nil when archived SOURCE-NAME is expected to be fetchable.
+
+This prevents noisy permission errors for sources that require elevated access."
+  (cond
+   ;; Discord private archived thread listing requires MANAGE_THREADS.
+   ((equal source-name "private")
+    (disco-root--channel-has-permission-p
+     parent-channel
+     disco-root--permission-manage-threads-bit))
+   (t t)))
+
+(defun disco-root--archived-missing-access-error-p (err)
+  "Return non-nil when ERR is a Discord missing-access response."
+  (and (consp err)
+       (eq (car err) 'disco-api-error)
+       (let* ((data (cdr err))
+              (status (nth 1 data))
+              (body (nth 2 data))
+              (code (and (listp body) (alist-get 'code body)))
+              (message (and (listp body) (alist-get 'message body))))
+         (and (equal status 403)
+              (or (equal code 50001)
+                  (equal message "Missing Access"))))))
 
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
@@ -513,6 +553,32 @@ Higher score means channel should appear earlier in activity mode."
    disco-root--archived-thread-sources
    "  "))
 
+(defun disco-root--fetch-archived-source-page (source-name source-fn parent-channel-id before)
+  "Fetch one archived page for SOURCE-NAME using SOURCE-FN.
+
+Return plist with keys:
+- `:threads' list
+- `:has-more' boolean
+- `:next-before' cursor (or nil)
+- `:missing-access' when 403/50001
+- `:error' human-readable error string."
+  (condition-case err
+      (let* ((resp (funcall source-fn parent-channel-id before disco-thread-archive-fetch-limit))
+             (threads (or (alist-get 'threads resp) '()))
+             (has-more (disco-root--json-true-p (alist-get 'has_more resp)))
+             (next-before (disco-root--archived-next-before-cursor source-name threads)))
+        (when (and has-more (null threads))
+          ;; Prevent endless pagination loops when server returns
+          ;; an empty page without advancing cursor semantics.
+          (setq has-more nil))
+        (list :threads threads
+              :has-more has-more
+              :next-before next-before))
+    (error
+     (if (disco-root--archived-missing-access-error-p err)
+         (list :missing-access t)
+       (list :error (error-message-string err))))))
+
 (defun disco-root--fetch-archived-threads-page (parent-channel-id &optional reset)
   "Fetch one archived thread page for PARENT-CHANNEL-ID.
 
@@ -520,36 +586,51 @@ When RESET is non-nil, start pagination from first page for all sources.
 Return plist with keys :threads and :errors for this page only."
   (when reset
     (disco-root--reset-archived-pagination-state))
-  (let (page-threads errors)
+  (let ((parent-channel (disco-state-channel parent-channel-id))
+        page-threads
+        errors)
     (dolist (source disco-root--archived-thread-sources)
       (let* ((source-name (car source))
              (source-fn (cdr source))
-             (should-fetch (or reset
-                               (alist-get source-name
-                                          disco-root--archived-source-has-more
-                                          nil nil #'equal))))
-        (when should-fetch
-          (let ((before (alist-get source-name disco-root--archived-before-cursors nil nil #'equal)))
-            (condition-case err
-                (let* ((resp (funcall source-fn parent-channel-id before disco-thread-archive-fetch-limit))
-                       (threads (or (alist-get 'threads resp) '()))
-                       (has-more (disco-root--json-true-p (alist-get 'has_more resp)))
-                       (next-before (disco-root--archived-next-before-cursor source-name threads)))
-                  (when (and has-more (null threads))
-                    ;; Prevent endless pagination loops when server returns
-                    ;; an empty page without advancing cursor semantics.
-                    (setq has-more nil))
-                  (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
-                        has-more)
-                  (when next-before
-                    (setf (alist-get source-name disco-root--archived-before-cursors nil nil #'equal)
-                          next-before))
-                  (setq page-threads (append page-threads threads)))
-              (error
-               ;; Keep source marked as has-more so temporary failures can be retried.
-               (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal) t)
-               (push (format "%s: %s" source-name (error-message-string err))
-                     errors)))))))
+             (source-allowed
+              (disco-root--archived-source-fetch-allowed-p source-name parent-channel))
+             (should-fetch
+              (or reset
+                  (alist-get source-name
+                             disco-root--archived-source-has-more
+                             nil nil #'equal))))
+        (cond
+         ((not source-allowed)
+          (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                nil))
+         ((not should-fetch)
+          nil)
+         (t
+          (let* ((before (alist-get source-name disco-root--archived-before-cursors nil nil #'equal))
+                 (result (disco-root--fetch-archived-source-page
+                          source-name source-fn parent-channel-id before))
+                 (threads (or (plist-get result :threads) '()))
+                 (has-more (plist-get result :has-more))
+                 (next-before (plist-get result :next-before))
+                 (missing-access (plist-get result :missing-access))
+                 (error-text (plist-get result :error)))
+            (cond
+             (missing-access
+              ;; Missing-access is expected for some sources on user accounts.
+              (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                    nil))
+             (error-text
+              ;; Keep source marked as has-more so temporary failures can be retried.
+              (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                    t)
+              (push (format "%s: %s" source-name error-text) errors))
+             (t
+              (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                    has-more)
+              (when next-before
+                (setf (alist-get source-name disco-root--archived-before-cursors nil nil #'equal)
+                      next-before))
+              (setq page-threads (append page-threads threads)))))))))
     (list :threads (disco-root--sort-threads-by-archive-time
                     (disco-root--dedupe-threads page-threads))
           :errors (nreverse errors))))
