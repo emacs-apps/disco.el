@@ -31,6 +31,12 @@
 (defvar disco-state--unread-counts-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> unread message count.")
 
+(defvar disco-state--last-read-message-id-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> last acknowledged message ID.")
+
+(defvar disco-state--ack-token-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> last read-state ack token.")
+
 (defun disco-state-reset ()
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
@@ -39,7 +45,9 @@
   (clrhash disco-state--threads-by-parent)
   (clrhash disco-state--thread-ids-by-guild)
   (clrhash disco-state--messages-by-channel)
-  (clrhash disco-state--unread-counts-by-channel))
+  (clrhash disco-state--unread-counts-by-channel)
+  (clrhash disco-state--last-read-message-id-by-channel)
+  (clrhash disco-state--ack-token-by-channel))
 
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."
@@ -227,7 +235,9 @@
           (disco-state--remove-thread-indexes channel)))
       (remhash channel-id disco-state--channels-by-id)
       (remhash channel-id disco-state--messages-by-channel)
-      (remhash channel-id disco-state--unread-counts-by-channel))))
+      (remhash channel-id disco-state--unread-counts-by-channel)
+      (remhash channel-id disco-state--last-read-message-id-by-channel)
+      (remhash channel-id disco-state--ack-token-by-channel))))
 
 (defun disco-state-sync-threads (guild-id parent-channel-ids threads)
   "Sync active THREADS for GUILD-ID.
@@ -265,10 +275,62 @@ Otherwise, replace threads only under the provided parent IDs."
     (puthash channel-id next disco-state--unread-counts-by-channel)
     next))
 
+(defun disco-state-set-channel-unread (channel-id count)
+  "Set unread COUNT for CHANNEL-ID and return normalized count."
+  (let ((normalized (max 0 (or count 0))))
+    (if (> normalized 0)
+        (puthash channel-id normalized disco-state--unread-counts-by-channel)
+      (remhash channel-id disco-state--unread-counts-by-channel))
+    normalized))
+
 (defun disco-state-clear-channel-unread (channel-id)
   "Reset unread count for CHANNEL-ID to zero."
   (remhash channel-id disco-state--unread-counts-by-channel)
   0)
+
+(defun disco-state-channel-last-read-message-id (channel-id)
+  "Return last acknowledged message ID for CHANNEL-ID, or nil."
+  (gethash channel-id disco-state--last-read-message-id-by-channel))
+
+(defun disco-state-set-channel-last-read-message-id (channel-id message-id)
+  "Set CHANNEL-ID read cursor to MESSAGE-ID and return MESSAGE-ID."
+  (puthash channel-id message-id disco-state--last-read-message-id-by-channel)
+  message-id)
+
+(defun disco-state-channel-ack-token (channel-id)
+  "Return read-state ack token for CHANNEL-ID, or nil."
+  (gethash channel-id disco-state--ack-token-by-channel))
+
+(defun disco-state-set-channel-ack-token (channel-id token)
+  "Store read-state ack TOKEN for CHANNEL-ID and return TOKEN.
+
+If TOKEN is nil, clear any stored token for CHANNEL-ID."
+  (if token
+      (puthash channel-id token disco-state--ack-token-by-channel)
+    (remhash channel-id disco-state--ack-token-by-channel))
+  token)
+
+(defun disco-state-reset-ack-tokens ()
+  "Clear all stored read-state ack tokens."
+  (clrhash disco-state--ack-token-by-channel))
+
+(defun disco-state-snowflake< (left right)
+  "Return non-nil when snowflake LEFT is strictly less than RIGHT.
+
+Comparison is numeric-safe for decimal snowflake strings."
+  (when (and (stringp left) (stringp right))
+    (let ((left-len (length left))
+          (right-len (length right)))
+      (if (= left-len right-len)
+          (string-lessp left right)
+        (< left-len right-len)))))
+
+(defun disco-state-snowflake>= (left right)
+  "Return non-nil when snowflake LEFT is greater than or equal to RIGHT."
+  (and (stringp left)
+       (stringp right)
+       (or (equal left right)
+           (disco-state-snowflake< right left))))
 
 (provide 'disco-state)
 

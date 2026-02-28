@@ -88,6 +88,34 @@
   "Return newest known message ID for current room, or nil."
   (alist-get 'id (car (disco-state-messages disco-room--channel-id))))
 
+(defun disco-room--mark-read (&optional message-id)
+  "Mark current room as read and acknowledge MESSAGE-ID.
+
+When MESSAGE-ID is nil, acknowledge the newest known message in the room.
+Unread counters are always cleared locally."
+  (let* ((channel-id disco-room--channel-id)
+         (channel (disco-room--channel-object))
+         (target-id (or message-id
+                        (disco-room--latest-message-id)
+                        (and channel (alist-get 'last_message_id channel))))
+         (last-read-id (disco-state-channel-last-read-message-id channel-id))
+         (should-ack (and target-id
+                          (or (null last-read-id)
+                              (disco-state-snowflake< last-read-id target-id)))))
+    (disco-state-clear-channel-unread channel-id)
+    (when should-ack
+      (condition-case err
+          (let* ((token (disco-state-channel-ack-token channel-id))
+                 (response (disco-api-ack-message channel-id target-id token))
+                 (token-pair (and (listp response) (assq 'token response))))
+            (disco-state-set-channel-last-read-message-id channel-id target-id)
+            (when token-pair
+              (disco-state-set-channel-ack-token channel-id (cdr token-pair))))
+        (error
+         (message "disco: read-state ack failed for %s: %s"
+                  channel-id
+                  (error-message-string err)))))))
+
 (defun disco-room--update-message-window-state (messages)
   "Update pagination cursors from MESSAGES (newest-first list)."
   (setq disco-room--newest-message-id (and messages (alist-get 'id (car messages))))
@@ -232,7 +260,7 @@ Returns nil when left blank."
     (setq disco-room--history-exhausted nil)
     (disco-state-put-messages disco-room--channel-id messages)
     (disco-room--update-message-window-state messages)
-    (disco-state-clear-channel-unread disco-room--channel-id)
+    (disco-room--mark-read)
     (disco-room-render)
     (message "disco: loaded %d messages" (length messages))))
 
@@ -266,11 +294,15 @@ REASON is shown in the minibuffer."
            (memq event-type
                  '(message-create message-update message-delete
                    channel-update thread-update)))
-      (let ((at-bottom (= (point) (point-max)))
+     (let ((at-bottom (= (point) (point-max)))
             (channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
         (disco-room-render)
+        (when (eq event-type 'message-create)
+          (let* ((message (plist-get event :message))
+                 (message-id (and (listp message) (alist-get 'id message))))
+            (disco-room--mark-read message-id)))
         (when at-bottom
           (goto-char (point-max))))))))
 
@@ -514,7 +546,6 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
       (setq disco-room--channel-name channel-name)
       (let ((channel (disco-state-channel channel-id)))
         (setq disco-room--guild-id (and channel (alist-get 'guild_id channel))))
-      (disco-state-clear-channel-unread channel-id)
       (disco-room--attach-live-updates)
       (disco-room-refresh))
     (pop-to-buffer buf)))

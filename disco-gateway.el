@@ -30,7 +30,7 @@
 
 Event schema:
 - :type one of
-  `message-create' `message-update' `message-delete'
+  `message-create' `message-update' `message-delete' `message-ack'
   `channel-create' `channel-update' `channel-delete'
   `guild-create' `guild-update' `guild-delete'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
@@ -38,6 +38,7 @@ Event schema:
 - :guild-id string for guild/channel/thread events
 - :message message object for create/update
 - :message-id string for message delete
+- :mention-count integer for message ack when present
 - :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
 - :guild guild object for guild events
@@ -396,12 +397,41 @@ State is kept newest-first to match REST message list ordering."
                                 old)))
     (disco-state-put-messages channel-id updated)))
 
+(defun disco-gateway--versioned-entries (value)
+  "Normalize VALUE into a list of entries.
+
+Discord Ready may deliver some fields as versioned structures
+`((entries . [...]) (partial . ...) (version . ...))'."
+  (cond
+   ((null value) '())
+   ((and (listp value) (assq 'entries value))
+    (or (alist-get 'entries value) '()))
+   ((listp value)
+    value)
+   (t '())))
+
+(defun disco-gateway--ingest-ready-read-states (read-state)
+  "Ingest Ready READ-STATE payload into local channel read state.
+
+Only CHANNEL read_state_type entries are used here."
+  (dolist (entry (disco-gateway--versioned-entries read-state))
+    (let ((read-state-type (or (alist-get 'read_state_type entry) 0))
+          (channel-id (alist-get 'id entry))
+          (message-id (alist-get 'last_message_id entry))
+          (mention-count (alist-get 'mention_count entry)))
+      (when (and (= read-state-type 0) channel-id)
+        (when message-id
+          (disco-state-set-channel-last-read-message-id channel-id message-id))
+        (when (numberp mention-count)
+          (disco-state-set-channel-unread channel-id mention-count))))))
+
 (defun disco-gateway--handle-dispatch (event-type data)
   "Handle one dispatch EVENT-TYPE with DATA payload."
   (pcase event-type
     ("READY"
      (setq disco-gateway--session-id (alist-get 'session_id data))
      (setq disco-gateway--resume-url (alist-get 'resume_gateway_url data))
+     (disco-gateway--ingest-ready-read-states (alist-get 'read_state data))
      (disco-gateway--reset-reconnect-backoff)
      (message "disco: gateway READY"))
     ("RESUMED"
@@ -457,6 +487,21 @@ State is kept newest-first to match REST message list ordering."
          (disco-gateway--delete-message channel-id message-id)
          (disco-gateway--emit
           (list :type 'message-delete :channel-id channel-id :message-id message-id)))))
+    ("MESSAGE_ACK"
+     (let ((channel-id (alist-get 'channel_id data))
+           (message-id (alist-get 'message_id data))
+           (mention-count (alist-get 'mention_count data)))
+       (when channel-id
+         (when message-id
+           (disco-state-set-channel-last-read-message-id channel-id message-id))
+         (if (numberp mention-count)
+             (disco-state-set-channel-unread channel-id mention-count)
+           (disco-state-clear-channel-unread channel-id))
+         (disco-gateway--emit
+          (list :type 'message-ack
+                :channel-id channel-id
+                :message-id message-id
+                :mention-count mention-count)))))
     ("THREAD_CREATE"
      (disco-state-upsert-channel data)
      (disco-gateway--emit-channel-event 'thread-create data))
@@ -478,7 +523,10 @@ State is kept newest-first to match REST message list ordering."
           (list :type 'thread-list-sync
                 :guild-id guild-id
                 :channel-ids channel-ids
-                :threads (or threads '()))))))))
+                :threads (or threads '()))))))
+    ("USER_UPDATE"
+     ;; Read-state ack tokens are account-scoped and should be reset on user updates.
+     (disco-state-reset-ack-tokens))))
 
 (defun disco-gateway--handle-payload (payload)
   "Handle one decoded gateway PAYLOAD."

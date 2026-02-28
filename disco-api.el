@@ -425,6 +425,36 @@ LIMIT defaults to `disco-message-fetch-limit'."
       (setq query (append query `(("before" . ,before)))))
     (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
 
+(defun disco-api-ack-message (channel-id message-id
+                                         &optional token manual mention-count
+                                         flags last-viewed)
+  "Acknowledge MESSAGE-ID in CHANNEL-ID.
+
+TOKEN is optional read-state ack token from prior responses.
+When MANUAL is non-nil, send manual mode to set read cursor explicitly.
+MENTION-COUNT implies MANUAL mode and is forwarded as mention_count.
+FLAGS and LAST-VIEWED are forwarded when non-nil.
+
+Response may include a refreshed ack token."
+  (let* ((manual-value (or manual (not (null mention-count))))
+         payload)
+    (when token
+      (push `(token . ,token) payload))
+    (when manual-value
+      (push '(manual . t) payload))
+    (when mention-count
+      (push `(mention_count . ,mention-count) payload))
+    (when flags
+      (push `(flags . ,flags) payload))
+    (when last-viewed
+      (push `(last_viewed . ,last-viewed) payload))
+    (disco-api--request
+     "POST"
+     (format "/channels/%s/messages/%s/ack" channel-id message-id)
+     (nreverse payload)
+     nil
+     nil)))
+
 (defun disco-api-send-message (channel-id content &optional reply-to-message-id)
   "Send CONTENT into CHANNEL-ID.
 
