@@ -32,7 +32,9 @@ This repository currently contains an MVP scaffold designed with these reference
 - Send/edit/delete in room use asynchronous REST requests to reduce command-time blocking.
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
-- Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) and sort toggle (`\`).
+- Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus sort toggle (`\`) and view cycle (`v`: all/unread/dms).
+- Root list uses a Discord-native guild -> channel -> thread tree layout.
+- Root rendering now uses EWOC, with local channel-row refresh on live message/read events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
 ## Dependencies
@@ -99,6 +101,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
+- Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.
@@ -108,7 +111,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 ## Next Milestones
 
-1. Add telega-style root view/filter modes (all/unread/DM-oriented slices with quick switching).
+1. Add tree interaction controls (collapse/expand guilds and thread subtrees) on top of the EWOC root model.
 2. Improve composer parity (`M-r` history search, safer cursor restore on live rerender, optional multiline compose mode).
 3. Expand fast navigation (`M-g` prefix map for unread/mentions/reactions style jumps).
 4. Add queue prioritization/backpressure so user actions are favored over background work.

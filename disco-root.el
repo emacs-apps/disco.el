@@ -11,6 +11,7 @@
 
 (require 'button)
 (require 'cl-lib)
+(require 'ewoc)
 (require 'seq)
 (require 'subr-x)
 (require 'disco-api)
@@ -57,6 +58,17 @@
 
 Supported values: `activity' and `name'.")
 
+(defvar-local disco-root--view-mode 'all
+  "Root visibility mode.
+
+Supported values: `all', `unread', and `dms'.")
+
+(defvar-local disco-root--ewoc nil
+  "EWOC used to render the root tree list incrementally.")
+
+(defvar-local disco-root--channel-node-table nil
+  "Hash table mapping channel IDs to root EWOC nodes.")
+
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root rerender."
   (memq event-type
@@ -65,15 +77,39 @@ Supported values: `activity' and `name'.")
           guild-create guild-update guild-delete
           thread-create thread-update thread-delete thread-list-sync)))
 
+(defun disco-root--render-preserving-position ()
+  "Render root tree and keep point near previous line/column."
+  (let ((line (line-number-at-pos))
+        (col (current-column)))
+    (disco-root-render)
+    (goto-char (point-min))
+    (forward-line (max 0 (1- line)))
+    (move-to-column col)))
+
+(defun disco-root--refresh-channel-node (channel-id)
+  "Refresh one CHANNEL-ID row in EWOC, returning non-nil on success."
+  (let ((node (and channel-id
+                   disco-root--channel-node-table
+                   (gethash channel-id disco-root--channel-node-table))))
+    (when (and node disco-root--ewoc)
+      (let ((channel (disco-state-channel channel-id)))
+        (when (and channel (disco-root--displayable-channel-p channel))
+          (let ((inhibit-read-only t)
+                (entry (copy-sequence (ewoc-data node))))
+            (setq entry (plist-put entry :channel channel))
+            (ewoc-set-data node entry)
+            (ewoc-invalidate disco-root--ewoc node)
+            t))))))
+
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
   (when (disco-root--live-event-p (plist-get event :type))
-    (let ((line (line-number-at-pos))
-          (col (current-column)))
-      (disco-root-render)
-      (goto-char (point-min))
-      (forward-line (max 0 (1- line)))
-      (move-to-column col))))
+    (let ((event-type (plist-get event :type))
+          (channel-id (plist-get event :channel-id)))
+      (if (memq event-type '(message-create message-ack))
+          (unless (disco-root--refresh-channel-node channel-id)
+            (disco-root--render-preserving-position))
+        (disco-root--render-preserving-position)))))
 
 (defun disco-root--attach-live-updates ()
   "Attach root buffer to global gateway update stream."
@@ -243,6 +279,27 @@ Channels lacking this field are treated as visible to avoid false negatives."
              (16 (format "[media] %s%s%s" name suffix (concat unread-suffix read-suffix))))))
         (_ (format "[type-%s] %s%s" channel-type name (concat unread-suffix read-suffix)))))))
 
+(defun disco-root--channel-has-unread-p (channel)
+  "Return non-nil when CHANNEL has unread messages tracked locally."
+  (> (disco-state-channel-unread-count (alist-get 'id channel)) 0))
+
+(defun disco-root--parent-has-unread-thread-p (channel)
+  "Return non-nil when CHANNEL has at least one unread thread child."
+  (let ((parent-id (alist-get 'id channel)))
+    (seq-some #'disco-root--channel-has-unread-p
+              (disco-state-parent-threads parent-id))))
+
+(defun disco-root--channel-visible-in-view-p (channel)
+  "Return non-nil when CHANNEL should appear under current view mode."
+  (pcase disco-root--view-mode
+    ('unread
+     (or (disco-root--channel-has-unread-p channel)
+         (and (disco-root--thread-parent-channel-p channel)
+              (disco-root--parent-has-unread-thread-p channel))))
+    ('dms
+     (memq (alist-get 'type channel) '(1 3)))
+    (_ t)))
+
 (defun disco-root--private-channels-sorted ()
   "Return private channels sorted by recency (newest first)."
   (sort (copy-sequence (disco-state-private-channels))
@@ -292,15 +349,59 @@ Higher score means channel should appear earlier in activity mode."
   (disco-root-render)
   (message "disco: root sort mode -> %s" disco-root--sort-mode))
 
+(defun disco-root-cycle-view-mode ()
+  "Cycle root view mode across all, unread, and dms."
+  (interactive)
+  (setq disco-root--view-mode
+        (pcase disco-root--view-mode
+          ('all 'unread)
+          ('unread 'dms)
+          (_ 'all)))
+  (disco-root-render)
+  (message "disco: root view mode -> %s" disco-root--view-mode))
+
+(defun disco-root--ewoc-printer (entry)
+  "Pretty-printer for one root EWOC ENTRY."
+  (pcase (plist-get entry :entry-type)
+    ('text
+     (insert (or (plist-get entry :text) "") "\n"))
+    ('blank
+     (insert "\n"))
+    ('channel
+     (disco-root--insert-channel-line
+      (plist-get entry :channel)
+      (or (plist-get entry :indent) 0)))
+    (_
+     (insert "\n"))))
+
+(defun disco-root--ewoc-insert-text (text)
+  "Insert one plain TEXT row in root EWOC."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'text :text text)))
+
+(defun disco-root--ewoc-insert-blank ()
+  "Insert one blank row in root EWOC."
+  (ewoc-enter-last disco-root--ewoc (list :entry-type 'blank)))
+
+(defun disco-root--ewoc-insert-channel (channel indent)
+  "Insert CHANNEL row at INDENT into root EWOC and index node by channel ID."
+  (let* ((entry (list :entry-type 'channel :channel channel :indent indent))
+         (node (ewoc-enter-last disco-root--ewoc entry))
+         (channel-id (alist-get 'id channel)))
+    (when channel-id
+      (puthash channel-id node disco-root--channel-node-table))
+    node))
+
 (defun disco-root--insert-private-channels ()
   "Insert private-channel (DM/group DM) section into root buffer."
-  (let ((channels (disco-root--private-channels-sorted)))
-    (insert "Direct Messages\n")
+  (let ((channels (seq-filter #'disco-root--channel-visible-in-view-p
+                              (disco-root--private-channels-sorted))))
+    (disco-root--ewoc-insert-text "Direct Messages")
     (if channels
         (dolist (channel channels)
-          (disco-root--insert-channel-line channel 4))
-      (insert "    (no private channels loaded)\n"))
-    (insert "\n")))
+          (disco-root--ewoc-insert-channel channel 4))
+      (disco-root--ewoc-insert-text "    (no private channels loaded)"))
+    (disco-root--ewoc-insert-blank)))
 
 (defun disco-root--guild-name-by-id (guild-id)
   "Return guild display name for GUILD-ID."
@@ -625,15 +726,18 @@ If point is not on a button, jump to the next button and open it."
   (let ((parent-id (alist-get 'id parent-channel)))
     (dolist (thread (disco-state-parent-threads parent-id))
       (let ((thread-id (alist-get 'id thread)))
-        (when (and thread-id (disco-root--displayable-channel-p thread))
+        (when (and thread-id
+                   (disco-root--displayable-channel-p thread)
+                   (disco-root--channel-visible-in-view-p thread))
           (puthash thread-id t rendered-thread-ids)
-          (disco-root--insert-channel-line thread 8))))))
+          (disco-root--ewoc-insert-channel thread 8))))))
 
 (defun disco-root--guild-visible-parent-channels (guild-id)
   "Return non-thread display channels for GUILD-ID."
   (let (parents)
     (dolist (channel (or (disco-state-guild-channels guild-id) '()))
       (when (and (disco-root--displayable-channel-p channel)
+                 (disco-root--channel-visible-in-view-p channel)
                  (not (disco-state-channel-thread-p channel)))
         (push channel parents)))
     (disco-root--sort-channels (nreverse parents))))
@@ -644,45 +748,51 @@ If point is not on a button, jump to the next button and open it."
          (guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
          (parents (disco-root--guild-visible-parent-channels guild-id))
          (rendered-thread-ids (make-hash-table :test #'equal)))
-    (insert (format "%s\n" guild-name))
+    (disco-root--ewoc-insert-text guild-name)
     (if parents
         (dolist (channel parents)
-          (disco-root--insert-channel-line channel 4)
+          (disco-root--ewoc-insert-channel channel 4)
           (when (disco-root--thread-parent-channel-p channel)
             (disco-root--insert-parent-threads channel rendered-thread-ids)))
-      (insert "    (no channels loaded)\n"))
+      (disco-root--ewoc-insert-text "    (no channels loaded)"))
 
     (let (orphan-threads)
       (dolist (thread (disco-state-guild-threads guild-id))
         (let ((thread-id (alist-get 'id thread)))
           (when (and thread-id
                      (disco-root--displayable-channel-p thread)
+                     (disco-root--channel-visible-in-view-p thread)
                      (not (gethash thread-id rendered-thread-ids)))
             (push thread orphan-threads))))
       (setq orphan-threads (nreverse orphan-threads))
       (when orphan-threads
-        (insert "    [threads]\n")
+        (disco-root--ewoc-insert-text "    [threads]")
         (dolist (thread orphan-threads)
-          (disco-root--insert-channel-line thread 8))))
+          (disco-root--ewoc-insert-channel thread 8))))
 
-    (insert "\n")))
+    (disco-root--ewoc-insert-blank)))
 
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "disco.el\n")
-    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   RET/mouse-1: open   n/p/TAB: nav   u: next unread   q: quit"
-                    disco-root--sort-mode))
+    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   v: view(%s)   RET/mouse-1: open   n/p/TAB: nav   u: next unread   q: quit"
+                    disco-root--sort-mode
+                    disco-root--view-mode))
     (when disco-root--refresh-in-flight
       (insert "   [refreshing...]"))
     (insert "\n\n")
+    (setq disco-root--channel-node-table (make-hash-table :test #'equal))
+    (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t))
     (disco-root--insert-private-channels)
-    (let ((guilds (or (disco-state-guilds) '())))
-      (if guilds
-          (dolist (guild guilds)
-            (disco-root--insert-guild guild))
-        (insert "No guilds loaded. Press g to refresh.\n")))
+    (if (eq disco-root--view-mode 'dms)
+        (disco-root--ewoc-insert-text "(guild tree hidden in dms view)")
+      (let ((guilds (or (disco-state-guilds) '())))
+        (if guilds
+            (dolist (guild guilds)
+              (disco-root--insert-guild guild))
+          (disco-root--ewoc-insert-text "No guilds loaded. Press g to refresh."))))
     (goto-char (point-min))))
 
 (defun disco-root--async-error-message (err)
@@ -808,6 +918,7 @@ If point is not on a button, jump to the next button and open it."
     (define-key map (kbd "g") #'disco-root-refresh)
     (define-key map (kbd "A") #'disco-root-list-archived-threads)
     (define-key map (kbd "\\") #'disco-root-toggle-sort-mode)
+    (define-key map (kbd "v") #'disco-root-cycle-view-mode)
     (define-key map (kbd "RET") #'disco-root-open-at-point)
     (define-key map (kbd "n") #'disco-root-button-forward)
     (define-key map (kbd "p") #'disco-root-button-backward)
@@ -822,7 +933,9 @@ If point is not on a button, jump to the next button and open it."
 (define-derived-mode disco-root-mode special-mode "Disco-Root"
   "Major mode for disco.el root buffer."
   (setq buffer-read-only t)
-  (setq truncate-lines t))
+  (setq truncate-lines t)
+  (setq-local disco-root--ewoc nil)
+  (setq-local disco-root--channel-node-table (make-hash-table :test #'equal)))
 
 (defun disco-root-open ()
   "Open root buffer and render current state."
