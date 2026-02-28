@@ -17,20 +17,6 @@
 (require 'cl-lib)
 (require 'plz)
 
-(declare-function plz "ext:plz")
-(declare-function plz-response-status "ext:plz")
-(declare-function plz-response-body "ext:plz")
-(declare-function plz-response-headers "ext:plz")
-(declare-function plz-error-response "ext:plz")
-(declare-function plz-queue "ext:plz")
-(declare-function make-plz-queue "ext:plz")
-(declare-function plz-run "ext:plz")
-(declare-function plz-clear "ext:plz")
-(declare-function plz-length "ext:plz")
-(declare-function plz-queue-limit "ext:plz")
-(declare-function plz-queue-active "ext:plz")
-(declare-function plz-queue-requests "ext:plz")
-
 (defgroup disco-http nil
   "HTTP transport options for disco.el."
   :group 'disco)
