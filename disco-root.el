@@ -87,6 +87,30 @@ Supported values: `all', `unread', and `dms'.")
 
 Each entry is (SECTION-SYMBOL . BOOLEAN).")
 
+(defvar-local disco-root--guild-expanded nil
+  "Hash table guild-id -> expansion state for guild rows.")
+
+(defvar-local disco-root--category-expanded nil
+  "Hash table category-channel-id -> expansion state for category rows.")
+
+(defcustom disco-root-show-guild-icons t
+  "When non-nil, show guild icons in root guild rows when available."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-guild-icon-size 18
+  "Pixel size used for inline guild icons in root rows."
+  :type 'integer
+  :group 'disco)
+
+(defvar disco-root--guild-icon-image-cache (make-hash-table :test #'equal)
+  "Global guild icon image cache keyed by guild icon cache key.
+
+Values are image objects or the symbol `:missing'.")
+
+(defvar disco-root--guild-icon-fetching (make-hash-table :test #'equal)
+  "Global set of guild icon cache keys currently being fetched.")
+
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root rerender."
   (memq event-type
@@ -123,6 +147,46 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
     (push (cons section (and expanded t)) disco-root--section-expanded))
   (and expanded t))
 
+(defun disco-root--ensure-collapse-state-tables ()
+  "Ensure guild/category expansion tables are initialized in current buffer."
+  (unless (hash-table-p disco-root--guild-expanded)
+    (setq disco-root--guild-expanded (make-hash-table :test #'equal)))
+  (unless (hash-table-p disco-root--category-expanded)
+    (setq disco-root--category-expanded (make-hash-table :test #'equal))))
+
+(defun disco-root--node-expanded-p (table key)
+  "Return expansion state from TABLE for KEY, defaulting to expanded."
+  (disco-root--ensure-collapse-state-tables)
+  (if (null key)
+      t
+    (let ((value (gethash key table '__disco-missing)))
+      (if (eq value '__disco-missing)
+          t
+        (and value t)))))
+
+(defun disco-root--set-node-expanded (table key expanded)
+  "Store EXPANDED for KEY in TABLE and return normalized state."
+  (disco-root--ensure-collapse-state-tables)
+  (when key
+    (puthash key (and expanded t) table))
+  (and expanded t))
+
+(defun disco-root--guild-expanded-p (guild-id)
+  "Return non-nil when GUILD-ID row is expanded."
+  (disco-root--node-expanded-p disco-root--guild-expanded guild-id))
+
+(defun disco-root--set-guild-expanded (guild-id expanded)
+  "Set GUILD-ID expansion to EXPANDED and return resulting state."
+  (disco-root--set-node-expanded disco-root--guild-expanded guild-id expanded))
+
+(defun disco-root--category-expanded-p (category-id)
+  "Return non-nil when CATEGORY-ID row is expanded."
+  (disco-root--node-expanded-p disco-root--category-expanded category-id))
+
+(defun disco-root--set-category-expanded (category-id expanded)
+  "Set CATEGORY-ID expansion to EXPANDED and return resulting state."
+  (disco-root--set-node-expanded disco-root--category-expanded category-id expanded))
+
 (defun disco-root--line-property (property &optional pos)
   "Return text PROPERTY on current rendered row at POS (or point)."
   (let ((p (or pos (point))))
@@ -134,6 +198,18 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defun disco-root--line-section (&optional pos)
   "Return section symbol for row at POS when row is a section header."
   (disco-root--line-property 'disco-root-section pos))
+
+(defun disco-root--line-row-type (&optional pos)
+  "Return row type symbol at POS (or point)."
+  (disco-root--line-property 'disco-root-row-type pos))
+
+(defun disco-root--line-guild-id (&optional pos)
+  "Return guild id for row at POS when row is a guild header."
+  (disco-root--line-property 'disco-root-guild-id pos))
+
+(defun disco-root--line-category-id (&optional pos)
+  "Return category channel id for row at POS when row is a category header."
+  (disco-root--line-property 'disco-root-category-id pos))
 
 (defun disco-root--line-channel-id (&optional pos)
   "Return channel id for row at POS when row is channel/thread row."
@@ -179,23 +255,59 @@ When PREDICATE is non-nil, include row only when (PREDICATE POS) is non-nil."
            section
            (if (disco-root--section-expanded-p section) "expanded" "collapsed")))
 
-(defun disco-root-toggle-section-at-point ()
-  "Toggle root section header at point.
-
-Point must be on a section header row."
+(defun disco-root--toggle-guild (guild-id)
+  "Toggle expansion state of GUILD-ID and rerender root buffer."
   (interactive)
-  (let ((section (disco-root--line-section)))
-    (unless section
-      (user-error "disco: point is not on a section header"))
-    (disco-root--toggle-section section)))
+  (unless guild-id
+    (user-error "disco: missing guild id at point"))
+  (disco-root--set-guild-expanded
+   guild-id
+   (not (disco-root--guild-expanded-p guild-id)))
+  (disco-root--render-preserving-position)
+  (message "disco: guild %s -> %s"
+           guild-id
+           (if (disco-root--guild-expanded-p guild-id) "expanded" "collapsed")))
+
+(defun disco-root--toggle-category (category-id)
+  "Toggle expansion state of CATEGORY-ID and rerender root buffer."
+  (interactive)
+  (unless category-id
+    (user-error "disco: missing category id at point"))
+  (disco-root--set-category-expanded
+   category-id
+   (not (disco-root--category-expanded-p category-id)))
+  (disco-root--render-preserving-position)
+  (message "disco: category %s -> %s"
+           category-id
+           (if (disco-root--category-expanded-p category-id) "expanded" "collapsed")))
+
+(defun disco-root--toggle-node-at-point ()
+  "Toggle collapsible node at point: section, guild, or category."
+  (let ((section (disco-root--line-section))
+        (guild-id (disco-root--line-guild-id))
+        (category-id (disco-root--line-category-id)))
+    (cond
+     (section
+      (disco-root--toggle-section section))
+     (guild-id
+      (disco-root--toggle-guild guild-id))
+     (category-id
+      (disco-root--toggle-category category-id))
+     (t nil))))
+
+(defun disco-root-toggle-section-at-point ()
+  "Toggle collapsible node at point.
+
+Supports top-level sections, guild rows, and category rows." 
+  (interactive)
+  (unless (disco-root--toggle-node-at-point)
+    (user-error "disco: point is not on a collapsible row")))
 
 (defun disco-root-tab-dwim ()
-  "On section header, toggle section; otherwise move to next channel row."
+  "On collapsible row, toggle it; otherwise move to next channel row."
   (interactive)
-  (let ((section (disco-root--line-section)))
-    (if section
-        (disco-root--toggle-section section)
-      (disco-root-button-forward 1))))
+  (unless (disco-root--toggle-node-at-point)
+    (disco-root-button-forward 1)))
 
 (defun disco-root--refresh-channel-node (channel-id)
   "Refresh one CHANNEL-ID row in EWOC, returning non-nil on success."
@@ -395,6 +507,112 @@ This prevents noisy permission errors for sources that require elevated access."
   (if (memq (alist-get 'type channel) '(1 3))
       (disco-root--private-channel-display-name channel)
     (or (alist-get 'name channel) "(no-name)")))
+
+(defun disco-root--guild-icon-hash (guild)
+  "Return icon hash string from GUILD, or nil when unavailable."
+  (let ((icon (alist-get 'icon guild)))
+    (and (stringp icon)
+         (not (string-empty-p icon))
+         icon)))
+
+(defun disco-root--guild-icon-url (guild)
+  "Return Discord CDN guild icon URL for GUILD, or nil."
+  (let ((guild-id (alist-get 'id guild))
+        (icon-hash (disco-root--guild-icon-hash guild)))
+    (when (and guild-id icon-hash)
+      (format "https://cdn.discordapp.com/icons/%s/%s.png?size=64"
+              guild-id icon-hash))))
+
+(defun disco-root--guild-icon-cache-key (guild)
+  "Build stable cache key for GUILD icon image."
+  (let ((guild-id (alist-get 'id guild))
+        (icon-hash (disco-root--guild-icon-hash guild)))
+    (when (and guild-id icon-hash)
+      (format "%s:%s:%s" guild-id icon-hash disco-root-guild-icon-size))))
+
+(defun disco-root--guild-icon-fallback (guild)
+  "Return fallback textual icon for GUILD when image is unavailable."
+  (let* ((name (or (alist-get 'name guild) "?"))
+         (initial (if (and (stringp name) (> (length name) 0))
+                      (upcase (substring name 0 1))
+                    "?")))
+    (format "[%s]" initial)))
+
+(defun disco-root--guild-icon-image-valid-p (image)
+  "Return non-nil when IMAGE object appears renderable."
+  (and image
+       (ignore-errors (image-size image t) t)))
+
+(defun disco-root--guild-icon-rendering-available-p ()
+  "Return non-nil when inline guild icons can be rendered."
+  (and disco-root-show-guild-icons
+       (display-images-p)
+       (image-type-available-p 'png)
+       (fboundp 'plz)))
+
+(defun disco-root--rerender-open-root-buffers ()
+  "Rerender all live root buffers to refresh async guild icon updates."
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (eq major-mode 'disco-root-mode)
+          (disco-root--render-preserving-position))))))
+
+(defun disco-root--start-guild-icon-fetch (cache-key url)
+  "Start asynchronous guild icon fetch for CACHE-KEY from URL."
+  (unless (or (gethash cache-key disco-root--guild-icon-fetching)
+              (gethash cache-key disco-root--guild-icon-image-cache))
+    (puthash cache-key t disco-root--guild-icon-fetching)
+    (plz 'get url
+         :as 'binary
+         :headers '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
+         :then (lambda (bytes)
+                 (let ((image
+                        (ignore-errors
+                          (create-image bytes 'png t
+                                        :width disco-root-guild-icon-size
+                                        :height disco-root-guild-icon-size
+                                        :ascent 'center))))
+                   (puthash cache-key
+                            (if (disco-root--guild-icon-image-valid-p image)
+                                image
+                              :missing)
+                            disco-root--guild-icon-image-cache)
+                   (remhash cache-key disco-root--guild-icon-fetching)
+                   (disco-root--rerender-open-root-buffers)))
+         :else (lambda (_err)
+                 (puthash cache-key :missing disco-root--guild-icon-image-cache)
+                 (remhash cache-key disco-root--guild-icon-fetching))))
+  nil)
+
+(defun disco-root--guild-icon-image (guild)
+  "Return image object for GUILD icon when available, otherwise nil.
+
+Starts asynchronous fetch when cache miss occurs."
+  (when (disco-root--guild-icon-rendering-available-p)
+    (let* ((cache-key (disco-root--guild-icon-cache-key guild))
+           (cached (and cache-key
+                        (gethash cache-key disco-root--guild-icon-image-cache))))
+      (cond
+       ((null cache-key)
+        nil)
+       ((eq cached :missing)
+        nil)
+       ((disco-root--guild-icon-image-valid-p cached)
+        cached)
+       (t
+        (let ((url (disco-root--guild-icon-url guild)))
+          (when url
+            (disco-root--start-guild-icon-fetch cache-key url)))
+        nil)))))
+
+(defun disco-root--insert-guild-icon (guild)
+  "Insert one guild icon for GUILD, falling back to text when needed."
+  (let ((fallback (disco-root--guild-icon-fallback guild))
+        (image (disco-root--guild-icon-image guild)))
+    (if (disco-root--guild-icon-image-valid-p image)
+        (insert-image image fallback)
+      (insert fallback))))
 
 (defun disco-root--channel-category-p (channel)
   "Return non-nil when CHANNEL is a guild category container."
@@ -632,6 +850,45 @@ Higher score means channel should appear earlier in activity mode."
               'help-echo "RET or TAB toggles this section"
               'disco-root-row-type 'section
               'disco-root-section section))))
+    ('guild
+     (let* ((guild (plist-get entry :guild))
+            (guild-id (alist-get 'id guild))
+            (guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
+            (unread (or (plist-get entry :unread-count) 0))
+            (expanded (disco-root--guild-expanded-p guild-id))
+            (indicator (if expanded "[-]" "[+]"))
+            (suffix (if (> unread 0) (format " [%d]" unread) ""))
+            (start (point)))
+       (insert (format "  %s " indicator))
+       (disco-root--insert-guild-icon guild)
+       (insert (format " %s%s\n" guild-name suffix))
+       (add-text-properties
+        start
+        (point)
+        (list 'face 'font-lock-function-name-face
+              'mouse-face 'highlight
+              'help-echo "RET/TAB/t toggles this guild"
+              'disco-root-row-type 'guild
+              'disco-root-guild-id guild-id))))
+    ('category
+     (let* ((category (plist-get entry :category))
+            (category-id (alist-get 'id category))
+            (category-name (or (disco-root--channel-display-name category)
+                               "(unnamed-category)"))
+            (unread (or (plist-get entry :unread-count) 0))
+            (expanded (disco-root--category-expanded-p category-id))
+            (indicator (if expanded "[-]" "[+]"))
+            (suffix (if (> unread 0) (format " [%d]" unread) ""))
+            (start (point)))
+       (insert (format "    %s [category] %s%s\n" indicator category-name suffix))
+       (add-text-properties
+        start
+        (point)
+        (list 'face 'font-lock-keyword-face
+              'mouse-face 'highlight
+              'help-echo "RET/TAB/t toggles this category"
+              'disco-root-row-type 'category
+              'disco-root-category-id category-id))))
     ('text
      (insert (or (plist-get entry :text) "") "\n"))
     ('blank
@@ -655,6 +912,20 @@ Higher score means channel should appear earlier in activity mode."
                          :section section
                          :title title
                          :count count)))
+
+(defun disco-root--ewoc-insert-guild (guild unread-count)
+  "Insert one collapsible GUILD row with UNREAD-COUNT badge."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'guild
+                         :guild guild
+                         :unread-count unread-count)))
+
+(defun disco-root--ewoc-insert-category (category unread-count)
+  "Insert one collapsible CATEGORY row with UNREAD-COUNT badge."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'category
+                         :category category
+                         :unread-count unread-count)))
 
 (defun disco-root--ewoc-insert-blank ()
   "Insert one blank row in root EWOC."
@@ -1168,11 +1439,9 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
 
 If point is not on actionable row, jump to next channel row and open it."
   (interactive)
-  (let ((section (disco-root--line-section))
-        (channel-id (disco-root--line-channel-id)))
+  (let ((channel-id (disco-root--line-channel-id)))
     (cond
-     (section
-      (disco-root--toggle-section section))
+     ((disco-root--toggle-node-at-point))
      (channel-id
       (disco-root--open-channel channel-id))
      (t
@@ -1237,31 +1506,19 @@ INDENT controls child-thread row indentation and defaults to 8 spaces."
         (push channel categories)))
     (disco-root--sort-categories (nreverse categories))))
 
-(defun disco-root--insert-guild-category-header (category children)
-  "Insert one CATEGORY heading for CHILDREN list." 
-  (let ((category-name (or (disco-root--channel-display-name category)
-                           "(unnamed-category)"))
-        (category-unread 0))
+(defun disco-root--category-children-unread-total (children)
+  "Return aggregated unread count for one category CHILDREN list."
+  (let ((total 0))
     (dolist (channel children)
-      (setq category-unread
-            (+ category-unread (disco-root--channel-effective-unread-count channel))))
-    (disco-root--ewoc-insert-text
-     (format "    [category] %s%s"
-             category-name
-             (if (> category-unread 0)
-                 (format " [%d]" category-unread)
-               "")))))
+      (setq total (+ total (disco-root--channel-effective-unread-count channel))))
+    total))
 
 (defun disco-root--insert-guild (guild)
   "Insert one GUILD and its visible channels in root buffer.
 
 Return non-nil when at least one visible row is inserted for GUILD."
   (let* ((guild-id (alist-get 'id guild))
-         (guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
          (guild-unread (disco-root--guild-unread-total guild-id t))
-         (unread-suffix (if (> guild-unread 0)
-                            (format " [%d]" guild-unread)
-                          ""))
          (parents (disco-root--guild-visible-parent-channels guild-id))
          (categories (disco-root--guild-visible-categories guild-id))
          (category-id-set (make-hash-table :test #'equal))
@@ -1293,37 +1550,41 @@ Return non-nil when at least one visible row is inserted for GUILD."
                               (gethash category-id category-children))))
                      categories)))
       (when (or uncategorized-parents has-categorized-parents has-visible-thread)
-        (disco-root--ewoc-insert-text (format "  %s%s" guild-name unread-suffix))
+        (disco-root--ewoc-insert-guild guild guild-unread)
 
-        (dolist (channel uncategorized-parents)
-          (disco-root--ewoc-insert-channel channel 4)
-          (when (disco-root--thread-parent-channel-p channel)
-            (disco-root--insert-parent-threads channel rendered-thread-ids 8)))
+        (when (disco-root--guild-expanded-p guild-id)
+          (dolist (channel uncategorized-parents)
+            (disco-root--ewoc-insert-channel channel 4)
+            (when (disco-root--thread-parent-channel-p channel)
+              (disco-root--insert-parent-threads channel rendered-thread-ids 8)))
 
-        (dolist (category categories)
-          (let* ((category-id (alist-get 'id category))
-                 (children (and category-id
-                                (gethash category-id category-children))))
-            (when children
-              (disco-root--insert-guild-category-header category children)
-              (dolist (channel children)
-                (disco-root--ewoc-insert-channel channel 6)
-                (when (disco-root--thread-parent-channel-p channel)
-                  (disco-root--insert-parent-threads channel rendered-thread-ids 10))))))
+          (dolist (category categories)
+            (let* ((category-id (alist-get 'id category))
+                   (children (and category-id
+                                  (gethash category-id category-children)))
+                   (category-unread (and children
+                                         (disco-root--category-children-unread-total children))))
+              (when children
+                (disco-root--ewoc-insert-category category (or category-unread 0))
+                (when (disco-root--category-expanded-p category-id)
+                  (dolist (channel children)
+                    (disco-root--ewoc-insert-channel channel 6)
+                    (when (disco-root--thread-parent-channel-p channel)
+                      (disco-root--insert-parent-threads channel rendered-thread-ids 10)))))))
 
-        (let (orphan-threads)
-          (dolist (thread (or (disco-state-guild-threads guild-id) '()))
-            (let ((thread-id (alist-get 'id thread)))
-              (when (and thread-id
-                         (disco-root--displayable-channel-p thread)
-                         (disco-root--channel-visible-in-view-p thread)
-                         (not (gethash thread-id rendered-thread-ids)))
-                (push thread orphan-threads))))
-          (setq orphan-threads (nreverse orphan-threads))
-          (when orphan-threads
-            (disco-root--ewoc-insert-text "    [threads]")
-            (dolist (thread orphan-threads)
-              (disco-root--ewoc-insert-channel thread 8))))
+          (let (orphan-threads)
+            (dolist (thread (or (disco-state-guild-threads guild-id) '()))
+              (let ((thread-id (alist-get 'id thread)))
+                (when (and thread-id
+                           (disco-root--displayable-channel-p thread)
+                           (disco-root--channel-visible-in-view-p thread)
+                           (not (gethash thread-id rendered-thread-ids)))
+                  (push thread orphan-threads))))
+            (setq orphan-threads (nreverse orphan-threads))
+            (when orphan-threads
+              (disco-root--ewoc-insert-text "    [threads]")
+              (dolist (thread orphan-threads)
+                (disco-root--ewoc-insert-channel thread 8)))))
 
         (disco-root--ewoc-insert-blank)
         t))))
@@ -1337,7 +1598,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
     (disco-root--ensure-section-state)
     (erase-buffer)
     (insert "disco.el\n")
-    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   v: view(%s)   RET: open/toggle   TAB: toggle section or next channel   n/p: nav   u: next unread   q: quit"
+    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   v: view(%s)   RET: open/toggle   TAB/t: toggle section/guild/category or next channel   n/p: nav   u: next unread   q: quit"
                     disco-root--sort-mode
                     disco-root--view-mode))
     (when disco-root--refresh-in-flight
@@ -1534,7 +1795,9 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (setq-local disco-root--ewoc nil)
-  (setq-local disco-root--channel-node-table (make-hash-table :test #'equal)))
+  (setq-local disco-root--channel-node-table (make-hash-table :test #'equal))
+  (setq-local disco-root--guild-expanded (make-hash-table :test #'equal))
+  (setq-local disco-root--category-expanded (make-hash-table :test #'equal)))
 
 (defun disco-root-open ()
   "Open root buffer and render current state."
