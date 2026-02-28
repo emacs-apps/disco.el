@@ -199,10 +199,11 @@ STATUS, HEADERS, BODY come from transport layer."
           (disco-api--set-route-deadline route-key deadline bucket-id))))))
 
 (defun disco-api--auth-header ()
-  "Return Authorization header value from `disco-token'."
-  (unless (and disco-token (not (string-empty-p disco-token)))
-    (user-error "disco: token is not set; run M-x disco-set-token"))
-  disco-token)
+  "Return Authorization header value from active token source."
+  (let ((token (disco-current-token)))
+    (unless token
+      (user-error "disco: token is not set; use M-x disco-set-token or DISCO_TOKEN"))
+    token))
 
 (defun disco-api--build-url (endpoint &optional query)
   "Build full URL using ENDPOINT and optional QUERY alist."

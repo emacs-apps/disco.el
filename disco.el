@@ -28,9 +28,9 @@
 (defun disco ()
   "Start disco.el and open root buffer.
 
-If token is missing, prompt for it once in current session."
+If neither session token nor `DISCO_TOKEN' is available, prompt once."
   (interactive)
-  (unless (and disco-token (not (string-empty-p disco-token)))
+  (unless (disco-current-token)
     (call-interactively #'disco-set-token))
   (when disco-enable-live-updates
     (disco-gateway-start))

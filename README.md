@@ -10,7 +10,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 ## Current MVP Scope
 
-- Configure token in-session with `M-x disco-set-token`.
+- Configure token with `DISCO_TOKEN` environment variable (default), or override in-session with `M-x disco-set-token`.
 - Start client with `M-x disco`.
 - Fetch and display guild/channel list in `*disco*`.
 - Fetch and display thread channels nested under their parent channels.

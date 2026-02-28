@@ -9,6 +9,8 @@
 
 ;;; Code:
 
+(require 'subr-x)
+
 (defgroup disco nil
   "Discord client for Emacs."
   :group 'comm)
@@ -16,8 +18,14 @@
 (defcustom disco-token nil
   "Discord token used for authenticated API requests.
 
-Use `disco-set-token' to set this in the current session."
+Use `disco-set-token' to set this in the current session.
+When unset, disco falls back to environment variable `DISCO_TOKEN'."
   :type '(choice (const :tag "Unset" nil) string)
+  :group 'disco)
+
+(defcustom disco-token-env-var "DISCO_TOKEN"
+  "Environment variable used as token fallback when `disco-token' is unset."
+  :type 'string
   :group 'disco)
 
 (defcustom disco-api-base-url "https://discord.com/api/v10"
@@ -166,6 +174,21 @@ Provide this as an alist matching Discord Gateway presence schema."
   (interactive (list (read-passwd "Discord token: ")))
   (setq disco-token token)
   (message "disco: token set for current session"))
+
+(defun disco-current-token ()
+  "Return active Discord token from custom var or environment.
+
+Preference order:
+1) `disco-token' when non-empty.
+2) environment variable named by `disco-token-env-var'."
+  (let* ((custom-token (and (stringp disco-token)
+                            (not (string-empty-p disco-token))
+                            disco-token))
+         (env-token (let ((raw (getenv disco-token-env-var)))
+                      (and (stringp raw)
+                           (not (string-empty-p raw))
+                           raw))))
+    (or custom-token env-token)))
 
 (provide 'disco-customize)
 

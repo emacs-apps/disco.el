@@ -299,7 +299,7 @@ This shape follows Discord gateway identify expectations."
 (defun disco-gateway--identify-payload ()
   "Build identify payload body for Gateway opcode 2."
   (let ((payload
-         `((token . ,(or disco-token ""))
+         `((token . ,(or (disco-current-token) ""))
            (properties . ,(disco-gateway--identify-properties))
            (compress . :false)
            (large_threshold . 250))))
@@ -324,7 +324,7 @@ This shape follows Discord gateway identify expectations."
   "Send resume payload (op 6)."
   (disco-gateway--send-op
    6
-   `((token . ,(or disco-token ""))
+   `((token . ,(or (disco-current-token) ""))
      (session_id . ,disco-gateway--session-id)
      (seq . ,disco-gateway--seq))))
 
@@ -520,8 +520,8 @@ State is kept newest-first to match REST message list ordering."
 
 (defun disco-gateway--ensure-token ()
   "Signal user error if gateway token is missing."
-  (unless (and disco-token (not (string-empty-p disco-token)))
-    (user-error "disco: token is not set; run M-x disco-set-token")))
+  (unless (disco-current-token)
+    (user-error "disco: token is not set; use M-x disco-set-token or DISCO_TOKEN")))
 
 (defun disco-gateway--connect ()
   "Connect websocket transport if needed."
