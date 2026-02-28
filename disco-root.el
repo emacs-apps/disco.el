@@ -15,6 +15,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'disco-ui)
+(require 'disco-view)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-room)
@@ -89,12 +90,9 @@ Supported values: `all', `unread', and `dms'.")
 
 (defun disco-root--render-preserving-position ()
   "Render root tree and keep point near previous line/column."
-  (let ((line (line-number-at-pos))
-        (col (current-column)))
-    (disco-root-render)
-    (goto-char (point-min))
-    (forward-line (max 0 (1- line)))
-    (move-to-column col)))
+  (disco-view-render-preserving-position
+   #'disco-root-render
+   :preserve-window-start t))
 
 (defun disco-root--refresh-channel-node (channel-id)
   "Refresh one CHANNEL-ID row in EWOC, returning non-nil on success."

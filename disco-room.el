@@ -19,6 +19,7 @@
 (require 'url-handlers)
 (require 'plz)
 (require 'disco-ui)
+(require 'disco-view)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
@@ -783,6 +784,16 @@ Message lines carry the `disco-message-id' text property."
       (get-text-property (line-beginning-position) 'disco-message-id)
       (user-error "disco: point is not on a message line")))
 
+(defun disco-room--render-preserving-point ()
+  "Rerender room while preserving message reading position.
+
+This follows telega-like behavior: preserve anchor + viewport for passive
+updates, and only jump to bottom for explicit composer-focused operations."
+  (disco-view-render-preserving-position
+   #'disco-room-render
+   :anchor-property 'disco-message-id
+   :preserve-window-start t))
+
 (defun disco-room--message-by-id (message-id)
   "Return room message object for MESSAGE-ID, or nil."
   (seq-find (lambda (msg)
@@ -1376,17 +1387,15 @@ This filters out broken image specs that would otherwise render as tofu boxes."
   (message "disco: avatar cache reset; refetching"))
 
 (defun disco-room--rerender-open-rooms ()
-  "Rerender all open room buffers while preserving point line/column."
+  "Rerender all open room buffers while preserving reading position."
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (eq major-mode 'disco-room-mode)
-          (let ((line (line-number-at-pos))
-                (col (current-column)))
-            (disco-room-render)
-            (goto-char (point-min))
-            (forward-line (max 0 (1- line)))
-            (move-to-column col)))))))
+          (disco-view-render-preserving-position
+           #'disco-room-render
+           :anchor-property 'disco-message-id
+           :preserve-window-start t))))))
 
 (defun disco-room--start-avatar-fetch (cache-key url cache-base)
   "Start asynchronous avatar fetch for CACHE-KEY from URL using CACHE-BASE."
@@ -2647,7 +2656,9 @@ Return non-nil when handled without full room rerender."
            (disco-room--update-message-window-state messages)
            (disco-room--mark-read)
            (setq disco-room--refresh-in-flight nil)
-           (disco-room-render)
+           (if (= (point) (point-max))
+               (disco-room-render)
+             (disco-room--render-preserving-point))
            (message "disco: loaded %d messages" (length messages)))))
      :on-error
      (lambda (err)
@@ -2689,21 +2700,21 @@ REASON is shown in the minibuffer."
             (channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
-        (disco-room-render)
-        (when at-bottom
-          (goto-char (point-max)))))
+        (if at-bottom
+            (disco-room-render)
+          (disco-room--render-preserving-point))))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-create message-update message-delete)))
       (let ((at-bottom (= (point) (point-max))))
         ;; Message grouping/date/unread layout depends on surrounding rows,
         ;; so message create/update/delete keeps a full room rerender.
-        (disco-room-render)
+        (if at-bottom
+            (disco-room-render)
+          (disco-room--render-preserving-point))
         (when (eq event-type 'message-create)
           (let* ((message (plist-get event :message))
                  (message-id (and (listp message) (alist-get 'id message))))
-            (disco-room--mark-read message-id)))
-        (when at-bottom
-          (goto-char (point-max)))))
+            (disco-room--mark-read message-id)))))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-reaction-add
                               message-reaction-remove
@@ -3171,12 +3182,12 @@ When called with prefix argument, force draft edit in minibuffer first."
                    (if (null older)
                        (progn
                          (setq disco-room--history-exhausted t)
-                         (disco-room-render)
+                         (disco-room--render-preserving-point)
                          (message "disco: reached beginning of history"))
                      (let ((merged (disco-room--merge-message-pages existing older)))
                        (disco-state-put-messages channel-id merged)
                        (disco-room--update-message-window-state merged)
-                       (disco-room-render)
+                       (disco-room--render-preserving-point)
                        (message "disco: loaded %d older messages" (length older))))))))))
        :on-error
        (lambda (err)
@@ -3371,7 +3382,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
         channel
         'archived
         (if next-archived t :false))))
-    (disco-room-render)
+    (disco-room--render-preserving-point)
     (message "disco: thread %s" (if next-archived "archived" "unarchived"))))
 
 (defun disco-room-rename-thread (name)
@@ -3391,7 +3402,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
          (updated (disco-api-update-thread disco-room--channel-id :name name))
          (fallback (disco-room--thread-with-field channel 'name name)))
     (disco-room--resolve-thread-update updated fallback)
-    (disco-room-render)
+    (disco-room--render-preserving-point)
     (message "disco: thread renamed to %s" name)))
 
 (defun disco-room-toggle-thread-locked ()
@@ -3407,7 +3418,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
                     'locked
                     (if next-locked t :false))))
     (disco-room--resolve-thread-update updated fallback)
-    (disco-room-render)
+    (disco-room--render-preserving-point)
     (message "disco: thread %s" (if next-locked "locked" "unlocked"))))
 
 (defun disco-room-set-thread-slowmode (seconds)
@@ -3426,7 +3437,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
                    :rate-limit-per-user seconds))
          (fallback (disco-room--thread-with-field channel 'rate_limit_per_user seconds)))
     (disco-room--resolve-thread-update updated fallback)
-    (disco-room-render)
+    (disco-room--render-preserving-point)
     (message "disco: thread slowmode -> %ss" seconds)))
 
 (defun disco-room-set-thread-auto-archive-duration (minutes)
@@ -3449,7 +3460,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
                     'auto_archive_duration
                     minutes)))
     (disco-room--resolve-thread-update updated fallback)
-    (disco-room-render)
+    (disco-room--render-preserving-point)
     (message "disco: auto archive -> %s minutes" minutes)))
 
 (defun disco-room-set-thread-muted (muted)
@@ -3540,7 +3551,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
                'locked
                locked)))
       (disco-room--resolve-thread-update updated fallback)
-      (disco-room-render)
+      (disco-room--render-preserving-point)
       (message "disco: updated thread settings"))))
 
 (defvar disco-room-mode-map
