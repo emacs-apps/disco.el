@@ -73,6 +73,53 @@
   (unless (disco-room--thread-channel-p)
     (user-error "disco: current room is not a thread")))
 
+(defun disco-room--ensure-parent-channel ()
+  "Signal user error when current room channel is itself a thread."
+  (when (disco-room--thread-channel-p)
+    (user-error "disco: open a parent channel room to create a new thread")))
+
+(defun disco-room--latest-message-id ()
+  "Return newest known message ID for current room, or nil."
+  (alist-get 'id (car (disco-state-messages disco-room--channel-id))))
+
+(defun disco-room--read-thread-auto-archive-duration ()
+  "Prompt for optional auto archive duration in minutes.
+
+Returns nil when left blank."
+  (let* ((choices '("" "60" "1440" "4320" "10080"))
+         (raw (completing-read
+               "Auto archive minutes (empty for default): "
+               choices nil t nil nil "")))
+    (unless (string-empty-p raw)
+      (string-to-number raw))))
+
+(defun disco-room--read-optional-nonnegative-int (prompt)
+  "Read optional non-negative integer using PROMPT.
+
+Returns nil when left blank."
+  (let ((raw (read-string prompt)))
+    (unless (string-empty-p raw)
+      (let ((n (string-to-number raw)))
+        (when (< n 0)
+          (user-error "disco: value must be >= 0"))
+        n))))
+
+(defun disco-room--read-detached-thread-type ()
+  "Prompt for detached thread type; return numeric channel type or nil."
+  (let ((choice (completing-read
+                 "Thread type (empty/public/private): "
+                 '("" "public" "private") nil t nil nil "")))
+    (pcase choice
+      ("public" 11)
+      ("private" 12)
+      (_ nil))))
+
+(defun disco-room--forum-or-media-channel-p (&optional channel)
+  "Return non-nil when CHANNEL (or current room channel) is forum/media."
+  (let* ((target (or channel (disco-room--channel-object)))
+         (type (and target (alist-get 'type target))))
+    (memq type '(15 16))))
+
 (defun disco-room--thread-with-meta-field (channel key value)
   "Return CHANNEL with thread metadata KEY set to VALUE."
   (let* ((updated (copy-tree channel))
@@ -168,6 +215,77 @@
       (disco-room-refresh)
       (message "disco: message sent"))))
 
+(defun disco-room-create-thread-from-message (name message-id
+                                                   &optional auto-archive-duration
+                                                   rate-limit-per-user)
+  "Create thread NAME from MESSAGE-ID in current channel.
+
+AUTO-ARCHIVE-DURATION is optional minutes.
+RATE-LIMIT-PER-USER is optional slowmode seconds."
+  (interactive
+   (let* ((name (read-string "Thread name: "))
+          (default-message-id (disco-room--latest-message-id))
+          (message-raw (read-string
+                        (if default-message-id
+                            (format "Message ID (default %s): " default-message-id)
+                          "Message ID: ")))
+          (message-id (if (string-empty-p message-raw)
+                          (or default-message-id
+                              (user-error "disco: no message id provided and no loaded messages"))
+                        message-raw))
+          (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
+          (rate-limit-per-user
+           (disco-room--read-optional-nonnegative-int
+            "Slowmode seconds (empty for none): ")))
+     (list name message-id auto-archive-duration rate-limit-per-user)))
+  (disco-room--ensure-parent-channel)
+  (let* ((thread (disco-api-create-thread-from-message
+                  disco-room--channel-id
+                  message-id
+                  name
+                  auto-archive-duration
+                  rate-limit-per-user))
+         (thread-id (and (listp thread) (alist-get 'id thread)))
+         (thread-name (or (and (listp thread) (alist-get 'name thread)) name)))
+    (when thread-id
+      (disco-state-upsert-channel thread)
+      (disco-room-open thread-id thread-name))
+    (message "disco: created thread %s" name)))
+
+(defun disco-room-create-thread (name &optional type auto-archive-duration
+                                       invitable rate-limit-per-user)
+  "Create detached thread NAME in current channel.
+
+TYPE is optional thread channel type.
+AUTO-ARCHIVE-DURATION is optional minutes.
+INVITABLE controls private-thread invites when TYPE is 12.
+RATE-LIMIT-PER-USER is optional slowmode seconds."
+  (interactive
+   (let* ((name (read-string "Thread name: "))
+          (type (unless (disco-room--forum-or-media-channel-p)
+                  (disco-room--read-detached-thread-type)))
+          (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
+          (invitable (when (equal type 12)
+                       (y-or-n-p "Invitable by non-moderators? ")))
+          (rate-limit-per-user
+           (disco-room--read-optional-nonnegative-int
+            "Slowmode seconds (empty for none): ")))
+     (list name type auto-archive-duration invitable rate-limit-per-user)))
+  (disco-room--ensure-parent-channel)
+  (let* ((thread (disco-api-create-thread
+                  disco-room--channel-id
+                  name
+                  type
+                  auto-archive-duration
+                  invitable
+                  rate-limit-per-user))
+         (thread-id (and (listp thread) (alist-get 'id thread)))
+         (thread-name (or (and (listp thread) (alist-get 'name thread)) name)))
+    (when thread-id
+      (disco-state-upsert-channel thread)
+      (disco-room-open thread-id thread-name))
+    (message "disco: created detached thread %s" name)))
+
 (defun disco-room-join-thread ()
   "Join current thread room as current user."
   (interactive)
@@ -205,6 +323,8 @@
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-room-refresh)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+    (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
+    (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
     (define-key map (kbd "C-c C-a") #'disco-room-toggle-thread-archived)

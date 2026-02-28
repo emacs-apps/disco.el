@@ -17,6 +17,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Browse archived thread lists per parent channel.
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
+- In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
@@ -49,6 +50,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root buffer: `A` opens archived thread browser for a selected parent channel.
 - Archived thread buffer: `g` refreshes, `RET`/mouse opens selected thread.
 - Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
+- Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
+- Room transient (`?`): includes message send/refresh, thread create/join/leave/archive, and inspect actions.
 
 ## Gateway Configuration
 
@@ -81,8 +84,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 ## Next Milestones
 
-1. Add thread creation commands (from message and detached thread creation flows).
-2. Expand dispatch handling beyond messages/threads (channel/guild mutations and unread state).
-3. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
-4. Add queue prioritization/backpressure so user actions are favored over background work.
-5. Add persisted session recovery (resume state restore across Emacs restarts).
+1. Expand dispatch handling beyond messages/threads (channel/guild mutations and unread state).
+2. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
+3. Add queue prioritization/backpressure so user actions are favored over background work.
+4. Add persisted session recovery (resume state restore across Emacs restarts).

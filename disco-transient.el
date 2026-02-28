@@ -21,6 +21,8 @@
 
 (declare-function disco-room-refresh "disco-room")
 (declare-function disco-room-send-message "disco-room")
+(declare-function disco-room-create-thread-from-message "disco-room")
+(declare-function disco-room-create-thread "disco-room")
 (declare-function disco-room-join-thread "disco-room")
 (declare-function disco-room-leave-thread "disco-room")
 (declare-function disco-room-toggle-thread-archived "disco-room")
@@ -83,6 +85,8 @@
     ("g" "Refresh room" disco-room-refresh)
     ("c" "Send message" disco-room-send-message)]
    ["Thread"
+    ("m" "Create from message" disco-room-create-thread-from-message)
+    ("n" "Create detached" disco-room-create-thread)
     ("j" "Join thread" disco-room-join-thread)
     ("l" "Leave thread" disco-room-leave-thread)
     ("a" "Toggle archived" disco-room-toggle-thread-archived)

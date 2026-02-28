@@ -367,6 +367,50 @@ If LOCKED is non-nil, set lock state in the same request."
       (setq payload (append payload `((locked . ,(if locked t :false))))))
     (disco-api--request "PATCH" (format "/channels/%s" thread-id) payload nil nil)))
 
+(defun disco-api-create-thread-from-message (channel-id message-id name
+                                                        &optional auto-archive-duration
+                                                        rate-limit-per-user)
+  "Create a thread named NAME from MESSAGE-ID under CHANNEL-ID.
+
+AUTO-ARCHIVE-DURATION is minutes (60/1440/4320/10080).
+RATE-LIMIT-PER-USER is per-user slowmode seconds."
+  (let ((payload `((name . ,name))))
+    (when auto-archive-duration
+      (setq payload (append payload `((auto_archive_duration . ,auto-archive-duration)))))
+    (when rate-limit-per-user
+      (setq payload (append payload `((rate_limit_per_user . ,rate-limit-per-user)))))
+    (disco-api--request
+     "POST"
+     (format "/channels/%s/messages/%s/threads" channel-id message-id)
+     payload
+     nil
+     nil)))
+
+(defun disco-api-create-thread (channel-id name
+                                           &optional type auto-archive-duration invitable
+                                           rate-limit-per-user)
+  "Create a detached thread named NAME under CHANNEL-ID.
+
+TYPE is thread channel type (e.g., 11 public, 12 private).
+AUTO-ARCHIVE-DURATION is minutes (60/1440/4320/10080).
+INVITABLE controls non-moderator invites in private threads.
+RATE-LIMIT-PER-USER is per-user slowmode seconds."
+  (let ((payload `((name . ,name))))
+    (when type
+      (setq payload (append payload `((type . ,type)))))
+    (when auto-archive-duration
+      (setq payload (append payload `((auto_archive_duration . ,auto-archive-duration)))))
+    (when (not (null invitable))
+      (setq payload (append payload `((invitable . ,(if invitable t :false))))))
+    (when rate-limit-per-user
+      (setq payload (append payload `((rate_limit_per_user . ,rate-limit-per-user)))))
+    (disco-api--request
+     "POST"
+     (format "/channels/%s/threads" channel-id)
+     payload
+     nil
+     nil)))
+
 (defun disco-api-channel-messages (channel-id &optional before limit)
   "Fetch messages in CHANNEL-ID.
 
