@@ -470,6 +470,42 @@ Response is an alist with keys including `threads' and `members'."
    :on-success on-success
    :on-error on-error))
 
+(defun disco-api--thread-search-active-query (limit offset)
+  "Build query alist for active thread search endpoint.
+
+LIMIT is clamped to the endpoint range 1-25. OFFSET is clamped to >= 0."
+  (let* ((raw-limit (or limit 25))
+         (normalized-limit (max 1 (min 25 raw-limit)))
+         (normalized-offset (max 0 (or offset 0))))
+    `(("archived" . "false")
+      ("sort_by" . "last_message_time")
+      ("sort_order" . "desc")
+      ("limit" . ,(number-to-string normalized-limit))
+      ("offset" . ,(number-to-string normalized-offset)))))
+
+(defun disco-api-channel-search-active-threads (channel-id &optional limit offset)
+  "Search active threads under CHANNEL-ID.
+
+Uses `/channels/{channel.id}/threads/search' with `archived=false'."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/threads/search" channel-id)
+   nil
+   (disco-api--thread-search-active-query limit offset)
+   nil))
+
+(cl-defun disco-api-channel-search-active-threads-async
+    (channel-id &key limit offset on-success on-error)
+  "Search active threads under CHANNEL-ID asynchronously.
+
+Uses `/channels/{channel.id}/threads/search' with `archived=false'."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s/threads/search" channel-id)
+   :query (disco-api--thread-search-active-query limit offset)
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api--thread-archive-query (before limit)
   "Build query alist for thread archive endpoints."
   (let* ((raw-limit (or limit 50))

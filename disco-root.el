@@ -29,6 +29,12 @@
 (defvar-local disco-root--parent-threads-parent-channel nil
   "Parent channel object for active-thread list buffers.")
 
+(defvar-local disco-root--parent-threads-refresh-generation 0
+  "Monotonic generation counter for parent-thread refresh callbacks.")
+
+(defvar-local disco-root--parent-threads-refresh-in-flight nil
+  "Non-nil while async active-thread fetch for parent-thread buffer runs.")
+
 (defconst disco-root--archived-thread-sources
   '(("public" . disco-api-channel-archived-public-threads)
     ("private" . disco-api-channel-archived-private-threads)
@@ -604,9 +610,11 @@ Return plist with keys :threads and :errors for this page only."
                     (if parent-channel
                         (disco-root--channel-label parent-channel)
                       "(no parent)")))
-    (insert "g: rerender   A: archived threads   RET/mouse-1: open thread   n/p/TAB: nav   q: quit\n")
-    (insert (format "Active threads indexed: %d (press g in root to fetch latest)\n"
+    (insert "g: refresh active   A: archived threads   RET/mouse-1: open thread   n/p/TAB: nav   q: quit\n")
+    (insert (format "Active threads indexed: %d\n"
                     (length (or threads '()))))
+    (when disco-root--parent-threads-refresh-in-flight
+      (insert "[refreshing active threads...]\n"))
     (insert "\n")
     (if threads
         (dolist (thread threads)
@@ -615,14 +623,49 @@ Return plist with keys :threads and :errors for this page only."
     (goto-char (point-min))))
 
 (defun disco-root-parent-threads-refresh ()
-  "Rerender active-thread list in current parent-thread buffer."
+  "Refresh active-thread list in current parent-thread buffer."
   (interactive)
-  (unless disco-root--parent-threads-parent-channel
-    (user-error "disco: thread buffer has no parent context"))
-  (disco-root--render-parent-threads-buffer)
-  (message "disco: rendered %d active threads"
-           (length (disco-root--active-parent-threads
-                    disco-root--parent-threads-parent-channel))))
+  (let* ((thread-buffer (current-buffer))
+         (parent-channel disco-root--parent-threads-parent-channel)
+         (parent-id (and parent-channel (alist-get 'id parent-channel)))
+         (guild-id (and parent-channel (alist-get 'guild_id parent-channel)))
+         (generation (1+ disco-root--parent-threads-refresh-generation)))
+    (unless parent-channel
+      (user-error "disco: thread buffer has no parent context"))
+    (unless guild-id
+      (user-error "disco: parent channel has no guild context"))
+    (setq disco-root--parent-threads-refresh-generation generation)
+    (setq disco-root--parent-threads-refresh-in-flight t)
+    (disco-root--render-parent-threads-buffer)
+    (disco-api-channel-search-active-threads-async
+     parent-id
+     :limit 25
+     :offset 0
+     :on-success
+     (lambda (result)
+       (when (and (buffer-live-p thread-buffer)
+                  (with-current-buffer thread-buffer
+                    (and (eq major-mode 'disco-root-parent-threads-mode)
+                         (= disco-root--parent-threads-refresh-generation generation))))
+         (with-current-buffer thread-buffer
+           (let ((threads
+                  (or (alist-get 'threads result) '())))
+             (disco-state-sync-threads guild-id (list parent-id) threads)
+             (setq disco-root--parent-threads-refresh-in-flight nil)
+             (disco-root--render-parent-threads-buffer)
+             (message "disco: loaded %d active threads"
+                      (length threads))))))
+     :on-error
+     (lambda (err)
+       (when (and (buffer-live-p thread-buffer)
+                  (with-current-buffer thread-buffer
+                    (and (eq major-mode 'disco-root-parent-threads-mode)
+                         (= disco-root--parent-threads-refresh-generation generation))))
+         (with-current-buffer thread-buffer
+           (setq disco-root--parent-threads-refresh-in-flight nil)
+           (disco-root--render-parent-threads-buffer)
+           (message "disco: active thread refresh failed: %s"
+                    (disco-root--async-error-message err))))))))
 
 (defun disco-root-parent-threads-open-archived ()
   "Open archived-thread browser for current parent-thread buffer context."
@@ -667,6 +710,8 @@ When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
       (with-current-buffer buf
         (disco-root-parent-threads-mode)
         (setq disco-root--parent-threads-parent-channel parent-channel)
+        (setq disco-root--parent-threads-refresh-generation 0)
+        (setq disco-root--parent-threads-refresh-in-flight nil)
         (disco-root-parent-threads-refresh))
       (pop-to-buffer buf))))
 

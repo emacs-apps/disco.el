@@ -69,6 +69,7 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Thread Commands
 
 - Root buffer: `A` opens archived thread browser for a selected parent channel.
+- Root buffer: `RET` on forum/media opens parent-thread list; that list fetches active threads via `/channels/{id}/threads/search` (`archived=false`) on open and on `g`.
 - Archived thread buffer: `g` refreshes from first page, `n` loads next page, `RET`/mouse opens selected thread.
 - Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
 - Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
@@ -90,7 +91,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway-identify-intents`: optional identify intents bitmask.
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
-- `disco-fetch-guild-active-threads`: optionally fetch `/guilds/{id}/threads/active` during root refresh.
+- `disco-fetch-guild-active-threads`: optionally fetch `/guilds/{id}/threads/active` during root refresh (Discord docs mark this route bot-only; user accounts return 403).
 - `disco-thread-archive-fetch-limit`: page size used by archived thread fetchers (2-100).
 - `disco-gateway-reconnect-delay`: base reconnect delay.
 - `disco-gateway-max-reconnect-attempts`: hard cap for consecutive reconnects (`nil` for unlimited).

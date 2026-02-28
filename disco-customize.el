@@ -79,8 +79,9 @@ and avoid unbounded memory growth."
 (defcustom disco-fetch-guild-active-threads nil
   "If non-nil, query active threads endpoint during root refresh.
 
-This endpoint may not be available for all account types. Failures are
-logged and ignored, so enabling this is safe but optional."
+Discord docs mark this endpoint as bot-only; user accounts will receive
+HTTP 403. Failures are logged and ignored, so enabling this is safe but
+primarily useful for bot-token workflows."
   :type 'boolean
   :group 'disco)
 
