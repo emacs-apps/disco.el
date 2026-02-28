@@ -72,6 +72,12 @@ Values are either image objects or the symbol `:missing'.")
 (defvar disco-room--attachment-preview-fetching (make-hash-table :test #'equal)
   "Global set of attachment preview cache keys currently being fetched.")
 
+(defvar disco-room--attachment-download-state-table (make-hash-table :test #'equal)
+  "Global attachment download state keyed by attachment download key.
+
+Each value is a plist carrying :status, :path, :process, :error and
+:cancel-requested flags.")
+
 (defvar disco-room--avatar-fetch-budget nil
   "Dynamic cap for number of avatar fetches started in current render pass.")
 
@@ -125,6 +131,12 @@ When image rendering is unavailable, room falls back to text placeholders."
 (defcustom disco-room-attachment-cache-directory
   (locate-user-emacs-file "disco-attachment-cache/")
   "Directory used to cache downloaded attachment preview images."
+  :type 'directory
+  :group 'disco)
+
+(defcustom disco-room-attachment-download-directory
+  (locate-user-emacs-file "disco-attachment-downloads/")
+  "Directory used for telega-style default attachment downloads."
   :type 'directory
   :group 'disco)
 
@@ -1630,12 +1642,153 @@ If needed, schedule async fetch and return nil until ready."
             (format "attachment-%s" id)
           "attachment.bin"))))
 
+(defun disco-room--sanitize-filename (filename)
+  "Return filesystem-safe variant of FILENAME."
+  (replace-regexp-in-string
+   "[[:cntrl:]/\\\\]+"
+   "_"
+   (or filename "attachment.bin")))
+
+(defun disco-room--attachment-download-key (attachment)
+  "Return stable download state key for ATTACHMENT."
+  (format "%s"
+          (or (alist-get 'id attachment)
+              (disco-room--attachment-preview-url attachment)
+              (alist-get 'filename attachment)
+              (sxhash attachment))))
+
+(defun disco-room--attachment-download-path (attachment)
+  "Return default local download path for ATTACHMENT."
+  (let* ((key (disco-room--attachment-download-key attachment))
+         (safe-name (disco-room--sanitize-filename
+                     (disco-room--attachment-default-save-name attachment))))
+    (expand-file-name
+     (format "%s-%s" (substring (md5 key) 0 10) safe-name)
+     disco-room-attachment-download-directory)))
+
+(defun disco-room--attachment-download-state (attachment)
+  "Return normalized download state plist for ATTACHMENT."
+  (let* ((key (disco-room--attachment-download-key attachment))
+         (entry (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
+         (path (or (plist-get entry :path)
+                   (disco-room--attachment-download-path attachment)))
+         (status (plist-get entry :status)))
+    (setq entry (plist-put entry :path path))
+    (when (and (eq status 'downloaded) (not (file-exists-p path)))
+      (setq entry (plist-put entry :status 'not-downloaded))
+      (setq entry (plist-put entry :error nil))
+      (setq status 'not-downloaded))
+    (when (and (not (eq status 'downloading))
+               (file-exists-p path))
+      (setq entry (plist-put entry :status 'downloaded))
+      (setq entry (plist-put entry :error nil)))
+    (unless (plist-get entry :status)
+      (setq entry (plist-put entry :status (if (file-exists-p path)
+                                               'downloaded
+                                             'not-downloaded))))
+    (puthash key entry disco-room--attachment-download-state-table)
+    entry))
+
+(defun disco-room--start-attachment-download (attachment &optional open-after)
+  "Start asynchronous default-location download for ATTACHMENT.
+
+When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
+  (let* ((url (disco-room--attachment-preview-url attachment))
+         (key (disco-room--attachment-download-key attachment))
+         (entry (disco-room--attachment-download-state attachment))
+         (path (plist-get entry :path))
+         (status (plist-get entry :status)))
+    (unless (and (stringp url) (not (string-empty-p url)))
+      (user-error "disco: attachment has no downloadable URL"))
+    (when (eq status 'downloading)
+      (user-error "disco: attachment download already in progress"))
+    (make-directory (or (file-name-directory path) disco-room-attachment-download-directory) t)
+    (let ((process
+           (plz 'get
+             url
+             :as 'binary
+             :noquery t
+             :then
+             (lambda (data)
+               (let ((raw-bytes (if (multibyte-string-p data)
+                                    (encode-coding-string data 'binary)
+                                  data))
+                     (current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '()))))
+                 (with-temp-buffer
+                   (set-buffer-multibyte nil)
+                   (insert raw-bytes)
+                   (let ((coding-system-for-write 'binary))
+                     (write-region (point-min) (point-max) path nil 'silent)))
+                 (setq current (plist-put current :status 'downloaded))
+                 (setq current (plist-put current :path path))
+                 (setq current (plist-put current :process nil))
+                 (setq current (plist-put current :cancel-requested nil))
+                 (setq current (plist-put current :error nil))
+                 (puthash key current disco-room--attachment-download-state-table)
+                 (disco-room--rerender-open-rooms)
+                 (message "disco: downloaded attachment -> %s" path)
+                 (when open-after
+                   (find-file path))))
+             :else
+             (lambda (err)
+               (let* ((current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
+                      (cancel-requested (disco-room--json-true-p (plist-get current :cancel-requested)))
+                      (next-status (if cancel-requested 'canceled 'error))
+                      (err-msg (unless cancel-requested (error-message-string err))))
+                 (setq current (plist-put current :status next-status))
+                 (setq current (plist-put current :process nil))
+                 (setq current (plist-put current :cancel-requested nil))
+                 (setq current (plist-put current :error err-msg))
+                 (puthash key current disco-room--attachment-download-state-table)
+                 (disco-room--rerender-open-rooms)
+                 (if cancel-requested
+                     (message "disco: attachment download canceled")
+                   (message "disco: attachment download failed: %s"
+                            (or err-msg "unknown error"))))))))
+      (setq entry (plist-put entry :status 'downloading))
+      (setq entry (plist-put entry :process process))
+      (setq entry (plist-put entry :cancel-requested nil))
+      (setq entry (plist-put entry :error nil))
+      (puthash key entry disco-room--attachment-download-state-table)
+      (disco-room--rerender-open-rooms)
+      (message "disco: downloading attachment %s"
+               (or (alist-get 'filename attachment)
+                   (alist-get 'id attachment)
+                   key)))))
+
+(defun disco-room--cancel-attachment-download (attachment)
+  "Cancel active asynchronous download for ATTACHMENT."
+  (let* ((key (disco-room--attachment-download-key attachment))
+         (entry (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
+         (status (plist-get entry :status))
+         (process (plist-get entry :process)))
+    (unless (eq status 'downloading)
+      (user-error "disco: attachment is not downloading"))
+    (setq entry (plist-put entry :cancel-requested t))
+    (puthash key entry disco-room--attachment-download-state-table)
+    (when (and (processp process) (process-live-p process))
+      (kill-process process))
+    (disco-room--rerender-open-rooms)
+    (message "disco: canceling attachment download")))
+
+(defun disco-room--open-downloaded-attachment (attachment)
+  "Open local downloaded file for ATTACHMENT."
+  (let* ((entry (disco-room--attachment-download-state attachment))
+         (path (plist-get entry :path)))
+    (unless (and (stringp path) (file-exists-p path))
+      (user-error "disco: attachment file is not downloaded yet"))
+    (find-file path)))
+
 (defun disco-room-download-attachment (attachment &optional target-path)
   "Download ATTACHMENT to TARGET-PATH.
 
 When TARGET-PATH is nil, prompt interactively for destination path."
   (interactive)
   (let* ((url (disco-room--attachment-preview-url attachment))
+         (download-state (disco-room--attachment-download-state attachment))
+         (cached-path (plist-get download-state :path))
+         (has-cached (and (stringp cached-path) (file-exists-p cached-path)))
+         (has-url (and (stringp url) (not (string-empty-p url))))
          (default-name (disco-room--attachment-default-save-name attachment))
          (target (or target-path
                      (read-file-name "Save attachment as: "
@@ -1643,12 +1796,14 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                                      default-name
                                      nil
                                      default-name))))
-    (unless (and (stringp url) (not (string-empty-p url)))
-      (user-error "disco: attachment has no downloadable URL"))
+    (unless (or has-cached has-url)
+      (user-error "disco: attachment has neither local cache nor downloadable URL"))
     (condition-case err
         (progn
           (make-directory (or (file-name-directory target) default-directory) t)
-          (url-copy-file url target t)
+          (if has-cached
+              (copy-file cached-path target t)
+            (url-copy-file url target t))
           (message "disco: downloaded attachment -> %s" target))
       (error
        (user-error "disco: attachment download failed: %s"
@@ -1668,7 +1823,11 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (meta (disco-room--attachment-meta-line attachment))
          (description (alist-get 'description attachment))
          (url (disco-room--attachment-preview-url attachment))
-         (preview (disco-room--attachment-preview-image attachment)))
+         (preview (disco-room--attachment-preview-image attachment))
+         (download-state (disco-room--attachment-download-state attachment))
+         (download-status (plist-get download-state :status))
+         (download-path (plist-get download-state :path))
+         (download-error (plist-get download-state :error)))
     (let ((top-start (point)))
       (insert "    +-- ")
       (insert summary)
@@ -1689,19 +1848,13 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         (add-text-properties desc-start (point)
                              '(face disco-room-attachment-card-meta))))
     (let ((action-start (point)))
-      (insert "    | ")
+      (insert "    | link: ")
       (if (and (stringp url) (not (string-empty-p url)))
           (progn
             (disco-room--insert-attachment-action-button
-             "[Open]"
+             "[Open URL]"
              (lambda () (browse-url url t))
              "Open attachment URL")
-            (insert " ")
-            (disco-room--insert-attachment-action-button
-             "[Save As]"
-             (lambda ()
-               (disco-room-download-attachment attachment))
-             "Download attachment to local file")
             (insert " ")
             (disco-room--insert-attachment-action-button
              "[Copy URL]"
@@ -1712,6 +1865,64 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         (insert "[No URL]"))
       (insert "\n")
       (add-text-properties action-start (point)
+                           '(face disco-room-attachment-card-meta)))
+    (let ((transfer-start (point)))
+      (insert "    | transfer: ")
+      (pcase download-status
+        ('downloading
+         (insert "[Downloading...] ")
+         (disco-room--insert-attachment-action-button
+          "[Cancel]"
+          (lambda ()
+            (disco-room--cancel-attachment-download attachment))
+          "Cancel attachment download"))
+        ('downloaded
+         (disco-room--insert-attachment-action-button
+          "[Open Local]"
+          (lambda ()
+            (disco-room--open-downloaded-attachment attachment))
+          "Open downloaded attachment file")
+         (insert " ")
+         (disco-room--insert-attachment-action-button
+          "[Save As]"
+          (lambda ()
+            (disco-room-download-attachment attachment))
+          "Copy downloaded file (or download) to chosen path")
+         (when (and (stringp download-path) (file-exists-p download-path))
+           (insert (format "  %s" (file-name-nondirectory download-path)))))
+        ('error
+         (when (and (stringp url) (not (string-empty-p url)))
+           (disco-room--insert-attachment-action-button
+            "[Retry]"
+            (lambda ()
+              (disco-room--start-attachment-download attachment nil))
+            "Retry attachment download")
+           (insert " "))
+         (disco-room--insert-attachment-action-button
+          "[Save As]"
+          (lambda ()
+            (disco-room-download-attachment attachment))
+          "Download attachment to chosen path")
+         (when (and (stringp download-error) (not (string-empty-p download-error)))
+           (insert (format "  error=%s"
+                           (truncate-string-to-width download-error 68 nil nil t)))))
+        (_
+         (if (and (stringp url) (not (string-empty-p url)))
+             (progn
+               (disco-room--insert-attachment-action-button
+                "[Download]"
+                (lambda ()
+                  (disco-room--start-attachment-download attachment nil))
+                "Download attachment into local cache directory")
+               (insert " ")
+               (disco-room--insert-attachment-action-button
+                "[Save As]"
+                (lambda ()
+                  (disco-room-download-attachment attachment))
+                "Download attachment to chosen path"))
+           (insert "[No URL]"))))
+      (insert "\n")
+      (add-text-properties transfer-start (point)
                            '(face disco-room-attachment-card-meta)))
     (when (equal (disco-room--attachment-kind attachment) "img")
       (let ((preview-start (point)))
