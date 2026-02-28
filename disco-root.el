@@ -116,25 +116,25 @@
     (let ((unread-suffix (if (> unread 0)
                              (format " [%d]" unread)
                            "")))
-    (pcase channel-type
-      ((or 10 11 12)
-       (let ((tags (disco-root--thread-status-tags channel)))
-         (format "[thread] %s%s%s"
-                 name
-                 (if (string-empty-p tags)
-                     ""
-                   (format " (%s)" tags))
-                 unread-suffix)))
-      ((or 0 5 15 16)
-       (let* ((thread-count (disco-root--thread-count-under-parent channel))
-              (suffix (if (> thread-count 0)
-                          (format " (%d threads)" thread-count)
-                        "")))
-         (pcase channel-type
-           ((or 0 5) (format "#%s%s%s" name suffix unread-suffix))
-           (15 (format "[forum] %s%s%s" name suffix unread-suffix))
-           (16 (format "[media] %s%s%s" name suffix unread-suffix)))))
-      (_ (format "[type-%s] %s%s" channel-type name unread-suffix))))))
+      (pcase channel-type
+        ((or 10 11 12)
+         (let ((tags (disco-root--thread-status-tags channel)))
+           (format "[thread] %s%s%s"
+                   name
+                   (if (string-empty-p tags)
+                       ""
+                     (format " (%s)" tags))
+                   unread-suffix)))
+        ((or 0 5 15 16)
+         (let* ((thread-count (disco-root--thread-count-under-parent channel))
+                (suffix (if (> thread-count 0)
+                            (format " (%d threads)" thread-count)
+                          "")))
+           (pcase channel-type
+             ((or 0 5) (format "#%s%s%s" name suffix unread-suffix))
+             (15 (format "[forum] %s%s%s" name suffix unread-suffix))
+             (16 (format "[media] %s%s%s" name suffix unread-suffix)))))
+        (_ (format "[type-%s] %s%s" channel-type name unread-suffix))))))
 
 (defun disco-root--guild-name-by-id (guild-id)
   "Return guild display name for GUILD-ID."
