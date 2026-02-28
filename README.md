@@ -14,6 +14,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Start client with `M-x disco`.
 - Fetch and display guild/channel list in `*disco*`.
 - Fetch and display private channels (DM/group DM) in root.
+- Hide guild channels lacking `VIEW_CHANNEL` based on computed channel permissions.
 - Fetch and display thread channels nested under their parent channels.
 - Browse archived thread lists per parent channel.
 - Open channel timeline.

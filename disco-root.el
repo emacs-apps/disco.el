@@ -91,9 +91,44 @@
       (eq value 'true)
       (equal value "true")))
 
+(defconst disco-root--permission-view-channel-bit (ash 1 10)
+  "Permission bit mask for VIEW_CHANNEL.")
+
+(defun disco-root--parse-decimal-integer (value)
+  "Parse decimal integer VALUE and return integer or nil."
+  (cond
+   ((integerp value)
+    value)
+   ((and (stringp value)
+         (string-match-p "\\`[0-9]+\\'" value))
+    (string-to-number value))
+   (t nil)))
+
+(defun disco-root--channel-viewable-p (channel)
+  "Return non-nil when CHANNEL should be visible to current user.
+
+For guild channels, computed `permissions' is used when available.
+Channels lacking this field are treated as visible to avoid false negatives."
+  (let ((channel-type (alist-get 'type channel))
+        (guild-id (alist-get 'guild_id channel))
+        (permissions (alist-get 'permissions channel)))
+    (cond
+     ((memq channel-type '(1 3))
+      t)
+     ((null guild-id)
+      t)
+     ((null permissions)
+      t)
+     (t
+      (let ((bits (disco-root--parse-decimal-integer permissions)))
+        (if (integerp bits)
+            (not (zerop (logand bits disco-root--permission-view-channel-bit)))
+          t))))))
+
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
-  (memq (alist-get 'type channel) '(0 1 3 5 10 11 12 15 16)))
+  (and (memq (alist-get 'type channel) '(0 1 3 5 10 11 12 15 16))
+       (disco-root--channel-viewable-p channel)))
 
 (defun disco-root--openable-channel-p (channel)
   "Return non-nil when CHANNEL can be opened as a room timeline."
@@ -235,7 +270,8 @@
       (let* ((guild-id (alist-get 'id guild))
              (guild-name (or (alist-get 'name guild) guild-id "unknown-guild")))
         (dolist (channel (disco-state-guild-channels guild-id))
-          (when (disco-root--thread-parent-channel-p channel)
+          (when (and (disco-root--thread-parent-channel-p channel)
+                     (disco-root--channel-viewable-p channel))
             (push (cons (format "%s / %s (%s)"
                                 guild-name
                                 (disco-root--channel-label channel)
@@ -507,7 +543,9 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
     (let (orphan-threads)
       (dolist (thread (disco-state-guild-threads guild-id))
         (let ((thread-id (alist-get 'id thread)))
-          (when (and thread-id (not (gethash thread-id rendered-thread-ids)))
+          (when (and thread-id
+                     (disco-root--displayable-channel-p thread)
+                     (not (gethash thread-id rendered-thread-ids)))
             (push thread orphan-threads))))
       (setq orphan-threads (nreverse orphan-threads))
       (when orphan-threads
