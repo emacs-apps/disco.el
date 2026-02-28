@@ -14,8 +14,10 @@ This repository currently contains an MVP scaffold designed with these reference
 - Start client with `M-x disco`.
 - Fetch and display guild/channel list in `*disco*`.
 - Fetch and display thread channels nested under their parent channels.
+- Browse archived thread lists per parent channel.
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
+- In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
@@ -42,6 +44,12 @@ This repository currently contains an MVP scaffold designed with these reference
 - `M-x disco-describe-rate-limits`: open a buffer showing global/route/bucket cooldown state.
 - `M-x disco-describe-gateway`: show websocket state, watched channel count, resume/session info, and reconnect backoff state.
 
+## Thread Commands
+
+- Root buffer: `A` opens archived thread browser for a selected parent channel.
+- Archived thread buffer: `g` refreshes, `RET`/mouse opens selected thread.
+- Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
+
 ## Gateway Configuration
 
 - `disco-gateway-version`: gateway API version (default now aligned to `v10`).
@@ -51,6 +59,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
 - `disco-fetch-guild-active-threads`: optionally fetch `/guilds/{id}/threads/active` during root refresh.
+- `disco-thread-archive-fetch-limit`: page size used by archived thread fetchers.
 - `disco-gateway-reconnect-delay`: base reconnect delay.
 - `disco-gateway-max-reconnect-attempts`: hard cap for consecutive reconnects (`nil` for unlimited).
 - `disco-gateway-reconnect-max-delay`: max reconnect delay cap.
@@ -72,7 +81,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 ## Next Milestones
 
-1. Add thread-focused commands (create/join/archive, active vs archived filters, parent/thread navigation).
+1. Add thread creation commands (from message and detached thread creation flows).
 2. Expand dispatch handling beyond messages/threads (channel/guild mutations and unread state).
 3. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
 4. Add queue prioritization/backpressure so user actions are favored over background work.

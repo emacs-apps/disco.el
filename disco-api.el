@@ -87,14 +87,14 @@ Each element is (KEY . remaining-seconds)."
     (pop-to-buffer buf)))
 
 (defun disco-api-reset-rate-limit-state ()
-  "Reset cached rate-limit tracking state." 
+  "Reset cached rate-limit tracking state."
   (setq disco-api--global-rate-limit-until 0.0)
   (clrhash disco-api--route-rate-limit-until)
   (clrhash disco-api--route-bucket-map)
   (clrhash disco-api--bucket-rate-limit-until))
 
 (defun disco-api--now ()
-  "Return current unix timestamp as float." 
+  "Return current unix timestamp as float."
   (float-time))
 
 (defun disco-api--route-key (method endpoint)
@@ -102,7 +102,7 @@ Each element is (KEY . remaining-seconds)."
   (format "%s %s" method endpoint))
 
 (defun disco-api--header (headers key)
-  "Return header KEY value from HEADERS, supporting symbol/string forms." 
+  "Return header KEY value from HEADERS, supporting symbol/string forms."
   (let ((sym (if (symbolp key)
                  key
                (intern (downcase key))))
@@ -113,7 +113,7 @@ Each element is (KEY . remaining-seconds)."
         (cdr (assoc str headers)))))
 
 (defun disco-api--to-number (value)
-  "Convert VALUE to number when possible, else nil." 
+  "Convert VALUE to number when possible, else nil."
   (cond
    ((numberp value)
     (float value))
@@ -123,13 +123,13 @@ Each element is (KEY . remaining-seconds)."
    (t nil)))
 
 (defun disco-api--remaining-zero-p (value)
-  "Return non-nil if VALUE represents 0 remaining requests." 
+  "Return non-nil if VALUE represents 0 remaining requests."
   (or (equal value "0")
       (equal value 0)
       (equal value 0.0)))
 
 (defun disco-api--json-true-p (value)
-  "Return non-nil if VALUE semantically represents JSON true." 
+  "Return non-nil if VALUE semantically represents JSON true."
   (or (eq value t)
       (equal value "true")
       (eq value 'true)))
@@ -143,7 +143,7 @@ Return a number (seconds) or nil."
            (disco-api--to-number (alist-get 'retry_after body)))))
 
 (defun disco-api--route-deadline (route-key)
-  "Return current effective deadline for ROUTE-KEY." 
+  "Return current effective deadline for ROUTE-KEY."
   (let* ((route-deadline (or (gethash route-key disco-api--route-rate-limit-until) 0.0))
          (bucket-id (gethash route-key disco-api--route-bucket-map))
          (bucket-deadline (if bucket-id
@@ -152,7 +152,7 @@ Return a number (seconds) or nil."
     (max route-deadline bucket-deadline)))
 
 (defun disco-api--wait-for-rate-limit (route-key)
-  "Sleep until ROUTE-KEY is no longer blocked by rate-limit state." 
+  "Sleep until ROUTE-KEY is no longer blocked by rate-limit state."
   (let* ((deadline (max disco-api--global-rate-limit-until
                         (disco-api--route-deadline route-key)))
          (sleep-time (- deadline (disco-api--now))))
@@ -160,7 +160,7 @@ Return a number (seconds) or nil."
       (sleep-for sleep-time))))
 
 (defun disco-api--set-route-deadline (route-key deadline &optional bucket-id)
-  "Set DEADLINE for ROUTE-KEY, optionally under BUCKET-ID." 
+  "Set DEADLINE for ROUTE-KEY, optionally under BUCKET-ID."
   (if bucket-id
       (puthash bucket-id deadline disco-api--bucket-rate-limit-until)
     (puthash route-key deadline disco-api--route-rate-limit-until)))
@@ -309,6 +309,63 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
 
 Response is an alist with keys including `threads' and `members'."
   (disco-api--request "GET" (format "/guilds/%s/threads/active" guild-id) nil nil nil))
+
+(defun disco-api--thread-archive-query (before limit)
+  "Build query alist for thread archive endpoints."
+  (let ((query `(("limit" . ,(number-to-string (or limit 50))))))
+    (when before
+      (setq query (append query `(("before" . ,before)))))
+    query))
+
+(defun disco-api-channel-archived-public-threads (channel-id &optional before limit)
+  "Fetch archived public threads under CHANNEL-ID.
+
+BEFORE is an ISO8601 timestamp. LIMIT defaults to 50."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/threads/archived/public" channel-id)
+   nil
+   (disco-api--thread-archive-query before limit)
+   nil))
+
+(defun disco-api-channel-archived-private-threads (channel-id &optional before limit)
+  "Fetch archived private threads under CHANNEL-ID.
+
+BEFORE is an ISO8601 timestamp. LIMIT defaults to 50."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/threads/archived/private" channel-id)
+   nil
+   (disco-api--thread-archive-query before limit)
+   nil))
+
+(defun disco-api-channel-joined-private-archived-threads (channel-id &optional before limit)
+  "Fetch archived private threads joined by current user under CHANNEL-ID.
+
+BEFORE is a thread snowflake ID. LIMIT defaults to 50."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/users/@me/threads/archived/private" channel-id)
+   nil
+   (disco-api--thread-archive-query before limit)
+   nil))
+
+(defun disco-api-join-thread (thread-id)
+  "Join thread THREAD-ID as current user."
+  (disco-api--request "PUT" (format "/channels/%s/thread-members/@me" thread-id) nil nil nil))
+
+(defun disco-api-leave-thread (thread-id)
+  "Leave thread THREAD-ID as current user."
+  (disco-api--request "DELETE" (format "/channels/%s/thread-members/@me" thread-id) nil nil nil))
+
+(defun disco-api-set-thread-archived (thread-id archived &optional locked)
+  "Set THREAD-ID archived state to ARCHIVED.
+
+If LOCKED is non-nil, set lock state in the same request."
+  (let ((payload `((archived . ,(if archived t :false)))))
+    (when (not (null locked))
+      (setq payload (append payload `((locked . ,(if locked t :false))))))
+    (disco-api--request "PATCH" (format "/channels/%s" thread-id) payload nil nil)))
 
 (defun disco-api-channel-messages (channel-id &optional before limit)
   "Fetch messages in CHANNEL-ID.

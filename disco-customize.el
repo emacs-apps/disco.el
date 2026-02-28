@@ -76,6 +76,11 @@ logged and ignored, so enabling this is safe but optional."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-thread-archive-fetch-limit 50
+  "Default limit used when fetching archived thread lists."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-gateway-reconnect-delay 3
   "Seconds to wait before reconnecting gateway after disconnect/error."
   :type 'integer

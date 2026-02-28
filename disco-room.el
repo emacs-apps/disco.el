@@ -18,6 +18,68 @@
 (defvar-local disco-room--channel-name nil)
 (defvar-local disco-room--gateway-handler nil)
 
+(defun disco-room--channel-object ()
+  "Return current room channel object from state."
+  (disco-state-channel disco-room--channel-id))
+
+(defun disco-room--json-true-p (value)
+  "Return non-nil when VALUE semantically represents JSON true."
+  (or (eq value t)
+      (eq value 'true)
+      (equal value "true")))
+
+(defun disco-room--thread-channel-p (&optional channel)
+  "Return non-nil when CHANNEL (or current room channel) is a thread."
+  (let ((target (or channel (disco-room--channel-object))))
+    (and target (disco-state-channel-thread-p target))))
+
+(defun disco-room--thread-metadata (&optional channel)
+  "Return thread metadata alist for CHANNEL or current room channel."
+  (let ((target (or channel (disco-room--channel-object))))
+    (or (alist-get 'thread_metadata target) '())))
+
+(defun disco-room--thread-archived-p (&optional channel)
+  "Return non-nil when CHANNEL thread is archived."
+  (let* ((target (or channel (disco-room--channel-object)))
+         (meta (disco-room--thread-metadata target)))
+    (or (disco-room--json-true-p (alist-get 'archived meta))
+        (disco-room--json-true-p (alist-get 'archived target)))))
+
+(defun disco-room--thread-locked-p (&optional channel)
+  "Return non-nil when CHANNEL thread is locked."
+  (let* ((target (or channel (disco-room--channel-object)))
+         (meta (disco-room--thread-metadata target)))
+    (or (disco-room--json-true-p (alist-get 'locked meta))
+        (disco-room--json-true-p (alist-get 'locked target)))))
+
+(defun disco-room--thread-header-suffix ()
+  "Return human-readable status suffix for thread header."
+  (if (not (disco-room--thread-channel-p))
+      ""
+    (let (tags)
+      (when (disco-room--thread-archived-p)
+        (push "archived" tags))
+      (when (disco-room--thread-locked-p)
+        (push "locked" tags))
+      (when (= (alist-get 'type (disco-room--channel-object)) 12)
+        (push "private" tags))
+      (if tags
+          (format " [thread: %s]" (mapconcat #'identity (nreverse tags) ", "))
+        " [thread]"))))
+
+(defun disco-room--ensure-thread-channel ()
+  "Signal user error unless current room channel is a thread."
+  (unless (disco-room--thread-channel-p)
+    (user-error "disco: current room is not a thread")))
+
+(defun disco-room--thread-with-meta-field (channel key value)
+  "Return CHANNEL with thread metadata KEY set to VALUE."
+  (let* ((updated (copy-tree channel))
+         (meta (copy-tree (or (alist-get 'thread_metadata updated) '()))))
+    (setf (alist-get key meta nil 'remove) value)
+    (setf (alist-get 'thread_metadata updated nil 'remove) meta)
+    updated))
+
 (defun disco-room--buffer-name (channel-name channel-id)
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
@@ -48,7 +110,9 @@
   (let ((inhibit-read-only t)
         (messages (disco-state-messages disco-room--channel-id)))
     (erase-buffer)
-    (insert (format "Channel: %s\n\n" disco-room--channel-name))
+    (insert (format "Channel: %s%s\n\n"
+                    disco-room--channel-name
+                    (disco-room--thread-header-suffix)))
     ;; API returns newest-first by default; reverse for chat-like display.
     (dolist (msg (reverse messages))
       (disco-room--insert-message msg))
@@ -103,10 +167,46 @@
       (disco-room-refresh)
       (message "disco: message sent"))))
 
+(defun disco-room-join-thread ()
+  "Join current thread room as current user."
+  (interactive)
+  (disco-room--ensure-thread-channel)
+  (disco-api-join-thread disco-room--channel-id)
+  (message "disco: joined thread %s" disco-room--channel-name))
+
+(defun disco-room-leave-thread ()
+  "Leave current thread room as current user."
+  (interactive)
+  (disco-room--ensure-thread-channel)
+  (disco-api-leave-thread disco-room--channel-id)
+  (message "disco: left thread %s" disco-room--channel-name))
+
+(defun disco-room-toggle-thread-archived ()
+  "Toggle archived state for current thread."
+  (interactive)
+  (disco-room--ensure-thread-channel)
+  (let* ((channel (or (disco-room--channel-object)
+                      (user-error "disco: unknown thread in state")))
+         (next-archived (not (disco-room--thread-archived-p channel)))
+         (updated (disco-api-set-thread-archived disco-room--channel-id next-archived nil)))
+    (if (and (listp updated) (alist-get 'id updated))
+        (disco-state-upsert-channel updated)
+      ;; Fallback when API returns empty body.
+      (disco-state-upsert-channel
+       (disco-room--thread-with-meta-field
+        channel
+        'archived
+        (if next-archived t :false))))
+    (disco-room-render)
+    (message "disco: thread %s" (if next-archived "archived" "unarchived"))))
+
 (defvar disco-room-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-room-refresh)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+    (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
+    (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
+    (define-key map (kbd "C-c C-a") #'disco-room-toggle-thread-archived)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `disco-room-mode'.")
