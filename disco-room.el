@@ -13,6 +13,7 @@
 (require 'seq)
 (require 'ring)
 (require 'cl-lib)
+(require 'ewoc)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
@@ -37,6 +38,8 @@
 (defvar-local disco-room--last-search-query nil)
 (defvar-local disco-room--input-marker nil)
 (defvar-local disco-room--rendering nil)
+(defvar-local disco-room--ewoc nil)
+(defvar-local disco-room--message-node-table nil)
 
 (defcustom disco-room-input-history-size 30
   "Maximum number of draft entries kept in room input history."
@@ -188,25 +191,6 @@
                  (< beg (cdr bounds))
                  (> end (car bounds)))
         (disco-room--sync-draft-from-buffer)))))
-
-(defun disco-room--before-change (beg end)
-  "Reject edits outside draft input region for changes from BEG to END."
-  (unless disco-room--rendering
-    (let ((bounds (disco-room--input-region-bounds)))
-      (unless (and bounds
-                   (<= (car bounds) beg)
-                   (<= end (cdr bounds)))
-        (user-error "disco: edit only the draft area after >>>")))))
-
-(defun disco-room--apply-input-region-properties (input-start)
-  "Apply draft field/keymap properties for input region at INPUT-START."
-  (let ((writable-end (point-max)))
-    (add-text-properties
-     input-start writable-end
-     (list 'field 'disco-room-input
-           'local-map disco-room-input-map
-           'rear-nonsticky '(field local-map)))
-    (setq disco-room--input-marker (copy-marker input-start nil))))
 
 (defun disco-room--set-draft (text)
   "Set room draft TEXT and re-render room."
@@ -506,19 +490,115 @@ Returns nil when left blank."
     (add-text-properties
      line-start
      (point)
-     (list 'disco-message-id message-id))))
+     (list 'read-only t
+           'front-sticky '(read-only)
+           'disco-message-id message-id))))
+
+(defun disco-room--ewoc-printer (msg)
+  "EWOC pretty-printer for one room message MSG."
+  (disco-room--insert-message msg))
+
+(defun disco-room--input-footer-text (draft)
+  "Build EWOC footer text containing room prompt with DRAFT.
+
+Footer marks the editable input tail using `disco-room-input' property."
+  (let ((prompt (propertize "\n>>> "
+                            'read-only t
+                            'front-sticky '(read-only)
+                            'rear-nonsticky '(read-only disco-room-input)))
+        (input (if (string-empty-p draft)
+                   "\n"
+                 (concat draft "\n"))))
+    (concat prompt
+            (propertize input
+                        'disco-room-input t
+                        'read-only nil))))
+
+(defun disco-room--bind-input-region-from-footer ()
+  "Locate and bind editable input region from EWOC footer properties."
+  (let ((input-start (text-property-any (point-min) (point-max) 'disco-room-input t)))
+    (when input-start
+      (let ((input-end (or (next-single-property-change
+                            input-start 'disco-room-input nil (point-max))
+                           (point-max))))
+        (add-text-properties
+         input-start input-end
+         (list 'read-only nil
+               'field 'disco-room-input
+               'local-map disco-room-input-map
+               'rear-nonsticky '(read-only field local-map)))
+        (setq disco-room--input-marker (copy-marker input-start nil))))))
+
+(defun disco-room--insert-message-node (msg)
+  "Insert one message node for MSG at the end of room EWOC."
+  (when disco-room--ewoc
+    (let ((disco-room--rendering t)
+          (inhibit-read-only t))
+      (let* ((node (ewoc-enter-last disco-room--ewoc msg))
+             (message-id (and (listp msg) (alist-get 'id msg))))
+        (when (and node message-id disco-room--message-node-table)
+          (puthash message-id node disco-room--message-node-table))
+        node))))
+
+(defun disco-room--upsert-message-node (msg)
+  "Insert or update EWOC node for message MSG.
+
+Return non-nil when EWOC was updated."
+  (let ((message-id (and (listp msg) (alist-get 'id msg))))
+    (when (and message-id disco-room--ewoc disco-room--message-node-table)
+      (let ((node (gethash message-id disco-room--message-node-table)))
+        (if node
+            (let ((disco-room--rendering t)
+                  (inhibit-read-only t))
+              (ewoc-set-data node msg)
+              (ewoc-invalidate disco-room--ewoc node)
+              t)
+          (and (disco-room--insert-message-node msg) t))))))
+
+(defun disco-room--delete-message-node (message-id)
+  "Delete EWOC node identified by MESSAGE-ID.
+
+Return non-nil when a node is removed."
+  (let ((node (and message-id
+                   disco-room--message-node-table
+                   (gethash message-id disco-room--message-node-table))))
+    (when (and node disco-room--ewoc)
+      (let ((disco-room--rendering t)
+            (inhibit-read-only t))
+        (ewoc-delete disco-room--ewoc node)
+        (remhash message-id disco-room--message-node-table)
+        t))))
+
+(defun disco-room--apply-live-message-event-partially (event)
+  "Apply EVENT with EWOC-local message updates when possible.
+
+Return non-nil when handled without full room rerender."
+  (let* ((event-type (plist-get event :type))
+         (event-message (plist-get event :message))
+         (message-id (or (and (listp event-message) (alist-get 'id event-message))
+                         (plist-get event :message-id)))
+         (state-message (and message-id (disco-room--message-by-id message-id)))
+         handled)
+    (pcase event-type
+      ('message-create
+       (setq handled (disco-room--upsert-message-node
+                      (or state-message event-message))))
+      ('message-update
+       (setq handled (and state-message
+                          (disco-room--upsert-message-node state-message))))
+      ('message-delete
+       (setq handled (disco-room--delete-message-node message-id))))
+    (when handled
+      (disco-room--update-message-window-state
+       (or (disco-state-messages disco-room--channel-id) '()))
+      t)))
 
 (defun disco-room-render ()
   "Render timeline for current room buffer."
   (let ((inhibit-read-only t)
         (messages (disco-state-messages disco-room--channel-id))
-        (draft (disco-room--current-draft)))
-    ;; Ensure already-open room buffers from older code paths also get
-    ;; strict edit guards after first re-render.
-    (unless (memq #'disco-room--before-change before-change-functions)
-      (add-hook 'before-change-functions #'disco-room--before-change nil t))
-    (unless (memq #'disco-room--after-change after-change-functions)
-      (add-hook 'after-change-functions #'disco-room--after-change nil t))
+        (draft (disco-room--current-draft))
+        header-end)
     (setq disco-room--rendering t)
     (unwind-protect
         (progn
@@ -540,19 +620,23 @@ Returns nil when left blank."
           (when disco-room--history-exhausted
             (insert "(older history exhausted)\n"))
           (insert "\n")
+          (setq header-end (point))
+          (put-text-property (point-min) header-end 'read-only t)
+          (setq disco-room--input-marker nil)
+          (setq disco-room--message-node-table (make-hash-table :test #'equal))
+          (setq disco-room--ewoc
+                (ewoc-create
+                 #'disco-room--ewoc-printer
+                 nil
+                 (disco-room--input-footer-text draft)
+                 t))
           ;; API returns newest-first by default; reverse for chat-like display.
           (dolist (msg (reverse messages))
-            (disco-room--insert-message msg))
-          (unless (or (null messages)
-                      (= (char-before (point)) ?\n))
-            (insert "\n"))
-          (insert "\n>>> ")
-          (let ((input-start (point)))
-            (insert draft)
-            (insert "\n")
-            (disco-room--apply-input-region-properties input-start)
+            (disco-room--insert-message-node msg))
+          (disco-room--bind-input-region-from-footer)
+          (when (markerp disco-room--input-marker)
             ;; Keep typing position at end of current draft.
-            (goto-char (max input-start (1- (point))))
+            (goto-char (point-max))
             (disco-room--sync-draft-from-buffer)))
       (setq disco-room--rendering nil))))
 
@@ -612,14 +696,19 @@ REASON is shown in the minibuffer."
        (format "disco: guild for channel %s was deleted"
                (or disco-room--channel-name disco-room--channel-id))))
      ((and (equal event-channel-id disco-room--channel-id)
-           (memq event-type
-                 '(message-create message-update message-delete
-                   channel-update thread-update)))
+           (memq event-type '(channel-update thread-update)))
       (let ((at-bottom (= (point) (point-max)))
             (channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
         (disco-room-render)
+        (when at-bottom
+          (goto-char (point-max)))))
+     ((and (equal event-channel-id disco-room--channel-id)
+           (memq event-type '(message-create message-update message-delete)))
+      (let ((at-bottom (= (point) (point-max))))
+        (unless (disco-room--apply-live-message-event-partially event)
+          (disco-room-render))
         (when (eq event-type 'message-create)
           (let* ((message (plist-get event :message))
                  (message-id (and (listp message) (alist-get 'id message))))
@@ -969,7 +1058,8 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (setq-local disco-room--last-search-query nil)
   (setq-local disco-room--input-marker nil)
   (setq-local disco-room--rendering nil)
-  (add-hook 'before-change-functions #'disco-room--before-change nil t)
+  (setq-local disco-room--ewoc nil)
+  (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (add-hook 'after-change-functions #'disco-room--after-change nil t))
 
 (defun disco-room-open (channel-id channel-name)

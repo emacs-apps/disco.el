@@ -21,6 +21,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Send plain text message with `C-c C-c` in room buffer.
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
+- Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
@@ -35,6 +36,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus sort toggle (`\`) and view cycle (`v`: all/unread/dms).
 - Root list uses a Discord-native guild -> channel -> thread tree layout.
 - Root rendering now uses EWOC, with local channel-row refresh on live message/read events.
+- Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
 ## Dependencies
@@ -102,6 +104,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
+- Room EWOC state keeps message-node indexes so chat events can update rows without full rerender.
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.
