@@ -24,6 +24,24 @@
 (defvar-local disco-root--archived-parent-channel nil
   "Parent channel object for archived thread list buffers.")
 
+(defconst disco-root--archived-thread-sources
+  '(("public" . disco-api-channel-archived-public-threads)
+    ("private" . disco-api-channel-archived-private-threads)
+    ("joined-private" . disco-api-channel-joined-private-archived-threads))
+  "Archived thread source endpoints used for per-source pagination.")
+
+(defvar-local disco-root--archived-before-cursors nil
+  "Alist source-name -> before cursor for archived pagination.")
+
+(defvar-local disco-root--archived-source-has-more nil
+  "Alist source-name -> non-nil when source may have more archived pages.")
+
+(defvar-local disco-root--archived-threads-cache nil
+  "Accumulated archived thread list for current archived buffer.")
+
+(defvar-local disco-root--archived-last-errors nil
+  "Latest archived pagination errors for current archived buffer.")
+
 (defvar-local disco-root--gateway-handler nil
   "Buffer-local gateway event handler closure.")
 
@@ -194,29 +212,110 @@
            (disco-root--thread-archive-sort-key a)
            (disco-root--thread-archive-sort-key b)))))
 
-(defun disco-root--fetch-archived-threads (parent-channel-id)
-  "Fetch archived thread lists for PARENT-CHANNEL-ID.
+(defun disco-root--reset-archived-pagination-state ()
+  "Reset archived-thread pagination state for current archived buffer."
+  (setq disco-root--archived-before-cursors nil)
+  (setq disco-root--archived-source-has-more nil)
+  (setq disco-root--archived-threads-cache nil)
+  (setq disco-root--archived-last-errors nil)
+  (dolist (source disco-root--archived-thread-sources)
+    (let ((name (car source)))
+      (push (cons name nil) disco-root--archived-before-cursors)
+      (push (cons name t) disco-root--archived-source-has-more)))
+  (setq disco-root--archived-before-cursors
+        (nreverse disco-root--archived-before-cursors))
+  (setq disco-root--archived-source-has-more
+        (nreverse disco-root--archived-source-has-more)))
 
-Return plist with keys :threads and :errors."
-  (let ((sources
-         `(("public" . ,#'disco-api-channel-archived-public-threads)
-           ("private" . ,#'disco-api-channel-archived-private-threads)
-           ("joined-private" . ,#'disco-api-channel-joined-private-archived-threads)))
-        all-threads
-        errors)
-    (dolist (source sources)
-      (let ((source-name (car source))
-            (source-fn (cdr source)))
-        (condition-case err
-            (let* ((resp (funcall source-fn parent-channel-id nil disco-thread-archive-fetch-limit))
-                   (threads (or (alist-get 'threads resp) '())))
-              (setq all-threads (append all-threads threads)))
-          (error
-           (push (format "%s: %s" source-name (error-message-string err))
-                 errors)))))
+(defun disco-root--archived-next-before-cursor (source-name threads)
+  "Compute next BEFORE cursor for SOURCE-NAME from THREADS page."
+  (let ((last-thread (car (last threads))))
+    (when last-thread
+      (if (equal source-name "joined-private")
+          (alist-get 'id last-thread)
+        (or (alist-get 'archive_timestamp (disco-root--thread-metadata last-thread))
+            (alist-get 'archive_timestamp last-thread))))))
+
+(defun disco-root--archived-any-source-has-more-p ()
+  "Return non-nil when at least one archived source may return more pages."
+  (seq-some #'cdr disco-root--archived-source-has-more))
+
+(defun disco-root--archived-source-status-string ()
+  "Return human-readable per-source pagination status string."
+  (mapconcat
+   (lambda (source)
+     (let* ((name (car source))
+            (has-more (alist-get name disco-root--archived-source-has-more nil nil #'equal)))
+       (format "%s:%s" name (if has-more "more" "end"))))
+   disco-root--archived-thread-sources
+   "  "))
+
+(defun disco-root--fetch-archived-threads-page (parent-channel-id &optional reset)
+  "Fetch one archived thread page for PARENT-CHANNEL-ID.
+
+When RESET is non-nil, start pagination from first page for all sources.
+Return plist with keys :threads and :errors for this page only."
+  (when reset
+    (disco-root--reset-archived-pagination-state))
+  (let (page-threads errors)
+    (dolist (source disco-root--archived-thread-sources)
+      (let* ((source-name (car source))
+             (source-fn (cdr source))
+             (should-fetch (or reset
+                               (alist-get source-name
+                                          disco-root--archived-source-has-more
+                                          nil nil #'equal))))
+        (when should-fetch
+          (let ((before (alist-get source-name disco-root--archived-before-cursors nil nil #'equal)))
+            (condition-case err
+                (let* ((resp (funcall source-fn parent-channel-id before disco-thread-archive-fetch-limit))
+                       (threads (or (alist-get 'threads resp) '()))
+                       (has-more (disco-root--json-true-p (alist-get 'has_more resp)))
+                       (next-before (disco-root--archived-next-before-cursor source-name threads)))
+                  (when (and has-more (null threads))
+                    ;; Prevent endless pagination loops when server returns
+                    ;; an empty page without advancing cursor semantics.
+                    (setq has-more nil))
+                  (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                        has-more)
+                  (when next-before
+                    (setf (alist-get source-name disco-root--archived-before-cursors nil nil #'equal)
+                          next-before))
+                  (setq page-threads (append page-threads threads)))
+              (error
+               ;; Keep source marked as has-more so temporary failures can be retried.
+               (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal) t)
+               (push (format "%s: %s" source-name (error-message-string err))
+                     errors)))))))
     (list :threads (disco-root--sort-threads-by-archive-time
-                    (disco-root--dedupe-threads all-threads))
+                    (disco-root--dedupe-threads page-threads))
           :errors (nreverse errors))))
+
+(defun disco-root--render-archived-threads-buffer ()
+  "Render archived-thread buffer from local pagination/cache state."
+  (let* ((parent-channel disco-root--archived-parent-channel)
+         (threads (or disco-root--archived-threads-cache '()))
+         (errors (or disco-root--archived-last-errors '()))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "Archived Threads: %s\n"
+                    (disco-root--channel-label parent-channel)))
+    (insert "g: refresh   n: next page   RET/mouse-1: open thread   q: quit\n")
+    (insert (format "Loaded: %d   Sources: %s\n"
+                    (length threads)
+                    (disco-root--archived-source-status-string)))
+    (unless (disco-root--archived-any-source-has-more-p)
+      (insert "(no more archived pages)\n"))
+    (insert "\n")
+    (if threads
+        (dolist (thread threads)
+          (disco-root--insert-channel-line thread 2))
+      (insert "(no archived threads)\n"))
+    (when errors
+      (insert "\nErrors:\n")
+      (dolist (err errors)
+        (insert (format "  - %s\n" err))))
+    (goto-char (point-min))))
 
 (defun disco-root--archived-buffer-name (parent-channel)
   "Return archived-thread buffer name for PARENT-CHANNEL."
@@ -231,30 +330,42 @@ Return plist with keys :threads and :errors."
     (unless parent-channel
       (user-error "disco: archived-thread buffer has no parent context"))
     (let* ((parent-id (alist-get 'id parent-channel))
-           (result (disco-root--fetch-archived-threads parent-id))
-           (threads (plist-get result :threads))
-           (errors (plist-get result :errors))
-           (inhibit-read-only t))
+           (result (disco-root--fetch-archived-threads-page parent-id t))
+           (threads (plist-get result :threads)))
+      (setq disco-root--archived-last-errors (plist-get result :errors))
+      (setq disco-root--archived-threads-cache threads)
       (dolist (thread threads)
         (disco-state-upsert-channel thread))
-      (erase-buffer)
-      (insert (format "Archived Threads: %s\n"
-                      (disco-root--channel-label parent-channel)))
-      (insert "g: refresh   RET/mouse-1: open thread   q: quit\n\n")
-      (if threads
-          (dolist (thread threads)
-            (disco-root--insert-channel-line thread 2))
-        (insert "(no archived threads)\n"))
-      (when errors
-        (insert "\nErrors:\n")
-        (dolist (err errors)
-          (insert (format "  - %s\n" err))))
-      (goto-char (point-min))
+      (disco-root--render-archived-threads-buffer)
       (message "disco: loaded %d archived threads" (length threads)))))
+
+(defun disco-root-archived-threads-load-more ()
+  "Load next archived-thread page for current archived buffer."
+  (interactive)
+  (let ((parent-channel disco-root--archived-parent-channel))
+    (unless parent-channel
+      (user-error "disco: archived-thread buffer has no parent context"))
+    (if (not (disco-root--archived-any-source-has-more-p))
+        (message "disco: no more archived thread pages")
+      (let* ((parent-id (alist-get 'id parent-channel))
+             (result (disco-root--fetch-archived-threads-page parent-id nil))
+             (page-threads (plist-get result :threads)))
+        (setq disco-root--archived-last-errors (plist-get result :errors))
+        (setq disco-root--archived-threads-cache
+              (disco-root--sort-threads-by-archive-time
+               (disco-root--dedupe-threads
+                (append disco-root--archived-threads-cache page-threads))))
+        (dolist (thread page-threads)
+          (disco-state-upsert-channel thread))
+        (disco-root--render-archived-threads-buffer)
+        (message "disco: loaded %d more archived threads (total %d)"
+                 (length page-threads)
+                 (length disco-root--archived-threads-cache))))))
 
 (defvar disco-root-archived-threads-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-root-archived-threads-refresh)
+    (define-key map (kbd "n") #'disco-root-archived-threads-load-more)
     (define-key map (kbd "?") #'disco-root-transient)
     (define-key map (kbd "q") #'quit-window)
     map)

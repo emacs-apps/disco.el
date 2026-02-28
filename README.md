@@ -52,7 +52,7 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Thread Commands
 
 - Root buffer: `A` opens archived thread browser for a selected parent channel.
-- Archived thread buffer: `g` refreshes, `RET`/mouse opens selected thread.
+- Archived thread buffer: `g` refreshes from first page, `n` loads next page, `RET`/mouse opens selected thread.
 - Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
 - Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
 - Room transient (`?`): includes message send/refresh, thread create/join/leave/archive, and inspect actions.
