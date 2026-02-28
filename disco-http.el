@@ -29,10 +29,11 @@ This avoids concurrent burst traffic from timers and interactive commands."
   :type 'boolean
   :group 'disco-http)
 
-(defcustom disco-http-queue-limit 1
+(defcustom disco-http-queue-limit 4
   "Maximum number of concurrent requests in disco's plz queue.
 
-Value 1 enforces strict serialization."
+Value 1 enforces strict serialization. Higher values improve startup
+hydration throughput while still honoring rate-limit backoff."
   :type 'integer
   :group 'disco-http)
 

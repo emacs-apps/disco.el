@@ -34,7 +34,7 @@ Event schema:
   `message-reaction-add' `message-reaction-remove'
   `message-reaction-remove-all' `message-reaction-remove-emoji'
   `channel-create' `channel-update' `channel-delete'
-  `guild-create' `guild-update' `guild-delete'
+  `guild-create' `guild-update' `guild-delete' `guild-sync'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
   `thread-member-update' `thread-members-update'
 - :channel-id string for message/channel/thread events
@@ -47,6 +47,8 @@ Event schema:
 - :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
 - :guild guild object for guild events
+- :guild-count integer for guild-sync events
+- :guild-ids list of guild IDs for guild-sync events
 - :threads list for thread-list-sync
 - :thread-member thread member object for thread-member-update
 - :added-members list for thread-members-update
@@ -439,6 +441,32 @@ Only CHANNEL read_state_type entries are used here."
   (disco-state-set-private-channels
    (disco-gateway--versioned-entries private-channels)))
 
+(defun disco-gateway--ingest-ready-guilds (guilds)
+  "Ingest Ready GUILDS payload into local guild/channel state."
+  (let ((ready-guilds (cl-remove-if-not #'listp
+                                        (disco-gateway--versioned-entries guilds))))
+    (disco-state-set-guilds ready-guilds)
+    (dolist (guild ready-guilds)
+      (let* ((guild-id (alist-get 'id guild))
+             (has-channels (assq 'channels guild))
+             (has-threads (assq 'threads guild))
+             (channels (and has-channels
+                            (disco-gateway--versioned-entries
+                             (alist-get 'channels guild))))
+             (threads (and has-threads
+                           (disco-gateway--versioned-entries
+                            (alist-get 'threads guild)))))
+        (when (and guild-id has-channels)
+          (disco-state-put-channels guild-id channels))
+        (when has-threads
+          (dolist (thread threads)
+            (disco-state-upsert-channel thread)))))
+    (disco-gateway--emit
+     (list :type 'guild-sync
+           :source 'ready
+           :guild-ids (delq nil (mapcar (lambda (it) (alist-get 'id it)) ready-guilds))
+           :guild-count (length ready-guilds)))))
+
 (defun disco-gateway--handle-dispatch (event-type data)
   "Handle one dispatch EVENT-TYPE with DATA payload."
   (pcase event-type
@@ -446,6 +474,9 @@ Only CHANNEL read_state_type entries are used here."
      (setq disco-gateway--session-id (alist-get 'session_id data))
      (setq disco-gateway--resume-url (alist-get 'resume_gateway_url data))
      (disco-gateway--ingest-ready-read-states (alist-get 'read_state data))
+     (when (assq 'guilds data)
+       (disco-gateway--ingest-ready-guilds
+        (alist-get 'guilds data)))
      (when (assq 'private_channels data)
        (disco-gateway--ingest-ready-private-channels
         (alist-get 'private_channels data)))

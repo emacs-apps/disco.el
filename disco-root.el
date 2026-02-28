@@ -84,7 +84,7 @@ Supported values: `all', `unread', and `dms'.")
   (memq event-type
         '(message-create message-ack
           channel-create channel-update channel-delete
-          guild-create guild-update guild-delete
+          guild-create guild-update guild-delete guild-sync
           thread-create thread-update thread-delete thread-list-sync)))
 
 (defun disco-root--render-preserving-position ()
@@ -1050,6 +1050,8 @@ If point is not on a button, jump to the next button and open it."
          (guild-count 0)
          (channel-count 0)
          (pending 0)
+         (last-render-at 0.0)
+         (render-throttle-sec 0.08)
          errors)
     (setq disco-root--refresh-generation generation)
     (setq disco-root--refresh-in-flight t)
@@ -1060,6 +1062,14 @@ If point is not on a button, jump to the next button and open it."
                 (with-current-buffer root-buffer
                   (and (eq major-mode 'disco-root-mode)
                        (= disco-root--refresh-generation generation)))))
+         (maybe-render-incremental (&optional force)
+           (when (callback-active-p)
+             (with-current-buffer root-buffer
+               (let ((now (float-time)))
+                 (when (or force
+                           (>= (- now last-render-at) render-throttle-sec))
+                   (setq last-render-at now)
+                   (disco-root--render-preserving-position))))))
          (record-error (label err)
            (push (format "%s: %s" label (disco-root--async-error-message err))
                  errors))
@@ -1100,7 +1110,8 @@ If point is not on a button, jump to the next button and open it."
               (lambda (channels)
                 (when (callback-active-p)
                   (setq channel-count (+ channel-count (length channels)))
-                  (disco-state-put-channels guild-id channels))
+                  (disco-state-put-channels guild-id channels)
+                  (maybe-render-incremental))
                 (dec-pending))
               :on-error
               (lambda (err)
@@ -1115,7 +1126,8 @@ If point is not on a button, jump to the next button and open it."
                 (lambda (active)
                   (when (callback-active-p)
                     (dolist (thread (or (alist-get 'threads active) '()))
-                      (disco-state-upsert-channel thread)))
+                      (disco-state-upsert-channel thread))
+                    (maybe-render-incremental))
                   (dec-pending))
                 :on-error
                 (lambda (err)
@@ -1129,13 +1141,15 @@ If point is not on a button, jump to the next button and open it."
          (when (callback-active-p)
            (setq guild-count (length guilds))
            (disco-state-set-guilds guilds)
+           (maybe-render-incremental)
 
            (inc-pending)
            (disco-api-user-private-channels-async
             :on-success
             (lambda (private-channels)
               (when (callback-active-p)
-                (disco-state-set-private-channels private-channels))
+                (disco-state-set-private-channels private-channels)
+                (maybe-render-incremental))
               (dec-pending))
             :on-error
             (lambda (err)
@@ -1150,7 +1164,8 @@ If point is not on a button, jump to the next button and open it."
        (lambda (err)
          (when (callback-active-p)
            (record-error "guild list" err))
-         (dec-pending))))))
+         (dec-pending)))
+      (maybe-render-incremental t))))
 
 (defvar disco-root-mode-map
   (let ((map (make-sparse-keymap)))
