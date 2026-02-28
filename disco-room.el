@@ -157,11 +157,9 @@
              (eq (marker-buffer disco-room--input-marker) (current-buffer)))
     (let ((start (marker-position disco-room--input-marker)))
       (when (<= start (point-max))
-        (let ((end (or (next-single-property-change
-                        start 'field nil (point-max))
-                       (point-max))))
-          (when (> end start)
-            (cons start end)))))))
+        ;; Draft input is rendered at the end of buffer. Using point-max
+        ;; avoids depending on field-property propagation edge cases.
+        (cons start (point-max))))))
 
 (defun disco-room--point-in-input-p (&optional position)
   "Return non-nil when POSITION (or point) is inside draft input region."
@@ -202,15 +200,12 @@
 
 (defun disco-room--apply-input-region-properties (input-start)
   "Apply draft field/keymap properties for input region at INPUT-START."
-  (let* ((line-end (save-excursion
-                     (goto-char input-start)
-                     (line-end-position)))
-         ;; Include trailing newline so inserting at EOL stays writable.
-         (writable-end (min (point-max) (1+ line-end))))
+  (let ((writable-end (point-max)))
     (add-text-properties
      input-start writable-end
      (list 'field 'disco-room-input
-           'local-map disco-room-input-map))
+           'local-map disco-room-input-map
+           'rear-nonsticky '(field local-map)))
     (setq disco-room--input-marker (copy-marker input-start nil))))
 
 (defun disco-room--set-draft (text)
@@ -518,6 +513,12 @@ Returns nil when left blank."
   (let ((inhibit-read-only t)
         (messages (disco-state-messages disco-room--channel-id))
         (draft (disco-room--current-draft)))
+    ;; Ensure already-open room buffers from older code paths also get
+    ;; strict edit guards after first re-render.
+    (unless (memq #'disco-room--before-change before-change-functions)
+      (add-hook 'before-change-functions #'disco-room--before-change nil t))
+    (unless (memq #'disco-room--after-change after-change-functions)
+      (add-hook 'after-change-functions #'disco-room--after-change nil t))
     (setq disco-room--rendering t)
     (unwind-protect
         (progn
