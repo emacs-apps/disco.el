@@ -19,7 +19,10 @@ This repository currently contains an MVP scaffold designed with these reference
 - Browse archived thread lists per parent channel.
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
+- Send file attachments from room buffer (multipart upload) with `C-c C-f`, clear queued files with `C-c C-x`, then send via `RET`/`C-c C-c`.
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
+- Message rows render structured attachment metadata (image/video/file kind, size, dimensions when available).
+- Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
@@ -83,6 +86,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
+- Room transient (`?`): includes attachment queue and reaction actions (`f`, `x`, `!`, `+`, `-`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration

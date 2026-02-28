@@ -31,6 +31,8 @@
 Event schema:
 - :type one of
   `message-create' `message-update' `message-delete' `message-ack'
+  `message-reaction-add' `message-reaction-remove'
+  `message-reaction-remove-all' `message-reaction-remove-emoji'
   `channel-create' `channel-update' `channel-delete'
   `guild-create' `guild-update' `guild-delete'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
@@ -41,6 +43,7 @@ Event schema:
 - :message message object for create/update
 - :message-id string for message delete
 - :mention-count integer for message ack when present
+- :emoji reaction emoji object/string for reaction events when present
 - :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
 - :guild guild object for guild events
@@ -501,6 +504,49 @@ Only CHANNEL read_state_type entries are used here."
          (disco-gateway--delete-message channel-id message-id)
          (disco-gateway--emit
           (list :type 'message-delete :channel-id channel-id :message-id message-id)))))
+    ("MESSAGE_REACTION_ADD"
+     (let ((channel-id (alist-get 'channel_id data))
+           (message-id (alist-get 'message_id data)))
+       (when (and channel-id message-id)
+         (disco-gateway--emit
+          (list :type 'message-reaction-add
+                :channel-id channel-id
+                :message-id message-id
+                :user-id (alist-get 'user_id data)
+                :emoji (or (alist-get 'emoji data)
+                           (alist-get 'emoji_name data))
+                :reaction-type (alist-get 'type data))))))
+    ("MESSAGE_REACTION_REMOVE"
+     (let ((channel-id (alist-get 'channel_id data))
+           (message-id (alist-get 'message_id data)))
+       (when (and channel-id message-id)
+         (disco-gateway--emit
+          (list :type 'message-reaction-remove
+                :channel-id channel-id
+                :message-id message-id
+                :user-id (alist-get 'user_id data)
+                :emoji (or (alist-get 'emoji data)
+                           (alist-get 'emoji_name data))
+                :reaction-type (alist-get 'type data))))))
+    ("MESSAGE_REACTION_REMOVE_ALL"
+     (let ((channel-id (alist-get 'channel_id data))
+           (message-id (alist-get 'message_id data)))
+       (when (and channel-id message-id)
+         (disco-gateway--emit
+          (list :type 'message-reaction-remove-all
+                :channel-id channel-id
+                :message-id message-id)))))
+    ("MESSAGE_REACTION_REMOVE_EMOJI"
+     (let ((channel-id (alist-get 'channel_id data))
+           (message-id (alist-get 'message_id data)))
+       (when (and channel-id message-id)
+         (disco-gateway--emit
+          (list :type 'message-reaction-remove-emoji
+                :channel-id channel-id
+                :message-id message-id
+                :emoji (or (alist-get 'emoji data)
+                           (alist-get 'emoji_name data))
+                :reaction-type (alist-get 'type data))))))
     ("MESSAGE_ACK"
      (let ((channel-id (alist-get 'channel_id data))
            (message-id (alist-get 'message_id data))

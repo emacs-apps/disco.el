@@ -13,6 +13,7 @@
 (require 'json)
 (require 'seq)
 (require 'subr-x)
+(require 'url-util)
 (require 'disco-customize)
 (require 'disco-http)
 
@@ -281,34 +282,51 @@ Return nil for empty or non-JSON body."
         :body body
         :message message))
 
-(defun disco-api--request (method endpoint &optional payload query unauthenticated)
+(defun disco-api--request (method endpoint &optional payload query unauthenticated
+                                  raw-body extra-headers body-type)
   "Execute METHOD request to ENDPOINT.
 
 PAYLOAD is an alist encoded as JSON for request body.
 QUERY is an alist for query parameters.
-If UNAUTHENTICATED is non-nil, omit Authorization header."
+If UNAUTHENTICATED is non-nil, omit Authorization header.
+RAW-BODY and EXTRA-HEADERS enable non-JSON requests (for example multipart).
+BODY-TYPE is forwarded to transport layer."
+  (when (and payload raw-body)
+    (error "disco: payload and raw-body cannot be combined"))
   (let* ((headers
           (append
-           `(("Content-Type" . "application/json")
-             ("Accept" . "application/json")
+           (unless raw-body
+             '(("Content-Type" . "application/json")))
+           `(("Accept" . "application/json")
              ("User-Agent" . ,disco-user-agent)
              ("X-Discord-Locale" . ,disco-locale)
              ("Accept-Language" . ,disco-locale))
+           (or extra-headers '())
            (unless unauthenticated
              `(("Authorization" . ,(disco-api--auth-header))))))
          (data (cond
+                ((not (null raw-body))
+                 raw-body)
                 ((eq payload :empty-object)
                  "{}")
                 (payload
                  (disco-api--json-encode payload))
                 (t nil)))
+         (effective-body-type (or body-type
+                                  (when raw-body 'binary)))
          (url (disco-api--build-url endpoint query))
          (route-key (disco-api--route-key method endpoint))
          (attempt 0))
     (catch 'disco-api-return
       (while t
         (disco-api--wait-for-rate-limit route-key)
-        (let* ((response (disco-http-request :method method :url url :headers headers :body data :timeout disco-http-timeout))
+        (let* ((response (disco-http-request
+                          :method method
+                          :url url
+                          :headers headers
+                          :body data
+                          :body-type effective-body-type
+                          :timeout disco-http-timeout))
                (status (or (plist-get response :status) 0))
                (raw-body (or (plist-get response :body) ""))
                (response-headers (or (plist-get response :headers) nil))
@@ -335,26 +353,37 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
                    status
                    body)))))))))
 
-(cl-defun disco-api--request-async (method endpoint &key payload query unauthenticated on-success on-error)
+(cl-defun disco-api--request-async (method endpoint &key payload query unauthenticated on-success on-error
+                                           raw-body extra-headers body-type)
   "Execute METHOD request to ENDPOINT asynchronously.
 
 ON-SUCCESS receives decoded JSON body.
-ON-ERROR receives plist `(:status :body :message)'."
+ON-ERROR receives plist `(:status :body :message)'.
+RAW-BODY and EXTRA-HEADERS enable non-JSON requests (for example multipart).
+BODY-TYPE is forwarded to transport layer."
+  (when (and payload raw-body)
+    (error "disco: payload and raw-body cannot be combined"))
   (let* ((headers
           (append
-           `(("Content-Type" . "application/json")
-             ("Accept" . "application/json")
+           (unless raw-body
+             '(("Content-Type" . "application/json")))
+           `(("Accept" . "application/json")
              ("User-Agent" . ,disco-user-agent)
              ("X-Discord-Locale" . ,disco-locale)
              ("Accept-Language" . ,disco-locale))
+           (or extra-headers '())
            (unless unauthenticated
              `(("Authorization" . ,(disco-api--auth-header))))))
          (data (cond
+                ((not (null raw-body))
+                 raw-body)
                 ((eq payload :empty-object)
                  "{}")
                 (payload
                  (disco-api--json-encode payload))
                 (t nil)))
+         (effective-body-type (or body-type
+                                  (when raw-body 'binary)))
          (url (disco-api--build-url endpoint query))
          (route-key (disco-api--route-key method endpoint))
          (attempt 0))
@@ -400,6 +429,7 @@ ON-ERROR receives plist `(:status :body :message)'."
                 :url url
                 :headers headers
                 :body data
+                :body-type effective-body-type
                 :timeout disco-http-timeout
                 :on-success #'handle-response
                 :on-error #'handle-response)))))
@@ -903,6 +933,240 @@ Response may include a refreshed ack token."
                 (if body body :empty-object))
      :on-success on-success
      :on-error on-error)))
+
+(defun disco-api--guess-content-type (filename)
+  "Best-effort MIME type for FILENAME."
+  (let ((ext (downcase (or (file-name-extension (or filename "")) ""))))
+    (cond
+     ((member ext '("png")) "image/png")
+     ((member ext '("jpg" "jpeg")) "image/jpeg")
+     ((member ext '("gif")) "image/gif")
+     ((member ext '("webp")) "image/webp")
+     ((member ext '("bmp")) "image/bmp")
+     ((member ext '("svg")) "image/svg+xml")
+     ((member ext '("mp4")) "video/mp4")
+     ((member ext '("mov")) "video/quicktime")
+     ((member ext '("webm")) "video/webm")
+     ((member ext '("mkv")) "video/x-matroska")
+     ((member ext '("mp3")) "audio/mpeg")
+     ((member ext '("wav")) "audio/wav")
+     ((member ext '("ogg")) "audio/ogg")
+     ((member ext '("pdf")) "application/pdf")
+     ((member ext '("zip")) "application/zip")
+     ((member ext '("json")) "application/json")
+     ((member ext '("txt" "md" "log")) "text/plain")
+     (t "application/octet-stream"))))
+
+(defun disco-api--read-file-bytes (path)
+  "Return file contents of PATH as a unibyte string."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally path)
+    (buffer-string)))
+
+(defun disco-api--multipart-boundary ()
+  "Generate multipart boundary token for one request."
+  (format "----disco-%s-%06d"
+          (format-time-string "%Y%m%d%H%M%S" (current-time) t)
+          (random 1000000)))
+
+(defun disco-api--multipart-write-string (string)
+  "Insert STRING into current buffer as UTF-8 unibyte bytes."
+  (insert (encode-coding-string (or string "") 'utf-8 t)))
+
+(defun disco-api--multipart-write-payload-json (boundary payload)
+  "Insert PAYLOAD as multipart payload_json part using BOUNDARY."
+  (disco-api--multipart-write-string (format "--%s\r\n" boundary))
+  (disco-api--multipart-write-string
+   "Content-Disposition: form-data; name=\"payload_json\"\r\n")
+  (disco-api--multipart-write-string "Content-Type: application/json\r\n\r\n")
+  (disco-api--multipart-write-string (disco-api--json-encode payload))
+  (disco-api--multipart-write-string "\r\n"))
+
+(defun disco-api--multipart-write-file (boundary index attachment)
+  "Insert one ATTACHMENT part under multipart BOUNDARY with INDEX."
+  (let* ((path (plist-get attachment :path))
+         (filename (plist-get attachment :filename))
+         (content-type (plist-get attachment :content-type))
+         (bytes (disco-api--read-file-bytes path)))
+    (disco-api--multipart-write-string (format "--%s\r\n" boundary))
+    (disco-api--multipart-write-string
+     (format
+      "Content-Disposition: form-data; name=\"files[%d]\"; filename=\"%s\"\r\n"
+      index
+      (replace-regexp-in-string "\"" "_" filename)))
+    (disco-api--multipart-write-string
+     (format "Content-Type: %s\r\n\r\n" content-type))
+    (insert bytes)
+    (disco-api--multipart-write-string "\r\n")))
+
+(defun disco-api--normalize-send-attachment (attachment)
+  "Normalize ATTACHMENT into plist with :path/:filename/:description/:content-type.
+
+ATTACHMENT may be a file path string or a plist containing :path."
+  (let* ((path (cond
+                ((stringp attachment) attachment)
+                ((and (listp attachment) (plist-get attachment :path))
+                 (plist-get attachment :path))
+                (t nil)))
+         (description (and (listp attachment) (plist-get attachment :description)))
+         (filename (and (listp attachment) (plist-get attachment :filename)))
+         (content-type (and (listp attachment) (plist-get attachment :content-type))))
+    (unless (and (stringp path) (not (string-empty-p path)))
+      (user-error "disco: attachment must include a file path"))
+    (unless (file-readable-p path)
+      (user-error "disco: attachment file is not readable: %s" path))
+    (let ((resolved-filename (or filename (file-name-nondirectory path))))
+      (list :path path
+            :filename resolved-filename
+            :description (and (stringp description)
+                              (not (string-empty-p (string-trim description)))
+                              (string-trim description))
+            :content-type (or content-type
+                              (disco-api--guess-content-type resolved-filename))))))
+
+(defun disco-api--build-message-multipart-body (payload attachments)
+  "Build multipart body for message PAYLOAD and ATTACHMENTS.
+
+Return cons cell (BOUNDARY . BODY)."
+  (let ((boundary (disco-api--multipart-boundary)))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (disco-api--multipart-write-payload-json boundary payload)
+      (cl-loop for attachment in attachments
+               for idx from 0
+               do (disco-api--multipart-write-file boundary idx attachment))
+      (disco-api--multipart-write-string (format "--%s--\r\n" boundary))
+      (cons boundary (buffer-string)))))
+
+(defun disco-api--message-send-payload (content reply-to-message-id attachments)
+  "Build message create payload.
+
+CONTENT is optional message text, REPLY-TO-MESSAGE-ID optional reply target,
+ATTACHMENTS is normalized attachment plist list."
+  (let (payload)
+    (when (and (stringp content)
+               (not (string-empty-p (string-trim-right content))))
+      (push `(content . ,(string-trim-right content)) payload))
+    (when reply-to-message-id
+      (push `(message_reference . ((message_id . ,reply-to-message-id))) payload))
+    (when attachments
+      (let ((attachment-objects nil))
+        (cl-loop for attachment in attachments
+                 for idx from 0
+                 do (let ((entry `((id . ,idx)
+                                   (filename . ,(plist-get attachment :filename)))))
+                      (let ((description (plist-get attachment :description)))
+                        (when description
+                          (setq entry (append entry `((description . ,description))))))
+                      (push entry attachment-objects)))
+        (push `(attachments . ,(nreverse attachment-objects)) payload)))
+    (nreverse payload)))
+
+(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id attachments)
+  "Send message to CHANNEL-ID with ATTACHMENTS via multipart/form-data.
+
+ATTACHMENTS is a list of file path strings or plists containing :path and
+optional :description/:filename/:content-type."
+  (let* ((normalized-attachments
+          (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
+         (payload (disco-api--message-send-payload content reply-to-message-id normalized-attachments)))
+    (unless (or (alist-get 'content payload) normalized-attachments)
+      (user-error "disco: message content and attachments are both empty"))
+    (if (null normalized-attachments)
+        (disco-api-send-message channel-id (or (alist-get 'content payload) "") reply-to-message-id)
+      (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
+             (boundary (car multipart))
+             (body (cdr multipart)))
+        (disco-api--request
+         "POST"
+         (format "/channels/%s/messages" channel-id)
+         nil
+         nil
+         nil
+         body
+         `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
+         'binary)))))
+
+(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id attachments on-success on-error)
+  "Asynchronously send message to CHANNEL-ID with ATTACHMENTS.
+
+ATTACHMENTS is a list of file path strings or plists containing :path and
+optional :description/:filename/:content-type."
+  (let* ((normalized-attachments
+          (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
+         (payload (disco-api--message-send-payload content reply-to-message-id normalized-attachments)))
+    (unless (or (alist-get 'content payload) normalized-attachments)
+      (user-error "disco: message content and attachments are both empty"))
+    (if (null normalized-attachments)
+        (disco-api-send-message-async channel-id (or (alist-get 'content payload) "")
+                                      :reply-to-message-id reply-to-message-id
+                                      :on-success on-success
+                                      :on-error on-error)
+      (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
+             (boundary (car multipart))
+             (body (cdr multipart)))
+        (disco-api--request-async
+         "POST"
+         (format "/channels/%s/messages" channel-id)
+         :raw-body body
+         :extra-headers `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
+         :body-type 'binary
+         :on-success on-success
+         :on-error on-error)))))
+
+(defun disco-api--normalize-reaction-emoji (emoji)
+  "Normalize user-provided EMOJI string for Discord reaction endpoints."
+  (let* ((raw (or emoji ""))
+         (trimmed (string-trim raw))
+         (custom
+          (cond
+           ((string-match "^<a?:\\([^:>]+\\):\\([0-9]+\\)>$" trimmed)
+            (format "%s:%s" (match-string 1 trimmed) (match-string 2 trimmed)))
+           ((string-match "^[^:]+:[0-9]+$" trimmed)
+            trimmed)
+           (t trimmed))))
+    (unless (and (stringp custom) (not (string-empty-p custom)))
+      (user-error "disco: emoji cannot be empty"))
+    custom))
+
+(defun disco-api--encode-reaction-emoji (emoji)
+  "Return URL path component for reaction EMOJI."
+  (url-hexify-string (disco-api--normalize-reaction-emoji emoji)))
+
+(defun disco-api-add-reaction (channel-id message-id emoji)
+  "Add EMOJI reaction to MESSAGE-ID in CHANNEL-ID for current user."
+  (disco-api--request
+   "PUT"
+   (format "/channels/%s/messages/%s/reactions/%s/@me"
+           channel-id message-id (disco-api--encode-reaction-emoji emoji))
+   nil nil nil))
+
+(cl-defun disco-api-add-reaction-async (channel-id message-id emoji &key on-success on-error)
+  "Asynchronously add EMOJI reaction to MESSAGE-ID in CHANNEL-ID for current user."
+  (disco-api--request-async
+   "PUT"
+   (format "/channels/%s/messages/%s/reactions/%s/@me"
+           channel-id message-id (disco-api--encode-reaction-emoji emoji))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-remove-own-reaction (channel-id message-id emoji)
+  "Remove current user's EMOJI reaction from MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request
+   "DELETE"
+   (format "/channels/%s/messages/%s/reactions/%s/@me"
+           channel-id message-id (disco-api--encode-reaction-emoji emoji))
+   nil nil nil))
+
+(cl-defun disco-api-remove-own-reaction-async (channel-id message-id emoji &key on-success on-error)
+  "Asynchronously remove current user's EMOJI reaction from MESSAGE-ID."
+  (disco-api--request-async
+   "DELETE"
+   (format "/channels/%s/messages/%s/reactions/%s/@me"
+           channel-id message-id (disco-api--encode-reaction-emoji emoji))
+   :on-success on-success
+   :on-error on-error))
 
 (defun disco-api-send-message (channel-id content &optional reply-to-message-id)
   "Send CONTENT into CHANNEL-ID.

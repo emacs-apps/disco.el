@@ -41,6 +41,7 @@
 (defvar-local disco-room--rendering nil)
 (defvar-local disco-room--ewoc nil)
 (defvar-local disco-room--message-node-table nil)
+(defvar-local disco-room--pending-attachments nil)
 
 (defvar disco-room--avatar-image-cache (make-hash-table :test #'equal)
   "Global avatar image cache keyed by avatar cache key.
@@ -104,6 +105,41 @@ When nil, avatar fetches are uncapped per render pass
 (defcustom disco-room-avatar-fetch-concurrency 20
   "Maximum concurrent avatar downloads in plz queue."
   :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-show-attachments t
+  "When non-nil, render attachment details under each message."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-show-reactions t
+  "When non-nil, render reaction chips under each message."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-show-attachment-urls nil
+  "When non-nil, include raw attachment URLs in message rendering."
+  :type 'boolean
+  :group 'disco)
+
+(defface disco-room-timestamp
+  '((t :inherit shadow))
+  "Face used for room message timestamps."
+  :group 'disco)
+
+(defface disco-room-message-meta
+  '((t :inherit shadow))
+  "Face used for room message metadata rows."
+  :group 'disco)
+
+(defface disco-room-reaction
+  '((t :inherit mode-line-inactive))
+  "Face used for unselected reaction chips."
+  :group 'disco)
+
+(defface disco-room-reaction-selected
+  '((t :inherit success :weight bold))
+  "Face used for reactions selected by the current user."
   :group 'disco)
 
 (defface disco-room-author-color-1
@@ -170,6 +206,8 @@ When nil, avatar fetches are uncapped per render pass
     (define-key map (kbd "M-p") #'disco-room-draft-prev)
     (define-key map (kbd "M-n") #'disco-room-draft-next)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
+    (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+    (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
     map)
   "Keymap active when point is inside the room draft region.")
 
@@ -1054,12 +1092,197 @@ If needed, schedule async fetch and fall back to text placeholder."
         (embeds (or (alist-get 'embeds msg) '())))
     (if (string-empty-p content)
         (cond
-         ((> (length attachments) 0)
+         ((and (not disco-room-show-attachments) (> (length attachments) 0))
           (format "[attachment x%d]" (length attachments)))
          ((> (length embeds) 0)
           (format "[embed x%d]" (length embeds)))
+         ((> (length attachments) 0)
+          "")
          (t "[empty]"))
       content)))
+
+(defun disco-room--attachment-kind (attachment)
+  "Return short attachment kind string for ATTACHMENT object."
+  (let* ((content-type (downcase (or (alist-get 'content_type attachment) "")))
+         (filename (downcase (or (alist-get 'filename attachment) ""))))
+    (cond
+     ((string-prefix-p "image/" content-type) "img")
+     ((string-prefix-p "video/" content-type) "video")
+     ((string-prefix-p "audio/" content-type) "audio")
+     ((string-match-p "\\.\(?:png\\|jpe?g\\|gif\\|webp\\|bmp\\|svg\\)\\'" filename) "img")
+     ((string-match-p "\\.\(?:mp4\\|mov\\|mkv\\|webm\\|avi\\)\\'" filename) "video")
+     ((string-match-p "\\.\(?:mp3\\|wav\\|ogg\\|flac\\|m4a\\)\\'" filename) "audio")
+     (t "file"))))
+
+(defun disco-room--attachment-summary (attachment)
+  "Return one-line attachment summary string for ATTACHMENT object."
+  (let* ((kind (disco-room--attachment-kind attachment))
+         (filename (or (alist-get 'filename attachment) "unnamed"))
+         (size (alist-get 'size attachment))
+         (width (alist-get 'width attachment))
+         (height (alist-get 'height attachment))
+         (size-text (when (numberp size)
+                      (file-size-human-readable size)))
+         (dims-text (when (and (numberp width) (numberp height))
+                      (format "%dx%d" width height))))
+    (string-trim
+     (format "[%s] %s%s%s"
+             kind
+             filename
+             (if size-text (format " (%s" size-text) "")
+             (if dims-text
+                 (format "%s%s" (if size-text ", " " (") dims-text)
+               (if size-text ")" ""))))))
+
+(defun disco-room--insert-message-attachments (msg)
+  "Insert attachment detail lines for MSG."
+  (when disco-room-show-attachments
+    (dolist (attachment (or (alist-get 'attachments msg) '()))
+      (let ((line-start (point))
+            (url (or (alist-get 'url attachment)
+                     (alist-get 'proxy_url attachment))))
+        (insert "    ")
+        (insert (disco-room--attachment-summary attachment))
+        (insert "\n")
+        (add-text-properties line-start (point) '(face disco-room-message-meta))
+        (when (and disco-room-show-attachment-urls
+                   (stringp url)
+                   (not (string-empty-p url)))
+          (let ((url-start (point)))
+            (insert (format "      %s\n" url))
+            (add-text-properties url-start (point) '(face shadow))))))))
+
+(defun disco-room--reaction-emoji (reaction)
+  "Extract display emoji string from REACTION object."
+  (let* ((emoji (alist-get 'emoji reaction))
+         (name (and (listp emoji) (alist-get 'name emoji))))
+    (or name
+        (and (stringp emoji) emoji)
+        (alist-get 'emoji_name reaction)
+        "?")))
+
+(defun disco-room--reaction-count (reaction)
+  "Return integer count for REACTION object."
+  (or (alist-get 'count reaction)
+      (alist-get 'total_count reaction)
+      0))
+
+(defun disco-room--reaction-selected-p (reaction)
+  "Return non-nil when REACTION is selected by current user."
+  (or (disco-room--json-true-p (alist-get 'me reaction))
+      (disco-room--json-true-p (alist-get 'is_chosen reaction))))
+
+(defun disco-room--message-reactions (msg)
+  "Return normalized reactions list for MSG."
+  (or (alist-get 'reactions msg)
+      (alist-get 'reaction_counts msg)
+      '()))
+
+(defun disco-room--insert-message-reactions (msg)
+  "Insert reaction chip line for MSG."
+  (when disco-room-show-reactions
+    (let ((reactions (disco-room--message-reactions msg))
+          (line-start (point))
+          (first t))
+      (when reactions
+        (insert "    ")
+        (dolist (reaction reactions)
+          (unless first
+            (insert " "))
+          (setq first nil)
+          (let ((chip (format "[%s %s]"
+                              (disco-room--reaction-emoji reaction)
+                              (disco-room--reaction-count reaction))))
+            (insert (propertize chip
+                                'face (if (disco-room--reaction-selected-p reaction)
+                                          'disco-room-reaction-selected
+                                        'disco-room-reaction)))))
+        (insert "\n")
+        (add-text-properties line-start (point) '(face disco-room-message-meta))))))
+
+(defun disco-room--parse-reaction-input (emoji)
+  "Parse user EMOJI input into plist with :id/:name.
+
+Accepted forms: Unicode emoji, `name:id`, or `<:name:id>`/`<a:name:id>`."
+  (let ((raw (string-trim (or emoji ""))))
+    (cond
+     ((string-match "^<a?:\\([^:>]+\\):\\([0-9]+\\)>$" raw)
+      (list :name (match-string 1 raw)
+            :id (match-string 2 raw)))
+     ((string-match "^\\([^:]+\\):\\([0-9]+\\)$" raw)
+      (list :name (match-string 1 raw)
+            :id (match-string 2 raw)))
+     (t
+      (list :name raw :id nil)))))
+
+(defun disco-room--reaction-matches-input-p (reaction emoji)
+  "Return non-nil when REACTION matches EMOJI input string."
+  (let* ((spec (disco-room--parse-reaction-input emoji))
+         (target-id (plist-get spec :id))
+         (target-name (plist-get spec :name))
+         (emoji-obj (alist-get 'emoji reaction))
+         (reaction-id (and (listp emoji-obj) (alist-get 'id emoji-obj)))
+         (reaction-name (disco-room--reaction-emoji reaction)))
+    (if target-id
+        (and reaction-id (equal (format "%s" reaction-id) (format "%s" target-id)))
+      (equal reaction-name target-name))))
+
+(defun disco-room--message-has-own-reaction-p (msg emoji)
+  "Return non-nil when MSG has current-user reaction EMOJI."
+  (let ((found nil))
+    (dolist (reaction (disco-room--message-reactions msg))
+      (when (and (disco-room--reaction-matches-input-p reaction emoji)
+                 (disco-room--reaction-selected-p reaction))
+        (setq found t)))
+    found))
+
+(defun disco-room--message-with-reaction-delta (msg emoji addp)
+  "Return MSG copy after applying one reaction delta for EMOJI.
+
+When ADDP is non-nil, reaction count is increased and marked selected;
+otherwise selected flag is cleared and count is decreased."
+  (let* ((updated (copy-tree msg))
+         (reactions (copy-tree (disco-room--message-reactions msg)))
+         (spec (disco-room--parse-reaction-input emoji))
+         (target-id (plist-get spec :id))
+         (target-name (plist-get spec :name))
+         (found nil)
+         (next '()))
+    (dolist (reaction reactions)
+      (if (disco-room--reaction-matches-input-p reaction emoji)
+          (let* ((count (max 0 (or (disco-room--reaction-count reaction) 0)))
+                 (next-count (if addp (1+ count) (max 0 (1- count))))
+                 (item (copy-tree reaction)))
+            (setq found t)
+            (setf (alist-get 'count item nil 'remove) next-count)
+            (setf (alist-get 'me item nil 'remove) (if addp t :false))
+            (when (> next-count 0)
+              (push item next)))
+        (push reaction next)))
+    (unless (or found (not addp))
+      (push `((count . 1)
+              (me . t)
+              (emoji . ((name . ,target-name)
+                        (id . ,target-id))))
+            next))
+    (setf (alist-get 'reactions updated nil 'remove) (nreverse next))
+    updated))
+
+(defun disco-room--update-message-locally (message-id updater)
+  "Apply UPDATER function to message with MESSAGE-ID in current room state."
+  (let* ((messages (or (disco-state-messages disco-room--channel-id) '()))
+         (updated-list nil)
+         (updated-msg nil))
+    (dolist (msg messages)
+      (if (and message-id (equal (alist-get 'id msg) message-id))
+          (let ((next (funcall updater msg)))
+            (push next updated-list)
+            (setq updated-msg next))
+        (push msg updated-list)))
+    (setq updated-list (nreverse updated-list))
+    (disco-state-put-messages disco-room--channel-id updated-list)
+    (when updated-msg
+      (disco-room--upsert-message-node updated-msg))))
 
 (defun disco-room--reply-reference-id (msg)
   "Return referenced message ID for MSG, or nil."
@@ -1103,13 +1326,18 @@ If needed, schedule async fetch and fall back to text placeholder."
                'front-sticky '(read-only)
                'disco-message-id message-id))))
     (setq line-start (point))
-    (insert (format "[%s] " timestamp))
+    (insert (propertize (format "[%s] " timestamp) 'face 'disco-room-timestamp))
     (disco-room--insert-avatar msg)
     (insert " ")
     (setq author-start (point))
     (insert author)
     (add-text-properties author-start (point) (list 'face author-face))
-    (insert (format ": %s\n" content))
+    (insert ":")
+    (if (string-empty-p content)
+        (insert "\n")
+      (insert (format " %s\n" content)))
+    (disco-room--insert-message-attachments msg)
+    (disco-room--insert-message-reactions msg)
     (add-text-properties
      line-start
      (point)
@@ -1232,7 +1460,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-x: clear attachments   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -1243,6 +1471,11 @@ Return non-nil when handled without full room rerender."
           (when disco-room--pending-reply-to
             (insert (format "Replying to: %s (C-c C-k to cancel)\n"
                             disco-room--pending-reply-to)))
+          (when disco-room--pending-attachments
+            (insert (format "Queued attachments: %s\n"
+                            (mapconcat #'identity
+                                       (disco-room--pending-attachment-labels)
+                                       ", "))))
           (when disco-room--history-exhausted
             (insert "(older history exhausted)\n"))
           (insert "\n")
@@ -1340,7 +1573,15 @@ REASON is shown in the minibuffer."
                  (message-id (and (listp message) (alist-get 'id message))))
             (disco-room--mark-read message-id)))
         (when at-bottom
-          (goto-char (point-max))))))))
+          (goto-char (point-max)))))
+     ((and (equal event-channel-id disco-room--channel-id)
+           (memq event-type '(message-reaction-add
+                              message-reaction-remove
+                              message-reaction-remove-all
+                              message-reaction-remove-emoji)))
+      ;; Reaction dispatch payloads don't include full message objects;
+      ;; refresh to keep reaction chips in sync.
+      (disco-room-refresh)))))
 
 (defun disco-room--attach-live-updates ()
   "Attach this room buffer to live update event stream."
@@ -1366,6 +1607,143 @@ REASON is shown in the minibuffer."
   (when disco-room--channel-id
     (disco-gateway-unwatch-channel disco-room--channel-id)))
 
+(defun disco-room--pending-attachment-labels ()
+  "Return compact filename labels for pending composer attachments."
+  (let ((labels (mapcar (lambda (item)
+                          (file-name-nondirectory (or (plist-get item :path) "")))
+                        (or disco-room--pending-attachments '()))))
+    (if (> (length labels) 3)
+        (append (seq-take labels 3)
+                (list (format "+%d more" (- (length labels) 3))))
+      labels)))
+
+(defun disco-room--message-id-required-at-point ()
+  "Return message ID at point, or signal user error."
+  (or (disco-room--message-id-at-point)
+      (user-error "disco: point is not on a message")))
+
+(defun disco-room--default-reaction-emoji (msg)
+  "Return best default reaction emoji suggestion from MSG."
+  (let* ((reactions (disco-room--message-reactions msg))
+         (selected (seq-find #'disco-room--reaction-selected-p reactions))
+         (candidate (or selected (car reactions))))
+    (or (and candidate (disco-room--reaction-emoji candidate))
+        "👍")))
+
+(defun disco-room--read-reaction-emoji (prompt &optional default)
+  "Prompt for emoji with PROMPT and DEFAULT fallback."
+  (let* ((raw (read-string
+               (if default
+                   (format "%s (default %s): " prompt default)
+                 (format "%s: " prompt))
+               nil nil default))
+         (emoji (string-trim raw)))
+    (if (string-empty-p emoji)
+        (or default (user-error "disco: emoji cannot be empty"))
+      emoji)))
+
+(defun disco-room-add-reaction (&optional emoji message-id)
+  "Add EMOJI reaction to MESSAGE-ID at point."
+  (interactive
+   (let* ((msg (or (disco-room--message-at-point)
+                   (user-error "disco: point is not on a message")))
+          (default (disco-room--default-reaction-emoji msg))
+          (picked (disco-room--read-reaction-emoji "Add reaction" default)))
+     (list picked (alist-get 'id msg))))
+  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
+         (room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (emoji-text emoji))
+    (disco-api-add-reaction-async
+     channel-id
+     target-id
+     emoji-text
+     :on-success
+     (lambda (_response)
+       (when (disco-room--channel-buffer-p room-buffer channel-id)
+         (with-current-buffer room-buffer
+           (disco-room--update-message-locally
+            target-id
+            (lambda (msg)
+              (disco-room--message-with-reaction-delta msg emoji-text t)))
+           (message "disco: reaction added (%s)" emoji-text))))
+     :on-error
+     (lambda (err)
+       (message "disco: add reaction failed: %s"
+                (disco-room--async-error-message err))))))
+
+(defun disco-room-remove-reaction (&optional emoji message-id)
+  "Remove current user's EMOJI reaction from MESSAGE-ID at point."
+  (interactive
+   (let* ((msg (or (disco-room--message-at-point)
+                   (user-error "disco: point is not on a message")))
+          (default (disco-room--default-reaction-emoji msg))
+          (picked (disco-room--read-reaction-emoji "Remove reaction" default)))
+     (list picked (alist-get 'id msg))))
+  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
+         (room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (emoji-text emoji))
+    (disco-api-remove-own-reaction-async
+     channel-id
+     target-id
+     emoji-text
+     :on-success
+     (lambda (_response)
+       (when (disco-room--channel-buffer-p room-buffer channel-id)
+         (with-current-buffer room-buffer
+           (disco-room--update-message-locally
+            target-id
+            (lambda (msg)
+              (disco-room--message-with-reaction-delta msg emoji-text nil)))
+           (message "disco: reaction removed (%s)" emoji-text))))
+     :on-error
+     (lambda (err)
+       (message "disco: remove reaction failed: %s"
+                (disco-room--async-error-message err))))))
+
+(defun disco-room-toggle-reaction (&optional emoji message-id)
+  "Toggle current user's EMOJI reaction on MESSAGE-ID at point."
+  (interactive
+   (let* ((msg (or (disco-room--message-at-point)
+                   (user-error "disco: point is not on a message")))
+          (default (disco-room--default-reaction-emoji msg))
+          (picked (disco-room--read-reaction-emoji "Toggle reaction" default)))
+     (list picked (alist-get 'id msg))))
+  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
+         (msg (or (disco-room--message-by-id target-id)
+                  (disco-room--message-at-point)
+                  (user-error "disco: message not found in room state"))))
+    (if (disco-room--message-has-own-reaction-p msg emoji)
+        (disco-room-remove-reaction emoji target-id)
+      (disco-room-add-reaction emoji target-id))))
+
+(defun disco-room-attach-file (path &optional description)
+  "Queue attachment PATH for next room send.
+
+DESCRIPTION is optional per-file description."
+  (interactive
+   (let* ((path (read-file-name "Attach file: " nil nil t))
+          (description-input (string-trim (read-string "Attachment description (optional): ")))
+          (description (unless (string-empty-p description-input)
+                         description-input)))
+     (list path description)))
+  (unless (file-readable-p path)
+    (user-error "disco: file is not readable: %s" path))
+  (setq disco-room--pending-attachments
+        (append (or disco-room--pending-attachments '())
+                (list (list :path path
+                            :description description))))
+  (disco-room-render)
+  (message "disco: queued attachment %s" (file-name-nondirectory path)))
+
+(defun disco-room-clear-attachments ()
+  "Clear queued attachments for next send in current room."
+  (interactive)
+  (setq disco-room--pending-attachments nil)
+  (disco-room-render)
+  (message "disco: cleared queued attachments"))
+
 (defun disco-room-send-message ()
   "Send current draft message to this room asynchronously.
 
@@ -1377,41 +1755,70 @@ When called with prefix argument, force draft edit in minibuffer first."
     (message "disco: send already in progress"))
    (t
     (let* ((current-draft (disco-room--current-draft))
+           (has-attachments (not (null disco-room--pending-attachments)))
            (content (if (or current-prefix-arg
-                            (string-empty-p (string-trim-right current-draft)))
+                            (and (string-empty-p (string-trim-right current-draft))
+                                 (not has-attachments)))
                         (read-from-minibuffer "Message: " current-draft)
                       current-draft))
            (normalized (string-trim-right (or content ""))))
-      (if (string-empty-p normalized)
+      (if (and (string-empty-p normalized)
+               (not has-attachments))
           (message "disco: draft is empty")
         (let ((room-buffer (current-buffer))
               (channel-id disco-room--channel-id)
-              (reply-to disco-room--pending-reply-to))
-          (disco-room--input-history-push normalized)
+              (reply-to disco-room--pending-reply-to)
+              (attachments (copy-tree (or disco-room--pending-attachments '()))))
+          (unless (string-empty-p normalized)
+            (disco-room--input-history-push normalized))
           (setq disco-room--draft-input "")
           (setq disco-room--send-in-flight t)
           (disco-room-render)
-          (disco-api-send-message-async
-           channel-id
-           normalized
-           :reply-to-message-id reply-to
-           :on-success
-           (lambda (_response)
-             (when (disco-room--channel-buffer-p room-buffer channel-id)
-               (with-current-buffer room-buffer
-                 (setq disco-room--send-in-flight nil)
-                 (setq disco-room--pending-reply-to nil)
-                 (disco-room-refresh)
-                 (message "disco: message sent"))))
-           :on-error
-           (lambda (err)
-             (when (disco-room--channel-buffer-p room-buffer channel-id)
-               (with-current-buffer room-buffer
-                 (setq disco-room--send-in-flight nil)
-                 (setq disco-room--draft-input normalized)
-                 (disco-room-render)
-                 (message "disco: send failed: %s"
-                          (disco-room--async-error-message err))))))))))))
+          (if has-attachments
+              (disco-api-send-message-with-attachments-async
+               channel-id
+               :content (unless (string-empty-p normalized) normalized)
+               :reply-to-message-id reply-to
+               :attachments attachments
+               :on-success
+               (lambda (_response)
+                 (when (disco-room--channel-buffer-p room-buffer channel-id)
+                   (with-current-buffer room-buffer
+                     (setq disco-room--send-in-flight nil)
+                     (setq disco-room--pending-reply-to nil)
+                     (setq disco-room--pending-attachments nil)
+                     (disco-room-refresh)
+                     (message "disco: message with attachment(s) sent"))))
+               :on-error
+               (lambda (err)
+                 (when (disco-room--channel-buffer-p room-buffer channel-id)
+                   (with-current-buffer room-buffer
+                     (setq disco-room--send-in-flight nil)
+                     (setq disco-room--draft-input normalized)
+                     (disco-room-render)
+                     (message "disco: send failed: %s"
+                              (disco-room--async-error-message err))))))
+            (disco-api-send-message-async
+             channel-id
+             normalized
+             :reply-to-message-id reply-to
+             :on-success
+             (lambda (_response)
+               (when (disco-room--channel-buffer-p room-buffer channel-id)
+                 (with-current-buffer room-buffer
+                   (setq disco-room--send-in-flight nil)
+                   (setq disco-room--pending-reply-to nil)
+                   (disco-room-refresh)
+                   (message "disco: message sent"))))
+             :on-error
+             (lambda (err)
+               (when (disco-room--channel-buffer-p room-buffer channel-id)
+                 (with-current-buffer room-buffer
+                   (setq disco-room--send-in-flight nil)
+                   (setq disco-room--draft-input normalized)
+                   (disco-room-render)
+                   (message "disco: send failed: %s"
+                            (disco-room--async-error-message err)))))))))))))
 
 (defun disco-room-load-older-messages ()
   "Load one older message page before the oldest loaded message asynchronously."
@@ -1829,7 +2236,12 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "r") #'disco-room-reply-to-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
     (define-key map (kbd "d") #'disco-room-delete-message)
+    (define-key map (kbd "!") #'disco-room-toggle-reaction)
+    (define-key map (kbd "+") #'disco-room-add-reaction)
+    (define-key map (kbd "-") #'disco-room-remove-reaction)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+    (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+    (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
     (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
@@ -1861,6 +2273,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--input-marker nil)
   (setq-local disco-room--rendering nil)
   (setq-local disco-room--ewoc nil)
+  (setq-local disco-room--pending-attachments nil)
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (add-hook 'after-change-functions #'disco-room--after-change nil t))
 
