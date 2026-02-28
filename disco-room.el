@@ -13,6 +13,7 @@
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
+(require 'disco-transient)
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
@@ -207,6 +208,7 @@
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
     (define-key map (kbd "C-c C-a") #'disco-room-toggle-thread-archived)
+    (define-key map (kbd "?") #'disco-room-transient)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `disco-room-mode'.")

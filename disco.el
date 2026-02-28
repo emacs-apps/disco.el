@@ -3,7 +3,7 @@
 ;; Author: disco.el contributors
 ;; Keywords: comm
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16"))
+;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.3"))
 
 ;;; Commentary:
 
@@ -20,6 +20,7 @@
 (require 'disco-api)
 (require 'disco-http)
 (require 'disco-gateway)
+(require 'disco-transient)
 (require 'disco-room)
 (require 'disco-root)
 

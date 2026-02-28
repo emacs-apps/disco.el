@@ -15,6 +15,7 @@
 (require 'disco-api)
 (require 'disco-room)
 (require 'disco-state)
+(require 'disco-transient)
 
 (defconst disco-root-buffer-name "*disco*"
   "Main root buffer name.")
@@ -205,6 +206,7 @@ Return plist with keys :threads and :errors."
 (defvar disco-root-archived-threads-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-root-archived-threads-refresh)
+    (define-key map (kbd "?") #'disco-root-transient)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `disco-root-archived-threads-mode'.")
@@ -337,6 +339,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-root-refresh)
     (define-key map (kbd "A") #'disco-root-list-archived-threads)
+    (define-key map (kbd "?") #'disco-root-transient)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `disco-root-mode'.")
