@@ -14,10 +14,16 @@
 (require 'ring)
 (require 'cl-lib)
 (require 'ewoc)
+(require 'url)
+(require 'url-http)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
 (require 'disco-transient)
+
+(defvar url-http-response-status)
+(defvar url-http-end-of-headers)
+(defvar url-http-content-type)
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
@@ -41,6 +47,17 @@
 (defvar-local disco-room--ewoc nil)
 (defvar-local disco-room--message-node-table nil)
 
+(defvar disco-room--avatar-image-cache (make-hash-table :test #'equal)
+  "Global avatar image cache keyed by avatar cache key.
+
+Values are either image objects or the symbol `:missing'.")
+
+(defvar disco-room--avatar-fetching (make-hash-table :test #'equal)
+  "Global set of avatar cache keys currently being fetched.")
+
+(defvar disco-room--avatar-fetch-budget nil
+  "Dynamic cap for number of avatar fetches started in current render pass.")
+
 (defcustom disco-room-input-history-size 30
   "Maximum number of draft entries kept in room input history."
   :type 'integer
@@ -49,6 +66,29 @@
 (defcustom disco-room-send-on-return t
   "When non-nil, `RET' in room buffer sends current draft."
   :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-show-avatar-images t
+  "When non-nil, render author avatars as inline images when possible.
+
+When image rendering is unavailable, room falls back to text placeholders."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-avatar-image-size 28
+  "Pixel size used for inline avatar images in room timeline."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-avatar-cache-directory
+  (locate-user-emacs-file "disco-avatar-cache/")
+  "Directory used to cache downloaded avatar images."
+  :type 'directory
+  :group 'disco)
+
+(defcustom disco-room-avatar-max-fetches-per-render 6
+  "Maximum avatar fetches started during one room render pass."
+  :type 'integer
   :group 'disco)
 
 (defface disco-room-author-color-1
@@ -629,7 +669,7 @@ Returns nil when left blank."
     (aref faces idx)))
 
 (defun disco-room--avatar-placeholder (msg)
-  "Return text avatar placeholder for MSG author (e.g. "[AB]")."
+  "Return text avatar placeholder for MSG author (for example `[AB]')."
   (let* ((name (disco-room--message-author msg))
          (parts (split-string (or name "") "[^[:alnum:]]+" t))
          (first (if parts (substring (car parts) 0 1) "?"))
@@ -638,6 +678,218 @@ Returns nil when left blank."
                    ""))
          (initials (upcase (concat first second))))
     (format "[%s]" initials)))
+
+(defun disco-room--image-rendering-available-p ()
+  "Return non-nil when avatar images can be shown in current frame."
+  (and disco-room-show-avatar-images
+       (display-images-p)
+       (or (image-type-available-p 'png)
+           (image-type-available-p 'imagemagick))))
+
+(defun disco-room--author-avatar-hash (msg)
+  "Extract Discord avatar hash string from MSG author, or nil."
+  (let ((author (alist-get 'author msg)))
+    (and (listp author) (alist-get 'avatar author))))
+
+(defun disco-room--author-default-avatar-index (msg)
+  "Return Discord default avatar index for MSG author."
+  (let* ((author (alist-get 'author msg))
+         (user-id (and (listp author) (alist-get 'id author)))
+         (discriminator (and (listp author) (alist-get 'discriminator author))))
+    (cond
+     ((and discriminator
+           (stringp discriminator)
+           (not (string= discriminator "0")))
+      (mod (string-to-number discriminator) 5))
+     ((and user-id (string-match-p "\\`[0-9]+\\'" user-id))
+      ;; Modern Discord default avatar buckets derive from user snowflake.
+      (mod (ash (string-to-number user-id) -22) 6))
+     (t 0))))
+
+(defun disco-room--avatar-url (msg)
+  "Return avatar CDN URL for MSG author."
+  (let* ((user-id (disco-room--message-author-id msg))
+         (avatar-hash (disco-room--author-avatar-hash msg)))
+    (cond
+     ((and user-id avatar-hash)
+      (format "https://cdn.discordapp.com/avatars/%s/%s.png?size=64"
+              user-id avatar-hash))
+     (user-id
+      (format "https://cdn.discordapp.com/embed/avatars/%d.png"
+              (disco-room--author-default-avatar-index msg)))
+     (t nil))))
+
+(defun disco-room--avatar-cache-key (msg)
+  "Build stable avatar cache key for MSG author and avatar size."
+  (let* ((user-id (disco-room--message-author-id msg))
+         (avatar-hash (disco-room--author-avatar-hash msg))
+         (default-index (disco-room--author-default-avatar-index msg)))
+    (when user-id
+      (format "%s:%s:%s"
+              user-id
+              (or avatar-hash (format "default-%d" default-index))
+              disco-room-avatar-image-size))))
+
+(defun disco-room--avatar-cache-file (cache-key)
+  "Return cache file path for avatar CACHE-KEY."
+  (expand-file-name
+   (format "%s.png" (md5 cache-key))
+   disco-room-avatar-cache-directory))
+
+(defun disco-room--avatar-image-from-file (file)
+  "Create inline avatar image from FILE, or nil when unsupported."
+  (when (disco-room--file-looks-like-png-p file)
+    (let ((image
+           (ignore-errors
+             (create-image file nil nil
+                           :width disco-room-avatar-image-size
+                           :height disco-room-avatar-image-size
+                           :ascent 'center))))
+      (when (and image (disco-room--image-object-valid-p image))
+        image))))
+
+(defun disco-room--file-looks-like-png-p (file)
+  "Return non-nil when FILE starts with the PNG signature."
+  (and (file-exists-p file)
+       (>= (nth 7 (file-attributes file)) 8)
+       (with-temp-buffer
+         (let ((coding-system-for-read 'binary))
+           (insert-file-contents-literally file nil 0 8))
+         (string= (buffer-string)
+                  (string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n)))))
+
+(defun disco-room--image-object-valid-p (image)
+  "Return non-nil when IMAGE can be rendered by Emacs.
+
+This filters out broken image specs that would otherwise render as tofu boxes."
+  (and image
+       (condition-case _
+           (progn
+             (image-size image t)
+             t)
+         (error nil))))
+
+(defun disco-room-clear-avatar-cache ()
+  "Clear in-memory avatar cache and rerender all room buffers."
+  (interactive)
+  (clrhash disco-room--avatar-image-cache)
+  (clrhash disco-room--avatar-fetching)
+  (disco-room--rerender-open-rooms)
+  (message "disco: avatar cache cleared"))
+
+(defun disco-room-refetch-avatars ()
+  "Drop avatar caches (memory + disk) and refetch in open room buffers."
+  (interactive)
+  (clrhash disco-room--avatar-image-cache)
+  (clrhash disco-room--avatar-fetching)
+  (when (file-directory-p disco-room-avatar-cache-directory)
+    (delete-directory disco-room-avatar-cache-directory t))
+  (disco-room--rerender-open-rooms)
+  (message "disco: avatar cache reset; refetching"))
+
+(defun disco-room--rerender-open-rooms ()
+  "Rerender all open room buffers while preserving point line/column."
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (eq major-mode 'disco-room-mode)
+          (let ((line (line-number-at-pos))
+                (col (current-column)))
+            (disco-room-render)
+            (goto-char (point-min))
+            (forward-line (max 0 (1- line)))
+            (move-to-column col)))))))
+
+(defun disco-room--start-avatar-fetch (cache-key url file)
+  "Start asynchronous avatar fetch for CACHE-KEY from URL into FILE."
+  (unless (or (gethash cache-key disco-room--avatar-fetching)
+              (gethash cache-key disco-room--avatar-image-cache)
+              (and (numberp disco-room--avatar-fetch-budget)
+                   (<= disco-room--avatar-fetch-budget 0)))
+    (when (numberp disco-room--avatar-fetch-budget)
+      (cl-decf disco-room--avatar-fetch-budget))
+    (puthash cache-key t disco-room--avatar-fetching)
+    (url-retrieve
+     url
+     (lambda (status key target-file)
+       (unwind-protect
+           (let* ((status-code (and (boundp 'url-http-response-status)
+                                    url-http-response-status))
+                  (body-start (and (boundp 'url-http-end-of-headers)
+                                   url-http-end-of-headers))
+                  image)
+             (when (and (not (plist-get status :error))
+                        (numberp status-code)
+                        (<= 200 status-code)
+                        (< status-code 300)
+                        (or (not (boundp 'url-http-content-type))
+                            (null url-http-content-type)
+                            (string-match-p "\\`image/" url-http-content-type)))
+               (unless body-start
+                 (goto-char (point-min))
+                 (when (re-search-forward "\\r?\\n\\r?\\n" nil t)
+                   (setq body-start (point))))
+               (when body-start
+                 (make-directory (file-name-directory target-file) t)
+                 (let ((coding-system-for-write 'binary))
+                   (write-region body-start (point-max) target-file nil 'silent))
+                 (setq image (disco-room--avatar-image-from-file target-file))))
+             (when (and (null image)
+                        (file-exists-p target-file))
+               ;; Drop corrupted cache files so later refresh can retry cleanly.
+               (ignore-errors (delete-file target-file)))
+             (puthash key
+                      (or image :missing)
+                      disco-room--avatar-image-cache)
+             (remhash key disco-room--avatar-fetching)
+             (disco-room--rerender-open-rooms))
+         (when (buffer-live-p (current-buffer))
+           (kill-buffer (current-buffer)))))
+     (list cache-key file)
+     t)))
+
+(defun disco-room--avatar-image (msg)
+  "Return avatar image object for MSG when ready, otherwise nil.
+
+If needed, schedule async fetch and fall back to text placeholder."
+  (when (disco-room--image-rendering-available-p)
+    (let* ((cache-key (disco-room--avatar-cache-key msg))
+           (cached (and cache-key (gethash cache-key disco-room--avatar-image-cache))))
+      (cond
+       ((or (null cache-key) (eq cached :missing))
+        nil)
+       (cached
+        (if (disco-room--image-object-valid-p cached)
+            cached
+          (remhash cache-key disco-room--avatar-image-cache)
+          nil))
+       (t
+        (let* ((url (disco-room--avatar-url msg))
+               (cache-file (and cache-key (disco-room--avatar-cache-file cache-key)))
+               (file-image (and cache-file
+                                (file-exists-p cache-file)
+                                (disco-room--avatar-image-from-file cache-file))))
+          (cond
+           (file-image
+            (puthash cache-key file-image disco-room--avatar-image-cache)
+            file-image)
+           ((and url cache-file)
+            (when (and (file-exists-p cache-file) (not file-image))
+              (ignore-errors (delete-file cache-file)))
+            (disco-room--start-avatar-fetch cache-key url cache-file)
+            nil)
+           (t nil))))))))
+
+(defun disco-room--insert-avatar (msg)
+  "Insert avatar presentation for MSG at point."
+  (let ((image (disco-room--avatar-image msg))
+        (fallback (disco-room--avatar-placeholder msg)))
+    (if image
+        (condition-case _
+            (insert-image image fallback)
+          (error
+           (insert fallback)))
+      (insert fallback))))
 
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
@@ -679,7 +931,6 @@ Returns nil when left blank."
   (let* ((timestamp (disco-room--format-time (or (alist-get 'timestamp msg) "")))
          (author (disco-room--message-author msg))
          (author-face (disco-room--author-face msg))
-         (avatar (disco-room--avatar-placeholder msg))
          (content (disco-room--message-display-content msg))
          (reply (disco-room--reply-preview msg))
          (message-id (alist-get 'id msg))
@@ -696,7 +947,9 @@ Returns nil when left blank."
                'front-sticky '(read-only)
                'disco-message-id message-id))))
     (setq line-start (point))
-    (insert (format "[%s] %s " timestamp avatar))
+    (insert (format "[%s] " timestamp))
+    (disco-room--insert-avatar msg)
+    (insert " ")
     (setq author-start (point))
     (insert author)
     (add-text-properties author-start (point) (list 'face author-face))
@@ -812,7 +1065,9 @@ Return non-nil when handled without full room rerender."
   (let ((inhibit-read-only t)
         (messages (disco-state-messages disco-room--channel-id))
         (draft (disco-room--current-draft))
-        header-end)
+        header-end
+        (disco-room--avatar-fetch-budget
+         (max 0 (or disco-room-avatar-max-fetches-per-render 0))))
     (setq disco-room--rendering t)
     (unwind-protect
         (progn
@@ -820,7 +1075,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   RET/C-c C-c: send   TAB: @mention   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -1255,6 +1510,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
     (define-key map (kbd "C-c C-a") #'disco-room-toggle-thread-archived)
+    (define-key map (kbd "C-c C-v") #'disco-room-refetch-avatars)
     (define-key map (kbd "?") #'disco-room-transient)
     (define-key map (kbd "q") #'quit-window)
     map)

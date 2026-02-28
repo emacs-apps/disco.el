@@ -24,7 +24,9 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
+- Room can render inline Discord avatar images (async, cached) with automatic placeholder fallback.
 - Draft input supports `TAB` @mention completion (from loaded participants) and inserts Discord mention syntax.
+- Room provides `C-c C-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
@@ -107,6 +109,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
 - Room EWOC state keeps message-node indexes so chat events can update rows without full rerender.
+- Avatar fetch/render pipeline is asynchronous and rerenders room buffers when images become available.
 - Mention completion is token-boundary aware (start/whitespace + `@`), mirroring chat-client autocomplete behavior.
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
