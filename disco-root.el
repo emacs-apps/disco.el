@@ -396,6 +396,52 @@ This prevents noisy permission errors for sources that require elevated access."
       (disco-root--private-channel-display-name channel)
     (or (alist-get 'name channel) "(no-name)")))
 
+(defun disco-root--channel-category-p (channel)
+  "Return non-nil when CHANNEL is a guild category container."
+  (= (alist-get 'type channel) 4))
+
+(defun disco-root--channel-sort-position (channel)
+  "Return sortable numeric position for CHANNEL.
+
+Discord channel position can arrive as integer or numeric string."
+  (let ((raw (alist-get 'position channel)))
+    (or (disco-root--parse-decimal-integer raw)
+        most-positive-fixnum)))
+
+(defun disco-root--sort-categories (categories)
+  "Sort category CHANNELS according to current root sort mode."
+  (let ((copy (copy-sequence (or categories '()))))
+    (pcase disco-root--sort-mode
+      ('name
+       (sort copy
+             (lambda (a b)
+               (string-lessp (disco-root--channel-display-name a)
+                             (disco-root--channel-display-name b)))))
+      (_
+       (sort copy
+             (lambda (a b)
+               (let ((a-pos (disco-root--channel-sort-position a))
+                     (b-pos (disco-root--channel-sort-position b)))
+                 (if (= a-pos b-pos)
+                     (string-lessp (disco-root--channel-display-name a)
+                                   (disco-root--channel-display-name b))
+                   (< a-pos b-pos)))))))))
+
+(defun disco-root--parent-thread-unread-total (channel)
+  "Return unread total aggregated from CHANNEL child threads."
+  (let ((total 0)
+        (parent-id (alist-get 'id channel)))
+    (dolist (thread (disco-state-parent-threads parent-id))
+      (setq total (+ total (disco-state-channel-unread-count (alist-get 'id thread)))))
+    total))
+
+(defun disco-root--channel-effective-unread-count (channel)
+  "Return unread count for CHANNEL including visible child-thread unread."
+  (let ((own (disco-state-channel-unread-count (alist-get 'id channel))))
+    (if (disco-root--thread-parent-channel-p channel)
+        (+ own (disco-root--parent-thread-unread-total channel))
+      own)))
+
 (defun disco-root--thread-count-under-parent (channel)
   "Return number of indexed threads under CHANNEL."
   (length (disco-state-parent-threads (alist-get 'id channel))))
@@ -405,7 +451,7 @@ This prevents noisy permission errors for sources that require elevated access."
   (let ((name (disco-root--channel-display-name channel))
         (channel-type (alist-get 'type channel))
         (channel-id (alist-get 'id channel))
-        (unread (disco-state-channel-unread-count (alist-get 'id channel))))
+        (unread (disco-root--channel-effective-unread-count channel)))
     (let ((unread-suffix (if (> unread 0)
                              (format " [%d]" unread)
                            ""))
@@ -440,7 +486,7 @@ This prevents noisy permission errors for sources that require elevated access."
 
 (defun disco-root--channel-has-unread-p (channel)
   "Return non-nil when CHANNEL has unread messages tracked locally."
-  (> (disco-state-channel-unread-count (alist-get 'id channel)) 0))
+  (> (disco-root--channel-effective-unread-count channel) 0))
 
 (defun disco-root--parent-has-unread-thread-p (channel)
   "Return non-nil when CHANNEL has at least one unread thread child."
@@ -482,7 +528,7 @@ This prevents noisy permission errors for sources that require elevated access."
   "Return unique unread channels visible in current root view.
 
 Includes private channels, guild channels and thread channels, sorted by
-current sort mode." 
+current sort mode."
   (let ((seen (make-hash-table :test #'equal))
         result)
     (cl-labels
@@ -510,10 +556,10 @@ current sort mode."
 (defun disco-root--guild-unread-total (guild-id &optional visible-only)
   "Return aggregated unread count for GUILD-ID.
 
-When VISIBLE-ONLY is non-nil, only count channels visible in current view." 
+When VISIBLE-ONLY is non-nil, only count channels visible in current view."
   (let ((total 0))
     (dolist (channel (append (or (disco-state-guild-channels guild-id) '())
-                            (or (disco-state-guild-threads guild-id) '())))
+                             (or (disco-state-guild-threads guild-id) '())))
       (when (or (not visible-only)
                 (disco-root--channel-visible-in-view-p channel))
         (setq total (+ total (disco-state-channel-unread-count (alist-get 'id channel))))))
@@ -1065,7 +1111,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((channel-id (alist-get 'id channel))
         (channel-type (alist-get 'type channel))
         (label (disco-root--channel-label channel))
-        (unread-count (disco-state-channel-unread-count (alist-get 'id channel)))
+        (unread-count (disco-root--channel-effective-unread-count channel))
         (padding (make-string indent ?\s)))
     (let ((line-start (point)))
       (insert (format "%s%s\n" padding label))
@@ -1159,8 +1205,10 @@ If point is not on actionable row, jump to next channel row and open it."
   (mouse-set-point event)
   (disco-root-open-at-point))
 
-(defun disco-root--insert-parent-threads (parent-channel rendered-thread-ids)
-  "Insert threads under PARENT-CHANNEL and mark IDs in RENDERED-THREAD-IDS."
+(defun disco-root--insert-parent-threads (parent-channel rendered-thread-ids &optional indent)
+  "Insert threads under PARENT-CHANNEL and mark IDs in RENDERED-THREAD-IDS.
+
+INDENT controls child-thread row indentation and defaults to 8 spaces."
   (let ((parent-id (alist-get 'id parent-channel)))
     (dolist (thread (disco-state-parent-threads parent-id))
       (let ((thread-id (alist-get 'id thread)))
@@ -1168,7 +1216,7 @@ If point is not on actionable row, jump to next channel row and open it."
                    (disco-root--displayable-channel-p thread)
                    (disco-root--channel-visible-in-view-p thread))
           (puthash thread-id t rendered-thread-ids)
-          (disco-root--ewoc-insert-channel thread 8))))))
+          (disco-root--ewoc-insert-channel thread (or indent 8)))))))
 
 (defun disco-root--guild-visible-parent-channels (guild-id)
   "Return non-thread display channels for GUILD-ID."
@@ -1180,10 +1228,34 @@ If point is not on actionable row, jump to next channel row and open it."
         (push channel parents)))
     (disco-root--sort-channels (nreverse parents))))
 
+(defun disco-root--guild-visible-categories (guild-id)
+  "Return visible category channels for GUILD-ID."
+  (let (categories)
+    (dolist (channel (or (disco-state-guild-channels guild-id) '()))
+      (when (and (disco-root--channel-category-p channel)
+                 (disco-root--channel-viewable-p channel))
+        (push channel categories)))
+    (disco-root--sort-categories (nreverse categories))))
+
+(defun disco-root--insert-guild-category-header (category children)
+  "Insert one CATEGORY heading for CHILDREN list." 
+  (let ((category-name (or (disco-root--channel-display-name category)
+                           "(unnamed-category)"))
+        (category-unread 0))
+    (dolist (channel children)
+      (setq category-unread
+            (+ category-unread (disco-root--channel-effective-unread-count channel))))
+    (disco-root--ewoc-insert-text
+     (format "    [category] %s%s"
+             category-name
+             (if (> category-unread 0)
+                 (format " [%d]" category-unread)
+               "")))))
+
 (defun disco-root--insert-guild (guild)
   "Insert one GUILD and its visible channels in root buffer.
 
-Return non-nil when at least one visible row is inserted for GUILD." 
+Return non-nil when at least one visible row is inserted for GUILD."
   (let* ((guild-id (alist-get 'id guild))
          (guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
          (guild-unread (disco-root--guild-unread-total guild-id t))
@@ -1191,35 +1263,70 @@ Return non-nil when at least one visible row is inserted for GUILD."
                             (format " [%d]" guild-unread)
                           ""))
          (parents (disco-root--guild-visible-parent-channels guild-id))
+         (categories (disco-root--guild-visible-categories guild-id))
+         (category-id-set (make-hash-table :test #'equal))
+         (category-children (make-hash-table :test #'equal))
+         uncategorized-parents
          (rendered-thread-ids (make-hash-table :test #'equal))
          (has-visible-thread
           (seq-some (lambda (thread)
                       (and (disco-root--displayable-channel-p thread)
                            (disco-root--channel-visible-in-view-p thread)))
                     (or (disco-state-guild-threads guild-id) '()))))
-    (when (or parents has-visible-thread)
-      (disco-root--ewoc-insert-text (format "  %s%s" guild-name unread-suffix))
-      (dolist (channel parents)
-        (disco-root--ewoc-insert-channel channel 4)
-        (when (disco-root--thread-parent-channel-p channel)
-          (disco-root--insert-parent-threads channel rendered-thread-ids)))
+    (dolist (category categories)
+      (let ((category-id (alist-get 'id category)))
+        (when category-id
+          (puthash category-id t category-id-set))))
+    (dolist (channel parents)
+      (let ((parent-id (alist-get 'parent_id channel)))
+        (if (and parent-id (gethash parent-id category-id-set))
+            (puthash parent-id
+                     (append (or (gethash parent-id category-children) '())
+                             (list channel))
+                     category-children)
+          (push channel uncategorized-parents))))
+    (setq uncategorized-parents (nreverse uncategorized-parents))
+    (let ((has-categorized-parents
+           (seq-some (lambda (category)
+                       (let ((category-id (alist-get 'id category)))
+                         (and category-id
+                              (gethash category-id category-children))))
+                     categories)))
+      (when (or uncategorized-parents has-categorized-parents has-visible-thread)
+        (disco-root--ewoc-insert-text (format "  %s%s" guild-name unread-suffix))
 
-      (let (orphan-threads)
-        (dolist (thread (or (disco-state-guild-threads guild-id) '()))
-          (let ((thread-id (alist-get 'id thread)))
-            (when (and thread-id
-                       (disco-root--displayable-channel-p thread)
-                       (disco-root--channel-visible-in-view-p thread)
-                       (not (gethash thread-id rendered-thread-ids)))
-              (push thread orphan-threads))))
-        (setq orphan-threads (nreverse orphan-threads))
-        (when orphan-threads
-          (disco-root--ewoc-insert-text "    [threads]")
-          (dolist (thread orphan-threads)
-            (disco-root--ewoc-insert-channel thread 8))))
+        (dolist (channel uncategorized-parents)
+          (disco-root--ewoc-insert-channel channel 4)
+          (when (disco-root--thread-parent-channel-p channel)
+            (disco-root--insert-parent-threads channel rendered-thread-ids 8)))
 
-      (disco-root--ewoc-insert-blank)
-      t)))
+        (dolist (category categories)
+          (let* ((category-id (alist-get 'id category))
+                 (children (and category-id
+                                (gethash category-id category-children))))
+            (when children
+              (disco-root--insert-guild-category-header category children)
+              (dolist (channel children)
+                (disco-root--ewoc-insert-channel channel 6)
+                (when (disco-root--thread-parent-channel-p channel)
+                  (disco-root--insert-parent-threads channel rendered-thread-ids 10))))))
+
+        (let (orphan-threads)
+          (dolist (thread (or (disco-state-guild-threads guild-id) '()))
+            (let ((thread-id (alist-get 'id thread)))
+              (when (and thread-id
+                         (disco-root--displayable-channel-p thread)
+                         (disco-root--channel-visible-in-view-p thread)
+                         (not (gethash thread-id rendered-thread-ids)))
+                (push thread orphan-threads))))
+          (setq orphan-threads (nreverse orphan-threads))
+          (when orphan-threads
+            (disco-root--ewoc-insert-text "    [threads]")
+            (dolist (thread orphan-threads)
+              (disco-root--ewoc-insert-channel thread 8))))
+
+        (disco-root--ewoc-insert-blank)
+        t))))
 
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
@@ -1342,7 +1449,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
              (inc-pending)
              (disco-api-guild-channels-async
               guild-id
-             :on-success
+              :on-success
               (lambda (channels)
                 (when (callback-active-p)
                   (setq channel-count (+ channel-count (length channels)))
