@@ -425,6 +425,11 @@ Only CHANNEL read_state_type entries are used here."
         (when (numberp mention-count)
           (disco-state-set-channel-unread channel-id mention-count))))))
 
+(defun disco-gateway--ingest-ready-private-channels (private-channels)
+  "Ingest Ready PRIVATE-CHANNELS payload into local state."
+  (disco-state-set-private-channels
+   (disco-gateway--versioned-entries private-channels)))
+
 (defun disco-gateway--handle-dispatch (event-type data)
   "Handle one dispatch EVENT-TYPE with DATA payload."
   (pcase event-type
@@ -432,6 +437,9 @@ Only CHANNEL read_state_type entries are used here."
      (setq disco-gateway--session-id (alist-get 'session_id data))
      (setq disco-gateway--resume-url (alist-get 'resume_gateway_url data))
      (disco-gateway--ingest-ready-read-states (alist-get 'read_state data))
+     (when (assq 'private_channels data)
+       (disco-gateway--ingest-ready-private-channels
+        (alist-get 'private_channels data)))
      (disco-gateway--reset-reconnect-backoff)
      (message "disco: gateway READY"))
     ("RESUMED"

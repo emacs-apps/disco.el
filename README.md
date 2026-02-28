@@ -13,6 +13,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Configure token with `DISCO_TOKEN` environment variable (default), or override in-session with `M-x disco-set-token`.
 - Start client with `M-x disco`.
 - Fetch and display guild/channel list in `*disco*`.
+- Fetch and display private channels (DM/group DM) in root.
 - Fetch and display thread channels nested under their parent channels.
 - Browse archived thread lists per parent channel.
 - Open channel timeline.
@@ -25,6 +26,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root channel labels include lightweight unread counters from live message events.
 - Room open/refresh/live message flow now acknowledges Discord channel read-state (`/ack`) and tracks per-channel last-read cursor.
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
+- Gateway READY now ingests private channel payload and keeps local DM list in sync.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
 ## Dependencies

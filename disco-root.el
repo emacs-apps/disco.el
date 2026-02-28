@@ -93,11 +93,11 @@
 
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
-  (memq (alist-get 'type channel) '(0 5 10 11 12 15 16)))
+  (memq (alist-get 'type channel) '(0 1 3 5 10 11 12 15 16)))
 
 (defun disco-root--openable-channel-p (channel)
   "Return non-nil when CHANNEL can be opened as a room timeline."
-  (memq (alist-get 'type channel) '(0 5 10 11 12)))
+  (memq (alist-get 'type channel) '(0 1 3 5 10 11 12)))
 
 (defun disco-root--thread-parent-channel-p (channel)
   "Return non-nil when CHANNEL can contain visible threads in UI."
@@ -122,13 +122,45 @@
       (push "private" tags))
     (mapconcat #'identity (nreverse tags) ", ")))
 
+(defun disco-root--recipient-display-name (recipient)
+  "Return best display name for one DM RECIPIENT user object."
+  (or (alist-get 'global_name recipient)
+      (alist-get 'username recipient)
+      (alist-get 'id recipient)
+      "unknown-user"))
+
+(defun disco-root--private-channel-display-name (channel)
+  "Return best display name for private CHANNEL."
+  (let* ((channel-type (alist-get 'type channel))
+         (explicit-name (and (stringp (alist-get 'name channel))
+                             (not (string-empty-p (alist-get 'name channel)))
+                             (alist-get 'name channel)))
+         (recipients (or (alist-get 'recipients channel) '()))
+         (recipient-names (delq nil
+                                (mapcar (lambda (it)
+                                          (when (listp it)
+                                            (disco-root--recipient-display-name it)))
+                                        recipients))))
+    (pcase channel-type
+      (1 (or (car recipient-names) explicit-name "direct-message"))
+      (3 (or explicit-name
+             (and recipient-names (mapconcat #'identity recipient-names ", "))
+             "group-dm"))
+      (_ (or explicit-name "(no-name)")))))
+
+(defun disco-root--channel-display-name (channel)
+  "Return display name for CHANNEL independent of badge suffixes."
+  (if (memq (alist-get 'type channel) '(1 3))
+      (disco-root--private-channel-display-name channel)
+    (or (alist-get 'name channel) "(no-name)")))
+
 (defun disco-root--thread-count-under-parent (channel)
   "Return number of indexed threads under CHANNEL."
   (length (disco-state-parent-threads (alist-get 'id channel))))
 
 (defun disco-root--channel-label (channel)
   "Return display label for CHANNEL."
-  (let ((name (or (alist-get 'name channel) "(no-name)"))
+  (let ((name (disco-root--channel-display-name channel))
         (channel-type (alist-get 'type channel))
         (channel-id (alist-get 'id channel))
         (unread (disco-state-channel-unread-count (alist-get 'id channel))))
@@ -143,6 +175,8 @@
                  " [read]"
                ""))))
       (pcase channel-type
+        (1 (format "[dm] %s%s" name (concat unread-suffix read-suffix)))
+        (3 (format "[group] %s%s" name (concat unread-suffix read-suffix)))
         ((or 10 11 12)
          (let ((tags (disco-root--thread-status-tags channel)))
            (format "[thread] %s%s%s"
@@ -161,6 +195,30 @@
              (15 (format "[forum] %s%s%s" name suffix (concat unread-suffix read-suffix)))
              (16 (format "[media] %s%s%s" name suffix (concat unread-suffix read-suffix))))))
         (_ (format "[type-%s] %s%s" channel-type name (concat unread-suffix read-suffix)))))))
+
+(defun disco-root--private-channels-sorted ()
+  "Return private channels sorted by recency (newest first)."
+  (sort (copy-sequence (disco-state-private-channels))
+        (lambda (a b)
+          (let ((a-last (alist-get 'last_message_id a))
+                (b-last (alist-get 'last_message_id b)))
+            (cond
+             ((and (stringp a-last) (stringp b-last))
+              (disco-state-snowflake< b-last a-last))
+             ((stringp a-last) t)
+             ((stringp b-last) nil)
+             (t (string-lessp (or (alist-get 'id a) "")
+                              (or (alist-get 'id b) ""))))))))
+
+(defun disco-root--insert-private-channels ()
+  "Insert private-channel (DM/group DM) section into root buffer."
+  (let ((channels (disco-root--private-channels-sorted)))
+    (insert "Direct Messages\n")
+    (if channels
+        (dolist (channel channels)
+          (disco-root--insert-channel-line channel 4))
+      (insert "    (no private channels loaded)\n"))
+    (insert "\n")))
 
 (defun disco-root--guild-name-by-id (guild-id)
   "Return guild display name for GUILD-ID."
@@ -402,7 +460,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
 (defun disco-root--insert-channel-line (channel indent)
   "Insert one CHANNEL at INDENT spaces."
   (let ((channel-id (alist-get 'id channel))
-        (channel-name (or (alist-get 'name channel) "(no-name)"))
+        (channel-name (disco-root--channel-display-name channel))
         (label (disco-root--channel-label channel))
         (padding (make-string indent ?\s)))
     (if (disco-root--openable-channel-p channel)
@@ -465,6 +523,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
     (erase-buffer)
     (insert "disco.el\n")
     (insert "g: refresh   A: archived threads   RET/mouse-1: open channel/thread   q: quit\n\n")
+    (disco-root--insert-private-channels)
     (let ((guilds (or (disco-state-guilds) '())))
       (if guilds
           (dolist (guild guilds)
@@ -476,8 +535,19 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   "Fetch guild/channel data and redraw root buffer."
   (interactive)
   (let* ((guilds (disco-api-user-guilds))
+         (private-channels nil)
+         (private-channels-fetched nil)
          (guild-count (length guilds))
          (channel-count 0))
+    (condition-case err
+        (progn
+          (setq private-channels (disco-api-user-private-channels))
+          (setq private-channels-fetched t))
+      (error
+       (message "disco: private-channel fetch failed: %s"
+                (error-message-string err))))
+    (when private-channels-fetched
+      (disco-state-set-private-channels private-channels))
     (disco-state-set-guilds guilds)
     (dolist (guild guilds)
       (let* ((guild-id (alist-get 'id guild))
@@ -500,8 +570,11 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
           (setq thread-count (+ thread-count
                                 (length (disco-state-guild-threads guild-id))))))
       (disco-root-render)
-      (message "disco: loaded %d guilds, %d channels (%d threads)"
-               guild-count channel-count thread-count))))
+      (message "disco: loaded %d guilds, %d channels (%d threads), %d DMs"
+               guild-count
+               channel-count
+               thread-count
+               (length (disco-state-private-channels))))))
 
 (defvar disco-root-mode-map
   (let ((map (make-sparse-keymap)))

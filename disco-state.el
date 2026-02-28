@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 
 (defvar disco-state--guilds nil
   "List of guild objects as alists.")
@@ -18,6 +19,9 @@
 
 (defvar disco-state--channels-by-id (make-hash-table :test #'equal)
   "Hash table channel-id -> channel object.")
+
+(defvar disco-state--private-channels nil
+  "List of private channels (DM/group DM) as channel objects.")
 
 (defvar disco-state--threads-by-parent (make-hash-table :test #'equal)
   "Hash table parent-channel-id -> list of thread channel objects.")
@@ -40,6 +44,7 @@
 (defun disco-state-reset ()
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
+  (setq disco-state--private-channels nil)
   (clrhash disco-state--channels-by-guild)
   (clrhash disco-state--channels-by-id)
   (clrhash disco-state--threads-by-parent)
@@ -52,6 +57,10 @@
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."
   (memq (alist-get 'type channel) '(10 11 12)))
+
+(defun disco-state-private-channel-p (channel)
+  "Return non-nil when CHANNEL is a DM or group DM channel."
+  (memq (alist-get 'type channel) '(1 3)))
 
 (defun disco-state--parent-threads-upsert (parent-id channel)
   "Insert or replace thread CHANNEL under PARENT-ID."
@@ -143,6 +152,25 @@
   "Return guild list from memory."
   disco-state--guilds)
 
+(defun disco-state-private-channels ()
+  "Return private channels from memory."
+  (or disco-state--private-channels '()))
+
+(defun disco-state-set-private-channels (channels)
+  "Set private CHANNELS list in memory and refresh channel indexes."
+  (let* ((private-only (seq-filter #'disco-state-private-channel-p (or channels '())))
+         (new-ids (delq nil (mapcar (lambda (it) (alist-get 'id it)) private-only))))
+    (dolist (old (copy-sequence (or disco-state--private-channels '())))
+      (let ((old-id (alist-get 'id old)))
+        (when (and old-id (not (member old-id new-ids)))
+          (disco-state-delete-channel old-id))))
+    (setq disco-state--private-channels private-only)
+    (dolist (channel private-only)
+      (let ((channel-id (alist-get 'id channel)))
+        (when channel-id
+          (puthash channel-id channel disco-state--channels-by-id))))
+    private-only))
+
 (defun disco-state-upsert-guild (guild)
   "Insert or update one GUILD object in memory by ID."
   (setq disco-state--guilds
@@ -208,6 +236,13 @@
   (let* ((channel-id (alist-get 'id channel))
          (guild-id (alist-get 'guild_id channel))
          (old (and channel-id (gethash channel-id disco-state--channels-by-id))))
+    (when (and old
+               (disco-state-private-channel-p old)
+               (not (disco-state-private-channel-p channel)))
+      (setq disco-state--private-channels
+            (cl-remove-if (lambda (it)
+                            (equal (alist-get 'id it) channel-id))
+                          (or disco-state--private-channels '()))))
     (when (and old (disco-state-channel-thread-p old))
       (disco-state--remove-thread-indexes old))
     (when channel-id
@@ -217,6 +252,11 @@
         (puthash guild-id
                  (disco-state--replace-or-append-channel channels channel)
                  disco-state--channels-by-guild)))
+    (when (disco-state-private-channel-p channel)
+      (setq disco-state--private-channels
+            (disco-state--replace-or-append-channel
+             (or disco-state--private-channels '())
+             channel)))
     (when (disco-state-channel-thread-p channel)
       (disco-state--index-thread-channel channel))))
 
@@ -231,6 +271,11 @@
                                           (equal (alist-get 'id it) channel-id))
                                         channels)))
             (puthash guild-id updated disco-state--channels-by-guild)))
+        (when (disco-state-private-channel-p channel)
+          (setq disco-state--private-channels
+                (cl-remove-if (lambda (it)
+                                (equal (alist-get 'id it) channel-id))
+                              (or disco-state--private-channels '()))))
         (when (disco-state-channel-thread-p channel)
           (disco-state--remove-thread-indexes channel)))
       (remhash channel-id disco-state--channels-by-id)

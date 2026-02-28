@@ -301,6 +301,10 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
   "Fetch current user's guilds list."
   (disco-api--request "GET" "/users/@me/guilds" nil '(("limit" . "200")) nil))
 
+(defun disco-api-user-private-channels ()
+  "Fetch current user's private channels (DM/group DM) list."
+  (disco-api--request "GET" "/users/@me/channels" nil nil nil))
+
 (defun disco-api-guild-channels (guild-id)
   "Fetch channels in GUILD-ID."
   (disco-api--request "GET" (format "/guilds/%s/channels" guild-id) nil nil nil))
