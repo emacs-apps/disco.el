@@ -19,10 +19,11 @@ This repository currently contains an MVP scaffold designed with these reference
 - Browse archived thread lists per parent channel.
 - Open channel timeline.
 - Room timeline supports telega-inspired compact same-sender grouping, date separators, and unread divider rendering.
+- Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
 - Send plain text message with `C-c C-c` in room buffer.
-- Send file attachments from room buffer (multipart upload) with draft tokens: add via `C-c C-f`, remove token at point via `C-c C-d`, clear all via `C-c C-x`, then send via `RET`/`C-c C-c`.
+- Send file attachments from room buffer (multipart upload) with draft tokens: add via `C-c C-f`, remove token at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
-- Message rows render structured attachment metadata (image/video/file kind, size, dimensions when available).
+- Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, open/copy-url actions, and inline image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
@@ -88,7 +89,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
-- Room transient (`?`): includes attachment queue/token and reaction actions (`f`, `D`, `x`, `!`, `+`, `-`).
+- Room transient (`?`): includes attachment queue/token and reaction actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration

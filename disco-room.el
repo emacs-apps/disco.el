@@ -157,6 +157,11 @@ Set to nil to disable per-render capping."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-use-rich-attachment-cards t
+  "When non-nil, render telega-inspired rich cards for attachments."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-room-show-attachment-image-previews t
   "When non-nil, render inline image previews for image attachments."
   :type 'boolean
@@ -192,6 +197,11 @@ Grouping applies when sender stays the same and timestamps are within
 
 (defcustom disco-room-show-unread-divider t
   "When non-nil, render an unread divider before first unread message."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-right-align-timestamps t
+  "When non-nil, render message time tags aligned to the right edge."
   :type 'boolean
   :group 'disco)
 
@@ -317,6 +327,9 @@ Grouping applies when sender stays the same and timestamps are within
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
     (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
+    (define-key map (kbd "C-c M-l") #'disco-room-list-attachments)
+    (define-key map (kbd "C-c M-e") #'disco-room-edit-attachment-description)
+    (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
     map)
   "Keymap active when point is inside the room draft region.")
 
@@ -923,6 +936,32 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
       (format-time-string "%H:%M" (date-to-time iso8601))
     (error "--:--")))
 
+(defun disco-room--insert-right-aligned-text (text &optional face)
+  "Insert TEXT aligned to right edge on current line.
+
+When FACE is non-nil, apply FACE to TEXT."
+  (let* ((raw (or text ""))
+         (width (max 1 (1+ (string-width raw))))
+         (start (point)))
+    (if disco-room-right-align-timestamps
+        (insert (propertize " " 'display `(space :align-to (- right ,width))))
+      (insert " "))
+    (insert (if face
+                (propertize raw 'face face)
+              raw))
+    (cons start (point))))
+
+(defun disco-room--insert-prefixed-lines (prefix text &optional face)
+  "Insert TEXT as newline-separated lines, each prefixed by PREFIX.
+
+When FACE is non-nil, apply FACE to each inserted line."
+  (let ((lines (split-string (or text "") "\n" nil)))
+    (dolist (line lines)
+      (let ((line-start (point)))
+        (insert prefix line "\n")
+        (when face
+          (add-text-properties line-start (point) (list 'face face)))))))
+
 (defun disco-room--message-time (msg)
   "Return decoded time for MSG timestamp, or nil when unavailable."
   (let ((raw (alist-get 'timestamp msg)))
@@ -1371,7 +1410,7 @@ If needed, schedule async fetch and fall back to text placeholder."
      (t nil))))
 
 (defun disco-room--attachment-preview-cache-key (attachment)
-  "Return stable preview cache key for ATTACHMENT object." 
+  "Return stable preview cache key for ATTACHMENT object."
   (let* ((attachment-id (alist-get 'id attachment))
          (url (disco-room--attachment-preview-url attachment))
          (name (or (alist-get 'filename attachment) "unnamed"))
@@ -1384,24 +1423,24 @@ If needed, schedule async fetch and fall back to text placeholder."
             (max 64 disco-room-attachment-preview-max-width))))
 
 (defun disco-room--attachment-preview-cache-file-base (cache-key)
-  "Return attachment preview cache file base path for CACHE-KEY." 
+  "Return attachment preview cache file base path for CACHE-KEY."
   (expand-file-name (md5 cache-key) disco-room-attachment-cache-directory))
 
 (defun disco-room--attachment-preview-cache-file (cache-key extension)
-  "Return attachment preview cache file path for CACHE-KEY and EXTENSION." 
+  "Return attachment preview cache file path for CACHE-KEY and EXTENSION."
   (format "%s.%s"
           (disco-room--attachment-preview-cache-file-base cache-key)
           extension))
 
 (defun disco-room--attachment-preview-cache-existing-file (cache-key)
-  "Return existing preview cache file path for CACHE-KEY, or nil." 
+  "Return existing preview cache file path for CACHE-KEY, or nil."
   (seq-find #'file-exists-p
             (mapcar (lambda (ext)
                       (disco-room--attachment-preview-cache-file cache-key ext))
                     disco-room--avatar-cache-extensions)))
 
 (defun disco-room--attachment-preview-ensure-queue ()
-  "Return active queue for attachment preview fetches." 
+  "Return active queue for attachment preview fetches."
   (let ((limit (max 1 disco-room-attachment-preview-fetch-concurrency)))
     (when (or (null disco-room--attachment-preview-plz-queue)
               (not (equal disco-room--attachment-preview-plz-queue-limit limit)))
@@ -1409,8 +1448,15 @@ If needed, schedule async fetch and fall back to text placeholder."
       (setq disco-room--attachment-preview-plz-queue-limit limit))
     disco-room--attachment-preview-plz-queue))
 
+(defun disco-room--attachment-preview-delete-stale-cache-files (cache-base)
+  "Delete stale cached preview files for CACHE-BASE."
+  (dolist (ext disco-room--avatar-cache-extensions)
+    (let ((old-file (format "%s.%s" cache-base ext)))
+      (when (file-exists-p old-file)
+        (ignore-errors (delete-file old-file))))))
+
 (defun disco-room--attachment-preview-image-from-file (file)
-  "Create inline attachment preview image from FILE, or nil when unavailable." 
+  "Create inline attachment preview image from FILE, or nil when unavailable."
   (let ((image
          (ignore-errors
            (create-image file nil nil
@@ -1429,7 +1475,7 @@ If needed, schedule async fetch and fall back to text placeholder."
 (defun disco-room--attachment-preview-complete-fetch (cache-key image &optional target-file)
   "Finalize one attachment preview fetch for CACHE-KEY with IMAGE.
 
-When IMAGE is nil and TARGET-FILE exists, TARGET-FILE is deleted." 
+When IMAGE is nil and TARGET-FILE exists, TARGET-FILE is deleted."
   (when (and (null image) target-file (file-exists-p target-file))
     (ignore-errors (delete-file target-file)))
   (puthash cache-key (or image :missing) disco-room--attachment-preview-image-cache)
@@ -1437,7 +1483,7 @@ When IMAGE is nil and TARGET-FILE exists, TARGET-FILE is deleted."
   (disco-room--rerender-open-rooms))
 
 (defun disco-room--start-attachment-preview-fetch (cache-key url cache-base)
-  "Start asynchronous preview fetch for CACHE-KEY from URL into CACHE-BASE." 
+  "Start asynchronous preview fetch for CACHE-KEY from URL into CACHE-BASE."
   (unless (or (gethash cache-key disco-room--attachment-preview-fetching)
               (gethash cache-key disco-room--attachment-preview-image-cache)
               (and (numberp disco-room--attachment-preview-fetch-budget)
@@ -1466,7 +1512,7 @@ When IMAGE is nil and TARGET-FILE exists, TARGET-FILE is deleted."
                        (extension (disco-room--avatar-bytes->extension raw-bytes "img"))
                        (target-file (format "%s.%s" cache-base extension))
                        image)
-                  (disco-room--avatar-delete-stale-cache-files cache-base)
+                  (disco-room--attachment-preview-delete-stale-cache-files cache-base)
                   (make-directory (file-name-directory target-file) t)
                   (with-temp-buffer
                     (set-buffer-multibyte nil)
@@ -1488,7 +1534,7 @@ When IMAGE is nil and TARGET-FILE exists, TARGET-FILE is deleted."
 (defun disco-room--attachment-preview-image (attachment)
   "Return preview image object for ATTACHMENT when available.
 
-If needed, schedule async fetch and return nil until ready." 
+If needed, schedule async fetch and return nil until ready."
   (when (and (disco-room--attachment-preview-rendering-available-p)
              (equal (disco-room--attachment-kind attachment) "img"))
     (let* ((cache-key (disco-room--attachment-preview-cache-key attachment))
@@ -1518,7 +1564,7 @@ If needed, schedule async fetch and return nil until ready."
            (t nil))))))))
 
 (defun disco-room--attachment-meta-line (attachment)
-  "Return compact metadata line for ATTACHMENT object." 
+  "Return compact metadata line for ATTACHMENT object."
   (let* ((content-type (or (alist-get 'content_type attachment) "unknown"))
          (size (alist-get 'size attachment))
          (width (alist-get 'width attachment))
@@ -1530,7 +1576,7 @@ If needed, schedule async fetch and return nil until ready."
     (format "type=%s  size=%s  dims=%s" content-type size-text dims-text)))
 
 (defun disco-room--insert-attachment-action-button (label callback help-echo)
-  "Insert one attachment action button with LABEL, CALLBACK and HELP-ECHO." 
+  "Insert one attachment action button with LABEL, CALLBACK and HELP-ECHO."
   (insert-text-button
    label
    'face 'disco-room-attachment-card-action
@@ -1540,7 +1586,7 @@ If needed, schedule async fetch and return nil until ready."
              (funcall callback))))
 
 (defun disco-room--insert-attachment-card (attachment)
-  "Insert one rich attachment card for ATTACHMENT object." 
+  "Insert one rich attachment card for ATTACHMENT object."
   (let* ((summary (disco-room--attachment-summary attachment))
          (meta (disco-room--attachment-meta-line attachment))
          (description (alist-get 'description attachment))
@@ -1660,19 +1706,21 @@ If needed, schedule async fetch and return nil until ready."
   "Insert attachment detail lines for MSG."
   (when disco-room-show-attachments
     (dolist (attachment (or (alist-get 'attachments msg) '()))
-      (let ((line-start (point))
-            (url (or (alist-get 'url attachment)
-                     (alist-get 'proxy_url attachment))))
-        (insert "    ")
-        (insert (disco-room--attachment-summary attachment))
-        (insert "\n")
-        (add-text-properties line-start (point) '(face disco-room-message-meta))
-        (when (and disco-room-show-attachment-urls
-                   (stringp url)
-                   (not (string-empty-p url)))
-          (let ((url-start (point)))
-            (insert (format "      %s\n" url))
-            (add-text-properties url-start (point) '(face shadow))))))))
+      (if disco-room-use-rich-attachment-cards
+          (disco-room--insert-attachment-card attachment)
+        (let ((line-start (point))
+              (url (or (alist-get 'url attachment)
+                       (alist-get 'proxy_url attachment))))
+          (insert "    ")
+          (insert (disco-room--attachment-summary attachment))
+          (insert "\n")
+          (add-text-properties line-start (point) '(face disco-room-message-meta))
+          (when (and disco-room-show-attachment-urls
+                     (stringp url)
+                     (not (string-empty-p url)))
+            (let ((url-start (point)))
+              (insert (format "      %s\n" url))
+              (add-text-properties url-start (point) '(face shadow)))))))))
 
 (defun disco-room--reaction-emoji (reaction)
   "Extract display emoji string from REACTION object."
@@ -1910,34 +1958,57 @@ Return non-nil when a local message update was applied."
       (disco-room--insert-date-separator-row insert-date))
     (when insert-unread
       (disco-room--insert-unread-divider-row))
-    (when reply
-      (let ((reply-start (point)))
-        (insert (if compact
-                    (format "    ↪ %s\n" reply)
-                  (format "  ↪ %s\n" reply)))
-        (add-text-properties
-         reply-start
-         (point)
-         (list 'read-only t
-               'face 'shadow
-               'front-sticky '(read-only)
-               'disco-message-id message-id))))
     (setq line-start (point))
     (if compact
         (progn
-          (insert (propertize (format "    [%s] " short-time) 'face 'disco-room-timestamp))
-          (insert (propertize author 'face author-face))
-          (insert ":"))
-      (insert (propertize (format "[%s] " timestamp) 'face 'disco-room-timestamp))
+          (when reply
+            (disco-room--insert-prefixed-lines "    ↪ " reply 'shadow))
+          (if (string-empty-p content)
+              (let ((time-span nil))
+                (insert "    ")
+                (setq time-span
+                      (disco-room--insert-right-aligned-text
+                       short-time
+                       'disco-room-timestamp))
+                (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+                  (add-text-properties
+                   (car time-span)
+                   (cdr time-span)
+                   (list 'help-echo timestamp)))
+                (insert "\n"))
+            (let* ((compact-content
+                    (replace-regexp-in-string "\n" "\n    " content))
+                   (time-span nil))
+              (insert "    " compact-content)
+              (setq time-span
+                    (disco-room--insert-right-aligned-text
+                     short-time
+                     'disco-room-timestamp))
+              (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+                (add-text-properties
+                 (car time-span)
+                 (cdr time-span)
+                 (list 'help-echo timestamp)))
+              (insert "\n"))))
       (disco-room--insert-avatar msg)
       (insert " ")
       (setq author-start (point))
       (insert author)
       (add-text-properties author-start (point) (list 'face author-face))
-      (insert ":"))
-    (if (string-empty-p content)
-        (insert "\n")
-      (insert (format " %s\n" content)))
+      (let ((time-span
+             (disco-room--insert-right-aligned-text
+              short-time
+              'disco-room-timestamp)))
+        (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+          (add-text-properties
+           (car time-span)
+           (cdr time-span)
+           (list 'help-echo timestamp))))
+      (insert "\n")
+      (when reply
+        (disco-room--insert-prefixed-lines "    ↪ " reply 'shadow))
+      (unless (string-empty-p content)
+        (disco-room--insert-prefixed-lines "    " content)))
     (disco-room--insert-message-attachments msg)
     (disco-room--insert-message-reactions msg)
     (add-text-properties
@@ -2054,7 +2125,10 @@ Return non-nil when handled without full room rerender."
         header-end
         (disco-room--avatar-fetch-budget
          (when (numberp disco-room-avatar-max-fetches-per-render)
-           (max 0 disco-room-avatar-max-fetches-per-render))))
+           (max 0 disco-room-avatar-max-fetches-per-render)))
+        (disco-room--attachment-preview-fetch-budget
+         (when (numberp disco-room-attachment-preview-max-fetches-per-render)
+           (max 0 disco-room-attachment-preview-max-fetches-per-render))))
     (setq disco-room--rendering t)
     (unwind-protect
         (progn
@@ -2062,7 +2136,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -2240,9 +2314,22 @@ REASON is shown in the minibuffer."
 
 (defun disco-room--pending-attachment-labels ()
   "Return compact filename labels for pending composer attachments."
-  (let ((labels (mapcar (lambda (item)
-                          (file-name-nondirectory (or (plist-get item :path) "")))
-                        (or disco-room--pending-attachments '()))))
+  (let ((labels
+         (mapcar
+          (lambda (item)
+            (let* ((token-id (plist-get item :token-id))
+                   (path (or (plist-get item :path) ""))
+                   (filename (if (string-empty-p path)
+                                 "missing"
+                               (file-name-nondirectory path)))
+                   (description (or (plist-get item :description) ""))
+                   (token-label (if token-id
+                                    (disco-room--attachment-token-text token-id)
+                                  "[file:?]")))
+              (if (string-empty-p description)
+                  (format "%s %s" token-label filename)
+                (format "%s %s — %s" token-label filename description))))
+          (or disco-room--pending-attachments '()))))
     (if (> (length labels) 3)
         (append (seq-take labels 3)
                 (list (format "+%d more" (- (length labels) 3))))
@@ -2266,6 +2353,56 @@ REASON is shown in the minibuffer."
         (concat (substring draft 0 (match-beginning 0))
                 (substring draft (match-end 0)))
       draft)))
+
+(defun disco-room--attachment-token-choices (&optional draft)
+  "Return completion candidates for attachment tokens in DRAFT.
+
+Each candidate is a cons cell (LABEL . TOKEN-ID)."
+  (let ((text (or draft (disco-room--current-draft)))
+        (out '()))
+    (dolist (token-id (disco-room--attachment-token-ids-in-text text))
+      (let* ((attachment (disco-room--attachment-by-token-id token-id))
+             (path (or (plist-get attachment :path) ""))
+             (filename (if (string-empty-p path)
+                           "missing"
+                         (file-name-nondirectory path)))
+             (description (or (plist-get attachment :description) ""))
+             (label (if (string-empty-p description)
+                        (format "%s %s"
+                                (disco-room--attachment-token-text token-id)
+                                filename)
+                      (format "%s %s — %s"
+                              (disco-room--attachment-token-text token-id)
+                              filename
+                              description))))
+        (push (cons label token-id) out)))
+    (nreverse out)))
+
+(defun disco-room--choose-attachment-token-id (prompt)
+  "Prompt for one attachment token id with PROMPT."
+  (let* ((choices (disco-room--attachment-token-choices))
+         (labels (mapcar #'car choices))
+         (picked (completing-read prompt labels nil t)))
+    (or (cdr (assoc picked choices))
+        (user-error "disco: invalid attachment token selection"))))
+
+(defun disco-room--rewrite-draft-attachment-token-order (ordered-token-ids)
+  "Rewrite current draft so ORDERED-TOKEN-IDS becomes the token sequence.
+
+The free text body is preserved, all token markers are removed, then token
+markers are appended in requested order."
+  (let* ((text-only (string-trim-right
+                     (disco-room--draft-without-attachment-tokens
+                      (disco-room--current-draft))))
+         (token-tail (mapconcat #'disco-room--attachment-token-text ordered-token-ids " "))
+         (next
+          (cond
+           ((and (not (string-empty-p text-only))
+                 (not (string-empty-p token-tail)))
+            (format "%s %s" text-only token-tail))
+           ((not (string-empty-p text-only)) text-only)
+           (t token-tail))))
+    (disco-room--set-draft next)))
 
 (defun disco-room--attachment-token-bounds-at-point ()
   "Return bounds of attachment token around point in input region, or nil."
@@ -2309,6 +2446,61 @@ REASON is shown in the minibuffer."
           (remhash picked disco-room--attachment-token-table)
           (disco-room--set-draft updated)
           (message "disco: removed attachment token %s" picked)))))))
+
+(defun disco-room-list-attachments ()
+  "List queued attachment tokens for current draft."
+  (interactive)
+  (let ((choices (disco-room--attachment-token-choices)))
+    (if (null choices)
+        (message "disco: no queued attachments")
+      (message "disco: %s" (mapconcat #'car choices " | ")))))
+
+(defun disco-room-edit-attachment-description ()
+  "Edit description of one queued attachment token."
+  (interactive)
+  (let ((token-id (disco-room--choose-attachment-token-id "Edit attachment token: ")))
+    (let* ((entry (copy-tree (or (disco-room--attachment-by-token-id token-id)
+                                 (user-error "disco: token %s not found" token-id))))
+           (current (or (plist-get entry :description) ""))
+           (next-input (read-string
+                        (format "Description for %s (empty clears): "
+                                (disco-room--attachment-token-text token-id))
+                        current))
+           (next (string-trim next-input)))
+      (setq entry (plist-put entry :description (unless (string-empty-p next) next)))
+      (puthash token-id entry disco-room--attachment-token-table)
+      (disco-room--sync-pending-attachments-from-draft)
+      (disco-room-render)
+      (if (string-empty-p next)
+          (message "disco: cleared description for %s" token-id)
+        (message "disco: updated description for %s" token-id)))))
+
+(defun disco-room-reorder-attachments ()
+  "Reorder one queued attachment token in the current draft."
+  (interactive)
+  (let* ((ids (disco-room--attachment-token-ids-in-text (disco-room--current-draft)))
+         (count (length ids)))
+    (when (< count 2)
+      (user-error "disco: need at least two attachments to reorder"))
+    (let* ((token-id (disco-room--choose-attachment-token-id "Move attachment token: "))
+           (current-index (or (cl-position token-id ids :test #'equal)
+                              (user-error "disco: token %s not found in draft" token-id)))
+           (target-index-input
+            (read-number
+             (format "Move %s from %d to position (1-%d): "
+                     (disco-room--attachment-token-text token-id)
+                     (1+ current-index)
+                     count)
+             (1+ current-index)))
+           (target-index (max 0 (min (1- count) (1- target-index-input))))
+           (without-token (seq-remove (lambda (id) (equal id token-id)) ids))
+           (prefix (seq-take without-token target-index))
+           (suffix (seq-drop without-token target-index))
+           (next-order (append prefix (list token-id) suffix)))
+      (disco-room--rewrite-draft-attachment-token-order next-order)
+      (message "disco: moved %s to position %d"
+               (disco-room--attachment-token-text token-id)
+               (1+ target-index)))))
 
 (defun disco-room--message-id-required-at-point ()
   "Return message ID at point, or signal user error."
@@ -2948,6 +3140,9 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
     (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
+    (define-key map (kbd "C-c M-l") #'disco-room-list-attachments)
+    (define-key map (kbd "C-c M-e") #'disco-room-edit-attachment-description)
+    (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
     (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
