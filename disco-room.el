@@ -16,6 +16,7 @@
 (require 'ewoc)
 (require 'button)
 (require 'browse-url)
+(require 'url-handlers)
 (require 'plz)
 (require 'disco-ui)
 (require 'disco-api)
@@ -1621,6 +1622,38 @@ If needed, schedule async fetch and return nil until ready."
                       "-")))
     (format "type=%s  size=%s  dims=%s" content-type size-text dims-text)))
 
+(defun disco-room--attachment-default-save-name (attachment)
+  "Return default filename for saving ATTACHMENT locally."
+  (or (alist-get 'filename attachment)
+      (let ((id (alist-get 'id attachment)))
+        (if (and id (not (string-empty-p (format "%s" id))))
+            (format "attachment-%s" id)
+          "attachment.bin"))))
+
+(defun disco-room-download-attachment (attachment &optional target-path)
+  "Download ATTACHMENT to TARGET-PATH.
+
+When TARGET-PATH is nil, prompt interactively for destination path."
+  (interactive)
+  (let* ((url (disco-room--attachment-preview-url attachment))
+         (default-name (disco-room--attachment-default-save-name attachment))
+         (target (or target-path
+                     (read-file-name "Save attachment as: "
+                                     nil
+                                     default-name
+                                     nil
+                                     default-name))))
+    (unless (and (stringp url) (not (string-empty-p url)))
+      (user-error "disco: attachment has no downloadable URL"))
+    (condition-case err
+        (progn
+          (make-directory (or (file-name-directory target) default-directory) t)
+          (url-copy-file url target t)
+          (message "disco: downloaded attachment -> %s" target))
+      (error
+       (user-error "disco: attachment download failed: %s"
+                   (error-message-string err))))))
+
 (defun disco-room--insert-attachment-action-button (label callback help-echo)
   "Insert one attachment action button with LABEL, CALLBACK and HELP-ECHO."
   (disco-ui-insert-action-button
@@ -1663,6 +1696,12 @@ If needed, schedule async fetch and return nil until ready."
              "[Open]"
              (lambda () (browse-url url t))
              "Open attachment URL")
+            (insert " ")
+            (disco-room--insert-attachment-action-button
+             "[Save As]"
+             (lambda ()
+               (disco-room-download-attachment attachment))
+             "Download attachment to local file")
             (insert " ")
             (disco-room--insert-attachment-action-button
              "[Copy URL]"
@@ -1750,21 +1789,29 @@ If needed, schedule async fetch and return nil until ready."
   "Insert attachment detail lines for MSG."
   (when disco-room-show-attachments
     (dolist (attachment (or (alist-get 'attachments msg) '()))
-      (if disco-room-use-rich-attachment-cards
-          (disco-room--insert-attachment-card attachment)
-        (let ((line-start (point))
-              (url (or (alist-get 'url attachment)
-                       (alist-get 'proxy_url attachment))))
-          (insert "    ")
-          (insert (disco-room--attachment-summary attachment))
-          (insert "\n")
-          (add-text-properties line-start (point) '(face disco-room-message-meta))
-          (when (and disco-room-show-attachment-urls
-                     (stringp url)
-                     (not (string-empty-p url)))
-            (let ((url-start (point)))
-              (insert (format "      %s\n" url))
-              (add-text-properties url-start (point) '(face shadow)))))))))
+      (condition-case _
+          (if disco-room-use-rich-attachment-cards
+              (disco-room--insert-attachment-card attachment)
+            (let ((line-start (point))
+                  (url (or (alist-get 'url attachment)
+                           (alist-get 'proxy_url attachment))))
+              (insert "    ")
+              (insert (disco-room--attachment-summary attachment))
+              (insert "\n")
+              (add-text-properties line-start (point) '(face disco-room-message-meta))
+              (when (and disco-room-show-attachment-urls
+                         (stringp url)
+                         (not (string-empty-p url)))
+                (let ((url-start (point)))
+                  (insert (format "      %s\n" url))
+                  (add-text-properties url-start (point) '(face shadow))))))
+        (error
+         (let ((line-start (point)))
+           (insert "    [file] "
+                   (or (alist-get 'filename attachment)
+                       (format "%s" (or (alist-get 'id attachment) "unknown")))
+                   " [render fallback]\n")
+           (add-text-properties line-start (point) '(face shadow))))))))
 
 (defun disco-room--reaction-emoji (reaction)
   "Extract display emoji string from REACTION object."
