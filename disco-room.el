@@ -17,6 +17,7 @@
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
+(defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--gateway-handler nil)
 
 (defun disco-room--channel-object ()
@@ -174,20 +175,50 @@ Returns nil when left blank."
     (disco-room-render)
     (message "disco: loaded %d messages" (length messages))))
 
+(defun disco-room--close-for-deleted-channel (reason)
+  "Close current room because its backing channel is no longer valid.
+
+REASON is shown in the minibuffer."
+  (let ((buf (current-buffer)))
+    (disco-room--detach-live-updates)
+    (kill-buffer buf)
+    (message "%s" reason)))
+
 (defun disco-room--handle-gateway-event (event)
   "Handle one EVENT plist from `disco-gateway-event-hook'."
-  (when (and (equal (plist-get event :channel-id) disco-room--channel-id)
-             (memq (plist-get event :type)
-                   '(message-create message-update message-delete)))
-    (let ((at-bottom (= (point) (point-max))))
-      (disco-room-render)
-      (when at-bottom
-        (goto-char (point-max))))))
+  (let ((event-type (plist-get event :type))
+        (event-channel-id (plist-get event :channel-id))
+        (event-guild-id (plist-get event :guild-id)))
+    (cond
+     ((and (memq event-type '(channel-delete thread-delete))
+           (equal event-channel-id disco-room--channel-id))
+      (disco-room--close-for-deleted-channel
+       (format "disco: channel %s was deleted"
+               (or disco-room--channel-name disco-room--channel-id))))
+     ((and (eq event-type 'guild-delete)
+           disco-room--guild-id
+           (equal event-guild-id disco-room--guild-id))
+      (disco-room--close-for-deleted-channel
+       (format "disco: guild for channel %s was deleted"
+               (or disco-room--channel-name disco-room--channel-id))))
+     ((and (equal event-channel-id disco-room--channel-id)
+           (memq event-type
+                 '(message-create message-update message-delete
+                   channel-update thread-update)))
+      (let ((at-bottom (= (point) (point-max)))
+            (channel (disco-room--channel-object)))
+        (when (and channel (alist-get 'name channel))
+          (setq disco-room--channel-name (alist-get 'name channel)))
+        (disco-room-render)
+        (when at-bottom
+          (goto-char (point-max))))))))
 
 (defun disco-room--attach-live-updates ()
   "Attach this room buffer to live update event stream."
   (when disco-room--gateway-handler
-    (remove-hook 'disco-gateway-event-hook disco-room--gateway-handler))
+    (remove-hook 'disco-gateway-event-hook disco-room--gateway-handler)
+    (when disco-room--channel-id
+      (disco-gateway-unwatch-channel disco-room--channel-id)))
   (let ((room-buffer (current-buffer)))
     (setq disco-room--gateway-handler
           (lambda (event)
@@ -345,6 +376,8 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
       (disco-room-mode)
       (setq disco-room--channel-id channel-id)
       (setq disco-room--channel-name channel-name)
+      (let ((channel (disco-state-channel channel-id)))
+        (setq disco-room--guild-id (and channel (alist-get 'guild_id channel))))
       (disco-room--attach-live-updates)
       (disco-room-refresh))
     (pop-to-buffer buf)))

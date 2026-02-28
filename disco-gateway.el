@@ -9,9 +9,11 @@
 ;; Public contract intentionally stays stable:
 ;; - `disco-gateway-watch-channel'
 ;; - `disco-gateway-unwatch-channel'
+;; - `disco-gateway-watch-global'
+;; - `disco-gateway-unwatch-global'
 ;; - `disco-gateway-event-hook' events with
-;;   :type one of message-create/message-update/message-delete,
-;;   :channel-id and :message / :message-id payload.
+;;   :type one of message/channel/guild/thread event symbols,
+;;   plus event-scoped payload fields (e.g., :channel-id, :guild-id).
 
 ;;; Code:
 
@@ -27,12 +29,23 @@
   "Hook called with one event plist argument.
 
 Event schema:
-- :type one of `message-create' `message-update' `message-delete'
-- :channel-id string
+- :type one of
+  `message-create' `message-update' `message-delete'
+  `channel-create' `channel-update' `channel-delete'
+  `guild-create' `guild-update' `guild-delete'
+  `thread-create' `thread-update' `thread-delete' `thread-list-sync'
+- :channel-id string for message/channel/thread events
+- :guild-id string for guild/channel/thread events
 - :message message object for create/update
-- :message-id string for delete")
+- :message-id string for message delete
+- :channel channel object for channel/thread events
+- :guild guild object for guild events
+- :threads list for thread-list-sync")
 
 (defvar disco-gateway--watch-counts (make-hash-table :test #'equal))
+
+(defvar disco-gateway--global-watch-count 0
+  "Reference count for non-channel-specific gateway consumers.")
 
 (defvar disco-gateway--ws nil)
 (defvar disco-gateway--connecting nil)
@@ -66,6 +79,26 @@ Event schema:
 (defun disco-gateway--emit (event)
   "Emit EVENT plist to `disco-gateway-event-hook'."
   (run-hook-with-args 'disco-gateway-event-hook event))
+
+(defun disco-gateway--emit-channel-event (event-type channel)
+  "Emit CHANNEL mutation as EVENT-TYPE to `disco-gateway-event-hook'."
+  (let ((channel-id (or (alist-get 'id channel)
+                        (alist-get 'channel_id channel)))
+        (guild-id (alist-get 'guild_id channel)))
+    (disco-gateway--emit
+     (list :type event-type
+           :channel-id channel-id
+           :guild-id guild-id
+           :channel channel))))
+
+(defun disco-gateway--emit-guild-event (event-type guild)
+  "Emit GUILD mutation as EVENT-TYPE to `disco-gateway-event-hook'."
+  (let ((guild-id (or (alist-get 'id guild)
+                      (alist-get 'guild_id guild))))
+    (disco-gateway--emit
+     (list :type event-type
+           :guild-id guild-id
+           :guild guild))))
 
 (defun disco-gateway--json-encode (obj)
   "Encode OBJ to compact JSON string."
@@ -326,6 +359,11 @@ This shape follows Discord gateway identify expectations."
   "Return non-nil if CHANNEL-ID has active watchers."
   (> (gethash channel-id disco-gateway--watch-counts 0) 0))
 
+(defun disco-gateway--watchers-active-p ()
+  "Return non-nil when any gateway consumer is currently active."
+  (or (> (hash-table-count disco-gateway--watch-counts) 0)
+      (> disco-gateway--global-watch-count 0)))
+
 (defun disco-gateway--upsert-message (channel-id message)
   "Insert or replace MESSAGE in channel CHANNEL-ID cache.
 
@@ -368,6 +406,28 @@ State is kept newest-first to match REST message list ordering."
     ("RESUMED"
      (disco-gateway--reset-reconnect-backoff)
      (message "disco: gateway RESUMED"))
+    ("GUILD_CREATE"
+     (disco-state-upsert-guild data)
+     (disco-gateway--emit-guild-event 'guild-create data))
+    ("GUILD_UPDATE"
+     (disco-state-upsert-guild data)
+     (disco-gateway--emit-guild-event 'guild-update data))
+    ("GUILD_DELETE"
+     (let ((guild-id (alist-get 'id data)))
+       (when guild-id
+         (disco-state-delete-guild guild-id))
+       (disco-gateway--emit-guild-event 'guild-delete data)))
+    ("CHANNEL_CREATE"
+     (disco-state-upsert-channel data)
+     (disco-gateway--emit-channel-event 'channel-create data))
+    ("CHANNEL_UPDATE"
+     (disco-state-upsert-channel data)
+     (disco-gateway--emit-channel-event 'channel-update data))
+    ("CHANNEL_DELETE"
+     (let ((channel-id (alist-get 'id data)))
+       (when channel-id
+         (disco-state-delete-channel channel-id))
+       (disco-gateway--emit-channel-event 'channel-delete data)))
     ("MESSAGE_CREATE"
      (let ((channel-id (alist-get 'channel_id data)))
        (when (and channel-id (disco-gateway--channel-watched-p channel-id))
@@ -388,19 +448,27 @@ State is kept newest-first to match REST message list ordering."
          (disco-gateway--emit
           (list :type 'message-delete :channel-id channel-id :message-id message-id)))))
     ("THREAD_CREATE"
-     (disco-state-upsert-channel data))
+     (disco-state-upsert-channel data)
+     (disco-gateway--emit-channel-event 'thread-create data))
     ("THREAD_UPDATE"
-     (disco-state-upsert-channel data))
+     (disco-state-upsert-channel data)
+     (disco-gateway--emit-channel-event 'thread-update data))
     ("THREAD_DELETE"
      (let ((thread-id (alist-get 'id data)))
        (when thread-id
-         (disco-state-delete-channel thread-id))))
+         (disco-state-delete-channel thread-id))
+       (disco-gateway--emit-channel-event 'thread-delete data)))
     ("THREAD_LIST_SYNC"
      (let ((guild-id (alist-get 'guild_id data))
            (channel-ids (alist-get 'channel_ids data))
            (threads (alist-get 'threads data)))
        (when guild-id
-         (disco-state-sync-threads guild-id channel-ids (or threads '())))))))
+         (disco-state-sync-threads guild-id channel-ids (or threads '()))
+         (disco-gateway--emit
+          (list :type 'thread-list-sync
+                :guild-id guild-id
+                :channel-ids channel-ids
+                :threads (or threads '()))))))))
 
 (defun disco-gateway--handle-payload (payload)
   "Handle one decoded gateway PAYLOAD."
@@ -508,7 +576,7 @@ State is kept newest-first to match REST message list ordering."
   (unless (timerp disco-gateway--reconnect-timer)
     (disco-gateway--reset-reconnect-backoff))
   (when (and disco-enable-live-updates
-             (> (hash-table-count disco-gateway--watch-counts) 0))
+             (disco-gateway--watchers-active-p))
     (disco-gateway--connect)))
 
 (defun disco-gateway-stop ()
@@ -526,6 +594,12 @@ State is kept newest-first to match REST message list ordering."
   (when disco-enable-live-updates
     (disco-gateway-start)))
 
+(defun disco-gateway-watch-global ()
+  "Start watching gateway dispatch globally for non-channel consumers."
+  (setq disco-gateway--global-watch-count (1+ disco-gateway--global-watch-count))
+  (when disco-enable-live-updates
+    (disco-gateway-start)))
+
 (defun disco-gateway-unwatch-channel (channel-id)
   "Decrease watch count for CHANNEL-ID and stop when no channels remain."
   (let ((count (gethash channel-id disco-gateway--watch-counts 0)))
@@ -534,16 +608,24 @@ State is kept newest-first to match REST message list ordering."
       (remhash channel-id disco-gateway--watch-counts))
      (t
       (puthash channel-id (1- count) disco-gateway--watch-counts))))
-  (when (= (hash-table-count disco-gateway--watch-counts) 0)
+  (unless (disco-gateway--watchers-active-p)
+    (disco-gateway-stop)))
+
+(defun disco-gateway-unwatch-global ()
+  "Decrease global watch count and stop if no gateway consumers remain."
+  (setq disco-gateway--global-watch-count
+        (max 0 (1- disco-gateway--global-watch-count)))
+  (unless (disco-gateway--watchers-active-p)
     (disco-gateway-stop)))
 
 (defun disco-gateway-describe-status ()
   "Display current gateway transport status in minibuffer."
   (interactive)
-  (message "disco-gateway: running=%s connecting=%s watched=%d seq=%s session=%s reconnect-attempt=%d reconnect-pending=%s"
+  (message "disco-gateway: running=%s connecting=%s watched-channels=%d watched-global=%d seq=%s session=%s reconnect-attempt=%d reconnect-pending=%s"
            (and disco-gateway--ws (websocket-openp disco-gateway--ws))
            disco-gateway--connecting
            (hash-table-count disco-gateway--watch-counts)
+           disco-gateway--global-watch-count
            (or disco-gateway--seq "nil")
            (if disco-gateway--session-id "set" "nil")
            disco-gateway--reconnect-attempt

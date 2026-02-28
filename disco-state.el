@@ -107,6 +107,22 @@
         updated
       (append updated (list channel)))))
 
+(defun disco-state--replace-or-append-guild (guilds guild)
+  "Return GUILDS with GUILD replaced by ID or appended if absent."
+  (let ((guild-id (alist-get 'id guild))
+        (found nil)
+        updated)
+    (setq updated
+          (mapcar
+           (lambda (it)
+             (if (equal (alist-get 'id it) guild-id)
+                 (progn (setq found t) guild)
+               it))
+           guilds))
+    (if found
+        updated
+      (append updated (list guild)))))
+
 (defun disco-state-set-guilds (guilds)
   "Set GUILDS list in memory."
   (setq disco-state--guilds guilds))
@@ -114,6 +130,24 @@
 (defun disco-state-guilds ()
   "Return guild list from memory."
   disco-state--guilds)
+
+(defun disco-state-upsert-guild (guild)
+  "Insert or update one GUILD object in memory by ID."
+  (setq disco-state--guilds
+        (disco-state--replace-or-append-guild (or disco-state--guilds '()) guild)))
+
+(defun disco-state-delete-guild (guild-id)
+  "Delete GUILD-ID and all related channel/thread/message state."
+  (setq disco-state--guilds
+        (cl-remove-if (lambda (it)
+                        (equal (alist-get 'id it) guild-id))
+                      (or disco-state--guilds '())))
+  (dolist (channel (copy-sequence (or (gethash guild-id disco-state--channels-by-guild) '())))
+    (let ((channel-id (alist-get 'id channel)))
+      (when channel-id
+        (disco-state-delete-channel channel-id))))
+  (remhash guild-id disco-state--channels-by-guild)
+  (remhash guild-id disco-state--thread-ids-by-guild))
 
 (defun disco-state-put-channels (guild-id channels)
   "Store CHANNELS list for GUILD-ID and index channels by ID."

@@ -13,15 +13,61 @@
 (require 'seq)
 (require 'subr-x)
 (require 'disco-api)
+(require 'disco-gateway)
 (require 'disco-room)
 (require 'disco-state)
 (require 'disco-transient)
+
+(declare-function disco-gateway-watch-global "disco-gateway")
+(declare-function disco-gateway-unwatch-global "disco-gateway")
 
 (defconst disco-root-buffer-name "*disco*"
   "Main root buffer name.")
 
 (defvar-local disco-root--archived-parent-channel nil
   "Parent channel object for archived thread list buffers.")
+
+(defvar-local disco-root--gateway-handler nil
+  "Buffer-local gateway event handler closure.")
+
+(defun disco-root--live-event-p (event-type)
+  "Return non-nil when EVENT-TYPE should trigger root rerender."
+  (memq event-type
+        '(channel-create channel-update channel-delete
+          guild-create guild-update guild-delete
+          thread-create thread-update thread-delete thread-list-sync)))
+
+(defun disco-root--handle-gateway-event (event)
+  "Apply one gateway EVENT to root buffer view."
+  (when (disco-root--live-event-p (plist-get event :type))
+    (let ((line (line-number-at-pos))
+          (col (current-column)))
+      (disco-root-render)
+      (goto-char (point-min))
+      (forward-line (max 0 (1- line)))
+      (move-to-column col))))
+
+(defun disco-root--attach-live-updates ()
+  "Attach root buffer to global gateway update stream."
+  (when disco-root--gateway-handler
+    (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
+    (disco-gateway-unwatch-global))
+  (let ((root-buffer (current-buffer)))
+    (setq disco-root--gateway-handler
+          (lambda (event)
+            (when (buffer-live-p root-buffer)
+              (with-current-buffer root-buffer
+                (disco-root--handle-gateway-event event))))))
+  (add-hook 'disco-gateway-event-hook disco-root--gateway-handler)
+  (disco-gateway-watch-global)
+  (add-hook 'kill-buffer-hook #'disco-root--detach-live-updates nil t))
+
+(defun disco-root--detach-live-updates ()
+  "Detach root buffer from global gateway update stream."
+  (when disco-root--gateway-handler
+    (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
+    (setq disco-root--gateway-handler nil))
+  (disco-gateway-unwatch-global))
 
 (defun disco-root--json-true-p (value)
   "Return non-nil when VALUE semantically represents JSON true."
@@ -355,6 +401,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((buf (get-buffer-create disco-root-buffer-name)))
     (with-current-buffer buf
       (disco-root-mode)
+      (disco-root--attach-live-updates)
       (disco-root-render))
     (pop-to-buffer buf)))
 

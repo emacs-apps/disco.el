@@ -20,6 +20,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
+- Root buffer now live-syncs guild/channel/thread structure from gateway create/update/delete dispatch.
+- Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
 ## Dependencies
@@ -76,6 +78,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - HTTP transport is fully based on `plz` (curl-backed), with optional in-process serialization to avoid burst traffic.
 - REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
+- Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.
 - Gateway reconnect uses exponential backoff with jitter for transport failures, and randomized delay handling for `INVALID_SESSION`.
