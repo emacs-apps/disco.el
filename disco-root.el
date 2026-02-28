@@ -14,6 +14,7 @@
 (require 'ewoc)
 (require 'seq)
 (require 'subr-x)
+(require 'disco-ui)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-room)
@@ -643,23 +644,24 @@ Return plist with keys :threads and :errors for this page only."
          (errors (or disco-root--archived-last-errors '()))
          (inhibit-read-only t))
     (erase-buffer)
-    (insert (format "Archived Threads: %s\n"
-                    (disco-root--channel-label parent-channel)))
-    (insert "g: refresh   n: next page   RET/mouse-1: open thread   q: quit\n")
-    (insert (format "Loaded: %d   Sources: %s\n"
-                    (length threads)
-                    (disco-root--archived-source-status-string)))
-    (unless (disco-root--archived-any-source-has-more-p)
-      (insert "(no more archived pages)\n"))
-    (insert "\n")
-    (if threads
-        (dolist (thread threads)
-          (disco-root--insert-channel-line thread 2))
-      (insert "(no archived threads)\n"))
-    (when errors
-      (insert "\nErrors:\n")
-      (dolist (err errors)
-        (insert (format "  - %s\n" err))))
+    (disco-ui-render-list-view
+     :title (format "Archived Threads: %s"
+                    (disco-root--channel-label parent-channel))
+     :key-hints "g: refresh   n: next page   RET/mouse-1: open thread   q: quit"
+     :summary (format "Loaded: %d   Sources: %s"
+                      (length threads)
+                      (disco-root--archived-source-status-string))
+     :loading-note (unless (disco-root--archived-any-source-has-more-p)
+                     "(no more archived pages)")
+     :items threads
+     :item-inserter (lambda (thread)
+                      (disco-root--insert-channel-line thread 2))
+     :empty-text "(no archived threads)"
+     :footer-lines (when errors
+                     (append (list "Errors:")
+                             (mapcar (lambda (err)
+                                       (format "  - %s" err))
+                                     errors))))
     (goto-char (point-min))))
 
 (defun disco-root--archived-buffer-name (parent-channel)
@@ -688,20 +690,20 @@ Return plist with keys :threads and :errors for this page only."
                        (disco-root--active-parent-threads parent-channel)))
          (inhibit-read-only t))
     (erase-buffer)
-    (insert (format "Threads: %s\n"
+    (disco-ui-render-list-view
+     :title (format "Threads: %s"
                     (if parent-channel
                         (disco-root--channel-label parent-channel)
-                      "(no parent)")))
-    (insert "g: refresh active   A: archived threads   RET/mouse-1: open thread   n/p/TAB: nav   q: quit\n")
-    (insert (format "Active threads indexed: %d\n"
-                    (length (or threads '()))))
-    (when disco-root--parent-threads-refresh-in-flight
-      (insert "[refreshing active threads...]\n"))
-    (insert "\n")
-    (if threads
-        (dolist (thread threads)
-          (disco-root--insert-channel-line thread 2))
-      (insert "(no active threads indexed)\n"))
+                      "(no parent)"))
+     :key-hints "g: refresh active   A: archived threads   RET/mouse-1: open thread   n/p/TAB: nav   q: quit"
+     :summary (format "Active threads indexed: %d"
+                      (length (or threads '())))
+     :loading-note (when disco-root--parent-threads-refresh-in-flight
+                     "[refreshing active threads...]")
+     :items threads
+     :item-inserter (lambda (thread)
+                      (disco-root--insert-channel-line thread 2))
+     :empty-text "(no active threads indexed)")
     (goto-char (point-min))))
 
 (defun disco-root-parent-threads-refresh ()
@@ -885,16 +887,15 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
         (unread-count (disco-state-channel-unread-count (alist-get 'id channel)))
         (padding (make-string indent ?\s)))
     (if (disco-root--openable-channel-p channel)
-        (insert-text-button
+        (disco-ui-insert-action-button
          (format "%s%s\n" padding label)
-         'action (lambda (_)
-                   (disco-root--open-channel channel-id))
-         'disco-channel-id channel-id
-         'disco-unread-count unread-count
-         'follow-link t
-         'help-echo (if (memq channel-type '(15 16))
+         (lambda ()
+           (disco-root--open-channel channel-id))
+         :help-echo (if (memq channel-type '(15 16))
                         (format "Open threads under channel %s" channel-id)
-                      (format "Open channel %s" channel-id)))
+                      (format "Open channel %s" channel-id))
+         :properties (list 'disco-channel-id channel-id
+                           'disco-unread-count unread-count))
       (insert (format "%s%s\n" padding label)))))
 
 (defun disco-root-button-forward (&optional n)

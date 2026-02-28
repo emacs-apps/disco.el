@@ -17,6 +17,7 @@
 (require 'button)
 (require 'browse-url)
 (require 'plz)
+(require 'disco-ui)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
@@ -955,12 +956,7 @@ When FACE is non-nil, apply FACE to TEXT."
   "Insert TEXT as newline-separated lines, each prefixed by PREFIX.
 
 When FACE is non-nil, apply FACE to each inserted line."
-  (let ((lines (split-string (or text "") "\n" nil)))
-    (dolist (line lines)
-      (let ((line-start (point)))
-        (insert prefix line "\n")
-        (when face
-          (add-text-properties line-start (point) (list 'face face)))))))
+  (disco-ui-insert-prefixed-lines prefix text :face face))
 
 (defun disco-room--message-time (msg)
   "Return decoded time for MSG timestamp, or nil when unavailable."
@@ -1024,15 +1020,12 @@ When FACE is non-nil, apply FACE to each inserted line."
 
 (defun disco-room--insert-divider-row (text face)
   "Insert read-only divider row TEXT with FACE."
-  (let ((start (point)))
-    (insert (format "%s\n" text))
-    (add-text-properties
-     start
-     (point)
-     (list 'read-only t
-           'face face
-           'front-sticky '(read-only)
-           'rear-nonsticky '(read-only)))))
+  (disco-ui-insert-styled-line
+   text
+   :face face
+   :properties '(read-only t
+                 front-sticky (read-only)
+                 rear-nonsticky (read-only))))
 
 (defun disco-room--insert-date-separator-row (day-key)
   "Insert date separator row for DAY-KEY."
@@ -1577,13 +1570,11 @@ If needed, schedule async fetch and return nil until ready."
 
 (defun disco-room--insert-attachment-action-button (label callback help-echo)
   "Insert one attachment action button with LABEL, CALLBACK and HELP-ECHO."
-  (insert-text-button
+  (disco-ui-insert-action-button
    label
-   'face 'disco-room-attachment-card-action
-   'follow-link t
-   'help-echo help-echo
-   'action (lambda (_button)
-             (funcall callback))))
+   callback
+   :face 'disco-room-attachment-card-action
+   :help-echo help-echo))
 
 (defun disco-room--insert-attachment-card (attachment)
   "Insert one rich attachment card for ATTACHMENT object."

@@ -58,6 +58,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 - `disco.el`: package entrypoint.
 - `disco-customize.el`: user options and token command.
+- `disco-ui.el`: shared UI rendering primitives (buttons, styled lines, list sections).
 - `disco-api.el`: REST requests (sync + async callback paths).
 - `disco-http.el`: HTTP wrapper on `plz` (sync + async queue-backed paths).
 - `disco-state.el`: in-memory guild/channel/message cache.
@@ -119,6 +120,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
 - Room EWOC state keeps message-node indexes; reaction events patch rows locally while create/update/delete rerender fully to preserve grouping/day/unread layout correctness.
+- Shared `disco-ui` primitives are reused by room cards and forum/thread list buffers to keep UI interactions and list layout consistent.
 - Avatar fetch/render pipeline is asynchronous and rerenders room buffers when images become available.
 - Mention completion is token-boundary aware (start/whitespace + `@`), mirroring chat-client autocomplete behavior.
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
