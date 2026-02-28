@@ -1721,9 +1721,9 @@ If needed, schedule async fetch and return nil until ready."
      ((string-prefix-p "image/" content-type) "img")
      ((string-prefix-p "video/" content-type) "video")
      ((string-prefix-p "audio/" content-type) "audio")
-     ((string-match-p "\\.\(?:png\\|jpe?g\\|gif\\|webp\\|bmp\\|svg\\)\\'" filename) "img")
-     ((string-match-p "\\.\(?:mp4\\|mov\\|mkv\\|webm\\|avi\\)\\'" filename) "video")
-     ((string-match-p "\\.\(?:mp3\\|wav\\|ogg\\|flac\\|m4a\\)\\'" filename) "audio")
+     ((string-match-p "\\.\\(?:png\\|jpe?g\\|gif\\|webp\\|bmp\\|svg\\)\\'" filename) "img")
+     ((string-match-p "\\.\\(?:mp4\\|mov\\|mkv\\|webm\\|avi\\)\\'" filename) "video")
+     ((string-match-p "\\.\\(?:mp3\\|wav\\|ogg\\|flac\\|m4a\\)\\'" filename) "audio")
      (t "file"))))
 
 (defun disco-room--attachment-summary (attachment)
