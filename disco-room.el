@@ -24,6 +24,7 @@
 (defvar url-http-response-status)
 (defvar url-http-end-of-headers)
 (defvar url-http-content-type)
+(defvar url-request-extra-headers)
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
@@ -57,6 +58,10 @@ Values are either image objects or the symbol `:missing'.")
 
 (defvar disco-room--avatar-fetch-budget nil
   "Dynamic cap for number of avatar fetches started in current render pass.")
+
+(defconst disco-room--avatar-cache-extensions
+  '("webp" "png" "jpg" "jpeg" "gif" "img")
+  "Preferred avatar cache file extension candidates.")
 
 (defcustom disco-room-input-history-size 30
   "Maximum number of draft entries kept in room input history."
@@ -684,6 +689,9 @@ Returns nil when left blank."
   (and disco-room-show-avatar-images
        (display-images-p)
        (or (image-type-available-p 'png)
+           (image-type-available-p 'webp)
+           (image-type-available-p 'jpeg)
+           (image-type-available-p 'gif)
            (image-type-available-p 'imagemagick))))
 
 (defun disco-room--author-avatar-hash (msg)
@@ -730,33 +738,127 @@ Returns nil when left blank."
               (or avatar-hash (format "default-%d" default-index))
               disco-room-avatar-image-size))))
 
-(defun disco-room--avatar-cache-file (cache-key)
-  "Return cache file path for avatar CACHE-KEY."
-  (expand-file-name
-   (format "%s.png" (md5 cache-key))
-   disco-room-avatar-cache-directory))
+(defun disco-room--avatar-cache-file-base (cache-key)
+  "Return avatar cache file base path for CACHE-KEY (without extension)."
+  (expand-file-name (md5 cache-key) disco-room-avatar-cache-directory))
+
+(defun disco-room--avatar-cache-file (cache-key extension)
+  "Return avatar cache file path for CACHE-KEY and EXTENSION."
+  (format "%s.%s"
+          (disco-room--avatar-cache-file-base cache-key)
+          extension))
+
+(defun disco-room--avatar-cache-existing-file (cache-key)
+  "Return an existing cached avatar path for CACHE-KEY, or nil."
+  (seq-find #'file-exists-p
+            (mapcar (lambda (ext)
+                      (disco-room--avatar-cache-file cache-key ext))
+                    disco-room--avatar-cache-extensions)))
+
+(defun disco-room--avatar-content-type->extension (content-type)
+  "Map avatar CONTENT-TYPE to a stable cache file extension."
+  (cond
+   ((and (stringp content-type)
+         (string-match-p "\\`image/webp" content-type)) "webp")
+   ((and (stringp content-type)
+         (string-match-p "\\`image/png" content-type)) "png")
+   ((and (stringp content-type)
+         (string-match-p "\\`image/jpeg" content-type)) "jpg")
+   ((and (stringp content-type)
+         (string-match-p "\\`image/gif" content-type)) "gif")
+   (t "img")))
+
+
+(defun disco-room--bytes-prefix-p (bytes offset prefix-bytes)
+  "Return non-nil when BYTES at OFFSET starts with PREFIX-BYTES list."
+  (and (stringp bytes)
+       (<= (+ offset (length prefix-bytes)) (length bytes))
+       (cl-loop for b in prefix-bytes
+                for i from 0
+                always (= (aref bytes (+ offset i)) b))))
+
+(defun disco-room--webp-bytes-p-at (bytes offset)
+  "Return non-nil when BYTES has WEBP signature at OFFSET."
+  (and (disco-room--bytes-prefix-p bytes offset '(82 73 70 70))
+       (disco-room--bytes-prefix-p bytes (+ offset 8) '(87 69 66 80))))
+
+(defun disco-room--known-image-signature-at-p (bytes offset)
+  "Return non-nil when BYTES has known image signature at OFFSET."
+  (and (<= offset (length bytes))
+       (or (disco-room--bytes-prefix-p bytes offset '(137 80 78 71 13 10 26 10))
+           (disco-room--bytes-prefix-p bytes offset '(255 216 255))
+           (disco-room--bytes-prefix-p bytes offset '(71 73 70 56 55 97))
+           (disco-room--bytes-prefix-p bytes offset '(71 73 70 56 57 97))
+           (disco-room--webp-bytes-p-at bytes offset))))
+
+(defun disco-room--normalize-image-bytes (bytes)
+  "Normalize downloaded image BYTES by stripping stray leading newlines."
+  (cond
+   ((and (stringp bytes)
+         (>= (length bytes) 2)
+         (eq (aref bytes 0) ?\n)
+         (disco-room--known-image-signature-at-p bytes 1))
+    (substring bytes 1))
+   ((and (stringp bytes)
+         (>= (length bytes) 3)
+         (eq (aref bytes 0) ?\r)
+         (eq (aref bytes 1) ?\n)
+         (disco-room--known-image-signature-at-p bytes 2))
+    (substring bytes 2))
+   (t bytes)))
+
+(defun disco-room--avatar-bytes->extension (bytes fallback-extension)
+  "Infer image extension from BYTES, else return FALLBACK-EXTENSION."
+  (cond
+   ((disco-room--known-image-signature-at-p bytes 0)
+    (cond
+     ((disco-room--bytes-prefix-p bytes 0 '(137 80 78 71 13 10 26 10))
+      "png")
+     ((disco-room--bytes-prefix-p bytes 0 '(255 216 255))
+      "jpg")
+     ((or (disco-room--bytes-prefix-p bytes 0 '(71 73 70 56 55 97))
+          (disco-room--bytes-prefix-p bytes 0 '(71 73 70 56 57 97)))
+      "gif")
+     ((disco-room--webp-bytes-p-at bytes 0)
+      "webp")
+     (t fallback-extension)))
+   (t fallback-extension)))
+
+(defun disco-room--response-status-from-buffer ()
+  "Parse HTTP status code from current response buffer, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when (looking-at "HTTP/[0-9.]+[ \t]+\([0-9]+\)")
+      (string-to-number (match-string 1)))))
+
+(defun disco-room--response-header-value (name)
+  "Return HTTP header NAME value from current response buffer, or nil."
+  (let ((case-fold-search t))
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward
+             (format "^%s:[ \t]*\(.*\)$" (regexp-quote name))
+             nil t)
+        (string-trim (match-string 1))))))
 
 (defun disco-room--avatar-image-from-file (file)
   "Create inline avatar image from FILE, or nil when unsupported."
-  (when (disco-room--file-looks-like-png-p file)
-    (let ((image
-           (ignore-errors
-             (create-image file nil nil
-                           :width disco-room-avatar-image-size
-                           :height disco-room-avatar-image-size
-                           :ascent 'center))))
-      (when (and image (disco-room--image-object-valid-p image))
-        image))))
-
-(defun disco-room--file-looks-like-png-p (file)
-  "Return non-nil when FILE starts with the PNG signature."
-  (and (file-exists-p file)
-       (>= (nth 7 (file-attributes file)) 8)
-       (with-temp-buffer
-         (let ((coding-system-for-read 'binary))
-           (insert-file-contents-literally file nil 0 8))
-         (string= (buffer-string)
-                  (string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n)))))
+  (let ((image
+         (ignore-errors
+           (create-image file nil nil
+                         :width disco-room-avatar-image-size
+                         :height disco-room-avatar-image-size
+                         :ascent 'center))))
+    (unless (disco-room--image-object-valid-p image)
+      (when (image-type-available-p 'imagemagick)
+        (setq image
+              (ignore-errors
+                (create-image file 'imagemagick nil
+                              :width disco-room-avatar-image-size
+                              :height disco-room-avatar-image-size
+                              :ascent 'center)))))
+    (when (disco-room--image-object-valid-p image)
+      image)))
 
 (defun disco-room--image-object-valid-p (image)
   "Return non-nil when IMAGE can be rendered by Emacs.
@@ -800,8 +902,8 @@ This filters out broken image specs that would otherwise render as tofu boxes."
             (forward-line (max 0 (1- line)))
             (move-to-column col)))))))
 
-(defun disco-room--start-avatar-fetch (cache-key url file)
-  "Start asynchronous avatar fetch for CACHE-KEY from URL into FILE."
+(defun disco-room--start-avatar-fetch (cache-key url cache-base)
+  "Start asynchronous avatar fetch for CACHE-KEY from URL using CACHE-BASE."
   (unless (or (gethash cache-key disco-room--avatar-fetching)
               (gethash cache-key disco-room--avatar-image-cache)
               (and (numberp disco-room--avatar-fetch-budget)
@@ -809,44 +911,69 @@ This filters out broken image specs that would otherwise render as tofu boxes."
     (when (numberp disco-room--avatar-fetch-budget)
       (cl-decf disco-room--avatar-fetch-budget))
     (puthash cache-key t disco-room--avatar-fetching)
-    (url-retrieve
-     url
-     (lambda (status key target-file)
-       (unwind-protect
-           (let* ((status-code (and (boundp 'url-http-response-status)
-                                    url-http-response-status))
-                  (body-start (and (boundp 'url-http-end-of-headers)
-                                   url-http-end-of-headers))
-                  image)
-             (when (and (not (plist-get status :error))
-                        (numberp status-code)
-                        (<= 200 status-code)
-                        (< status-code 300)
-                        (or (not (boundp 'url-http-content-type))
-                            (null url-http-content-type)
-                            (string-match-p "\\`image/" url-http-content-type)))
-               (unless body-start
-                 (goto-char (point-min))
-                 (when (re-search-forward "\\r?\\n\\r?\\n" nil t)
-                   (setq body-start (point))))
-               (when body-start
-                 (make-directory (file-name-directory target-file) t)
-                 (let ((coding-system-for-write 'binary))
-                   (write-region body-start (point-max) target-file nil 'silent))
-                 (setq image (disco-room--avatar-image-from-file target-file))))
-             (when (and (null image)
-                        (file-exists-p target-file))
-               ;; Drop corrupted cache files so later refresh can retry cleanly.
-               (ignore-errors (delete-file target-file)))
-             (puthash key
-                      (or image :missing)
-                      disco-room--avatar-image-cache)
-             (remhash key disco-room--avatar-fetching)
-             (disco-room--rerender-open-rooms))
-         (when (buffer-live-p (current-buffer))
-           (kill-buffer (current-buffer)))))
-     (list cache-key file)
-     t)))
+    (let ((url-request-extra-headers
+           '(("Accept" . "image/png,image/webp,image/*;q=0.8,*/*;q=0.1"))))
+      (url-retrieve
+       url
+       (lambda (status key base-file)
+         (unwind-protect
+             (let* ((status-code (and (boundp 'url-http-response-status)
+                                      url-http-response-status))
+                    (body-start (and (boundp 'url-http-end-of-headers)
+                                     url-http-end-of-headers))
+                    (content-type (and (boundp 'url-http-content-type)
+                                       url-http-content-type))
+                    (raw-bytes nil)
+                    (extension nil)
+                    (target-file nil)
+                    image)
+               (set-buffer-multibyte nil)
+               (unless (numberp status-code)
+                 (setq status-code (disco-room--response-status-from-buffer)))
+               (unless (and (stringp content-type)
+                            (not (string-empty-p content-type)))
+                 (setq content-type (disco-room--response-header-value "Content-Type")))
+               (when (and (not (plist-get status :error))
+                          (numberp status-code)
+                          (<= 200 status-code)
+                          (< status-code 300)
+                          (or (not (boundp 'url-http-content-type))
+                              (null url-http-content-type)
+                              (string-match-p "\\`image/" url-http-content-type)))
+                 (when body-start
+                   (dolist (ext disco-room--avatar-cache-extensions)
+                     (let ((old-file (format "%s.%s" base-file ext)))
+                       (when (file-exists-p old-file)
+                         (ignore-errors (delete-file old-file)))))
+                   (setq raw-bytes
+                         (disco-room--normalize-image-bytes
+                          (buffer-substring-no-properties body-start (point-max))))
+                   (setq extension
+                         (disco-room--avatar-bytes->extension
+                          raw-bytes
+                          (disco-room--avatar-content-type->extension content-type)))
+                   (setq target-file (format "%s.%s" base-file extension))
+                   (make-directory (file-name-directory target-file) t)
+                   (with-temp-buffer
+                     (set-buffer-multibyte nil)
+                     (insert raw-bytes)
+                     (let ((coding-system-for-write 'binary))
+                       (write-region (point-min) (point-max) target-file nil 'silent)))
+                   (setq image (disco-room--avatar-image-from-file target-file))))
+               (when (and target-file
+                          (null image)
+                          (file-exists-p target-file))
+                 ;; Drop corrupted cache files so later refresh can retry cleanly.
+                 (ignore-errors (delete-file target-file)))
+               (puthash key
+                        (or image :missing)
+                        disco-room--avatar-image-cache)
+               (remhash key disco-room--avatar-fetching)
+               (disco-room--rerender-open-rooms))
+           (when (buffer-live-p (current-buffer))
+             (kill-buffer (current-buffer)))))
+       (list cache-key cache-base)
+       t))))
 
 (defun disco-room--avatar-image (msg)
   "Return avatar image object for MSG when ready, otherwise nil.
@@ -865,18 +992,17 @@ If needed, schedule async fetch and fall back to text placeholder."
           nil))
        (t
         (let* ((url (disco-room--avatar-url msg))
-               (cache-file (and cache-key (disco-room--avatar-cache-file cache-key)))
-               (file-image (and cache-file
-                                (file-exists-p cache-file)
-                                (disco-room--avatar-image-from-file cache-file))))
+               (cache-base (and cache-key (disco-room--avatar-cache-file-base cache-key)))
+               (cache-file (and cache-key (disco-room--avatar-cache-existing-file cache-key)))
+               (file-image (and cache-file (disco-room--avatar-image-from-file cache-file))))
           (cond
            (file-image
             (puthash cache-key file-image disco-room--avatar-image-cache)
             file-image)
-           ((and url cache-file)
-            (when (and (file-exists-p cache-file) (not file-image))
+           ((and url cache-base)
+            (when (and cache-file (not file-image))
               (ignore-errors (delete-file cache-file)))
-            (disco-room--start-avatar-fetch cache-key url cache-file)
+            (disco-room--start-avatar-fetch cache-key url cache-base)
             nil)
            (t nil))))))))
 
