@@ -1,9 +1,13 @@
 ;;; disco.el --- Discord client for Emacs -*- lexical-binding: t; -*-
 
-;; Author: disco.el contributors
+;; Copyright (C) 2026 0WD0
+
+;; Author: 0WD0 <wd.1105848296@gmail.com>
+;; Maintainer: 0WD0 <wd.1105848296@gmail.com>
 ;; Keywords: comm
+;; URL: https://github.com/0WD0/disco.el
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.3"))
+;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.3") (taxy-magit-section "0.14.3"))
 
 ;;; Commentary:
 
