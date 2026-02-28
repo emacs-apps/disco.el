@@ -9,7 +9,6 @@
 
 ;;; Code:
 
-(require 'button)
 (require 'cl-lib)
 (require 'ewoc)
 (require 'seq)
@@ -78,7 +77,15 @@ Supported values: `all', `unread', and `dms'.")
   "EWOC used to render the root tree list incrementally.")
 
 (defvar-local disco-root--channel-node-table nil
-  "Hash table mapping channel IDs to root EWOC nodes.")
+  "Hash table mapping channel IDs to root EWOC node lists.")
+
+(defconst disco-root--section-order '(unread private guilds)
+  "Top-level section order for root buffer rendering.")
+
+(defvar-local disco-root--section-expanded nil
+  "Alist of section expansion state in root buffer.
+
+Each entry is (SECTION-SYMBOL . BOOLEAN).")
 
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root rerender."
@@ -94,20 +101,119 @@ Supported values: `all', `unread', and `dms'.")
    #'disco-root-render
    :preserve-window-start t))
 
+(defun disco-root--ensure-section-state ()
+  "Ensure `disco-root--section-expanded' has defaults for all sections."
+  (dolist (section disco-root--section-order)
+    (unless (assq section disco-root--section-expanded)
+      (push (cons section t) disco-root--section-expanded)))
+  (setq disco-root--section-expanded
+        (nreverse (seq-uniq (nreverse disco-root--section-expanded)
+                            (lambda (a b) (eq (car a) (car b)))))))
+
+(defun disco-root--section-expanded-p (section)
+  "Return non-nil when SECTION is currently expanded."
+  (if-let* ((it (assq section disco-root--section-expanded)))
+      (and (cdr it) t)
+    t))
+
+(defun disco-root--set-section-expanded (section expanded)
+  "Set SECTION expansion state to EXPANDED and return EXPANDED."
+  (if-let* ((it (assq section disco-root--section-expanded)))
+      (setcdr it (and expanded t))
+    (push (cons section (and expanded t)) disco-root--section-expanded))
+  (and expanded t))
+
+(defun disco-root--line-property (property &optional pos)
+  "Return text PROPERTY on current rendered row at POS (or point)."
+  (let ((p (or pos (point))))
+    (or (get-text-property p property)
+        (save-excursion
+          (goto-char p)
+          (get-text-property (line-beginning-position) property)))))
+
+(defun disco-root--line-section (&optional pos)
+  "Return section symbol for row at POS when row is a section header."
+  (disco-root--line-property 'disco-root-section pos))
+
+(defun disco-root--line-channel-id (&optional pos)
+  "Return channel id for row at POS when row is channel/thread row."
+  (disco-root--line-property 'disco-channel-id pos))
+
+(defun disco-root--line-unread-count (&optional pos)
+  "Return unread count for row at POS, defaulting to 0."
+  (or (disco-root--line-property 'disco-unread-count pos) 0))
+
+(defun disco-root--channel-line-positions (&optional predicate)
+  "Return ordered list of channel row positions.
+
+When PREDICATE is non-nil, include row only when (PREDICATE POS) is non-nil."
+  (let (positions)
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (when (and (disco-root--line-channel-id (point))
+                   (or (null predicate)
+                       (funcall predicate (point))))
+          (push (line-beginning-position) positions))
+        (forward-line 1)))
+    (nreverse positions)))
+
+(defun disco-root--next-position-after (positions cursor)
+  "Return first position in POSITIONS strictly after CURSOR."
+  (seq-find (lambda (pos) (> pos cursor)) positions))
+
+(defun disco-root--previous-position-before (positions cursor)
+  "Return last position in POSITIONS strictly before CURSOR."
+  (let (found)
+    (dolist (pos positions found)
+      (when (< pos cursor)
+        (setq found pos)))))
+
+(defun disco-root--toggle-section (section)
+  "Toggle expansion state of SECTION and rerender root buffer."
+  (interactive)
+  (disco-root--set-section-expanded section
+                                    (not (disco-root--section-expanded-p section)))
+  (disco-root--render-preserving-position)
+  (message "disco: section %s -> %s"
+           section
+           (if (disco-root--section-expanded-p section) "expanded" "collapsed")))
+
+(defun disco-root-toggle-section-at-point ()
+  "Toggle root section header at point.
+
+Point must be on a section header row."
+  (interactive)
+  (let ((section (disco-root--line-section)))
+    (unless section
+      (user-error "disco: point is not on a section header"))
+    (disco-root--toggle-section section)))
+
+(defun disco-root-tab-dwim ()
+  "On section header, toggle section; otherwise move to next channel row."
+  (interactive)
+  (let ((section (disco-root--line-section)))
+    (if section
+        (disco-root--toggle-section section)
+      (disco-root-button-forward 1))))
+
 (defun disco-root--refresh-channel-node (channel-id)
   "Refresh one CHANNEL-ID row in EWOC, returning non-nil on success."
-  (let ((node (and channel-id
-                   disco-root--channel-node-table
-                   (gethash channel-id disco-root--channel-node-table))))
-    (when (and node disco-root--ewoc)
-      (let ((channel (disco-state-channel channel-id)))
+  (let ((nodes (and channel-id
+                    disco-root--channel-node-table
+                    (gethash channel-id disco-root--channel-node-table))))
+    (when (and nodes disco-root--ewoc)
+      (let ((channel (disco-state-channel channel-id))
+            updated)
         (when (and channel (disco-root--displayable-channel-p channel))
-          (let ((inhibit-read-only t)
-                (entry (copy-sequence (ewoc-data node))))
-            (setq entry (plist-put entry :channel channel))
-            (ewoc-set-data node entry)
-            (ewoc-invalidate disco-root--ewoc node)
-            t))))))
+          (let ((inhibit-read-only t))
+            (dolist (node (if (listp nodes) nodes (list nodes)))
+              (let ((entry (copy-sequence (ewoc-data node))))
+                (setq entry (plist-put entry :channel channel))
+                (ewoc-set-data node entry)
+                (ewoc-invalidate disco-root--ewoc node)
+                (setq updated t))))
+          updated)))))
 
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
@@ -367,6 +473,52 @@ This prevents noisy permission errors for sources that require elevated access."
              (t (string-lessp (or (alist-get 'id a) "")
                               (or (alist-get 'id b) ""))))))))
 
+(defun disco-root--visible-private-channels ()
+  "Return private channels that match current root view mode."
+  (seq-filter #'disco-root--channel-visible-in-view-p
+              (disco-root--private-channels-sorted)))
+
+(defun disco-root--collect-visible-unread-channels ()
+  "Return unique unread channels visible in current root view.
+
+Includes private channels, guild channels and thread channels, sorted by
+current sort mode." 
+  (let ((seen (make-hash-table :test #'equal))
+        result)
+    (cl-labels
+        ((push-unique (channel)
+           (let ((channel-id (alist-get 'id channel)))
+             (when (and channel-id
+                        (not (gethash channel-id seen))
+                        (disco-root--displayable-channel-p channel)
+                        (disco-root--channel-visible-in-view-p channel)
+                        (or (disco-root--channel-has-unread-p channel)
+                            (and (disco-root--thread-parent-channel-p channel)
+                                 (disco-root--parent-has-unread-thread-p channel))))
+               (puthash channel-id t seen)
+               (push channel result)))))
+      (dolist (channel (disco-state-private-channels))
+        (push-unique channel))
+      (dolist (guild (or (disco-state-guilds) '()))
+        (let ((guild-id (alist-get 'id guild)))
+          (dolist (channel (or (disco-state-guild-channels guild-id) '()))
+            (push-unique channel))
+          (dolist (thread (or (disco-state-guild-threads guild-id) '()))
+            (push-unique thread)))))
+    (disco-root--sort-channels (nreverse result))))
+
+(defun disco-root--guild-unread-total (guild-id &optional visible-only)
+  "Return aggregated unread count for GUILD-ID.
+
+When VISIBLE-ONLY is non-nil, only count channels visible in current view." 
+  (let ((total 0))
+    (dolist (channel (append (or (disco-state-guild-channels guild-id) '())
+                            (or (disco-state-guild-threads guild-id) '())))
+      (when (or (not visible-only)
+                (disco-root--channel-visible-in-view-p channel))
+        (setq total (+ total (disco-state-channel-unread-count (alist-get 'id channel))))))
+    total))
+
 (defun disco-root--channel-activity-score (channel)
   "Return sortable activity score for CHANNEL.
 
@@ -416,6 +568,24 @@ Higher score means channel should appear earlier in activity mode."
 (defun disco-root--ewoc-printer (entry)
   "Pretty-printer for one root EWOC ENTRY."
   (pcase (plist-get entry :entry-type)
+    ('section
+     (let* ((section (plist-get entry :section))
+            (title (or (plist-get entry :title) "Section"))
+            (count (plist-get entry :count))
+            (expanded (disco-root--section-expanded-p section))
+            (indicator (if expanded "[-]" "[+]"))
+            (suffix (if (numberp count) (format " (%d)" count) ""))
+            (label (format "%s %s%s\n" indicator title suffix))
+            (start (point)))
+       (insert label)
+       (add-text-properties
+        start
+        (point)
+        (list 'face (if expanded 'font-lock-keyword-face 'shadow)
+              'mouse-face 'highlight
+              'help-echo "RET or TAB toggles this section"
+              'disco-root-row-type 'section
+              'disco-root-section section))))
     ('text
      (insert (or (plist-get entry :text) "") "\n"))
     ('blank
@@ -432,6 +602,14 @@ Higher score means channel should appear earlier in activity mode."
   (ewoc-enter-last disco-root--ewoc
                    (list :entry-type 'text :text text)))
 
+(defun disco-root--ewoc-insert-section (section title &optional count)
+  "Insert one clickable SECTION row with TITLE and optional COUNT."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'section
+                         :section section
+                         :title title
+                         :count count)))
+
 (defun disco-root--ewoc-insert-blank ()
   "Insert one blank row in root EWOC."
   (ewoc-enter-last disco-root--ewoc (list :entry-type 'blank)))
@@ -442,19 +620,21 @@ Higher score means channel should appear earlier in activity mode."
          (node (ewoc-enter-last disco-root--ewoc entry))
          (channel-id (alist-get 'id channel)))
     (when channel-id
-      (puthash channel-id node disco-root--channel-node-table))
+      (let ((existing (gethash channel-id disco-root--channel-node-table)))
+        (puthash channel-id
+                 (cons node (if (listp existing)
+                                existing
+                              (and existing (list existing))))
+                 disco-root--channel-node-table)))
     node))
 
 (defun disco-root--insert-private-channels ()
-  "Insert private-channel (DM/group DM) section into root buffer."
-  (let ((channels (seq-filter #'disco-root--channel-visible-in-view-p
-                              (disco-root--private-channels-sorted))))
-    (disco-root--ewoc-insert-text "Direct Messages")
+  "Insert visible private-channel (DM/group DM) rows into root buffer."
+  (let ((channels (disco-root--visible-private-channels)))
     (if channels
         (dolist (channel channels)
-          (disco-root--ewoc-insert-channel channel 4))
-      (disco-root--ewoc-insert-text "    (no private channels loaded)"))
-    (disco-root--ewoc-insert-blank)))
+          (disco-root--ewoc-insert-channel channel 2))
+      (disco-root--ewoc-insert-text "  (no direct messages loaded)"))))
 
 (defun disco-root--guild-name-by-id (guild-id)
   "Return guild display name for GUILD-ID."
@@ -762,6 +942,7 @@ Return plist with keys :threads and :errors for this page only."
     (define-key map (kbd "g") #'disco-root-parent-threads-refresh)
     (define-key map (kbd "A") #'disco-root-parent-threads-open-archived)
     (define-key map (kbd "RET") #'disco-root-open-at-point)
+    (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
     (define-key map (kbd "n") #'disco-root-button-forward)
     (define-key map (kbd "p") #'disco-root-button-backward)
     (define-key map (kbd "TAB") #'disco-root-button-forward)
@@ -852,6 +1033,8 @@ channels open room timeline buffers."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-root-archived-threads-refresh)
     (define-key map (kbd "n") #'disco-root-archived-threads-load-more)
+    (define-key map (kbd "RET") #'disco-root-open-at-point)
+    (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
     (define-key map (kbd "?") #'disco-root-transient)
     (define-key map (kbd "q") #'quit-window)
     map)
@@ -884,79 +1067,97 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
         (label (disco-root--channel-label channel))
         (unread-count (disco-state-channel-unread-count (alist-get 'id channel)))
         (padding (make-string indent ?\s)))
-    (if (disco-root--openable-channel-p channel)
-        (disco-ui-insert-action-button
-         (format "%s%s\n" padding label)
-         (lambda ()
-           (disco-root--open-channel channel-id))
-         :help-echo (if (memq channel-type '(15 16))
-                        (format "Open threads under channel %s" channel-id)
-                      (format "Open channel %s" channel-id))
-         :properties (list 'disco-channel-id channel-id
-                           'disco-unread-count unread-count))
-      (insert (format "%s%s\n" padding label)))))
+    (let ((line-start (point)))
+      (insert (format "%s%s\n" padding label))
+      (when (disco-root--openable-channel-p channel)
+        (add-text-properties
+         line-start
+         (point)
+         (list 'mouse-face 'highlight
+               'help-echo (if (memq channel-type '(15 16))
+                              (format "Open threads under channel %s" channel-id)
+                            (format "Open channel %s" channel-id))
+               'disco-root-row-type 'channel
+               'disco-channel-id channel-id
+               'disco-unread-count unread-count))))))
 
 (defun disco-root-button-forward (&optional n)
-  "Move point to next channel button by N steps."
+  "Move point to next channel row by N steps."
   (interactive "p")
-  (condition-case _
-      (forward-button (or n 1) t)
-    (error
-     (message "disco: no next channel"))))
+  (let ((steps (max 1 (or n 1)))
+        (positions (disco-root--channel-line-positions))
+        (cursor (line-beginning-position))
+        (ok t)
+        found)
+    (dotimes (_ steps)
+      (when ok
+        (setq found (disco-root--next-position-after positions cursor))
+        (if found
+            (setq cursor found)
+          (setq ok nil))))
+    (if (and ok found)
+        (goto-char found)
+      (message "disco: no next channel"))))
 
 (defun disco-root-button-backward (&optional n)
-  "Move point to previous channel button by N steps."
+  "Move point to previous channel row by N steps."
   (interactive "p")
-  (condition-case _
-      (backward-button (or n 1) t)
-    (error
-     (message "disco: no previous channel"))))
+  (let ((steps (max 1 (or n 1)))
+        (positions (disco-root--channel-line-positions))
+        (cursor (line-beginning-position))
+        (ok t)
+        found)
+    (dotimes (_ steps)
+      (when ok
+        (setq found (disco-root--previous-position-before positions cursor))
+        (if found
+            (setq cursor found)
+          (setq ok nil))))
+    (if (and ok found)
+        (goto-char found)
+      (message "disco: no previous channel"))))
 
 (defun disco-root-open-at-point ()
-  "Open channel button at point.
+  "Open/toggle row at point.
 
-If point is not on a button, jump to the next button and open it."
+If point is not on actionable row, jump to next channel row and open it."
   (interactive)
-  (let ((button (button-at (point))))
-    (unless button
-      (condition-case _
-          (progn
-            (forward-button 1 t)
-            (setq button (button-at (point))))
-        (error
-         (setq button nil))))
-    (if button
-        (push-button (button-start button))
-      (user-error "disco: no openable channel at point"))))
-
-(defun disco-root--next-button-matching (predicate start limit)
-  "Return next button from START before LIMIT satisfying PREDICATE."
-  (let ((pos start)
-        found
-        next)
-    (while (and (not found)
-                (setq next (next-button pos))
-                (< (button-start next) limit))
-      (if (funcall predicate next)
-          (setq found next)
-        (setq pos (button-end next))))
-    found))
+  (let ((section (disco-root--line-section))
+        (channel-id (disco-root--line-channel-id)))
+    (cond
+     (section
+      (disco-root--toggle-section section))
+     (channel-id
+      (disco-root--open-channel channel-id))
+     (t
+      (let* ((positions (disco-root--channel-line-positions))
+             (next (disco-root--next-position-after
+                    positions
+                    (line-beginning-position))))
+        (if next
+            (progn
+              (goto-char next)
+              (disco-root--open-channel (disco-root--line-channel-id next)))
+          (user-error "disco: no openable channel at point")))))))
 
 (defun disco-root-next-unread ()
-  "Jump to next channel button with unread count > 0."
+  "Jump to next channel row with unread count > 0."
   (interactive)
-  (let* ((origin (point))
-         (current-button (button-at origin))
-         (scan-start (if current-button
-                         (button-end current-button)
-                       origin))
-         (predicate (lambda (button)
-                      (> (or (button-get button 'disco-unread-count) 0) 0)))
-         (found (or (disco-root--next-button-matching predicate scan-start (point-max))
-                    (disco-root--next-button-matching predicate (point-min) origin))))
-    (if found
-        (goto-char (button-start found))
+  (let* ((positions
+          (disco-root--channel-line-positions
+           (lambda (pos) (> (disco-root--line-unread-count pos) 0))))
+         (origin (line-beginning-position))
+         (found (or (disco-root--next-position-after positions origin)
+                    (car positions))))
+    (if (and found (integerp found))
+        (goto-char found)
       (message "disco: no unread channels"))))
+
+(defun disco-root-mouse-open-at-point (event)
+  "Handle mouse EVENT by opening or toggling row at clicked point."
+  (interactive "e")
+  (mouse-set-point event)
+  (disco-root-open-at-point))
 
 (defun disco-root--insert-parent-threads (parent-channel rendered-thread-ids)
   "Insert threads under PARENT-CHANNEL and mark IDs in RENDERED-THREAD-IDS."
@@ -980,41 +1181,56 @@ If point is not on a button, jump to the next button and open it."
     (disco-root--sort-channels (nreverse parents))))
 
 (defun disco-root--insert-guild (guild)
-  "Insert one GUILD and its channels in root buffer."
+  "Insert one GUILD and its visible channels in root buffer.
+
+Return non-nil when at least one visible row is inserted for GUILD." 
   (let* ((guild-id (alist-get 'id guild))
          (guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
+         (guild-unread (disco-root--guild-unread-total guild-id t))
+         (unread-suffix (if (> guild-unread 0)
+                            (format " [%d]" guild-unread)
+                          ""))
          (parents (disco-root--guild-visible-parent-channels guild-id))
-         (rendered-thread-ids (make-hash-table :test #'equal)))
-    (disco-root--ewoc-insert-text guild-name)
-    (if parents
-        (dolist (channel parents)
-          (disco-root--ewoc-insert-channel channel 4)
-          (when (disco-root--thread-parent-channel-p channel)
-            (disco-root--insert-parent-threads channel rendered-thread-ids)))
-      (disco-root--ewoc-insert-text "    (no channels loaded)"))
+         (rendered-thread-ids (make-hash-table :test #'equal))
+         (has-visible-thread
+          (seq-some (lambda (thread)
+                      (and (disco-root--displayable-channel-p thread)
+                           (disco-root--channel-visible-in-view-p thread)))
+                    (or (disco-state-guild-threads guild-id) '()))))
+    (when (or parents has-visible-thread)
+      (disco-root--ewoc-insert-text (format "  %s%s" guild-name unread-suffix))
+      (dolist (channel parents)
+        (disco-root--ewoc-insert-channel channel 4)
+        (when (disco-root--thread-parent-channel-p channel)
+          (disco-root--insert-parent-threads channel rendered-thread-ids)))
 
-    (let (orphan-threads)
-      (dolist (thread (disco-state-guild-threads guild-id))
-        (let ((thread-id (alist-get 'id thread)))
-          (when (and thread-id
-                     (disco-root--displayable-channel-p thread)
-                     (disco-root--channel-visible-in-view-p thread)
-                     (not (gethash thread-id rendered-thread-ids)))
-            (push thread orphan-threads))))
-      (setq orphan-threads (nreverse orphan-threads))
-      (when orphan-threads
-        (disco-root--ewoc-insert-text "    [threads]")
-        (dolist (thread orphan-threads)
-          (disco-root--ewoc-insert-channel thread 8))))
+      (let (orphan-threads)
+        (dolist (thread (or (disco-state-guild-threads guild-id) '()))
+          (let ((thread-id (alist-get 'id thread)))
+            (when (and thread-id
+                       (disco-root--displayable-channel-p thread)
+                       (disco-root--channel-visible-in-view-p thread)
+                       (not (gethash thread-id rendered-thread-ids)))
+              (push thread orphan-threads))))
+        (setq orphan-threads (nreverse orphan-threads))
+        (when orphan-threads
+          (disco-root--ewoc-insert-text "    [threads]")
+          (dolist (thread orphan-threads)
+            (disco-root--ewoc-insert-channel thread 8))))
 
-    (disco-root--ewoc-insert-blank)))
+      (disco-root--ewoc-insert-blank)
+      t)))
 
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        (private-channels (disco-root--visible-private-channels))
+        (unread-channels (disco-root--collect-visible-unread-channels))
+        (guilds (or (disco-state-guilds) '())))
+    (disco-root--ensure-section-state)
     (erase-buffer)
     (insert "disco.el\n")
-    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   v: view(%s)   RET/mouse-1: open (forum/media -> threads)   n/p/TAB: nav   u: next unread   q: quit"
+    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   v: view(%s)   RET: open/toggle   TAB: toggle section or next channel   n/p: nav   u: next unread   q: quit"
                     disco-root--sort-mode
                     disco-root--view-mode))
     (when disco-root--refresh-in-flight
@@ -1022,14 +1238,36 @@ If point is not on a button, jump to the next button and open it."
     (insert "\n\n")
     (setq disco-root--channel-node-table (make-hash-table :test #'equal))
     (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t))
-    (disco-root--insert-private-channels)
-    (if (eq disco-root--view-mode 'dms)
-        (disco-root--ewoc-insert-text "(guild tree hidden in dms view)")
-      (let ((guilds (or (disco-state-guilds) '())))
-        (if guilds
-            (dolist (guild guilds)
-              (disco-root--insert-guild guild))
-          (disco-root--ewoc-insert-text "No guilds loaded. Press g to refresh."))))
+
+    (disco-root--ewoc-insert-section 'unread "Unread" (length unread-channels))
+    (when (disco-root--section-expanded-p 'unread)
+      (if unread-channels
+          (dolist (channel unread-channels)
+            (disco-root--ewoc-insert-channel channel 2))
+        (disco-root--ewoc-insert-text "  (no unread channels)")))
+    (disco-root--ewoc-insert-blank)
+
+    (disco-root--ewoc-insert-section 'private "People" (length private-channels))
+    (when (disco-root--section-expanded-p 'private)
+      (if private-channels
+          (dolist (channel private-channels)
+            (disco-root--ewoc-insert-channel channel 2))
+        (disco-root--ewoc-insert-text "  (no direct messages loaded)")))
+    (disco-root--ewoc-insert-blank)
+
+    (disco-root--ewoc-insert-section 'guilds "Guilds" (length guilds))
+    (when (disco-root--section-expanded-p 'guilds)
+      (if (eq disco-root--view-mode 'dms)
+          (disco-root--ewoc-insert-text "  (guild sections hidden in dms view)")
+        (let ((inserted 0))
+          (if guilds
+              (dolist (guild guilds)
+                (when (disco-root--insert-guild guild)
+                  (setq inserted (1+ inserted))))
+            (setq inserted 0))
+          (when (= inserted 0)
+            (disco-root--ewoc-insert-text "  (no visible guild channels)")))))
+
     (goto-char (point-min))))
 
 (defun disco-root--async-error-message (err)
@@ -1171,10 +1409,12 @@ If point is not on a button, jump to the next button and open it."
     (define-key map (kbd "A") #'disco-root-list-archived-threads)
     (define-key map (kbd "\\") #'disco-root-toggle-sort-mode)
     (define-key map (kbd "v") #'disco-root-cycle-view-mode)
+    (define-key map (kbd "t") #'disco-root-toggle-section-at-point)
     (define-key map (kbd "RET") #'disco-root-open-at-point)
+    (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
     (define-key map (kbd "n") #'disco-root-button-forward)
     (define-key map (kbd "p") #'disco-root-button-backward)
-    (define-key map (kbd "TAB") #'disco-root-button-forward)
+    (define-key map (kbd "TAB") #'disco-root-tab-dwim)
     (define-key map (kbd "<backtab>") #'disco-root-button-backward)
     (define-key map (kbd "u") #'disco-root-next-unread)
     (define-key map (kbd "?") #'disco-root-transient)
