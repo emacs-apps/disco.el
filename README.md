@@ -23,6 +23,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
+- Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
+- Draft input supports `TAB` @mention completion (from loaded participants) and inserts Discord mention syntax.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
@@ -105,6 +107,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
 - Room EWOC state keeps message-node indexes so chat events can update rows without full rerender.
+- Mention completion is token-boundary aware (start/whitespace + `@`), mirroring chat-client autocomplete behavior.
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.
@@ -115,6 +118,6 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Next Milestones
 
 1. Add tree interaction controls (collapse/expand guilds and thread subtrees) on top of the EWOC root model.
-2. Improve composer parity (`M-r` history search, safer cursor restore on live rerender, optional multiline compose mode).
+2. Improve mention/composer parity (`M-r` history search, mention candidate popup UX, optional multiline compose mode).
 3. Expand fast navigation (`M-g` prefix map for unread/mentions/reactions style jumps).
 4. Add queue prioritization/backpressure so user actions are favored over background work.

@@ -51,10 +51,64 @@
   :type 'boolean
   :group 'disco)
 
+(defface disco-room-author-color-1
+  '((t :foreground "LightSkyBlue"))
+  "Face palette entry 1 for room author names."
+  :group 'disco)
+
+(defface disco-room-author-color-2
+  '((t :foreground "PaleGreen"))
+  "Face palette entry 2 for room author names."
+  :group 'disco)
+
+(defface disco-room-author-color-3
+  '((t :foreground "Khaki"))
+  "Face palette entry 3 for room author names."
+  :group 'disco)
+
+(defface disco-room-author-color-4
+  '((t :foreground "LightSalmon"))
+  "Face palette entry 4 for room author names."
+  :group 'disco)
+
+(defface disco-room-author-color-5
+  '((t :foreground "Plum1"))
+  "Face palette entry 5 for room author names."
+  :group 'disco)
+
+(defface disco-room-author-color-6
+  '((t :foreground "LightSteelBlue"))
+  "Face palette entry 6 for room author names."
+  :group 'disco)
+
+(defface disco-room-author-color-7
+  '((t :foreground "Aquamarine"))
+  "Face palette entry 7 for room author names."
+  :group 'disco)
+
+(defface disco-room-author-color-8
+  '((t :foreground "Wheat"))
+  "Face palette entry 8 for room author names."
+  :group 'disco)
+
+(defconst disco-room--author-faces
+  [disco-room-author-color-1
+   disco-room-author-color-2
+   disco-room-author-color-3
+   disco-room-author-color-4
+   disco-room-author-color-5
+   disco-room-author-color-6
+   disco-room-author-color-7
+   disco-room-author-color-8]
+  "Palette used for deterministic per-author name coloring.")
+
 (defvar disco-room-input-map
   (let ((map (make-sparse-keymap)))
     ;; Keep normal text editing in draft region, then layer room actions.
     (set-keymap-parent map (current-global-map))
+    (define-key map (kbd "TAB") #'disco-room-complete-mention)
+    (define-key map (kbd "<tab>") #'disco-room-complete-mention)
+    (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
     (define-key map (kbd "RET") #'disco-room-return-dwim)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)
@@ -249,6 +303,84 @@ When INDEX is nil, restore pending draft text."
         (if (< target 0)
             (disco-room--input-history-goto nil)
           (disco-room--input-history-goto target))))))
+
+(defun disco-room--mention-candidates ()
+  "Return mention completion candidates from loaded room messages.
+
+Each element is a cons cell (DISPLAY . USER-ID)."
+  (let ((seen-ids (make-hash-table :test #'equal))
+        (seen-labels (make-hash-table :test #'equal))
+        out)
+    (dolist (msg (or (disco-state-messages disco-room--channel-id) '()))
+      (let* ((author (alist-get 'author msg))
+             (user-id (and (listp author) (alist-get 'id author)))
+             (name (or (and (listp author) (alist-get 'global_name author))
+                       (and (listp author) (alist-get 'username author))
+                       "unknown")))
+        (when (and user-id (not (gethash user-id seen-ids)))
+          (puthash user-id t seen-ids)
+          (let ((label (format "@%s" name)))
+            (when (gethash label seen-labels)
+              (setq label (format "%s (%s)"
+                                  label
+                                  (substring user-id (max 0 (- (length user-id) 4))))))
+            (puthash label t seen-labels)
+            (push (cons label user-id) out)))))
+    (sort out (lambda (a b)
+                (string-lessp (downcase (car a))
+                              (downcase (car b)))))))
+
+(defun disco-room--mention-token-bounds ()
+  "Return bounds of @mention token at point as (START . END), or nil."
+  (save-excursion
+    (let ((end (point)))
+      (skip-chars-backward "A-Za-z0-9._-")
+      (when (eq (char-before) ?@)
+        (let* ((start (1- (point)))
+               (left (char-before start)))
+          ;; Trigger mention completion only at token boundaries.
+          (when (or (null left)
+                    (eq left ?\s)
+                    (eq left ?\t)
+                    (eq left ?\n)
+                    (eq left ?\r))
+            (cons start end)))))))
+
+(defun disco-room-complete-mention ()
+  "Complete @mention at point using authors in loaded room history.
+
+Completion inserts Discord mention syntax `<@USER-ID>`."
+  (interactive)
+  (let ((bounds (disco-room--mention-token-bounds)))
+    (if (not bounds)
+        (message "disco: point is not on an @mention token")
+      (let* ((start (car bounds))
+             (end (cdr bounds))
+             (prefix (buffer-substring-no-properties (1+ start) end))
+             (search-prefix (if (string-prefix-p "@" prefix)
+                                (substring prefix 1)
+                              prefix))
+             (all (disco-room--mention-candidates))
+             (matches (seq-filter (lambda (it)
+                                    (string-prefix-p (downcase search-prefix)
+                                                     (downcase (substring (car it) 1))))
+                                  all)))
+        (if (null matches)
+            (message "disco: no mention candidates for @%s" prefix)
+          (let* ((choice-label
+                  (if (= (length matches) 1)
+                      (car (car matches))
+                    (completing-read (format "Mention @%s: " prefix)
+                                     (mapcar #'car matches)
+                                     nil t nil nil search-prefix)))
+                 (choice-id (cdr (assoc choice-label matches))))
+            (unless choice-id
+              (user-error "disco: invalid mention selection"))
+            (delete-region start end)
+            (insert (format "<@%s>" choice-id))
+            (unless (memq (char-after) '(?\s ?\t))
+              (insert " "))
+            (disco-room--sync-draft-from-buffer)))))))
 
 (defun disco-room-edit-draft ()
   "Edit current room draft in minibuffer and re-render room."
@@ -479,14 +611,96 @@ Returns nil when left blank."
          (username (and (listp author) (alist-get 'username author))))
     (or global-name username "unknown")))
 
+(defun disco-room--message-author-id (msg)
+  "Extract author ID string from message MSG alist."
+  (let ((author (alist-get 'author msg)))
+    (and (listp author) (alist-get 'id author))))
+
+(defun disco-room--author-face (msg)
+  "Return deterministic face symbol for MSG author."
+  (let* ((faces disco-room--author-faces)
+         (count (length faces))
+         (key (or (disco-room--message-author-id msg)
+                  (disco-room--message-author msg)
+                  "unknown"))
+         (idx (if (> count 0)
+                  (mod (abs (sxhash key)) count)
+                0)))
+    (aref faces idx)))
+
+(defun disco-room--avatar-placeholder (msg)
+  "Return text avatar placeholder for MSG author (e.g. "[AB]")."
+  (let* ((name (disco-room--message-author msg))
+         (parts (split-string (or name "") "[^[:alnum:]]+" t))
+         (first (if parts (substring (car parts) 0 1) "?"))
+         (second (if (> (length parts) 1)
+                     (substring (cadr parts) 0 1)
+                   ""))
+         (initials (upcase (concat first second))))
+    (format "[%s]" initials)))
+
+(defun disco-room--message-display-content (msg)
+  "Return human-readable content string for message MSG."
+  (let ((content (or (alist-get 'content msg) ""))
+        (attachments (or (alist-get 'attachments msg) '()))
+        (embeds (or (alist-get 'embeds msg) '())))
+    (if (string-empty-p content)
+        (cond
+         ((> (length attachments) 0)
+          (format "[attachment x%d]" (length attachments)))
+         ((> (length embeds) 0)
+          (format "[embed x%d]" (length embeds)))
+         (t "[empty]"))
+      content)))
+
+(defun disco-room--reply-reference-id (msg)
+  "Return referenced message ID for MSG, or nil."
+  (or (and (listp (alist-get 'referenced_message msg))
+           (alist-get 'id (alist-get 'referenced_message msg)))
+      (and (listp (alist-get 'message_reference msg))
+           (alist-get 'message_id (alist-get 'message_reference msg)))))
+
+(defun disco-room--reply-preview (msg)
+  "Return one-line preview string of MSG reply target, or nil."
+  (let* ((ref (alist-get 'referenced_message msg))
+         (ref-id (or (and (listp ref) (alist-get 'id ref))
+                     (disco-room--reply-reference-id msg)))
+         (resolved (or (and (listp ref) ref)
+                       (and ref-id (disco-room--message-by-id ref-id)))))
+    (when ref-id
+      (if resolved
+          (let* ((author (disco-room--message-author resolved))
+                 (content (disco-room--message-display-content resolved)))
+            (format "%s: %s" author (truncate-string-to-width content 72 nil nil t)))
+        (format "Original message unavailable (%s)" ref-id)))))
+
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
-  (let ((timestamp (disco-room--format-time (or (alist-get 'timestamp msg) "")))
-        (author (disco-room--message-author msg))
-        (content (or (alist-get 'content msg) ""))
-        (message-id (alist-get 'id msg))
-        (line-start (point)))
-    (insert (format "[%s] %s: %s\n" timestamp author content))
+  (let* ((timestamp (disco-room--format-time (or (alist-get 'timestamp msg) "")))
+         (author (disco-room--message-author msg))
+         (author-face (disco-room--author-face msg))
+         (avatar (disco-room--avatar-placeholder msg))
+         (content (disco-room--message-display-content msg))
+         (reply (disco-room--reply-preview msg))
+         (message-id (alist-get 'id msg))
+         line-start
+         author-start)
+    (when reply
+      (let ((reply-start (point)))
+        (insert (format "  ↪ %s\n" reply))
+        (add-text-properties
+         reply-start
+         (point)
+         (list 'read-only t
+               'face 'shadow
+               'front-sticky '(read-only)
+               'disco-message-id message-id))))
+    (setq line-start (point))
+    (insert (format "[%s] %s " timestamp avatar))
+    (setq author-start (point))
+    (insert author)
+    (add-text-properties author-start (point) (list 'face author-face))
+    (insert (format ": %s\n" content))
     (add-text-properties
      line-start
      (point)
@@ -606,7 +820,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   RET/C-c C-c: send   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   RET/C-c C-c: send   TAB: @mention   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
