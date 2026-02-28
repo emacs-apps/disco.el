@@ -26,6 +26,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root buffer now live-syncs guild/channel/thread structure from gateway create/update/delete dispatch.
 - Root channel labels include lightweight unread counters from live message events.
 - Room open/refresh/live message flow now acknowledges Discord channel read-state (`/ack`) and tracks per-channel last-read cursor.
+- Root and room refresh paths are now asynchronous to avoid blocking Emacs UI.
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
@@ -40,12 +41,12 @@ This repository currently contains an MVP scaffold designed with these reference
 
 - `disco.el`: package entrypoint.
 - `disco-customize.el`: user options and token command.
-- `disco-api.el`: synchronous REST requests.
-- `disco-http.el`: synchronous HTTP wrapper on `plz` with serialized request queue.
+- `disco-api.el`: REST requests (sync + async callback paths).
+- `disco-http.el`: HTTP wrapper on `plz` (sync + async queue-backed paths).
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root.el`: root dashboard buffer.
-- `disco-room.el`: room buffer render/send/refresh flow.
+- `disco-room.el`: room buffer render/send flow with async refresh/pagination.
 
 ## Runtime Observability
 

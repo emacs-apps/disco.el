@@ -11,6 +11,7 @@
 (require 'subr-x)
 (require 'time-date)
 (require 'seq)
+(require 'cl-lib)
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
@@ -24,6 +25,9 @@
 (defvar-local disco-room--history-exhausted nil)
 (defvar-local disco-room--pending-reply-to nil)
 (defvar-local disco-room--gateway-handler nil)
+(defvar-local disco-room--refresh-generation 0)
+(defvar-local disco-room--refresh-in-flight nil)
+(defvar-local disco-room--older-in-flight nil)
 
 (defun disco-room--channel-object ()
   "Return current room channel object from state."
@@ -88,12 +92,30 @@
   "Return newest known message ID for current room, or nil."
   (alist-get 'id (car (disco-state-messages disco-room--channel-id))))
 
+(defun disco-room--async-error-message (err)
+  "Return user-facing error message extracted from async ERR payload."
+  (or (and (listp err) (plist-get err :message))
+      (and (listp err)
+           (plist-get err :status)
+           (format "HTTP %s" (plist-get err :status)))
+      (format "%S" err)))
+
+(defun disco-room--callback-active-p (room-buffer channel-id generation)
+  "Return non-nil when async callback state still matches ROOM-BUFFER context."
+  (and (buffer-live-p room-buffer)
+       (with-current-buffer room-buffer
+         (and (eq major-mode 'disco-room-mode)
+              (equal disco-room--channel-id channel-id)
+              (= disco-room--refresh-generation generation)))))
+
 (defun disco-room--mark-read (&optional message-id)
   "Mark current room as read and acknowledge MESSAGE-ID.
 
 When MESSAGE-ID is nil, acknowledge the newest known message in the room.
 Unread counters are always cleared locally."
-  (let* ((channel-id disco-room--channel-id)
+  (let* ((room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (generation disco-room--refresh-generation)
          (channel (disco-room--channel-object))
          (target-id (or message-id
                         (disco-room--latest-message-id)
@@ -104,17 +126,23 @@ Unread counters are always cleared locally."
                               (disco-state-snowflake< last-read-id target-id)))))
     (disco-state-clear-channel-unread channel-id)
     (when should-ack
-      (condition-case err
-          (let* ((token (disco-state-channel-ack-token channel-id))
-                 (response (disco-api-ack-message channel-id target-id token))
-                 (token-pair (and (listp response) (assq 'token response))))
-            (disco-state-set-channel-last-read-message-id channel-id target-id)
-            (when token-pair
-              (disco-state-set-channel-ack-token channel-id (cdr token-pair))))
-        (error
-         (message "disco: read-state ack failed for %s: %s"
-                  channel-id
-                  (error-message-string err)))))))
+      (let ((token (disco-state-channel-ack-token channel-id)))
+        (disco-api-ack-message-async
+         channel-id
+         target-id
+         :token token
+         :on-success
+         (lambda (response)
+           (when (disco-room--callback-active-p room-buffer channel-id generation)
+             (disco-state-set-channel-last-read-message-id channel-id target-id)
+             (let ((token-pair (and (listp response) (assq 'token response))))
+               (when token-pair
+                 (disco-state-set-channel-ack-token channel-id (cdr token-pair))))))
+         :on-error
+         (lambda (err)
+           (message "disco: read-state ack failed for %s: %s"
+                    channel-id
+                    (disco-room--async-error-message err))))))))
 
 (defun disco-room--update-message-window-state (messages)
   "Update pagination cursors from MESSAGES (newest-first list)."
@@ -242,7 +270,12 @@ Returns nil when left blank."
     (insert (format "Channel: %s%s\n"
                     disco-room--channel-name
                     (disco-room--thread-header-suffix)))
-    (insert "g: refresh   M-<: older   r/e/d: reply/edit/delete   C-c C-c: send   q: quit\n")
+    (insert "g: refresh   M-<: older   r/e/d: reply/edit/delete   C-c C-c: send   q: quit")
+    (when disco-room--refresh-in-flight
+      (insert "   [refreshing...]"))
+    (when disco-room--older-in-flight
+      (insert "   [loading older...]"))
+    (insert "\n")
     (when disco-room--pending-reply-to
       (insert (format "Replying to: %s (C-c C-k to cancel)\n" disco-room--pending-reply-to)))
     (when disco-room--history-exhausted
@@ -254,15 +287,33 @@ Returns nil when left blank."
     (goto-char (point-max))))
 
 (defun disco-room-refresh ()
-  "Fetch and redraw latest messages for current room."
+  "Fetch and redraw latest messages for current room asynchronously."
   (interactive)
-  (let ((messages (disco-api-channel-messages disco-room--channel-id nil nil)))
-    (setq disco-room--history-exhausted nil)
-    (disco-state-put-messages disco-room--channel-id messages)
-    (disco-room--update-message-window-state messages)
-    (disco-room--mark-read)
-    (disco-room-render)
-    (message "disco: loaded %d messages" (length messages))))
+  (let* ((room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (generation (1+ disco-room--refresh-generation)))
+    (setq disco-room--refresh-generation generation)
+    (setq disco-room--refresh-in-flight t)
+    (disco-api-channel-messages-async
+     channel-id
+     :on-success
+     (lambda (messages)
+       (when (disco-room--callback-active-p room-buffer channel-id generation)
+         (with-current-buffer room-buffer
+           (setq disco-room--history-exhausted nil)
+           (disco-state-put-messages channel-id messages)
+           (disco-room--update-message-window-state messages)
+           (disco-room--mark-read)
+           (setq disco-room--refresh-in-flight nil)
+           (disco-room-render)
+           (message "disco: loaded %d messages" (length messages)))))
+     :on-error
+     (lambda (err)
+       (when (disco-room--callback-active-p room-buffer channel-id generation)
+         (with-current-buffer room-buffer
+           (setq disco-room--refresh-in-flight nil)
+           (message "disco: room refresh failed: %s"
+                    (disco-room--async-error-message err))))))))
 
 (defun disco-room--close-for-deleted-channel (reason)
   "Close current room because its backing channel is no longer valid.
@@ -344,24 +395,50 @@ REASON is shown in the minibuffer."
       (message "disco: message sent"))))
 
 (defun disco-room-load-older-messages ()
-  "Load one older message page before the oldest loaded message."
+  "Load one older message page before the oldest loaded message asynchronously."
   (interactive)
-  (if disco-room--history-exhausted
-      (message "disco: no older messages available")
-    (let* ((before (or disco-room--oldest-message-id
-                       (user-error "disco: no oldest message cursor; refresh first")))
-           (existing (or (disco-state-messages disco-room--channel-id) '()))
-           (older (disco-api-channel-messages disco-room--channel-id before nil)))
-      (if (null older)
-          (progn
-            (setq disco-room--history-exhausted t)
-            (disco-room-render)
-            (message "disco: reached beginning of history"))
-        (let ((merged (disco-room--merge-message-pages existing older)))
-          (disco-state-put-messages disco-room--channel-id merged)
-          (disco-room--update-message-window-state merged)
-          (disco-room-render)
-          (message "disco: loaded %d older messages" (length older)))))))
+  (cond
+   (disco-room--history-exhausted
+    (message "disco: no older messages available"))
+   (disco-room--older-in-flight
+    (message "disco: older history load already in progress"))
+   (t
+    (let* ((room-buffer (current-buffer))
+           (channel-id disco-room--channel-id)
+           (generation disco-room--refresh-generation)
+           (before (or disco-room--oldest-message-id
+                       (user-error "disco: no oldest message cursor; refresh first"))))
+      (setq disco-room--older-in-flight t)
+      (disco-api-channel-messages-async
+       channel-id
+       :before before
+       :on-success
+       (lambda (older)
+         (when (buffer-live-p room-buffer)
+           (with-current-buffer room-buffer
+             (when (equal channel-id disco-room--channel-id)
+               (setq disco-room--older-in-flight nil)
+               (if (/= generation disco-room--refresh-generation)
+                   (message "disco: discarded stale older-history page")
+                 (let ((existing (or (disco-state-messages channel-id) '())))
+                   (if (null older)
+                       (progn
+                         (setq disco-room--history-exhausted t)
+                         (disco-room-render)
+                         (message "disco: reached beginning of history"))
+                     (let ((merged (disco-room--merge-message-pages existing older)))
+                       (disco-state-put-messages channel-id merged)
+                       (disco-room--update-message-window-state merged)
+                       (disco-room-render)
+                       (message "disco: loaded %d older messages" (length older))))))))))
+       :on-error
+       (lambda (err)
+         (when (buffer-live-p room-buffer)
+           (with-current-buffer room-buffer
+             (when (equal channel-id disco-room--channel-id)
+               (setq disco-room--older-in-flight nil)
+               (message "disco: older history load failed: %s"
+                        (disco-room--async-error-message err)))))))))))
 
 (defun disco-room-reply-to-message (&optional message-id)
   "Set pending reply target MESSAGE-ID for next send.

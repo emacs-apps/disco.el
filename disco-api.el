@@ -267,6 +267,20 @@ Return nil for empty or non-JSON body."
           (json-read-from-string body-text)
         (error nil)))))
 
+(defun disco-api--http-error-message (status raw-body body)
+  "Return user-facing message for STATUS/RAW-BODY/BODY response tuple."
+  (format "HTTP %d %s"
+          status
+          (or (and (listp body) (alist-get 'message body))
+              (and (not (string-empty-p (or raw-body ""))) raw-body)
+              "request failed")))
+
+(defun disco-api--error-plist (status body message)
+  "Build normalized async error plist."
+  (list :status status
+        :body body
+        :message message))
+
 (defun disco-api--request (method endpoint &optional payload query unauthenticated)
   "Execute METHOD request to ENDPOINT.
 
@@ -317,13 +331,79 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
            (t
             (signal
              'disco-api-error
-             (list (format "HTTP %d %s"
-                           status
-                           (or (and (listp body) (alist-get 'message body))
-                               (and (not (string-empty-p raw-body)) raw-body)
-                               "request failed"))
+             (list (disco-api--http-error-message status raw-body body)
                    status
                    body)))))))))
+
+(cl-defun disco-api--request-async (method endpoint &key payload query unauthenticated on-success on-error)
+  "Execute METHOD request to ENDPOINT asynchronously.
+
+ON-SUCCESS receives decoded JSON body.
+ON-ERROR receives plist `(:status :body :message)'."
+  (let* ((headers
+          (append
+           `(("Content-Type" . "application/json")
+             ("Accept" . "application/json")
+             ("User-Agent" . ,disco-user-agent)
+             ("X-Discord-Locale" . ,disco-locale)
+             ("Accept-Language" . ,disco-locale))
+           (unless unauthenticated
+             `(("Authorization" . ,(disco-api--auth-header))))))
+         (data (cond
+                ((eq payload :empty-object)
+                 "{}")
+                (payload
+                 (disco-api--json-encode payload))
+                (t nil)))
+         (url (disco-api--build-url endpoint query))
+         (route-key (disco-api--route-key method endpoint))
+         (attempt 0))
+    (cl-labels
+        ((emit-error (status body message)
+           (when on-error
+             (funcall on-error (disco-api--error-plist status body message))))
+         (schedule-next (delay)
+           (run-at-time (max 0 (or delay 0.0)) nil
+                        (lambda ()
+                          (dispatch-request))))
+         (handle-response (response)
+           (let* ((status (or (plist-get response :status) 0))
+                  (raw-body (or (plist-get response :body) ""))
+                  (response-headers (or (plist-get response :headers) nil))
+                  (body (disco-api--decode-json raw-body))
+                  (retry-after (disco-api--extract-retry-after response-headers body)))
+             (disco-api--update-rate-limit-state route-key status response-headers body)
+             (cond
+              ((and (>= status 200) (< status 300))
+               (when on-success
+                 (funcall on-success body)))
+              ((= status 429)
+               (if (>= attempt disco-rate-limit-max-retries)
+                   (emit-error
+                    status
+                    body
+                    (format "rate limited (429), retries exhausted, retry-after=%s"
+                            (or retry-after "unknown")))
+                 (setq attempt (1+ attempt))
+                 (schedule-next (or retry-after 1.0))))
+              (t
+               (emit-error status body
+                           (disco-api--http-error-message status raw-body body))))))
+         (dispatch-request ()
+           (let* ((deadline (max disco-api--global-rate-limit-until
+                                 (disco-api--route-deadline route-key)))
+                  (wait-time (- deadline (disco-api--now))))
+             (if (> wait-time 0)
+                 (schedule-next wait-time)
+               (disco-http-request-async
+                :method method
+                :url url
+                :headers headers
+                :body data
+                :timeout disco-http-timeout
+                :on-success #'handle-response
+                :on-error #'handle-response)))))
+      (dispatch-request))))
 
 (defun disco-api-current-user ()
   "Fetch current user object."
@@ -337,9 +417,26 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
   "Fetch current user's guilds list."
   (disco-api--request "GET" "/users/@me/guilds" nil '(("limit" . "200")) nil))
 
+(cl-defun disco-api-user-guilds-async (&key on-success on-error)
+  "Fetch current user's guild list asynchronously."
+  (disco-api--request-async
+   "GET"
+   "/users/@me/guilds"
+   :query '(("limit" . "200"))
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-user-private-channels ()
   "Fetch current user's private channels (DM/group DM) list."
   (disco-api--request "GET" "/users/@me/channels" nil nil nil))
+
+(cl-defun disco-api-user-private-channels-async (&key on-success on-error)
+  "Fetch current user's private channels asynchronously."
+  (disco-api--request-async
+   "GET"
+   "/users/@me/channels"
+   :on-success on-success
+   :on-error on-error))
 
 (defun disco-api-guild-channels (guild-id)
   "Fetch channels in GUILD-ID."
@@ -350,11 +447,28 @@ If UNAUTHENTICATED is non-nil, omit Authorization header."
    '(("permissions" . "true"))
    nil))
 
+(cl-defun disco-api-guild-channels-async (guild-id &key on-success on-error)
+  "Fetch channels in GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/channels" guild-id)
+   :query '(("permissions" . "true"))
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-guild-active-threads (guild-id)
   "Fetch active threads object for GUILD-ID.
 
 Response is an alist with keys including `threads' and `members'."
   (disco-api--request "GET" (format "/guilds/%s/threads/active" guild-id) nil nil nil))
+
+(cl-defun disco-api-guild-active-threads-async (guild-id &key on-success on-error)
+  "Fetch active threads object for GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/threads/active" guild-id)
+   :on-success on-success
+   :on-error on-error))
 
 (defun disco-api--thread-archive-query (before limit)
   "Build query alist for thread archive endpoints."
@@ -470,6 +584,18 @@ LIMIT defaults to `disco-message-fetch-limit'."
       (setq query (append query `(("before" . ,before)))))
     (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
 
+(cl-defun disco-api-channel-messages-async (channel-id &key before limit on-success on-error)
+  "Fetch messages in CHANNEL-ID asynchronously."
+  (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit))))))
+    (when before
+      (setq query (append query `(("before" . ,before)))))
+    (disco-api--request-async
+     "GET"
+     (format "/channels/%s/messages" channel-id)
+     :query query
+     :on-success on-success
+     :on-error on-error)))
+
 (defun disco-api-ack-message (channel-id message-id
                                          &optional token manual mention-count
                                          flags last-viewed)
@@ -500,6 +626,30 @@ Response may include a refreshed ack token."
        (if body body :empty-object))
      nil
      nil)))
+
+(cl-defun disco-api-ack-message-async (channel-id message-id
+                                                  &key token manual mention-count
+                                                  flags last-viewed on-success on-error)
+  "Acknowledge MESSAGE-ID in CHANNEL-ID asynchronously."
+  (let* ((manual-value (or manual (not (null mention-count))))
+         payload)
+    (when token
+      (push `(token . ,token) payload))
+    (when manual-value
+      (push '(manual . t) payload))
+    (when mention-count
+      (push `(mention_count . ,mention-count) payload))
+    (when flags
+      (push `(flags . ,flags) payload))
+    (when last-viewed
+      (push `(last_viewed . ,last-viewed) payload))
+    (disco-api--request-async
+     "POST"
+     (format "/channels/%s/messages/%s/ack" channel-id message-id)
+     :payload (let ((body (nreverse payload)))
+                (if body body :empty-object))
+     :on-success on-success
+     :on-error on-error)))
 
 (defun disco-api-send-message (channel-id content &optional reply-to-message-id)
   "Send CONTENT into CHANNEL-ID.

@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'button)
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'disco-api)
@@ -44,6 +45,12 @@
 
 (defvar-local disco-root--gateway-handler nil
   "Buffer-local gateway event handler closure.")
+
+(defvar-local disco-root--refresh-generation 0
+  "Monotonic generation counter for async refresh callbacks.")
+
+(defvar-local disco-root--refresh-in-flight nil
+  "Non-nil while an async root refresh is in progress.")
 
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root rerender."
@@ -560,7 +567,10 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "disco.el\n")
-    (insert "g: refresh   A: archived threads   RET/mouse-1: open channel/thread   q: quit\n\n")
+    (insert "g: refresh   A: archived threads   RET/mouse-1: open channel/thread   q: quit")
+    (when disco-root--refresh-in-flight
+      (insert "   [refreshing...]"))
+    (insert "\n\n")
     (disco-root--insert-private-channels)
     (let ((guilds (or (disco-state-guilds) '())))
       (if guilds
@@ -569,50 +579,123 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
         (insert "No guilds loaded. Press g to refresh.\n")))
     (goto-char (point-min))))
 
+(defun disco-root--async-error-message (err)
+  "Return user-facing error message extracted from async ERR payload."
+  (or (and (listp err) (plist-get err :message))
+      (and (listp err)
+           (plist-get err :status)
+           (format "HTTP %s" (plist-get err :status)))
+      (format "%S" err)))
+
 (defun disco-root-refresh ()
-  "Fetch guild/channel data and redraw root buffer."
+  "Fetch guild/channel data asynchronously and redraw root buffer."
   (interactive)
-  (let* ((guilds (disco-api-user-guilds))
-         (private-channels nil)
-         (private-channels-fetched nil)
-         (guild-count (length guilds))
-         (channel-count 0))
-    (condition-case err
-        (progn
-          (setq private-channels (disco-api-user-private-channels))
-          (setq private-channels-fetched t))
-      (error
-       (message "disco: private-channel fetch failed: %s"
-                (error-message-string err))))
-    (when private-channels-fetched
-      (disco-state-set-private-channels private-channels))
-    (disco-state-set-guilds guilds)
-    (dolist (guild guilds)
-      (let* ((guild-id (alist-get 'id guild))
-             (channels (disco-api-guild-channels guild-id)))
-        (setq channel-count (+ channel-count (length channels)))
-        (disco-state-put-channels guild-id channels)
+  (let* ((root-buffer (current-buffer))
+         (generation (1+ disco-root--refresh-generation))
+         (guild-count 0)
+         (channel-count 0)
+         (pending 0)
+         errors)
+    (setq disco-root--refresh-generation generation)
+    (setq disco-root--refresh-in-flight t)
+    (message "disco: refreshing...")
+    (cl-labels
+        ((callback-active-p ()
+           (and (buffer-live-p root-buffer)
+                (with-current-buffer root-buffer
+                  (and (eq major-mode 'disco-root-mode)
+                       (= disco-root--refresh-generation generation)))))
+         (record-error (label err)
+           (push (format "%s: %s" label (disco-root--async-error-message err))
+                 errors))
+         (finalize-when-done ()
+           (when (and (<= pending 0) (callback-active-p))
+             (with-current-buffer root-buffer
+               (let ((thread-count 0))
+                 (dolist (guild (or (disco-state-guilds) '()))
+                   (let ((guild-id (alist-get 'id guild)))
+                     (setq thread-count (+ thread-count
+                                           (length (disco-state-guild-threads guild-id))))))
+                 (setq disco-root--refresh-in-flight nil)
+                 (disco-root-render)
+                 (if errors
+                     (message
+                      "disco: loaded %d guilds, %d channels (%d threads), %d DMs (%d errors)"
+                      guild-count
+                      channel-count
+                      thread-count
+                      (length (disco-state-private-channels))
+                      (length errors))
+                   (message "disco: loaded %d guilds, %d channels (%d threads), %d DMs"
+                            guild-count
+                            channel-count
+                            thread-count
+                            (length (disco-state-private-channels))))))))
+         (dec-pending ()
+           (setq pending (1- pending))
+           (finalize-when-done))
+         (inc-pending ()
+           (setq pending (1+ pending)))
+         (fetch-guild-channels-and-threads (guild)
+           (let ((guild-id (alist-get 'id guild)))
+             (inc-pending)
+             (disco-api-guild-channels-async
+              guild-id
+             :on-success
+              (lambda (channels)
+                (when (callback-active-p)
+                  (setq channel-count (+ channel-count (length channels)))
+                  (disco-state-put-channels guild-id channels))
+                (dec-pending))
+              :on-error
+              (lambda (err)
+                (when (callback-active-p)
+                  (record-error (format "guild %s channels" guild-id) err))
+                (dec-pending)))
+             (when disco-fetch-guild-active-threads
+               (inc-pending)
+               (disco-api-guild-active-threads-async
+                guild-id
+                :on-success
+                (lambda (active)
+                  (when (callback-active-p)
+                    (dolist (thread (or (alist-get 'threads active) '()))
+                      (disco-state-upsert-channel thread)))
+                  (dec-pending))
+                :on-error
+                (lambda (err)
+                  (when (callback-active-p)
+                    (record-error (format "guild %s active threads" guild-id) err))
+                  (dec-pending)))))))
+      (inc-pending)
+      (disco-api-user-guilds-async
+       :on-success
+       (lambda (guilds)
+         (when (callback-active-p)
+           (setq guild-count (length guilds))
+           (disco-state-set-guilds guilds)
 
-        (when disco-fetch-guild-active-threads
-          (condition-case err
-              (let ((active (disco-api-guild-active-threads guild-id)))
-                (dolist (thread (or (alist-get 'threads active) '()))
-                  (disco-state-upsert-channel thread)))
-            (error
-             (message "disco: active thread fetch failed for guild %s: %s"
-                      guild-id (error-message-string err)))))))
+           (inc-pending)
+           (disco-api-user-private-channels-async
+            :on-success
+            (lambda (private-channels)
+              (when (callback-active-p)
+                (disco-state-set-private-channels private-channels))
+              (dec-pending))
+            :on-error
+            (lambda (err)
+              (when (callback-active-p)
+                (record-error "private channels" err))
+              (dec-pending)))
 
-    (let ((thread-count 0))
-      (dolist (guild guilds)
-        (let ((guild-id (alist-get 'id guild)))
-          (setq thread-count (+ thread-count
-                                (length (disco-state-guild-threads guild-id))))))
-      (disco-root-render)
-      (message "disco: loaded %d guilds, %d channels (%d threads), %d DMs"
-               guild-count
-               channel-count
-               thread-count
-               (length (disco-state-private-channels))))))
+           (dolist (guild guilds)
+             (fetch-guild-channels-and-threads guild)))
+         (dec-pending))
+       :on-error
+       (lambda (err)
+         (when (callback-active-p)
+           (record-error "guild list" err))
+         (dec-pending))))))
 
 (defvar disco-root-mode-map
   (let ((map (make-sparse-keymap)))

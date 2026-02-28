@@ -127,13 +127,13 @@ ERR may be a raw `plz-error' object or a condition-case tuple like
   (condition-case err
       (disco-http--response->plist
        (plz (disco-http--method-symbol method) url
-            :headers headers
-            :body body
-            :body-type 'text
-            :as 'response
-            :then 'sync
-            :timeout timeout
-            :connect-timeout timeout))
+         :headers headers
+         :body body
+         :body-type 'text
+         :as 'response
+         :then 'sync
+         :timeout timeout
+         :connect-timeout timeout))
     (error
      (disco-http--error->plist err))))
 
@@ -155,21 +155,21 @@ synchronous API contract."
          (result nil)
          (start-time (float-time)))
     (plz-queue
-     queue
-     (disco-http--method-symbol method)
-     url
-     :headers headers
-     :body body
-     :body-type 'text
-     :as 'response
-     :timeout timeout
-     :connect-timeout timeout
-     :then (lambda (response)
-             (setq result (disco-http--response->plist response)
-                   done t))
-     :else (lambda (err)
-             (setq result (disco-http--error->plist err)
-                   done t)))
+      queue
+      (disco-http--method-symbol method)
+      url
+      :headers headers
+      :body body
+      :body-type 'text
+      :as 'response
+      :timeout timeout
+      :connect-timeout timeout
+      :then (lambda (response)
+              (setq result (disco-http--response->plist response)
+                    done t))
+      :else (lambda (err)
+              (setq result (disco-http--error->plist err)
+                    done t)))
     (plz-run queue)
     (while (not done)
       (when (> (- (float-time) start-time) disco-http-queue-wait-timeout)
@@ -181,6 +181,59 @@ synchronous API contract."
         (setq done t))
       (accept-process-output nil disco-http-queue-poll-interval))
     result))
+
+(defun disco-http--call-callback (callback payload)
+  "Invoke CALLBACK with PAYLOAD and guard callback-side errors."
+  (when callback
+    (condition-case err
+        (funcall callback payload)
+      (error
+       (message "disco-http: callback failed: %s"
+                (error-message-string err))))))
+
+(defun disco-http--request-plz-async (method url headers body timeout on-success on-error)
+  "Execute one asynchronous HTTP request with plz."
+  (condition-case err
+      (plz (disco-http--method-symbol method) url
+        :headers headers
+        :body body
+        :body-type 'text
+        :as 'response
+        :timeout timeout
+        :connect-timeout timeout
+        :then (lambda (response)
+                (disco-http--call-callback
+                 on-success
+                 (disco-http--response->plist response)))
+        :else (lambda (request-error)
+                (disco-http--call-callback
+                 on-error
+                 (disco-http--error->plist request-error))))
+    (error
+     (disco-http--call-callback on-error (disco-http--error->plist err)))))
+
+(defun disco-http--request-plz-queued-async (method url headers body timeout on-success on-error)
+  "Execute one asynchronous request via the shared plz queue."
+  (let ((queue (disco-http--ensure-queue)))
+    (plz-queue
+      queue
+      (disco-http--method-symbol method)
+      url
+      :headers headers
+      :body body
+      :body-type 'text
+      :as 'response
+      :timeout timeout
+      :connect-timeout timeout
+      :then (lambda (response)
+              (disco-http--call-callback
+               on-success
+               (disco-http--response->plist response)))
+      :else (lambda (request-error)
+              (disco-http--call-callback
+               on-error
+               (disco-http--error->plist request-error))))
+    (plz-run queue)))
 
 (defun disco-http-queue-stats ()
   "Return current queue stats as plist."
@@ -220,6 +273,15 @@ METHOD is uppercase string (for example: GET)."
   (if (not disco-http-serialize-requests)
       (disco-http--request-plz method url headers body timeout)
     (disco-http--request-plz-queued method url headers body timeout)))
+
+(cl-defun disco-http-request-async (&key method url headers body timeout on-success on-error)
+  "Execute HTTP request asynchronously and invoke callbacks.
+
+ON-SUCCESS and ON-ERROR are called with a normalized response plist
+containing keys `:status', `:body', and `:headers'."
+  (if (not disco-http-serialize-requests)
+      (disco-http--request-plz-async method url headers body timeout on-success on-error)
+    (disco-http--request-plz-queued-async method url headers body timeout on-success on-error)))
 
 (provide 'disco-http)
 
