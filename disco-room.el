@@ -34,6 +34,9 @@
 (defvar-local disco-room--input-index nil)
 (defvar-local disco-room--input-pending nil)
 (defvar-local disco-room--send-in-flight nil)
+(defvar-local disco-room--last-search-query nil)
+(defvar-local disco-room--input-marker nil)
+(defvar-local disco-room--rendering nil)
 
 (defcustom disco-room-input-history-size 30
   "Maximum number of draft entries kept in room input history."
@@ -44,6 +47,19 @@
   "When non-nil, `RET' in room buffer sends current draft."
   :type 'boolean
   :group 'disco)
+
+(defvar disco-room-input-map
+  (let ((map (make-sparse-keymap)))
+    ;; Keep normal text editing in draft region, then layer room actions.
+    (set-keymap-parent map (current-global-map))
+    (define-key map (kbd "RET") #'disco-room-return-dwim)
+    (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+    (define-key map (kbd "C-c '") #'disco-room-edit-draft)
+    (define-key map (kbd "M-p") #'disco-room-draft-prev)
+    (define-key map (kbd "M-n") #'disco-room-draft-next)
+    (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
+    map)
+  "Keymap active when point is inside the room draft region.")
 
 (defun disco-room--channel-object ()
   "Return current room channel object from state."
@@ -134,6 +150,68 @@
 (defun disco-room--current-draft ()
   "Return current room draft string."
   (or disco-room--draft-input ""))
+
+(defun disco-room--input-region-bounds ()
+  "Return current writable draft region as (START . END), or nil."
+  (when (and (markerp disco-room--input-marker)
+             (eq (marker-buffer disco-room--input-marker) (current-buffer)))
+    (let ((start (marker-position disco-room--input-marker)))
+      (when (<= start (point-max))
+        (let ((end (or (next-single-property-change
+                        start 'field nil (point-max))
+                       (point-max))))
+          (when (> end start)
+            (cons start end)))))))
+
+(defun disco-room--point-in-input-p (&optional position)
+  "Return non-nil when POSITION (or point) is inside draft input region."
+  (let* ((bounds (disco-room--input-region-bounds))
+         (pos (or position (point))))
+    (and bounds
+         (<= (car bounds) pos)
+         (<= pos (cdr bounds)))))
+
+(defun disco-room--sync-draft-from-buffer ()
+  "Sync `disco-room--draft-input' from editable input region, when present."
+  (let ((bounds (disco-room--input-region-bounds)))
+    (when bounds
+      (let* ((raw (buffer-substring-no-properties (car bounds) (cdr bounds)))
+             (text (replace-regexp-in-string "[\n\r]+\\'" "" raw)))
+        (unless (equal text disco-room--draft-input)
+          (setq disco-room--draft-input text)
+          (setq disco-room--input-index nil)
+          (setq disco-room--input-pending nil))))))
+
+(defun disco-room--after-change (beg end _old-len)
+  "Keep draft state synced after editable-region changes from BEG to END."
+  (unless disco-room--rendering
+    (let ((bounds (disco-room--input-region-bounds)))
+      (when (and bounds
+                 (< beg (cdr bounds))
+                 (> end (car bounds)))
+        (disco-room--sync-draft-from-buffer)))))
+
+(defun disco-room--before-change (beg end)
+  "Reject edits outside draft input region for changes from BEG to END."
+  (unless disco-room--rendering
+    (let ((bounds (disco-room--input-region-bounds)))
+      (unless (and bounds
+                   (<= (car bounds) beg)
+                   (<= end (cdr bounds)))
+        (user-error "disco: edit only the draft area after >>>")))))
+
+(defun disco-room--apply-input-region-properties (input-start)
+  "Apply draft field/keymap properties for input region at INPUT-START."
+  (let* ((line-end (save-excursion
+                     (goto-char input-start)
+                     (line-end-position)))
+         ;; Include trailing newline so inserting at EOL stays writable.
+         (writable-end (min (point-max) (1+ line-end))))
+    (add-text-properties
+     input-start writable-end
+     (list 'field 'disco-room-input
+           'local-map disco-room-input-map))
+    (setq disco-room--input-marker (copy-marker input-start nil))))
 
 (defun disco-room--set-draft (text)
   "Set room draft TEXT and re-render room."
@@ -278,6 +356,86 @@ Message lines carry the `disco-message-id' text property."
     (or msg
         (user-error "disco: message not found in local room cache"))))
 
+(defun disco-room--search-message-line (pattern forward)
+  "Search PATTERN in room buffer and return matching message line position.
+
+When FORWARD is non-nil, search forward; otherwise search backward.
+Only lines tagged with `disco-message-id' are considered message hits."
+  (let ((search-fn (if forward #'re-search-forward #'re-search-backward))
+        hit)
+    (while (and (not hit)
+                (funcall search-fn pattern nil t))
+      (let ((line-pos (line-beginning-position)))
+        (when (get-text-property line-pos 'disco-message-id)
+          (setq hit line-pos))))
+    hit))
+
+(defun disco-room--search-move (forward &optional count)
+  "Move point to COUNTth next/previous search hit.
+
+When FORWARD is non-nil move forward, otherwise backward.
+Search uses `disco-room--last-search-query' and wraps once."
+  (let* ((query (or disco-room--last-search-query ""))
+         (pattern (regexp-quote query))
+         (steps (max 1 (or count 1)))
+         (case-fold-search t)
+         (start (point))
+         (moved nil))
+    (unless (string-empty-p query)
+      (let ((continue t)
+            (i 0))
+        (while (and continue (< i steps))
+          (let (hit)
+            (if forward
+                (when (< (point) (point-max))
+                  (forward-char 1))
+              (when (> (point) (point-min))
+                (backward-char 1)))
+            (setq hit (disco-room--search-message-line pattern forward))
+            (unless hit
+              (goto-char (if forward (point-min) (point-max)))
+              (setq hit (disco-room--search-message-line pattern forward)))
+            (if hit
+                (progn
+                  (goto-char hit)
+                  (setq moved t))
+              (goto-char start)
+              (setq moved nil)
+              (setq continue nil)))
+          (setq i (1+ i)))))
+    moved))
+
+(defun disco-room-search ()
+  "Prompt for message search query and jump to the next hit."
+  (interactive)
+  (let ((query (read-from-minibuffer
+                "Search messages: "
+                (or disco-room--last-search-query ""))))
+    (if (string-empty-p query)
+        (message "disco: search query is empty")
+      (setq disco-room--last-search-query query)
+      (if (disco-room--search-move t 1)
+          (message "disco: search -> %s" query)
+        (message "disco: no message matches '%s'" query)))))
+
+(defun disco-room-search-next (&optional n)
+  "Jump to Nth next message search result."
+  (interactive "p")
+  (if (string-empty-p (or disco-room--last-search-query ""))
+      (call-interactively #'disco-room-search)
+    (if (disco-room--search-move t n)
+        (message "disco: next match -> %s" disco-room--last-search-query)
+      (message "disco: no message matches '%s'" disco-room--last-search-query))))
+
+(defun disco-room-search-prev (&optional n)
+  "Jump to Nth previous message search result."
+  (interactive "p")
+  (if (string-empty-p (or disco-room--last-search-query ""))
+      (call-interactively #'disco-room-search)
+    (if (disco-room--search-move nil n)
+        (message "disco: previous match -> %s" disco-room--last-search-query)
+      (message "disco: no message matches '%s'" disco-room--last-search-query))))
+
 (defun disco-room--read-thread-auto-archive-duration ()
   "Prompt for optional auto archive duration in minutes.
 
@@ -360,28 +518,42 @@ Returns nil when left blank."
   (let ((inhibit-read-only t)
         (messages (disco-state-messages disco-room--channel-id))
         (draft (disco-room--current-draft)))
-    (erase-buffer)
-    (insert (format "Channel: %s%s\n"
-                    disco-room--channel-name
-                    (disco-room--thread-header-suffix)))
-    (insert "g: refresh   M-<: older   r/e/d: reply/edit/delete   RET/C-c C-c: send   C-c ': draft   M-p/M-n: history   q: quit")
-    (when disco-room--refresh-in-flight
-      (insert "   [refreshing...]"))
-    (when disco-room--older-in-flight
-      (insert "   [loading older...]"))
-    (when disco-room--send-in-flight
-      (insert "   [sending...]"))
-    (insert "\n")
-    (when disco-room--pending-reply-to
-      (insert (format "Replying to: %s (C-c C-k to cancel)\n" disco-room--pending-reply-to)))
-    (insert (format ">>> %s\n" draft))
-    (when disco-room--history-exhausted
-      (insert "(older history exhausted)\n"))
-    (insert "\n")
-    ;; API returns newest-first by default; reverse for chat-like display.
-    (dolist (msg (reverse messages))
-      (disco-room--insert-message msg))
-    (goto-char (point-max))))
+    (setq disco-room--rendering t)
+    (unwind-protect
+        (progn
+          (erase-buffer)
+          (insert (format "Channel: %s%s\n"
+                          disco-room--channel-name
+                          (disco-room--thread-header-suffix)))
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   RET/C-c C-c: send   type at >>>   M-p/M-n: history   q: quit")
+          (when disco-room--refresh-in-flight
+            (insert "   [refreshing...]"))
+          (when disco-room--older-in-flight
+            (insert "   [loading older...]"))
+          (when disco-room--send-in-flight
+            (insert "   [sending...]"))
+          (insert "\n")
+          (when disco-room--pending-reply-to
+            (insert (format "Replying to: %s (C-c C-k to cancel)\n"
+                            disco-room--pending-reply-to)))
+          (when disco-room--history-exhausted
+            (insert "(older history exhausted)\n"))
+          (insert "\n")
+          ;; API returns newest-first by default; reverse for chat-like display.
+          (dolist (msg (reverse messages))
+            (disco-room--insert-message msg))
+          (unless (or (null messages)
+                      (= (char-before (point)) ?\n))
+            (insert "\n"))
+          (insert "\n>>> ")
+          (let ((input-start (point)))
+            (insert draft)
+            (insert "\n")
+            (disco-room--apply-input-region-properties input-start)
+            ;; Keep typing position at end of current draft.
+            (goto-char (max input-start (1- (point))))
+            (disco-room--sync-draft-from-buffer)))
+      (setq disco-room--rendering nil))))
 
 (defun disco-room-refresh ()
   "Fetch and redraw latest messages for current room asynchronously."
@@ -483,6 +655,7 @@ REASON is shown in the minibuffer."
 
 When called with prefix argument, force draft edit in minibuffer first."
   (interactive)
+  (disco-room--sync-draft-from-buffer)
   (cond
    (disco-room--send-in-flight
     (message "disco: send already in progress"))
@@ -765,6 +938,9 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)
     (define-key map (kbd "M-p") #'disco-room-draft-prev)
     (define-key map (kbd "M-n") #'disco-room-draft-next)
+    (define-key map (kbd "s") #'disco-room-search)
+    (define-key map (kbd "n") #'disco-room-search-next)
+    (define-key map (kbd "p") #'disco-room-search-prev)
     (define-key map (kbd "r") #'disco-room-reply-to-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
     (define-key map (kbd "d") #'disco-room-delete-message)
@@ -782,13 +958,18 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 
 (define-derived-mode disco-room-mode special-mode "Disco-Room"
   "Major mode for disco.el room buffers."
-  (setq buffer-read-only t)
+  (setq buffer-read-only nil)
   (setq truncate-lines t)
   (setq-local disco-room--draft-input "")
   (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))
   (setq-local disco-room--input-index nil)
   (setq-local disco-room--input-pending nil)
-  (setq-local disco-room--send-in-flight nil))
+  (setq-local disco-room--send-in-flight nil)
+  (setq-local disco-room--last-search-query nil)
+  (setq-local disco-room--input-marker nil)
+  (setq-local disco-room--rendering nil)
+  (add-hook 'before-change-functions #'disco-room--before-change nil t)
+  (add-hook 'after-change-functions #'disco-room--after-change nil t))
 
 (defun disco-room-open (channel-id channel-name)
   "Open room for CHANNEL-ID with CHANNEL-NAME."

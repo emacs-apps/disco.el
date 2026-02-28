@@ -20,7 +20,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Open channel timeline.
 - Send plain text message with `C-c C-c` in room buffer.
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
-- Room draft composer line (`>>>`) with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
+- Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
+- Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
@@ -93,7 +94,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 ## Design Notes
 
-- Initial implementation intentionally keeps synchronous request flow to simplify debugging and establish API correctness first.
+- Root/room refresh and message actions use async request flow to keep Emacs responsive during network activity.
 - HTTP transport is fully based on `plz` (curl-backed), with optional in-process serialization to avoid burst traffic.
 - REST calls apply rate-limit coordination (global + bucket/route cooldown) and bounded 429 retries.
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
@@ -107,7 +108,7 @@ This repository currently contains an MVP scaffold designed with these reference
 
 ## Next Milestones
 
-1. Expand dispatch handling beyond messages/threads (channel/guild mutations and unread state).
-2. Improve root/room rendering (unread markers, compact mode, keyboard navigation parity with telega-style workflows).
-3. Add queue prioritization/backpressure so user actions are favored over background work.
-4. Add persisted session recovery (resume state restore across Emacs restarts).
+1. Add telega-style root view/filter modes (all/unread/DM-oriented slices with quick switching).
+2. Improve composer parity (`M-r` history search, safer cursor restore on live rerender, optional multiline compose mode).
+3. Expand fast navigation (`M-g` prefix map for unread/mentions/reactions style jumps).
+4. Add queue prioritization/backpressure so user actions are favored over background work.
