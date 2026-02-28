@@ -14,6 +14,8 @@
 (require 'ring)
 (require 'cl-lib)
 (require 'ewoc)
+(require 'button)
+(require 'browse-url)
 (require 'plz)
 (require 'disco-api)
 (require 'disco-gateway)
@@ -54,17 +56,34 @@
 
 Values are either image objects or the symbol `:missing'.")
 
+(defvar disco-room--attachment-preview-image-cache (make-hash-table :test #'equal)
+  "Global attachment preview image cache keyed by preview cache key.
+
+Values are either image objects or the symbol `:missing'.")
+
 (defvar disco-room--avatar-fetching (make-hash-table :test #'equal)
   "Global set of avatar cache keys currently being fetched.")
+
+(defvar disco-room--attachment-preview-fetching (make-hash-table :test #'equal)
+  "Global set of attachment preview cache keys currently being fetched.")
 
 (defvar disco-room--avatar-fetch-budget nil
   "Dynamic cap for number of avatar fetches started in current render pass.")
 
+(defvar disco-room--attachment-preview-fetch-budget nil
+  "Dynamic cap for number of attachment preview fetches started in one render.")
+
 (defvar disco-room--avatar-plz-queue nil
   "Shared plz queue used for asynchronous avatar downloads.")
 
+(defvar disco-room--attachment-preview-plz-queue nil
+  "Shared plz queue used for asynchronous attachment preview downloads.")
+
 (defvar disco-room--avatar-plz-queue-limit nil
   "Last applied queue limit for `disco-room--avatar-plz-queue'.")
+
+(defvar disco-room--attachment-preview-plz-queue-limit nil
+  "Last applied queue limit for `disco-room--attachment-preview-plz-queue'.")
 
 (defconst disco-room--avatar-cache-extensions
   '("webp" "png" "jpg" "jpeg" "gif" "img")
@@ -98,6 +117,12 @@ When image rendering is unavailable, room falls back to text placeholders."
   :type 'directory
   :group 'disco)
 
+(defcustom disco-room-attachment-cache-directory
+  (locate-user-emacs-file "disco-attachment-cache/")
+  "Directory used to cache downloaded attachment preview images."
+  :type 'directory
+  :group 'disco)
+
 (defcustom disco-room-avatar-max-fetches-per-render nil
   "Maximum avatar fetches started during one room render pass.
 
@@ -108,14 +133,38 @@ When nil, avatar fetches are uncapped per render pass
           integer)
   :group 'disco)
 
+(defcustom disco-room-attachment-preview-max-fetches-per-render 4
+  "Maximum attachment preview fetches started during one room render pass.
+
+Set to nil to disable per-render capping."
+  :type '(choice
+          (const :tag "No per-render cap" nil)
+          integer)
+  :group 'disco)
+
 (defcustom disco-room-avatar-fetch-concurrency 20
   "Maximum concurrent avatar downloads in plz queue."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-attachment-preview-fetch-concurrency 6
+  "Maximum concurrent attachment preview downloads in plz queue."
   :type 'integer
   :group 'disco)
 
 (defcustom disco-room-show-attachments t
   "When non-nil, render attachment details under each message."
   :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-show-attachment-image-previews t
+  "When non-nil, render inline image previews for image attachments."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-attachment-preview-max-width 460
+  "Maximum pixel width used for inline image attachment previews."
+  :type 'integer
   :group 'disco)
 
 (defcustom disco-room-show-reactions t
@@ -159,6 +208,26 @@ Grouping applies when sender stays the same and timestamps are within
 (defface disco-room-message-meta
   '((t :inherit shadow))
   "Face used for room message metadata rows."
+  :group 'disco)
+
+(defface disco-room-attachment-card-border
+  '((t :inherit shadow))
+  "Face used for attachment card border glyphs."
+  :group 'disco)
+
+(defface disco-room-attachment-card-title
+  '((t :inherit default :weight bold))
+  "Face used for attachment card title row."
+  :group 'disco)
+
+(defface disco-room-attachment-card-meta
+  '((t :inherit shadow))
+  "Face used for attachment card metadata rows."
+  :group 'disco)
+
+(defface disco-room-attachment-card-action
+  '((t :inherit link))
+  "Face used for attachment card action buttons."
   :group 'disco)
 
 (defface disco-room-reaction
@@ -1281,6 +1350,262 @@ If needed, schedule async fetch and fall back to text placeholder."
           (error
            (insert fallback)))
       (insert fallback))))
+
+(defun disco-room--attachment-preview-rendering-available-p ()
+  "Return non-nil when inline attachment image previews are available."
+  (and disco-room-show-attachment-image-previews
+       (display-images-p)
+       (or (image-type-available-p 'png)
+           (image-type-available-p 'webp)
+           (image-type-available-p 'jpeg)
+           (image-type-available-p 'gif)
+           (image-type-available-p 'imagemagick))))
+
+(defun disco-room--attachment-preview-url (attachment)
+  "Return best preview URL for ATTACHMENT object."
+  (let ((proxy (alist-get 'proxy_url attachment))
+        (url (alist-get 'url attachment)))
+    (cond
+     ((and (stringp proxy) (not (string-empty-p proxy))) proxy)
+     ((and (stringp url) (not (string-empty-p url))) url)
+     (t nil))))
+
+(defun disco-room--attachment-preview-cache-key (attachment)
+  "Return stable preview cache key for ATTACHMENT object." 
+  (let* ((attachment-id (alist-get 'id attachment))
+         (url (disco-room--attachment-preview-url attachment))
+         (name (or (alist-get 'filename attachment) "unnamed"))
+         (seed (or (and attachment-id (format "%s" attachment-id))
+                   (and url (md5 url))
+                   name)))
+    (format "%s:%s:%s"
+            seed
+            name
+            (max 64 disco-room-attachment-preview-max-width))))
+
+(defun disco-room--attachment-preview-cache-file-base (cache-key)
+  "Return attachment preview cache file base path for CACHE-KEY." 
+  (expand-file-name (md5 cache-key) disco-room-attachment-cache-directory))
+
+(defun disco-room--attachment-preview-cache-file (cache-key extension)
+  "Return attachment preview cache file path for CACHE-KEY and EXTENSION." 
+  (format "%s.%s"
+          (disco-room--attachment-preview-cache-file-base cache-key)
+          extension))
+
+(defun disco-room--attachment-preview-cache-existing-file (cache-key)
+  "Return existing preview cache file path for CACHE-KEY, or nil." 
+  (seq-find #'file-exists-p
+            (mapcar (lambda (ext)
+                      (disco-room--attachment-preview-cache-file cache-key ext))
+                    disco-room--avatar-cache-extensions)))
+
+(defun disco-room--attachment-preview-ensure-queue ()
+  "Return active queue for attachment preview fetches." 
+  (let ((limit (max 1 disco-room-attachment-preview-fetch-concurrency)))
+    (when (or (null disco-room--attachment-preview-plz-queue)
+              (not (equal disco-room--attachment-preview-plz-queue-limit limit)))
+      (setq disco-room--attachment-preview-plz-queue (make-plz-queue :limit limit))
+      (setq disco-room--attachment-preview-plz-queue-limit limit))
+    disco-room--attachment-preview-plz-queue))
+
+(defun disco-room--attachment-preview-image-from-file (file)
+  "Create inline attachment preview image from FILE, or nil when unavailable." 
+  (let ((image
+         (ignore-errors
+           (create-image file nil nil
+                         :max-width disco-room-attachment-preview-max-width
+                         :ascent 'center))))
+    (unless (disco-room--image-object-valid-p image)
+      (when (image-type-available-p 'imagemagick)
+        (setq image
+              (ignore-errors
+                (create-image file 'imagemagick nil
+                              :max-width disco-room-attachment-preview-max-width
+                              :ascent 'center)))))
+    (when (disco-room--image-object-valid-p image)
+      image)))
+
+(defun disco-room--attachment-preview-complete-fetch (cache-key image &optional target-file)
+  "Finalize one attachment preview fetch for CACHE-KEY with IMAGE.
+
+When IMAGE is nil and TARGET-FILE exists, TARGET-FILE is deleted." 
+  (when (and (null image) target-file (file-exists-p target-file))
+    (ignore-errors (delete-file target-file)))
+  (puthash cache-key (or image :missing) disco-room--attachment-preview-image-cache)
+  (remhash cache-key disco-room--attachment-preview-fetching)
+  (disco-room--rerender-open-rooms))
+
+(defun disco-room--start-attachment-preview-fetch (cache-key url cache-base)
+  "Start asynchronous preview fetch for CACHE-KEY from URL into CACHE-BASE." 
+  (unless (or (gethash cache-key disco-room--attachment-preview-fetching)
+              (gethash cache-key disco-room--attachment-preview-image-cache)
+              (and (numberp disco-room--attachment-preview-fetch-budget)
+                   (<= disco-room--attachment-preview-fetch-budget 0)))
+    (when (numberp disco-room--attachment-preview-fetch-budget)
+      (cl-decf disco-room--attachment-preview-fetch-budget))
+    (puthash cache-key t disco-room--attachment-preview-fetching)
+    (let ((queue (disco-room--attachment-preview-ensure-queue))
+          (headers '(("Accept" . "image/png,image/webp,image/*;q=0.8,*/*;q=0.1"))))
+      (condition-case err
+          (progn
+            (plz-queue
+              queue
+              'get
+              url
+              :headers headers
+              :as 'binary
+              :noquery t
+              :then
+              (lambda (data)
+                (let* ((raw-bytes
+                        (disco-room--normalize-image-bytes
+                         (if (multibyte-string-p data)
+                             (encode-coding-string data 'binary)
+                           data)))
+                       (extension (disco-room--avatar-bytes->extension raw-bytes "img"))
+                       (target-file (format "%s.%s" cache-base extension))
+                       image)
+                  (disco-room--avatar-delete-stale-cache-files cache-base)
+                  (make-directory (file-name-directory target-file) t)
+                  (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (insert raw-bytes)
+                    (let ((coding-system-for-write 'binary))
+                      (write-region (point-min) (point-max) target-file nil 'silent)))
+                  (setq image (disco-room--attachment-preview-image-from-file target-file))
+                  (disco-room--attachment-preview-complete-fetch cache-key image target-file)))
+              :else
+              (lambda (_err)
+                (disco-room--attachment-preview-complete-fetch cache-key nil)))
+            (plz-run queue))
+        (error
+         (disco-room--attachment-preview-complete-fetch cache-key nil)
+         (message "disco: attachment preview enqueue failed for %s: %s"
+                  cache-key
+                  (error-message-string err)))))))
+
+(defun disco-room--attachment-preview-image (attachment)
+  "Return preview image object for ATTACHMENT when available.
+
+If needed, schedule async fetch and return nil until ready." 
+  (when (and (disco-room--attachment-preview-rendering-available-p)
+             (equal (disco-room--attachment-kind attachment) "img"))
+    (let* ((cache-key (disco-room--attachment-preview-cache-key attachment))
+           (cached (gethash cache-key disco-room--attachment-preview-image-cache)))
+      (cond
+       ((eq cached :missing)
+        nil)
+       ((and cached (disco-room--image-object-valid-p cached))
+        cached)
+       (cached
+        (remhash cache-key disco-room--attachment-preview-image-cache)
+        nil)
+       (t
+        (let* ((url (disco-room--attachment-preview-url attachment))
+               (cache-base (disco-room--attachment-preview-cache-file-base cache-key))
+               (cache-file (disco-room--attachment-preview-cache-existing-file cache-key))
+               (file-image (and cache-file (disco-room--attachment-preview-image-from-file cache-file))))
+          (cond
+           (file-image
+            (puthash cache-key file-image disco-room--attachment-preview-image-cache)
+            file-image)
+           ((and url cache-base)
+            (when (and cache-file (not file-image))
+              (ignore-errors (delete-file cache-file)))
+            (disco-room--start-attachment-preview-fetch cache-key url cache-base)
+            nil)
+           (t nil))))))))
+
+(defun disco-room--attachment-meta-line (attachment)
+  "Return compact metadata line for ATTACHMENT object." 
+  (let* ((content-type (or (alist-get 'content_type attachment) "unknown"))
+         (size (alist-get 'size attachment))
+         (width (alist-get 'width attachment))
+         (height (alist-get 'height attachment))
+         (size-text (if (numberp size) (file-size-human-readable size) "n/a"))
+         (dims-text (if (and (numberp width) (numberp height))
+                        (format "%dx%d" width height)
+                      "-")))
+    (format "type=%s  size=%s  dims=%s" content-type size-text dims-text)))
+
+(defun disco-room--insert-attachment-action-button (label callback help-echo)
+  "Insert one attachment action button with LABEL, CALLBACK and HELP-ECHO." 
+  (insert-text-button
+   label
+   'face 'disco-room-attachment-card-action
+   'follow-link t
+   'help-echo help-echo
+   'action (lambda (_button)
+             (funcall callback))))
+
+(defun disco-room--insert-attachment-card (attachment)
+  "Insert one rich attachment card for ATTACHMENT object." 
+  (let* ((summary (disco-room--attachment-summary attachment))
+         (meta (disco-room--attachment-meta-line attachment))
+         (description (alist-get 'description attachment))
+         (url (disco-room--attachment-preview-url attachment))
+         (preview (disco-room--attachment-preview-image attachment)))
+    (let ((top-start (point)))
+      (insert "    +-- ")
+      (insert summary)
+      (insert "\n")
+      (add-text-properties top-start (point)
+                           '(face disco-room-attachment-card-title)))
+    (let ((meta-start (point)))
+      (insert "    | ")
+      (insert meta)
+      (insert "\n")
+      (add-text-properties meta-start (point)
+                           '(face disco-room-attachment-card-meta)))
+    (when (and (stringp description) (not (string-empty-p description)))
+      (let ((desc-start (point)))
+        (insert "    | caption: ")
+        (insert description)
+        (insert "\n")
+        (add-text-properties desc-start (point)
+                             '(face disco-room-attachment-card-meta))))
+    (let ((action-start (point)))
+      (insert "    | ")
+      (if (and (stringp url) (not (string-empty-p url)))
+          (progn
+            (disco-room--insert-attachment-action-button
+             "[Open]"
+             (lambda () (browse-url url t))
+             "Open attachment URL")
+            (insert " ")
+            (disco-room--insert-attachment-action-button
+             "[Copy URL]"
+             (lambda ()
+               (kill-new url)
+               (message "disco: copied attachment URL"))
+             "Copy attachment URL"))
+        (insert "[No URL]"))
+      (insert "\n")
+      (add-text-properties action-start (point)
+                           '(face disco-room-attachment-card-meta)))
+    (when (equal (disco-room--attachment-kind attachment) "img")
+      (let ((preview-start (point)))
+        (insert "    | ")
+        (if preview
+            (condition-case _
+                (insert-image preview "[image]")
+              (error
+               (insert "[image unavailable]")))
+          (insert "[loading preview]")
+          (insert "\n")
+          (add-text-properties preview-start (point)
+                               '(face disco-room-attachment-card-meta)))))
+    (let ((bottom-start (point)))
+      (insert "    +--\n")
+      (add-text-properties bottom-start (point)
+                           '(face disco-room-attachment-card-border)))
+    (when (and disco-room-show-attachment-urls
+               (stringp url)
+               (not (string-empty-p url)))
+      (let ((url-start (point)))
+        (insert (format "      %s\n" url))
+        (add-text-properties url-start (point) '(face shadow))))))
 
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
