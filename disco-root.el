@@ -185,17 +185,17 @@ Channels lacking this field are treated as visible to avoid false negatives."
             (not (zerop (logand bits disco-root--permission-view-channel-bit)))
           t))))))
 
-(defun disco-root--channel-has-permission-p (channel permission-bit)
+(cl-defun disco-root--channel-has-permission-p (channel permission-bit &optional (unknown-value t))
   "Return non-nil when CHANNEL has PERMISSION-BIT in computed permissions.
 
-If permissions are missing or unparsable, return t to avoid false negatives."
+If permissions are missing or unparsable, return UNKNOWN-VALUE (default t)."
   (let ((permissions (alist-get 'permissions channel)))
     (if (null permissions)
-        t
+        unknown-value
       (let ((bits (disco-root--parse-decimal-integer permissions)))
         (if (integerp bits)
             (not (zerop (logand bits permission-bit)))
-          t)))))
+          unknown-value)))))
 
 (defun disco-root--archived-source-fetch-allowed-p (source-name parent-channel)
   "Return non-nil when archived SOURCE-NAME is expected to be fetchable.
@@ -206,7 +206,8 @@ This prevents noisy permission errors for sources that require elevated access."
    ((equal source-name "private")
     (disco-root--channel-has-permission-p
      parent-channel
-     disco-root--permission-manage-threads-bit))
+     disco-root--permission-manage-threads-bit
+     nil))
    (t t)))
 
 (defun disco-root--archived-missing-access-error-p (err)

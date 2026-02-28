@@ -34,15 +34,21 @@ Event schema:
   `channel-create' `channel-update' `channel-delete'
   `guild-create' `guild-update' `guild-delete'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
+  `thread-member-update' `thread-members-update'
 - :channel-id string for message/channel/thread events
 - :guild-id string for guild/channel/thread events
+- :thread-id string for thread and thread-member events
 - :message message object for create/update
 - :message-id string for message delete
 - :mention-count integer for message ack when present
 - :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
 - :guild guild object for guild events
-- :threads list for thread-list-sync")
+- :threads list for thread-list-sync
+- :thread-member thread member object for thread-member-update
+- :added-members list for thread-members-update
+- :removed-member-ids list for thread-members-update
+- :member-count integer for thread-members-update when present")
 
 (defvar disco-gateway--watch-counts (make-hash-table :test #'equal))
 
@@ -532,6 +538,46 @@ Only CHANNEL read_state_type entries are used here."
                 :guild-id guild-id
                 :channel-ids channel-ids
                 :threads (or threads '()))))))
+    ("THREAD_MEMBER_UPDATE"
+     (let* ((thread-id (or (alist-get 'id data)
+                           (alist-get 'thread_id data)))
+            (guild-id (alist-get 'guild_id data))
+            (member (alist-get 'member data))
+            (member-user (and (listp member)
+                              (alist-get 'user member)))
+            (user-id (or (alist-get 'user_id data)
+                         (and (listp member-user)
+                              (alist-get 'id member-user)))))
+       (when (and thread-id user-id)
+         (disco-state-upsert-thread-member thread-id user-id))
+       (disco-gateway--emit
+        (list :type 'thread-member-update
+              :channel-id thread-id
+              :thread-id thread-id
+              :guild-id guild-id
+              :user-id user-id
+              :thread-member data))))
+    ("THREAD_MEMBERS_UPDATE"
+     (let* ((thread-id (or (alist-get 'id data)
+                           (alist-get 'thread_id data)))
+            (guild-id (alist-get 'guild_id data))
+            (added-members (or (alist-get 'added_members data) '()))
+            (removed-member-ids (or (alist-get 'removed_member_ids data) '()))
+            (member-count (alist-get 'member_count data)))
+       (when thread-id
+         (disco-state-apply-thread-members-update
+          thread-id
+          added-members
+          removed-member-ids
+          member-count))
+       (disco-gateway--emit
+        (list :type 'thread-members-update
+              :channel-id thread-id
+              :thread-id thread-id
+              :guild-id guild-id
+              :added-members added-members
+              :removed-member-ids removed-member-ids
+              :member-count member-count))))
     ("USER_UPDATE"
      ;; Read-state ack tokens are account-scoped and should be reset on user updates.
      (disco-state-reset-ack-tokens))))

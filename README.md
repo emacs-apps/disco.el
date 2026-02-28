@@ -28,7 +28,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Draft input supports `TAB` @mention completion (from loaded participants) and inserts Discord mention syntax.
 - Room provides `C-c C-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
-- In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`).
+- In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
 - Root buffer now live-syncs guild/channel/thread structure from gateway create/update/delete dispatch.
 - Root channel labels include lightweight unread counters from live message events.
@@ -71,10 +71,11 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root buffer: `A` opens archived thread browser for a selected parent channel.
 - Root buffer: `RET` on forum/media opens parent-thread list; that list fetches active threads via `/channels/{id}/threads/search` (`archived=false`) on open and on `g`.
 - Archived thread buffer: `g` refreshes from first page, `n` loads next page, `RET`/mouse opens selected thread.
-- Archived thread fetch gracefully skips sources that return expected permission-denied (`Missing Access`) responses for current account/permissions.
+- Archived thread fetch only queries the `private` source when `MANAGE_THREADS` is present, and also suppresses expected permission-denied (`Missing Access`) source noise.
 - Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
+- Thread room buffer: `C-c C-t r` rename, `C-c C-t k` toggle locked, `C-c C-t s` set slowmode, `C-c C-t a` set auto-archive duration, `C-c C-t e` edit multi-field settings, `C-c C-t u` set thread mute.
 - Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
-- Room transient (`?`): includes message send/refresh, thread create/join/leave/archive, and inspect actions.
+- Room transient (`?`): includes message send/refresh plus thread create/join/leave/archive/rename/lock/slowmode/auto-archive/settings/mute actions.
 
 ## Message Commands
 
@@ -116,6 +117,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.
+- Gateway thread membership deltas (`THREAD_MEMBER_UPDATE`/`THREAD_MEMBERS_UPDATE`) now update lightweight per-thread member caches.
 - Gateway reconnect uses exponential backoff with jitter for transport failures, and randomized delay handling for `INVALID_SESSION`.
 - Identify payload supports optional intents/capabilities/presence fields through customization.
 - Rate-limit handling currently surfaces 429 with retry metadata to the user; full bucket scheduler is planned next.

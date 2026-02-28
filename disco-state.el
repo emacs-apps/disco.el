@@ -41,6 +41,12 @@
 (defvar disco-state--ack-token-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> last read-state ack token.")
 
+(defvar disco-state--thread-member-ids-by-thread (make-hash-table :test #'equal)
+  "Hash table thread-id -> list of known member user IDs.")
+
+(defvar disco-state--thread-member-count-by-thread (make-hash-table :test #'equal)
+  "Hash table thread-id -> last known thread member count.")
+
 (defun disco-state-reset ()
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
@@ -52,7 +58,9 @@
   (clrhash disco-state--messages-by-channel)
   (clrhash disco-state--unread-counts-by-channel)
   (clrhash disco-state--last-read-message-id-by-channel)
-  (clrhash disco-state--ack-token-by-channel))
+  (clrhash disco-state--ack-token-by-channel)
+  (clrhash disco-state--thread-member-ids-by-thread)
+  (clrhash disco-state--thread-member-count-by-thread))
 
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."
@@ -111,6 +119,75 @@
         (unless (member channel-id ids)
           (puthash guild-id (append ids (list channel-id))
                    disco-state--thread-ids-by-guild))))))
+
+(defun disco-state--thread-member-user-id (thread-member)
+  "Extract user ID from THREAD-MEMBER object."
+  (or (and (listp thread-member)
+           (alist-get 'user_id thread-member))
+      (let* ((member (and (listp thread-member)
+                          (alist-get 'member thread-member)))
+             (user (and (listp member)
+                        (alist-get 'user member))))
+        (and (listp user)
+             (alist-get 'id user)))))
+
+(defun disco-state-thread-member-ids (thread-id)
+  "Return known member user IDs for THREAD-ID."
+  (copy-sequence (or (gethash thread-id disco-state--thread-member-ids-by-thread) '())))
+
+(defun disco-state-thread-member-count (thread-id)
+  "Return known member count for THREAD-ID, or nil."
+  (gethash thread-id disco-state--thread-member-count-by-thread))
+
+(defun disco-state-set-thread-member-count (thread-id member-count)
+  "Store MEMBER-COUNT for THREAD-ID and return normalized count."
+  (if (numberp member-count)
+      (let ((normalized (max 0 member-count)))
+        (puthash thread-id normalized disco-state--thread-member-count-by-thread)
+        normalized)
+    (remhash thread-id disco-state--thread-member-count-by-thread)
+    nil))
+
+(defun disco-state-upsert-thread-member (thread-id user-id)
+  "Add USER-ID to THREAD-ID member index and return updated IDs."
+  (let ((normalized-user-id (and user-id (format "%s" user-id))))
+    (if (not (and thread-id normalized-user-id))
+        (disco-state-thread-member-ids thread-id)
+      (let ((existing (or (gethash thread-id disco-state--thread-member-ids-by-thread) '())))
+        (unless (member normalized-user-id existing)
+          (puthash thread-id
+                   (append existing (list normalized-user-id))
+                   disco-state--thread-member-ids-by-thread))
+        (disco-state-thread-member-ids thread-id)))))
+
+(defun disco-state-delete-thread-member (thread-id user-id)
+  "Remove USER-ID from THREAD-ID member index and return updated IDs."
+  (let ((normalized-user-id (and user-id (format "%s" user-id))))
+    (if (not (and thread-id normalized-user-id))
+        (disco-state-thread-member-ids thread-id)
+      (let* ((existing (or (gethash thread-id disco-state--thread-member-ids-by-thread) '()))
+             (updated (delete normalized-user-id (copy-sequence existing))))
+        (if updated
+            (puthash thread-id updated disco-state--thread-member-ids-by-thread)
+          (remhash thread-id disco-state--thread-member-ids-by-thread))
+        updated))))
+
+(defun disco-state-apply-thread-members-update (thread-id added-members removed-member-ids
+                                                          &optional member-count)
+  "Apply gateway thread membership delta for THREAD-ID.
+
+ADDED-MEMBERS is an array/list of thread member objects.
+REMOVED-MEMBER-IDS is an array/list of removed user IDs.
+MEMBER-COUNT is optional approximate thread member count."
+  (dolist (member (or added-members '()))
+    (let ((user-id (disco-state--thread-member-user-id member)))
+      (when user-id
+        (disco-state-upsert-thread-member thread-id user-id))))
+  (dolist (user-id (or removed-member-ids '()))
+    (disco-state-delete-thread-member thread-id user-id))
+  (when (numberp member-count)
+    (disco-state-set-thread-member-count thread-id member-count))
+  (disco-state-thread-member-ids thread-id))
 
 (defun disco-state--replace-or-append-channel (channels channel)
   "Return CHANNELS with CHANNEL replaced by ID or appended if absent."
@@ -197,6 +274,8 @@
       (let ((old-thread (gethash thread-id disco-state--channels-by-id)))
         (when old-thread
           (disco-state--remove-thread-indexes old-thread)
+          (remhash thread-id disco-state--thread-member-ids-by-thread)
+          (remhash thread-id disco-state--thread-member-count-by-thread)
           (remhash thread-id disco-state--channels-by-id)))))
   (puthash guild-id channels disco-state--channels-by-guild)
   (dolist (channel channels)
@@ -204,7 +283,15 @@
       (when channel-id
         (puthash channel-id channel disco-state--channels-by-id)
         (when (disco-state-channel-thread-p channel)
-          (disco-state--index-thread-channel channel))))))
+          (disco-state--index-thread-channel channel)
+          (let ((thread-member (alist-get 'member channel))
+                (thread-member-count (alist-get 'member_count channel)))
+            (when thread-member
+              (let ((user-id (disco-state--thread-member-user-id thread-member)))
+                (when user-id
+                  (disco-state-upsert-thread-member channel-id user-id))))
+            (when (numberp thread-member-count)
+              (disco-state-set-thread-member-count channel-id thread-member-count))))))))
 
 (defun disco-state-guild-channels (guild-id)
   "Return channels for GUILD-ID."
@@ -258,7 +345,15 @@
              (or disco-state--private-channels '())
              channel)))
     (when (disco-state-channel-thread-p channel)
-      (disco-state--index-thread-channel channel))))
+      (disco-state--index-thread-channel channel)
+      (let ((thread-member (alist-get 'member channel))
+            (thread-member-count (alist-get 'member_count channel)))
+        (when thread-member
+          (let ((user-id (disco-state--thread-member-user-id thread-member)))
+            (when user-id
+              (disco-state-upsert-thread-member channel-id user-id))))
+        (when (numberp thread-member-count)
+          (disco-state-set-thread-member-count channel-id thread-member-count))))))
 
 (defun disco-state-delete-channel (channel-id)
   "Delete channel CHANNEL-ID from indexes."
@@ -282,7 +377,9 @@
       (remhash channel-id disco-state--messages-by-channel)
       (remhash channel-id disco-state--unread-counts-by-channel)
       (remhash channel-id disco-state--last-read-message-id-by-channel)
-      (remhash channel-id disco-state--ack-token-by-channel))))
+      (remhash channel-id disco-state--ack-token-by-channel)))
+  (remhash channel-id disco-state--thread-member-ids-by-thread)
+  (remhash channel-id disco-state--thread-member-count-by-thread))
 
 (defun disco-state-sync-threads (guild-id parent-channel-ids threads)
   "Sync active THREADS for GUILD-ID.

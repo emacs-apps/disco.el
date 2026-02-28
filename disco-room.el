@@ -613,6 +613,31 @@ Returns nil when left blank."
     (unless (string-empty-p raw)
       (string-to-number raw))))
 
+(defun disco-room--read-required-thread-auto-archive-duration (&optional default)
+  "Prompt for required auto archive duration in minutes.
+
+DEFAULT, when non-nil, is preselected in completion candidates."
+  (let* ((choices '("60" "1440" "4320" "10080"))
+         (initial (and default (format "%s" default)))
+         (raw (completing-read
+               "Auto archive minutes: "
+               choices nil t nil nil initial)))
+    (string-to-number raw)))
+
+(defun disco-room--read-tristate-bool (prompt current-value)
+  "Read tri-state boolean with PROMPT and CURRENT-VALUE.
+
+Return symbol `keep', t, or :false."
+  (let* ((choice (completing-read
+                  (format "%s (keep/yes/no, current %s): "
+                          prompt
+                          (if current-value "yes" "no"))
+                  '("keep" "yes" "no") nil t nil nil "keep")))
+    (pcase choice
+      ("yes" t)
+      ("no" :false)
+      (_ 'keep))))
+
 (defun disco-room--read-optional-nonnegative-int (prompt)
   "Read optional non-negative integer using PROMPT.
 
@@ -647,6 +672,25 @@ Returns nil when left blank."
     (setf (alist-get key meta nil 'remove) value)
     (setf (alist-get 'thread_metadata updated nil 'remove) meta)
     updated))
+
+(defun disco-room--thread-with-field (channel key value)
+  "Return CHANNEL with top-level KEY set to VALUE."
+  (let ((updated (copy-tree channel)))
+    (setf (alist-get key updated nil 'remove) value)
+    updated))
+
+(defun disco-room--resolve-thread-update (updated fallback)
+  "Resolve UPDATED thread channel response with FALLBACK object.
+
+When UPDATED does not contain a full channel object, FALLBACK is used."
+  (let ((next (if (and (listp updated) (alist-get 'id updated))
+                  updated
+                fallback)))
+    (when next
+      (disco-state-upsert-channel next)
+      (when (alist-get 'name next)
+        (setq disco-room--channel-name (alist-get 'name next))))
+    next))
 
 (defun disco-room--buffer-name (channel-name channel-id)
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
@@ -1188,7 +1232,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -1602,6 +1646,175 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
     (disco-room-render)
     (message "disco: thread %s" (if next-archived "archived" "unarchived"))))
 
+(defun disco-room-rename-thread (name)
+  "Rename current thread to NAME."
+  (interactive
+   (let* ((channel (or (disco-room--channel-object)
+                       (user-error "disco: unknown thread in state")))
+          (current-name (or (alist-get 'name channel) ""))
+          (name (string-trim
+                 (read-string "Thread name: " current-name))))
+     (list name)))
+  (disco-room--ensure-thread-channel)
+  (when (string-empty-p name)
+    (user-error "disco: thread name cannot be empty"))
+  (let* ((channel (or (disco-room--channel-object)
+                      (user-error "disco: unknown thread in state")))
+         (updated (disco-api-update-thread disco-room--channel-id :name name))
+         (fallback (disco-room--thread-with-field channel 'name name)))
+    (disco-room--resolve-thread-update updated fallback)
+    (disco-room-render)
+    (message "disco: thread renamed to %s" name)))
+
+(defun disco-room-toggle-thread-locked ()
+  "Toggle locked state for current thread."
+  (interactive)
+  (disco-room--ensure-thread-channel)
+  (let* ((channel (or (disco-room--channel-object)
+                      (user-error "disco: unknown thread in state")))
+         (next-locked (not (disco-room--thread-locked-p channel)))
+         (updated (disco-api-update-thread disco-room--channel-id :locked next-locked))
+         (fallback (disco-room--thread-with-meta-field
+                    channel
+                    'locked
+                    (if next-locked t :false))))
+    (disco-room--resolve-thread-update updated fallback)
+    (disco-room-render)
+    (message "disco: thread %s" (if next-locked "locked" "unlocked"))))
+
+(defun disco-room-set-thread-slowmode (seconds)
+  "Set current thread slowmode to SECONDS.
+
+When called interactively, empty input clears slowmode (sets to 0)."
+  (interactive
+   (list (or (disco-room--read-optional-nonnegative-int
+              "Slowmode seconds (empty clears to 0): ")
+             0)))
+  (disco-room--ensure-thread-channel)
+  (let* ((channel (or (disco-room--channel-object)
+                      (user-error "disco: unknown thread in state")))
+         (updated (disco-api-update-thread
+                   disco-room--channel-id
+                   :rate-limit-per-user seconds))
+         (fallback (disco-room--thread-with-field channel 'rate_limit_per_user seconds)))
+    (disco-room--resolve-thread-update updated fallback)
+    (disco-room-render)
+    (message "disco: thread slowmode -> %ss" seconds)))
+
+(defun disco-room-set-thread-auto-archive-duration (minutes)
+  "Set current thread auto archive duration to MINUTES."
+  (interactive
+   (let* ((channel (or (disco-room--channel-object)
+                       (user-error "disco: unknown thread in state")))
+          (meta (disco-room--thread-metadata channel))
+          (current (or (alist-get 'auto_archive_duration meta)
+                       (alist-get 'auto_archive_duration channel))))
+     (list (disco-room--read-required-thread-auto-archive-duration current))))
+  (disco-room--ensure-thread-channel)
+  (let* ((channel (or (disco-room--channel-object)
+                      (user-error "disco: unknown thread in state")))
+         (updated (disco-api-update-thread
+                   disco-room--channel-id
+                   :auto-archive-duration minutes))
+         (fallback (disco-room--thread-with-meta-field
+                    channel
+                    'auto_archive_duration
+                    minutes)))
+    (disco-room--resolve-thread-update updated fallback)
+    (disco-room-render)
+    (message "disco: auto archive -> %s minutes" minutes)))
+
+(defun disco-room-set-thread-muted (muted)
+  "Set current user's muted state for current thread to MUTED."
+  (interactive
+   (list (y-or-n-p "Mute this thread? ")))
+  (disco-room--ensure-thread-channel)
+  (disco-api-update-thread-member-settings disco-room--channel-id :muted muted)
+  (message "disco: thread notifications %s" (if muted "muted" "unmuted")))
+
+(defun disco-room-edit-thread-settings ()
+  "Edit multiple thread settings in one PATCH request."
+  (interactive)
+  (disco-room--ensure-thread-channel)
+  (let* ((channel (or (disco-room--channel-object)
+                      (user-error "disco: unknown thread in state")))
+         (meta (disco-room--thread-metadata channel))
+         (current-name (or (alist-get 'name channel) ""))
+         (name-input (string-trim
+                      (read-string
+                       (format "Thread name (empty keeps %s): " current-name))))
+         (name (unless (string-empty-p name-input) name-input))
+         (current-auto (or (alist-get 'auto_archive_duration meta)
+                           (alist-get 'auto_archive_duration channel)))
+         (auto-input (completing-read
+                      (format "Auto archive minutes (empty keeps %s): "
+                              (or current-auto "unset"))
+                      '("" "60" "1440" "4320" "10080") nil t nil nil ""))
+         (auto-archive-duration
+          (unless (string-empty-p auto-input)
+            (string-to-number auto-input)))
+         (slow-input (read-string
+                      (format "Slowmode seconds (empty keeps %s): "
+                              (or (alist-get 'rate_limit_per_user channel) 0))))
+         (rate-limit-per-user
+          (unless (string-empty-p slow-input)
+            (let ((n (string-to-number slow-input)))
+              (when (< n 0)
+                (user-error "disco: value must be >= 0"))
+              n)))
+         (archived-choice
+          (disco-room--read-tristate-bool
+           "Archived"
+           (disco-room--thread-archived-p channel)))
+         (locked-choice
+          (disco-room--read-tristate-bool
+           "Locked"
+           (disco-room--thread-locked-p channel)))
+         (archived (unless (eq archived-choice 'keep) archived-choice))
+         (locked (unless (eq locked-choice 'keep) locked-choice))
+         (has-change (or name
+                         auto-archive-duration
+                         (not (null rate-limit-per-user))
+                         (not (eq archived-choice 'keep))
+                         (not (eq locked-choice 'keep)))))
+    (unless has-change
+      (user-error "disco: no thread setting changes provided"))
+    (let* ((updated
+            (disco-api-update-thread
+             disco-room--channel-id
+             :name name
+             :auto-archive-duration auto-archive-duration
+             :rate-limit-per-user rate-limit-per-user
+             :archived archived
+             :locked locked))
+           (fallback (copy-tree channel)))
+      (when name
+        (setf (alist-get 'name fallback nil 'remove) name))
+      (when auto-archive-duration
+        (setq fallback
+              (disco-room--thread-with-meta-field
+               fallback
+               'auto_archive_duration
+               auto-archive-duration)))
+      (when (not (null rate-limit-per-user))
+        (setf (alist-get 'rate_limit_per_user fallback nil 'remove)
+              rate-limit-per-user))
+      (when (not (eq archived-choice 'keep))
+        (setq fallback
+              (disco-room--thread-with-meta-field
+               fallback
+               'archived
+               archived)))
+      (when (not (eq locked-choice 'keep))
+        (setq fallback
+              (disco-room--thread-with-meta-field
+               fallback
+               'locked
+               locked)))
+      (disco-room--resolve-thread-update updated fallback)
+      (disco-room-render)
+      (message "disco: updated thread settings"))))
+
 (defvar disco-room-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-room-refresh)
@@ -1620,6 +1833,12 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
     (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
+    (define-key map (kbd "C-c C-t r") #'disco-room-rename-thread)
+    (define-key map (kbd "C-c C-t k") #'disco-room-toggle-thread-locked)
+    (define-key map (kbd "C-c C-t s") #'disco-room-set-thread-slowmode)
+    (define-key map (kbd "C-c C-t a") #'disco-room-set-thread-auto-archive-duration)
+    (define-key map (kbd "C-c C-t e") #'disco-room-edit-thread-settings)
+    (define-key map (kbd "C-c C-t u") #'disco-room-set-thread-muted)
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
     (define-key map (kbd "C-c C-a") #'disco-room-toggle-thread-archived)

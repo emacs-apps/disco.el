@@ -470,39 +470,142 @@ Response is an alist with keys including `threads' and `members'."
    :on-success on-success
    :on-error on-error))
 
-(defun disco-api--thread-search-active-query (limit offset)
-  "Build query alist for active thread search endpoint.
+(defun disco-api--query-bool-string (value)
+  "Return VALUE as API query boolean string.
 
-LIMIT is clamped to the endpoint range 1-25. OFFSET is clamped to >= 0."
-  (let* ((raw-limit (or limit 25))
-         (normalized-limit (max 1 (min 25 raw-limit)))
-         (normalized-offset (max 0 (or offset 0))))
-    `(("archived" . "false")
-      ("sort_by" . "last_message_time")
-      ("sort_order" . "desc")
-      ("limit" . ,(number-to-string normalized-limit))
-      ("offset" . ,(number-to-string normalized-offset)))))
+JSON-like true values map to the true string and everything else maps to
+the false string."
+  (if (disco-api--json-true-p value) "true" "false"))
+
+(defun disco-api--thread-search-tag-setting-value (value)
+  "Normalize thread search tag setting VALUE to API representation."
+  (pcase value
+    ((or 'match-some 'match_some) "match_some")
+    ((or 'match-all 'match_all) "match_all")
+    ((pred stringp) value)
+    (_ nil)))
+
+(defun disco-api--thread-search-sort-by-value (value)
+  "Normalize thread search sort-by VALUE to API representation."
+  (pcase value
+    ((or 'last-message-time 'last_message_time) "last_message_time")
+    ((or 'archive-time 'archive_time) "archive_time")
+    ('relevance "relevance")
+    ((or 'creation-time 'creation_time) "creation_time")
+    ((pred stringp) value)
+    (_ nil)))
+
+(defun disco-api--thread-search-sort-order-value (value)
+  "Normalize thread search sort-order VALUE to API representation."
+  (pcase value
+    ((or 'asc "asc") "asc")
+    ((or 'desc "desc") "desc")
+    (_ nil)))
+
+(cl-defun disco-api--thread-search-query (&key name slop tags tag-setting archived
+                                               sort-by sort-order limit offset
+                                               max-id min-id)
+  "Build query alist for `/channels/{channel.id}/threads/search'."
+  (let ((query nil))
+    (when (and (stringp name) (not (string-empty-p name)))
+      (push `("name" . ,name) query))
+    (when (numberp slop)
+      (push `("slop" . ,(number-to-string (max 0 (min 100 slop)))) query))
+    (when (listp tags)
+      (dolist (tag tags)
+        (when tag
+          (push `("tag" . ,(format "%s" tag)) query))))
+    (let ((tag-setting-value (disco-api--thread-search-tag-setting-value tag-setting)))
+      (when tag-setting-value
+        (push `("tag_setting" . ,tag-setting-value) query)))
+    (when (not (null archived))
+      (push `("archived" . ,(disco-api--query-bool-string archived)) query))
+    (let ((sort-by-value (disco-api--thread-search-sort-by-value sort-by)))
+      (when sort-by-value
+        (push `("sort_by" . ,sort-by-value) query)))
+    (let ((sort-order-value (disco-api--thread-search-sort-order-value sort-order)))
+      (when sort-order-value
+        (push `("sort_order" . ,sort-order-value) query)))
+    (when (numberp limit)
+      ;; Discord thread search endpoint accepts 1-25.
+      (push `("limit" . ,(number-to-string (max 1 (min 25 limit)))) query))
+    (when (numberp offset)
+      ;; Discord thread search endpoint accepts 0-9975.
+      (push `("offset" . ,(number-to-string (max 0 (min 9975 offset)))) query))
+    (when max-id
+      (push `("max_id" . ,(format "%s" max-id)) query))
+    (when min-id
+      (push `("min_id" . ,(format "%s" min-id)) query))
+    (nreverse query)))
+
+(cl-defun disco-api-channel-search-threads
+    (channel-id &key name slop tags tag-setting archived sort-by sort-order
+                limit offset max-id min-id)
+  "Search threads under CHANNEL-ID using `/threads/search'."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/threads/search" channel-id)
+   nil
+   (disco-api--thread-search-query
+    :name name
+    :slop slop
+    :tags tags
+    :tag-setting tag-setting
+    :archived archived
+    :sort-by sort-by
+    :sort-order sort-order
+    :limit limit
+    :offset offset
+    :max-id max-id
+    :min-id min-id)
+   nil))
+
+(cl-defun disco-api-channel-search-threads-async
+    (channel-id &key name slop tags tag-setting archived sort-by sort-order
+                limit offset max-id min-id on-success on-error)
+  "Search threads under CHANNEL-ID asynchronously using `/threads/search'."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s/threads/search" channel-id)
+   :query (disco-api--thread-search-query
+           :name name
+           :slop slop
+           :tags tags
+           :tag-setting tag-setting
+           :archived archived
+           :sort-by sort-by
+           :sort-order sort-order
+           :limit limit
+           :offset offset
+           :max-id max-id
+           :min-id min-id)
+   :on-success on-success
+   :on-error on-error))
 
 (defun disco-api-channel-search-active-threads (channel-id &optional limit offset)
   "Search active threads under CHANNEL-ID.
 
 Uses `/channels/{channel.id}/threads/search' with `archived=false'."
-  (disco-api--request
-   "GET"
-   (format "/channels/%s/threads/search" channel-id)
-   nil
-   (disco-api--thread-search-active-query limit offset)
-   nil))
+  (disco-api-channel-search-threads
+   channel-id
+   :archived :false
+   :sort-by 'last-message-time
+   :sort-order 'desc
+   :limit limit
+   :offset offset))
 
 (cl-defun disco-api-channel-search-active-threads-async
     (channel-id &key limit offset on-success on-error)
   "Search active threads under CHANNEL-ID asynchronously.
 
 Uses `/channels/{channel.id}/threads/search' with `archived=false'."
-  (disco-api--request-async
-   "GET"
-   (format "/channels/%s/threads/search" channel-id)
-   :query (disco-api--thread-search-active-query limit offset)
+  (disco-api-channel-search-threads-async
+   channel-id
+   :archived :false
+   :sort-by 'last-message-time
+   :sort-order 'desc
+   :limit limit
+   :offset offset
    :on-success on-success
    :on-error on-error))
 
@@ -549,6 +652,58 @@ BEFORE is a thread snowflake ID. LIMIT defaults to 50."
    (disco-api--thread-archive-query before limit)
    nil))
 
+(cl-defun disco-api--thread-members-query (&key with-member after limit)
+  "Build query alist for thread member listing endpoints."
+  (let (query)
+    (when (not (null with-member))
+      (push `("with_member" . ,(disco-api--query-bool-string with-member)) query))
+    (when after
+      (push `("after" . ,(format "%s" after)) query))
+    (when (numberp limit)
+      ;; Discord thread member listing endpoint accepts 1-100.
+      (push `("limit" . ,(number-to-string (max 1 (min 100 limit)))) query))
+    (nreverse query)))
+
+(cl-defun disco-api-thread-members (thread-id &key with-member after limit)
+  "Fetch thread member objects for THREAD-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/thread-members" thread-id)
+   nil
+   (disco-api--thread-members-query
+    :with-member with-member
+    :after after
+    :limit limit)
+   nil))
+
+(cl-defun disco-api-thread-member (thread-id user-id &key with-member)
+  "Fetch thread member object for USER-ID in THREAD-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/thread-members/%s" thread-id user-id)
+   nil
+   (disco-api--thread-members-query
+    :with-member with-member)
+   nil))
+
+(defun disco-api-add-thread-member (thread-id user-id)
+  "Add USER-ID to THREAD-ID."
+  (disco-api--request
+   "PUT"
+   (format "/channels/%s/thread-members/%s" thread-id user-id)
+   nil
+   nil
+   nil))
+
+(defun disco-api-remove-thread-member (thread-id user-id)
+  "Remove USER-ID from THREAD-ID."
+  (disco-api--request
+   "DELETE"
+   (format "/channels/%s/thread-members/%s" thread-id user-id)
+   nil
+   nil
+   nil))
+
 (defun disco-api-join-thread (thread-id)
   "Join thread THREAD-ID as current user."
   (disco-api--request "PUT" (format "/channels/%s/thread-members/@me" thread-id) nil nil nil))
@@ -557,14 +712,76 @@ BEFORE is a thread snowflake ID. LIMIT defaults to 50."
   "Leave thread THREAD-ID as current user."
   (disco-api--request "DELETE" (format "/channels/%s/thread-members/@me" thread-id) nil nil nil))
 
+(cl-defun disco-api-update-thread-member-settings (thread-id &key flags muted mute-config)
+  "Update current user's thread settings for THREAD-ID.
+
+FLAGS updates thread member flags. MUTED toggles thread mute state.
+MUTE-CONFIG is forwarded as the `mute_config' object."
+  (let (payload)
+    (when (not (null flags))
+      (push `(flags . ,flags) payload))
+    (when (not (null muted))
+      (push `(muted . ,(if muted t :false)) payload))
+    (when mute-config
+      (push `(mute_config . ,mute-config) payload))
+    (setq payload (nreverse payload))
+    (unless payload
+      (user-error "disco: no thread settings fields provided"))
+    (disco-api--request
+     "PATCH"
+     (format "/channels/%s/thread-members/@me/settings" thread-id)
+     payload
+     nil
+     nil)))
+
+(cl-defun disco-api--thread-update-payload (&key name archived locked auto-archive-duration
+                                                 rate-limit-per-user invitable applied-tags)
+  "Build thread channel PATCH payload from keyword arguments."
+  (let (payload)
+    (when (and (stringp name) (not (string-empty-p name)))
+      (push `(name . ,name) payload))
+    (when (not (null archived))
+      (push `(archived . ,(if (disco-api--json-true-p archived) t :false)) payload))
+    (when (not (null locked))
+      (push `(locked . ,(if (disco-api--json-true-p locked) t :false)) payload))
+    (when auto-archive-duration
+      (push `(auto_archive_duration . ,auto-archive-duration) payload))
+    (when (not (null rate-limit-per-user))
+      (push `(rate_limit_per_user . ,rate-limit-per-user) payload))
+    (when (not (null invitable))
+      (push `(invitable . ,(if (disco-api--json-true-p invitable) t :false)) payload))
+    (when (listp applied-tags)
+      (push `(applied_tags . ,applied-tags) payload))
+    (nreverse payload)))
+
+(cl-defun disco-api-update-thread (thread-id &key name archived locked auto-archive-duration
+                                             rate-limit-per-user invitable applied-tags)
+  "Patch mutable thread fields for THREAD-ID."
+  (let ((payload (disco-api--thread-update-payload
+                  :name name
+                  :archived archived
+                  :locked locked
+                  :auto-archive-duration auto-archive-duration
+                  :rate-limit-per-user rate-limit-per-user
+                  :invitable invitable
+                  :applied-tags applied-tags)))
+    (unless payload
+      (user-error "disco: no thread fields provided"))
+    (disco-api--request
+     "PATCH"
+     (format "/channels/%s" thread-id)
+     payload
+     nil
+     nil)))
+
 (defun disco-api-set-thread-archived (thread-id archived &optional locked)
   "Set THREAD-ID archived state to ARCHIVED.
 
 If LOCKED is non-nil, set lock state in the same request."
-  (let ((payload `((archived . ,(if archived t :false)))))
-    (when (not (null locked))
-      (setq payload (append payload `((locked . ,(if locked t :false))))))
-    (disco-api--request "PATCH" (format "/channels/%s" thread-id) payload nil nil)))
+  (disco-api-update-thread
+   thread-id
+   :archived archived
+   :locked locked))
 
 (defun disco-api-create-thread-from-message (channel-id message-id name
                                                         &optional auto-archive-duration
