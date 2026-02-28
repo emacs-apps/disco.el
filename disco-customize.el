@@ -159,8 +159,15 @@ Provide this as an alist matching Discord Gateway presence schema."
   :type 'number
   :group 'disco)
 
-(defcustom disco-user-agent "Mozilla/5.0 (X11; Linux x86_64) Emacs disco.el"
-  "User-Agent sent to Discord API."
+(defcustom disco-user-agent
+  (concat
+   "Mozilla/5.0 (X11; Linux x86_64) "
+   "AppleWebKit/537.36 (KHTML, like Gecko) "
+   "discord/0.0.670 Chrome/134.0.6998.179 Electron/35.1.5 Safari/537.36")
+  "User-Agent sent to Discord API.
+
+Default uses a desktop-style Discord/Electron shape similar to oxicord,
+which aligns with Discord user-account client property expectations."
   :type 'string
   :group 'disco)
 

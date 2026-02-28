@@ -71,6 +71,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway-reconnect-multiplier`: exponential backoff multiplier.
 - `disco-gateway-reconnect-jitter`: reconnect delay randomization ratio.
 - `disco-gateway-invalid-session-min-delay` / `disco-gateway-invalid-session-max-delay`: randomized reconnect window for opcode 9.
+- `disco-user-agent`: HTTP `User-Agent` header (default is desktop-style Discord/Electron shape).
 
 ## Design Notes
 
