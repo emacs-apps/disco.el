@@ -205,14 +205,45 @@ STATUS, HEADERS, BODY come from transport layer."
       (user-error "disco: token is not set; use M-x disco-set-token or DISCO_TOKEN"))
     token))
 
+(defun disco-api--normalize-query-entry (entry)
+  "Normalize one query ENTRY for `url-build-query-string'.
+
+Supported entry shapes are (KEY . VALUE) and (KEY VALUE)."
+  (cond
+   ((and (consp entry)
+         (consp (cdr entry))
+         (null (cddr entry)))
+    (let ((key (car entry))
+          (value (cadr entry)))
+      (when (and key value)
+        (list (format "%s" key)
+              (format "%s" value)))))
+   ((and (consp entry) (not (listp (cdr entry))))
+    (let* ((raw-key (car entry))
+           (raw-value (cdr entry))
+           (key (if (symbolp raw-key)
+                    (symbol-name raw-key)
+                  raw-key)))
+      (when (and key raw-value)
+        (list (format "%s" key)
+              (format "%s" raw-value)))))
+   (t nil)))
+
+(defun disco-api--normalize-query (query)
+  "Normalize QUERY entries for `url-build-query-string'."
+  (delq nil (mapcar #'disco-api--normalize-query-entry query)))
+
 (defun disco-api--build-url (endpoint &optional query)
   "Build full URL using ENDPOINT and optional QUERY alist."
-  (concat
-   (replace-regexp-in-string "/$" "" disco-api-base-url)
-   endpoint
-   (if (and query (consp query))
-       (concat "?" (url-build-query-string query))
-     "")))
+  (let ((normalized-query
+         (and (consp query)
+              (disco-api--normalize-query query))))
+    (concat
+     (replace-regexp-in-string "/$" "" disco-api-base-url)
+     endpoint
+     (if normalized-query
+         (concat "?" (url-build-query-string normalized-query))
+       ""))))
 
 (defun disco-api--json-encode (payload)
   "JSON encode PAYLOAD, preserving UTF-8."
