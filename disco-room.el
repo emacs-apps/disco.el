@@ -841,6 +841,31 @@ Returns nil when left blank."
              nil t)
         (string-trim (match-string 1))))))
 
+(defun disco-room--response-body-start ()
+  "Return byte position where HTTP body begins in current buffer.
+
+`url-http-end-of-headers' may point at the last separator newline;
+this helper normalizes by skipping all trailing CR/LF separators."
+  (let* ((from-var (and (boundp 'url-http-end-of-headers)
+                        (cond
+                         ((markerp url-http-end-of-headers)
+                          (marker-position url-http-end-of-headers))
+                         ((integerp url-http-end-of-headers)
+                          url-http-end-of-headers)
+                         (t nil))))
+         (pos (or from-var
+                  (save-excursion
+                    (goto-char (point-min))
+                    (and (re-search-forward "\\r?\\n\\r?\\n" nil t)
+                         (point))))))
+    (when pos
+      (save-excursion
+        (goto-char pos)
+        (while (and (< (point) (point-max))
+                    (memq (char-after) '(?\r ?\n)))
+          (forward-char 1))
+        (point)))))
+
 (defun disco-room--avatar-image-from-file (file)
   "Create inline avatar image from FILE, or nil when unsupported."
   (let ((image
@@ -919,8 +944,7 @@ This filters out broken image specs that would otherwise render as tofu boxes."
          (unwind-protect
              (let* ((status-code (and (boundp 'url-http-response-status)
                                       url-http-response-status))
-                    (body-start (and (boundp 'url-http-end-of-headers)
-                                     url-http-end-of-headers))
+                    (body-start nil)
                     (content-type (and (boundp 'url-http-content-type)
                                        url-http-content-type))
                     (raw-bytes nil)
@@ -933,6 +957,7 @@ This filters out broken image specs that would otherwise render as tofu boxes."
                (unless (and (stringp content-type)
                             (not (string-empty-p content-type)))
                  (setq content-type (disco-room--response-header-value "Content-Type")))
+               (setq body-start (disco-room--response-body-start))
                (when (and (not (plist-get status :error))
                           (numberp status-code)
                           (<= 200 status-code)
