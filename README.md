@@ -73,7 +73,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
 - `disco-fetch-guild-active-threads`: optionally fetch `/guilds/{id}/threads/active` during root refresh.
-- `disco-thread-archive-fetch-limit`: page size used by archived thread fetchers.
+- `disco-thread-archive-fetch-limit`: page size used by archived thread fetchers (2-100).
 - `disco-gateway-reconnect-delay`: base reconnect delay.
 - `disco-gateway-max-reconnect-attempts`: hard cap for consecutive reconnects (`nil` for unlimited).
 - `disco-gateway-reconnect-max-delay`: max reconnect delay cap.

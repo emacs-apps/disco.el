@@ -313,7 +313,10 @@ Response is an alist with keys including `threads' and `members'."
 
 (defun disco-api--thread-archive-query (before limit)
   "Build query alist for thread archive endpoints."
-  (let ((query `(("limit" . ,(number-to-string (or limit 50))))))
+  (let* ((raw-limit (or limit 50))
+         ;; Discord archived thread endpoints accept 2-100.
+         (normalized-limit (max 2 (min 100 raw-limit)))
+         (query `(("limit" . ,(number-to-string normalized-limit)))))
     (when before
       (setq query (append query `(("before" . ,before)))))
     query))

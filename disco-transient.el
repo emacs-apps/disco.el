@@ -54,8 +54,8 @@
 
 (defun disco-transient-set-thread-archive-fetch-limit (limit)
   "Set archived thread fetch LIMIT in current session."
-  (interactive "nArchive thread fetch limit (1-100): ")
-  (setq disco-thread-archive-fetch-limit (max 1 (min 100 limit)))
+  (interactive "nArchive thread fetch limit (2-100): ")
+  (setq disco-thread-archive-fetch-limit (max 2 (min 100 limit)))
   (message "disco: archive thread fetch limit set to %d"
            disco-thread-archive-fetch-limit))
 

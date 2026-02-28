@@ -85,7 +85,9 @@ logged and ignored, so enabling this is safe but optional."
   :group 'disco)
 
 (defcustom disco-thread-archive-fetch-limit 50
-  "Default limit used when fetching archived thread lists."
+  "Default limit used when fetching archived thread lists.
+
+Official Discord archived thread endpoints accept 2-100."
   :type 'integer
   :group 'disco)
 
