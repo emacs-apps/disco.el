@@ -26,6 +26,9 @@
 (defvar-local disco-root--archived-parent-channel nil
   "Parent channel object for archived thread list buffers.")
 
+(defvar-local disco-root--parent-threads-parent-channel nil
+  "Parent channel object for active-thread list buffers.")
+
 (defconst disco-root--archived-thread-sources
   '(("public" . disco-api-channel-archived-public-threads)
     ("private" . disco-api-channel-archived-private-threads)
@@ -180,11 +183,15 @@ Channels lacking this field are treated as visible to avoid false negatives."
 
 (defun disco-root--openable-channel-p (channel)
   "Return non-nil when CHANNEL can be opened as a room timeline."
-  (memq (alist-get 'type channel) '(0 1 3 5 10 11 12)))
+  (memq (alist-get 'type channel) '(0 1 3 5 10 11 12 15 16)))
 
 (defun disco-root--thread-parent-channel-p (channel)
   "Return non-nil when CHANNEL can contain visible threads in UI."
   (memq (alist-get 'type channel) '(0 5 15 16)))
+
+(defun disco-root--forum-or-media-channel-p (channel)
+  "Return non-nil when CHANNEL is a forum/media parent channel."
+  (memq (alist-get 'type channel) '(15 16)))
 
 (defun disco-root--thread-metadata (channel)
   "Return thread metadata for CHANNEL."
@@ -573,6 +580,108 @@ Return plist with keys :threads and :errors for this page only."
           (or (alist-get 'name parent-channel) "(no-name)")
           (alist-get 'id parent-channel)))
 
+(defun disco-root--parent-threads-buffer-name (parent-channel)
+  "Return active-thread buffer name for PARENT-CHANNEL."
+  (format "*disco:threads:%s (%s)*"
+          (or (alist-get 'name parent-channel) "(no-name)")
+          (alist-get 'id parent-channel)))
+
+(defun disco-root--active-parent-threads (parent-channel)
+  "Return active thread channels under PARENT-CHANNEL."
+  (let ((parent-id (alist-get 'id parent-channel)))
+    (disco-root--sort-channels
+     (seq-filter #'disco-root--displayable-channel-p
+                 (disco-state-parent-threads parent-id)))))
+
+(defun disco-root--render-parent-threads-buffer ()
+  "Render active-thread buffer from local parent-thread state."
+  (let* ((parent-channel disco-root--parent-threads-parent-channel)
+         (threads (and parent-channel
+                       (disco-root--active-parent-threads parent-channel)))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "Threads: %s\n"
+                    (if parent-channel
+                        (disco-root--channel-label parent-channel)
+                      "(no parent)")))
+    (insert "g: rerender   A: archived threads   RET/mouse-1: open thread   n/p/TAB: nav   q: quit\n")
+    (insert (format "Active threads indexed: %d (press g in root to fetch latest)\n"
+                    (length (or threads '()))))
+    (insert "\n")
+    (if threads
+        (dolist (thread threads)
+          (disco-root--insert-channel-line thread 2))
+      (insert "(no active threads indexed)\n"))
+    (goto-char (point-min))))
+
+(defun disco-root-parent-threads-refresh ()
+  "Rerender active-thread list in current parent-thread buffer."
+  (interactive)
+  (unless disco-root--parent-threads-parent-channel
+    (user-error "disco: thread buffer has no parent context"))
+  (disco-root--render-parent-threads-buffer)
+  (message "disco: rendered %d active threads"
+           (length (disco-root--active-parent-threads
+                    disco-root--parent-threads-parent-channel))))
+
+(defun disco-root-parent-threads-open-archived ()
+  "Open archived-thread browser for current parent-thread buffer context."
+  (interactive)
+  (unless disco-root--parent-threads-parent-channel
+    (user-error "disco: thread buffer has no parent context"))
+  (disco-root-list-archived-threads
+   (alist-get 'id disco-root--parent-threads-parent-channel)))
+
+(defvar disco-root-parent-threads-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'disco-root-parent-threads-refresh)
+    (define-key map (kbd "A") #'disco-root-parent-threads-open-archived)
+    (define-key map (kbd "RET") #'disco-root-open-at-point)
+    (define-key map (kbd "n") #'disco-root-button-forward)
+    (define-key map (kbd "p") #'disco-root-button-backward)
+    (define-key map (kbd "TAB") #'disco-root-button-forward)
+    (define-key map (kbd "<backtab>") #'disco-root-button-backward)
+    (define-key map (kbd "?") #'disco-root-transient)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `disco-root-parent-threads-mode'.")
+
+(define-derived-mode disco-root-parent-threads-mode special-mode "Disco-Threads"
+  "Major mode for active thread listing buffers."
+  (setq buffer-read-only t)
+  (setq truncate-lines t))
+
+(defun disco-root-open-parent-threads (&optional parent-channel-id)
+  "Open active thread list for PARENT-CHANNEL-ID.
+
+When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
+  (interactive)
+  (let* ((parent-channel
+          (or (and parent-channel-id (disco-state-channel parent-channel-id))
+              (disco-root--read-thread-parent-channel))))
+    (unless (and parent-channel
+                 (disco-root--thread-parent-channel-p parent-channel))
+      (user-error "disco: selected channel cannot contain threads"))
+    (let ((buf (get-buffer-create
+                (disco-root--parent-threads-buffer-name parent-channel))))
+      (with-current-buffer buf
+        (disco-root-parent-threads-mode)
+        (setq disco-root--parent-threads-parent-channel parent-channel)
+        (disco-root-parent-threads-refresh))
+      (pop-to-buffer buf))))
+
+(defun disco-root--open-channel (channel-id)
+  "Open CHANNEL-ID according to channel semantics.
+
+Forum/media parent channels open the active-thread listing buffer; other
+channels open room timeline buffers."
+  (let ((channel (and channel-id (disco-state-channel channel-id))))
+    (unless channel
+      (user-error "disco: channel %s is unavailable" channel-id))
+    (if (disco-root--forum-or-media-channel-p channel)
+        (disco-root-open-parent-threads channel-id)
+      (disco-room-open channel-id (disco-root--channel-display-name channel)))))
+
 (defun disco-root-archived-threads-refresh ()
   "Refresh archived thread list in current archived-thread buffer."
   (interactive)
@@ -644,7 +753,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
 (defun disco-root--insert-channel-line (channel indent)
   "Insert one CHANNEL at INDENT spaces."
   (let ((channel-id (alist-get 'id channel))
-        (channel-name (disco-root--channel-display-name channel))
+        (channel-type (alist-get 'type channel))
         (label (disco-root--channel-label channel))
         (unread-count (disco-state-channel-unread-count (alist-get 'id channel)))
         (padding (make-string indent ?\s)))
@@ -652,11 +761,13 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
         (insert-text-button
          (format "%s%s\n" padding label)
          'action (lambda (_)
-                   (disco-room-open channel-id channel-name))
+                   (disco-root--open-channel channel-id))
          'disco-channel-id channel-id
          'disco-unread-count unread-count
          'follow-link t
-         'help-echo (format "Open channel %s" channel-id))
+         'help-echo (if (memq channel-type '(15 16))
+                        (format "Open threads under channel %s" channel-id)
+                      (format "Open channel %s" channel-id)))
       (insert (format "%s%s\n" padding label)))))
 
 (defun disco-root-button-forward (&optional n)
@@ -777,7 +888,7 @@ If point is not on a button, jump to the next button and open it."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "disco.el\n")
-    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   v: view(%s)   RET/mouse-1: open   n/p/TAB: nav   u: next unread   q: quit"
+    (insert (format "g: refresh   A: archived threads   \\: sort(%s)   v: view(%s)   RET/mouse-1: open (forum/media -> threads)   n/p/TAB: nav   u: next unread   q: quit"
                     disco-root--sort-mode
                     disco-root--view-mode))
     (when disco-root--refresh-in-flight
