@@ -101,7 +101,7 @@ When nil, avatar fetches are uncapped per render pass
           integer)
   :group 'disco)
 
-(defcustom disco-room-avatar-fetch-concurrency 6
+(defcustom disco-room-avatar-fetch-concurrency 20
   "Maximum concurrent avatar downloads in plz queue."
   :type 'integer
   :group 'disco)
