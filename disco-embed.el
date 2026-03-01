@@ -89,9 +89,25 @@
   (when-let* ((hex (disco-embed--color-hex embed)))
     (ignore-errors (color-name-to-rgb hex))))
 
+(defun disco-embed--rgb-triple-p (value)
+  "Return non-nil if VALUE is an RGB triple of numeric channels."
+  (and (listp value)
+       (= (length value) 3)
+       (numberp (nth 0 value))
+       (numberp (nth 1 value))
+       (numberp (nth 2 value))))
+
+(defun disco-embed--default-background-rgb ()
+  "Return current default face background as RGB triple, or nil."
+  (let ((bg (face-background 'default nil t)))
+    (when (and (stringp bg)
+               (not (member bg '("unspecified" "unspecified-bg"))))
+      (ignore-errors (color-name-to-rgb bg)))))
+
 (defun disco-embed--blend-rgb (fg-rgb bg-rgb alpha)
   "Blend FG-RGB over BG-RGB with ALPHA and return RGB triple."
-  (when (and (listp fg-rgb) (listp bg-rgb))
+  (when (and (disco-embed--rgb-triple-p fg-rgb)
+             (disco-embed--rgb-triple-p bg-rgb))
     (list (+ (* alpha (nth 0 fg-rgb)) (* (- 1 alpha) (nth 0 bg-rgb)))
           (+ (* alpha (nth 1 fg-rgb)) (* (- 1 alpha) (nth 1 bg-rgb)))
           (+ (* alpha (nth 2 fg-rgb)) (* (- 1 alpha) (nth 2 bg-rgb))))))
@@ -99,7 +115,7 @@
 (defun disco-embed--background-face (embed)
   "Return subtle background face plist for EMBED, or nil."
   (let* ((accent (disco-embed--accent-rgb embed))
-         (default-bg (ignore-errors (color-name-to-rgb (face-background 'default nil t))))
+         (default-bg (disco-embed--default-background-rgb))
          (blended (disco-embed--blend-rgb accent default-bg 0.10)))
     (when blended
       `(:background ,(apply #'color-rgb-to-hex (append blended '(2))) :extend t))))
@@ -136,10 +152,6 @@
   "Append FACE to region START..END."
   (when (and face (< start end))
     (add-face-text-property start end face 'append)))
-
-(defun disco-embed--insert-line-prefix (_prefix-str)
-  "Compatibility helper returning current point as content start."
-  (point))
 
 (defun disco-embed--meta-line (embed)
   "Return compact metadata line for EMBED object."
