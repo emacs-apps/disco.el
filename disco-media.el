@@ -44,6 +44,11 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media-preview-rerender-function nil
   "Function called after media preview cache updates.")
 
+(defun disco-media-clear-preview-memory-cache ()
+  "Clear in-memory preview image cache without touching disk files."
+  (clrhash disco-media--attachment-preview-image-cache)
+  (clrhash disco-media--attachment-preview-fetching))
+
 (defun disco-media-inline-image-rendering-available-p ()
   "Return non-nil when current frame supports inline image rendering."
   (and (display-images-p)
@@ -87,14 +92,21 @@ Values are image objects or the symbol `:missing'.")
 
 (defun disco-media-image-slice-count (image)
   "Return line count used to render IMAGE as vertical slices."
-  (let* ((size (and (disco-media-image-object-valid-p image)
+  (let* ((props (cdr-safe image))
+         (explicit-slices (or (plist-get props :disco-nslices)
+                              (plist-get props :telega-nslices)))
+         (size (and (disco-media-image-object-valid-p image)
                     (ignore-errors
                       (image-size image nil (selected-frame)))))
          (height (and (consp size) (cdr size))))
     (max 1
-         (if (numberp height)
-             (ceiling height)
-           1))))
+         (cond
+          ((and (integerp explicit-slices)
+                (> explicit-slices 0))
+           explicit-slices)
+          ((numberp height)
+           (round height))
+          (t 1)))))
 
 (defun disco-media-insert-slice-newline ()
   "Insert newline between image slices without adding extra line gap."
@@ -107,7 +119,9 @@ Values are image objects or the symbol `:missing'.")
 (defun disco-media-insert-image-slices (image &optional url prefix-str fallback)
   "Insert IMAGE as line slices with optional URL open behavior."
   (let* ((slice-count (disco-media-image-slice-count image))
-         (slice-height (/ 1.0 slice-count))
+         (slice-height-px (max 1
+                              (or (ignore-errors (line-pixel-height))
+                                  (frame-char-height))))
          (label (or fallback "[image]")))
     (dotimes (slice-index slice-count)
       (when (> slice-index 0)
@@ -115,9 +129,77 @@ Values are image objects or the symbol `:missing'.")
         (when prefix-str
           (insert prefix-str)))
       (let ((slice-start (point))
-            (slice (list 0.0 (* slice-index slice-height) 1.0 slice-height)))
+            (slice (list 0
+                         (* slice-index slice-height-px)
+                         1.0
+                         slice-height-px)))
         (insert-image image label nil slice)
         (disco-media-add-open-url-properties slice-start (point) url)))))
+
+(defun disco-media--char-pixel-width ()
+  "Return default character width in pixels for current frame."
+  (max 1 (frame-char-width)))
+
+(defun disco-media--char-pixel-height ()
+  "Return default character height in pixels for current frame."
+  (max 1 (frame-char-height)))
+
+(defun disco-media--pixels->chars-width (pixels)
+  "Convert PIXELS to character columns using current frame metrics."
+  (max 1
+       (ceiling (/ (float (max 1 pixels))
+                   (float (disco-media--char-pixel-width))))))
+
+(defun disco-media--pixels->chars-height (pixels)
+  "Convert PIXELS to text lines using current frame metrics."
+  (max 1
+       (ceiling (/ (float (max 1 pixels))
+                   (float (disco-media--char-pixel-height))))))
+
+(defun disco-media--em-height-ratio ()
+  "Return em height ratio for default face in selected frame."
+  (let* ((frame (selected-frame))
+         (font-name (face-font 'default frame))
+         (font-info (and font-name (font-info font-name frame)))
+         (font-height (and (vectorp font-info) (aref font-info 3)))
+         (font-size (and (vectorp font-info) (aref font-info 2))))
+    (if (and (numberp font-height)
+             (numberp font-size)
+             (> font-size 0))
+        (/ (float font-height) font-size)
+      1.0)))
+
+(defun disco-media--ch-height-spec (chars)
+  "Return image height spec for CHARS text lines."
+  (let ((lines (max 1 chars)))
+    (if (version< emacs-version "30.1")
+        (cons (* lines (disco-media--em-height-ratio)) 'em)
+      (cons lines 'ch))))
+
+(defun disco-media--image-file-size-pixels (file)
+  "Return FILE image size in pixels as (WIDTH . HEIGHT), or nil."
+  (let ((probe (ignore-errors
+                 (create-image file nil nil :ascent 'center))))
+    (and (disco-media-image-object-valid-p probe)
+         (ignore-errors
+           (image-size probe t)))))
+
+(defun disco-media--preview-height-chars (image-size max-width max-height)
+  "Return target preview height in lines for IMAGE-SIZE and pixel limits."
+  (let* ((max-cols (disco-media--pixels->chars-width max-width))
+         (max-rows (disco-media--pixels->chars-height max-height))
+         (char-width (float (disco-media--char-pixel-width)))
+         (char-height (float (disco-media--char-pixel-height)))
+         (image-width (max 1.0 (float (car image-size))))
+         (image-height (max 1.0 (float (cdr image-size))))
+         (image-cols (/ image-width char-width))
+         (image-rows (/ image-height char-height))
+         (scale (min 1.0
+                     (/ (float max-cols) (max 1.0 image-cols))
+                     (/ (float max-rows) (max 1.0 image-rows)))))
+    (max 1
+         (min max-rows
+              (round (* image-rows scale))))))
 
 (defun disco-media-attachment-preview-rendering-available-p ()
   "Return non-nil when inline attachment image previews are available."
@@ -217,19 +299,32 @@ VALUE should be nil for uncapped mode or a non-negative integer."
 
 (defun disco-media-preview-image-from-file (file max-width max-height)
   "Create inline preview image from FILE constrained by MAX-WIDTH/MAX-HEIGHT."
-  (let ((image
-         (ignore-errors
-           (create-image file nil nil
-                         :max-width max-width
-                         :max-height max-height
-                         :ascent 'center))))
+  (let* ((safe-max-width (max 1 (if (numberp max-width) max-width 460)))
+         (safe-max-height (max 1 (if (numberp max-height) max-height 360)))
+         (file-size (disco-media--image-file-size-pixels file))
+         (target-height-chars
+          (if (consp file-size)
+              (disco-media--preview-height-chars
+               file-size
+               safe-max-width
+               safe-max-height)
+            (disco-media--pixels->chars-height safe-max-height)))
+         (height-spec (disco-media--ch-height-spec target-height-chars))
+         (image
+          (ignore-errors
+            (create-image file nil nil
+                          :height height-spec
+                          :disco-nslices target-height-chars
+                          :scale 1.0
+                          :ascent 'center))))
     (unless (disco-media-image-object-valid-p image)
       (when (image-type-available-p 'imagemagick)
         (setq image
               (ignore-errors
                 (create-image file 'imagemagick nil
-                              :max-width max-width
-                              :max-height max-height
+                              :height height-spec
+                              :disco-nslices target-height-chars
+                              :scale 1.0
                               :ascent 'center)))))
     (and (disco-media-image-object-valid-p image)
          image)))

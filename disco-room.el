@@ -22,6 +22,8 @@
 (require 'disco-util)
 (require 'disco-media)
 (require 'disco-embed)
+
+(declare-function disco-media-clear-preview-memory-cache "disco-media" ())
 (require 'disco-view)
 (require 'disco-api)
 (require 'disco-gateway)
@@ -1705,6 +1707,13 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
            #'disco-room-render
            :anchor-property 'disco-message-id
            :preserve-window-start t))))))
+
+(defun disco-room--on-text-scale-change ()
+  "Rerender room buffers after `text-scale-mode' changes."
+  (when (eq major-mode 'disco-room-mode)
+    ;; Recreate image objects from cache files so resized previews track text scale.
+    (disco-media-clear-preview-memory-cache)
+    (disco-room--rerender-open-rooms)))
 
 (setq disco-media-preview-rerender-function #'disco-room--rerender-open-rooms)
 
@@ -3810,6 +3819,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (when (fboundp 'cursor-intangible-mode)
     (cursor-intangible-mode 1))
+  (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command nil t))
 
