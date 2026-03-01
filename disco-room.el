@@ -377,17 +377,9 @@ Grouping applies when sender stays the same and timestamps are within
 
 (defun disco-room--configure-input-map (map)
   "Apply draft-input bindings to MAP and return MAP."
-  ;; Keep normal text editing in draft region, then layer room actions.
+  ;; Reset stale bindings before layering room actions over global editing.
+  (setcdr map nil)
   (set-keymap-parent map (current-global-map))
-  (define-key map (kbd "C-b") #'disco-room-input-backward-char)
-  (define-key map (kbd "<left>") #'disco-room-input-backward-char)
-  (define-key map (kbd "C-a") #'disco-room-input-beginning-of-line)
-  (define-key map (kbd "C-p") #'disco-room-input-previous-line)
-  (define-key map (kbd "<up>") #'disco-room-input-previous-line)
-  (define-key map (kbd "C-n") #'disco-room-input-next-line)
-  (define-key map (kbd "<down>") #'disco-room-input-next-line)
-  (define-key map (kbd "M-b") #'disco-room-input-backward-word)
-  (define-key map (kbd "M-DEL") #'disco-room-input-backward-kill-word)
   (define-key map (kbd "TAB") #'disco-room-complete-mention)
   (define-key map (kbd "<tab>") #'disco-room-complete-mention)
   (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
@@ -642,121 +634,18 @@ Grouping applies when sender stays the same and timestamps are within
          (>= pos prompt-start)
          (< pos input-start))))
 
-(defun disco-room-input-backward-char (&optional arg)
-  "Move backward by ARG chars inside draft input, stopping at prompt boundary."
-  (interactive "p")
-  (let ((steps (or arg 1))
-        (input-start (disco-room--input-start-position)))
-    (if (and (integerp steps)
-             (> steps 0)
-             (number-or-marker-p input-start)
-             (<= (point) input-start))
-        (user-error "Beginning of line")
-      (backward-char steps))))
-
-(defun disco-room-input-beginning-of-line (&optional arg)
-  "Move to draft-input beginning; with ARG, keep line movement within input."
-  (interactive "p")
-  (let ((input-start (disco-room--input-start-position))
-        (n (or arg 1)))
-    (if (or (null input-start) (= n 1))
-        (when input-start
-          (goto-char input-start))
-      (move-beginning-of-line n)
-      (when (< (point) input-start)
-        (goto-char input-start)))))
-
-(defun disco-room-input-previous-line (&optional arg)
-  "Move up by ARG lines; crossing prompt enters timeline above it."
-  (interactive "p")
-  (let ((steps (or arg 1)))
-    (cond
-     ((< steps 0)
-      (disco-room-input-next-line (- steps)))
-     ((= steps 0)
-      (move-to-column (current-column)))
-     (t
-      (let ((goal-column (current-column)))
-        (dotimes (_ steps)
-          (let ((input-start (disco-room--input-start-position))
-                (prompt-start (disco-room--input-prompt-start-position)))
-            (cond
-             ((and (number-or-marker-p input-start)
-                   (> (line-beginning-position) input-start))
-              (forward-line -1))
-             ((and (number-or-marker-p prompt-start)
-                   (> prompt-start (point-min)))
-              (goto-char (1- prompt-start))
-              (beginning-of-line))
-             (t
-              (goto-char (point-min))))))
-        (move-to-column goal-column))))))
-
-(defun disco-room-input-next-line (&optional arg)
-  "Move down by ARG lines in draft input without entering sentinel line."
-  (interactive "p")
-  (let ((steps (or arg 1)))
-    (cond
-     ((< steps 0)
-      (disco-room-input-previous-line (- steps)))
-     ((= steps 0)
-      (move-to-column (current-column)))
-     (t
-      (let ((goal-column (current-column))
-            (logical-end (disco-room--input-logical-end-position)))
-        (unless logical-end
-          (user-error "disco: input region is unavailable"))
-        (dotimes (_ steps)
-          (let ((before (point)))
-            (forward-line 1)
-            (when (> (point) logical-end)
-              (goto-char logical-end))
-            (when (= (point) before)
-              (user-error "End of input"))))
-        (move-to-column goal-column))))))
-
-(defun disco-room-input-backward-word (&optional arg)
-  "Move backward by ARG words inside draft input, stopping at prompt boundary."
-  (interactive "p")
-  (let ((input-start (disco-room--input-start-position))
-        (steps (max 1 (or arg 1))))
-    (when (or (null input-start)
-              (<= (point) input-start))
-      (user-error "Beginning of line"))
-    (backward-word steps)
-    (when (< (point) input-start)
-      (goto-char input-start))))
-
-(defun disco-room-input-backward-kill-word (&optional arg)
-  "Kill ARG words backward without crossing prompt boundary."
-  (interactive "p")
-  (let ((input-start (disco-room--input-start-position))
-        (steps (max 1 (or arg 1))))
-    (unless input-start
-      (user-error "disco: input region is unavailable"))
-    (when (<= (point) input-start)
-      (user-error "Beginning of line"))
-    (let* ((here (point))
-           (target (save-excursion
-                     (backward-word steps)
-                     (point))))
-      (kill-region (max input-start target) here))))
-
 (defun disco-room--post-command ()
-  "Keep point out of prompt glyphs and at draft start when entering prompt span."
+  "Keep point out of prompt glyphs and off the synthetic trailing draft row."
   (unless disco-room--rendering
     (when (disco-room--point-in-prompt-p)
-      (if (memq this-command '(disco-room-input-previous-line previous-line))
-          (let ((prompt-start (disco-room--input-prompt-start-position)))
-            (if (and (number-or-marker-p prompt-start)
-                     (> prompt-start (point-min)))
-                (progn
-                  (goto-char (1- prompt-start))
-                  (beginning-of-line))
-              (goto-char (point-min))))
-        (let ((input-start (disco-room--input-start-position)))
-          (when (number-or-marker-p input-start)
-            (goto-char input-start)))))))
+      (let ((input-start (disco-room--input-start-position)))
+        (when (number-or-marker-p input-start)
+          (goto-char input-start))))
+    (let ((logical-end (disco-room--input-logical-end-position)))
+      (when (and (number-or-marker-p logical-end)
+                 (disco-room--point-in-input-p)
+                 (> (point) logical-end))
+        (goto-char logical-end)))))
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
@@ -3126,7 +3015,7 @@ Return non-nil when a local message update was applied."
   "Build EWOC footer text containing room prompt with DRAFT.
 
 Footer marks the editable input tail using `disco-room-input' property."
-  (let ((prompt (propertize "\n>>> "
+  (let ((prompt (propertize ">>> "
                             'read-only t
                             'field 'disco-room-prompt
                             'cursor-intangible t
@@ -3136,8 +3025,9 @@ Footer marks the editable input tail using `disco-room-input' property."
                             '(read-only field cursor-intangible disco-room-input)))
         (input (if (string-empty-p draft)
                    "\n"
-                 (concat draft "\n"))))
-    (concat prompt
+                 draft)))
+    (concat "\n"
+            prompt
             (propertize input
                         'disco-room-input t
                         'read-only nil))))
@@ -3155,9 +3045,8 @@ Footer marks the editable input tail using `disco-room-input' property."
         (add-text-properties
          input-start input-end
          (list 'read-only nil
-               'field 'disco-room-input
                'local-map disco-room-input-map
-               'rear-nonsticky '(read-only field local-map)))
+               'rear-nonsticky '(read-only local-map)))
         (setq disco-room--input-prompt-marker (copy-marker prompt-start nil))
         (setq disco-room--input-marker (copy-marker input-start nil))))))
 
