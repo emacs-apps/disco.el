@@ -879,28 +879,66 @@ Message lines carry the `disco-message-id' text property."
       (get-text-property (line-beginning-position) 'disco-message-id)
       (user-error "disco: point is not on a message line")))
 
+(defun disco-room--capture-window-input-offsets ()
+  "Return (WINDOW . OFFSET) pairs for windows currently in draft input."
+  (let ((bounds (disco-room--input-region-bounds))
+        offsets)
+    (when bounds
+      (let ((start (car bounds))
+            (end (cdr bounds)))
+        (dolist (win (get-buffer-window-list (current-buffer) nil t))
+          (let ((window-point (window-point win)))
+            (when (and (<= start window-point)
+                       (<= window-point end))
+              (push (cons win (- window-point start)) offsets))))))
+    offsets))
+
+(defun disco-room--restore-window-input-offsets (offsets)
+  "Restore window points in OFFSETS relative to current draft input start."
+  (let ((start (disco-room--input-start-position))
+        (logical-end (disco-room--input-logical-end-position)))
+    (when (and (number-or-marker-p start)
+               (number-or-marker-p logical-end))
+      (dolist (entry offsets)
+        (let ((win (car entry))
+              (offset (cdr entry)))
+          (when (and (window-live-p win)
+                     (eq (window-buffer win) (current-buffer)))
+            (set-window-point
+             win
+             (min logical-end
+                  (max start (+ start offset))))))))))
+
+(defun disco-room--at-message-bottom-p ()
+  "Return non-nil when point is at timeline bottom, outside draft input."
+  (and (= (point) (point-max))
+       (not (disco-room--point-in-input-p))))
+
 (defun disco-room--render-preserving-point ()
   "Rerender room while preserving message reading position.
 
 This follows telega-like behavior: preserve anchor + viewport for passive
 updates, and keep draft cursor stable when point is in the composer."
-  (let* ((input-start (disco-room--input-start-position))
+  (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
+         (input-start (disco-room--input-start-position))
          (in-input (and (number-or-marker-p input-start)
                         (disco-room--point-in-input-p)))
          (input-offset (and in-input (- (point) input-start))))
-    (if (and in-input (numberp input-offset))
-        (progn
-          (disco-room-render)
-          (let ((new-start (disco-room--input-start-position))
-                (logical-end (disco-room--input-logical-end-position)))
-            (when (and (number-or-marker-p new-start)
-                       (number-or-marker-p logical-end))
-              (goto-char (min logical-end
-                              (max new-start (+ new-start input-offset)))))))
-      (disco-view-render-preserving-position
-       #'disco-room-render
-       :anchor-property 'disco-message-id
-       :preserve-window-start t))))
+    (unwind-protect
+        (if (and in-input (numberp input-offset))
+            (progn
+              (disco-room-render)
+              (let ((new-start (disco-room--input-start-position))
+                    (logical-end (disco-room--input-logical-end-position)))
+                (when (and (number-or-marker-p new-start)
+                           (number-or-marker-p logical-end))
+                  (goto-char (min logical-end
+                                  (max new-start (+ new-start input-offset)))))))
+          (disco-view-render-preserving-position
+           #'disco-room-render
+           :anchor-property 'disco-message-id
+           :preserve-window-start t))
+      (disco-room--restore-window-input-offsets window-input-offsets))))
 
 (defun disco-room--message-by-id (message-id)
   "Return room message object for MESSAGE-ID, or nil."
@@ -3224,7 +3262,7 @@ Return non-nil when handled without full room rerender."
            (disco-room--update-message-window-state messages)
            (disco-room--mark-read)
            (setq disco-room--refresh-in-flight nil)
-           (if (= (point) (point-max))
+           (if (disco-room--at-message-bottom-p)
                (disco-room-render)
              (disco-room--render-preserving-point))
            (message "disco: loaded %d messages" (length messages)))))
@@ -3264,7 +3302,7 @@ REASON is shown in the minibuffer."
                (or disco-room--channel-name disco-room--channel-id))))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(channel-update thread-update)))
-      (let ((at-bottom (= (point) (point-max)))
+      (let ((at-bottom (disco-room--at-message-bottom-p))
             (channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
@@ -3273,7 +3311,7 @@ REASON is shown in the minibuffer."
           (disco-room--render-preserving-point))))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-create message-update message-delete)))
-      (let ((at-bottom (= (point) (point-max))))
+      (let ((at-bottom (disco-room--at-message-bottom-p)))
         ;; Message grouping/date/unread layout depends on surrounding rows,
         ;; so message create/update/delete keeps a full room rerender.
         (if at-bottom
