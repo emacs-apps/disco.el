@@ -15,6 +15,7 @@
 
 (defvar disco-room-show-attachment-image-previews)
 (defvar disco-room-attachment-preview-max-width)
+(defvar disco-room-attachment-preview-max-height)
 (defvar disco-room-attachment-preview-fetch-concurrency)
 (defvar disco-room-attachment-cache-directory)
 
@@ -91,10 +92,17 @@ Values are image objects or the symbol `:missing'.")
          (seed (or (and attachment-id (format "%s" attachment-id))
                    (and url (md5 url))
                    name)))
-    (format "%s:%s:%s"
+    (format "%s:%s:%s:%s"
             seed
             name
-            (max 64 disco-room-attachment-preview-max-width))))
+            (max 64
+                 (if (numberp disco-room-attachment-preview-max-width)
+                     disco-room-attachment-preview-max-width
+                   460))
+            (max 64
+                 (if (numberp disco-room-attachment-preview-max-height)
+                     disco-room-attachment-preview-max-height
+                   360)))))
 
 (defun disco-media-attachment-preview-cache-state (cache-key)
   "Return preview cache state for CACHE-KEY.
@@ -151,17 +159,27 @@ VALUE should be nil for uncapped mode or a non-negative integer."
 
 (defun disco-media--attachment-preview-image-from-file (file)
   "Create inline attachment preview image from FILE, or nil when unavailable."
-  (let ((image
-         (ignore-errors
-           (create-image file nil nil
-                         :max-width disco-room-attachment-preview-max-width
-                         :ascent 'center))))
+  (let* ((max-width (max 64
+                         (if (numberp disco-room-attachment-preview-max-width)
+                             disco-room-attachment-preview-max-width
+                           460)))
+         (max-height (max 64
+                          (if (numberp disco-room-attachment-preview-max-height)
+                              disco-room-attachment-preview-max-height
+                            360)))
+         (image
+          (ignore-errors
+            (create-image file nil nil
+                          :max-width max-width
+                          :max-height max-height
+                          :ascent 'center))))
     (unless (disco-media-image-object-valid-p image)
       (when (image-type-available-p 'imagemagick)
         (setq image
               (ignore-errors
                 (create-image file 'imagemagick nil
-                              :max-width disco-room-attachment-preview-max-width
+                              :max-width max-width
+                              :max-height max-height
                               :ascent 'center)))))
     (when (disco-media-image-object-valid-p image)
       image)))

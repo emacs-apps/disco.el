@@ -179,6 +179,11 @@ Set to nil to disable per-render capping."
   :type 'integer
   :group 'disco)
 
+(defcustom disco-room-attachment-preview-max-height 360
+  "Maximum pixel height used for inline image attachment previews."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-room-show-embeds t
   "When non-nil, render embed details under each message."
   :type 'boolean

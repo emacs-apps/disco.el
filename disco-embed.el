@@ -22,6 +22,8 @@
 (defvar disco-room-show-embed-author-icons)
 (defvar disco-room-embed-author-icon-size)
 (defvar disco-room-embed-description-limit)
+(defvar disco-room-attachment-preview-max-width)
+(defvar disco-room-attachment-preview-max-height)
 
 (defun disco-embed--url-present-p (url)
   "Return non-nil when URL is a non-empty string."
@@ -225,6 +227,133 @@
       (disco-embed--author-url msg embed)
       (disco-embed--provider-url msg embed)))
 
+(defun disco-embed--embed-url-key (embed)
+  "Return normalized URL key for EMBED dedup/grouping logic."
+  (let ((raw-url (or (disco-util-object-get embed 'url)
+                     (disco-util-object-get embed 'canonical_url 'canonicalUrl))))
+    (and (disco-embed--url-present-p raw-url)
+         (string-trim raw-url))))
+
+(defun disco-embed--image-object-key (image)
+  "Return stable de-dup key for IMAGE object."
+  (let ((raw-url (or (disco-util-object-get image 'proxy_url 'proxyUrl)
+                     (disco-util-object-get image 'url)
+                     (disco-util-object-get image 'canonical_url 'canonicalUrl))))
+    (or (and (disco-embed--url-present-p raw-url)
+             (string-trim raw-url))
+        (format "raw:%s" (sxhash image)))))
+
+(defun disco-embed--dedupe-image-objects (images)
+  "Return IMAGES without duplicate URL/image entries."
+  (let ((seen (make-hash-table :test #'equal))
+        (result '()))
+    (dolist (image images)
+      (when (consp image)
+        (let ((key (disco-embed--image-object-key image)))
+          (unless (gethash key seen)
+            (puthash key t seen)
+            (push image result)))))
+    (nreverse result)))
+
+(defun disco-embed--embed-image-objects (embed)
+  "Return all image objects for EMBED, including merged `images' entries."
+  (let* ((single (disco-util-object-get embed 'image))
+         (images (disco-util-object-get embed 'images))
+         (image-list (cond
+                      ((vectorp images) (append images nil))
+                      ((listp images) images)
+                      (t nil)))
+         (all-images (append (and (consp single) (list single)) image-list)))
+    (disco-embed--dedupe-image-objects all-images)))
+
+(defun disco-embed--image-object-url (msg image)
+  "Return best resolved URL for IMAGE object in MSG."
+  (let* ((proxy-url (disco-util-object-get image 'proxy_url 'proxyUrl))
+         (source-url (or (disco-util-object-get image 'url)
+                         (disco-util-object-get image 'canonical_url 'canonicalUrl)))
+         (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
+         (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url)))
+    (or (and (disco-embed--url-present-p resolved-proxy)
+             resolved-proxy)
+        (and (disco-embed--url-present-p resolved-source)
+             resolved-source))))
+
+(defun disco-embed--embed-with-images (embed images)
+  "Return EMBED cloned with normalized IMAGES list."
+  (if (listp embed)
+      (let* ((deduped-images (disco-embed--dedupe-image-objects images))
+             (cleaned-embed
+              (seq-remove
+               (lambda (entry)
+                 (let ((key (car-safe entry)))
+                   (or (eq key 'images)
+                       (eq key :images)
+                       (and (stringp key)
+                            (string= key "images")))))
+               (copy-tree embed))))
+        (cons (cons 'images deduped-images) cleaned-embed))
+    embed))
+
+(defun disco-embed--seq-empty-p (value)
+  "Return non-nil when VALUE is nil or an empty list/vector."
+  (or (null value)
+      (and (listp value) (null value))
+      (and (vectorp value) (= (length value) 0))))
+
+(defun disco-embed--trailing-image-embed-p (embed url-key)
+  "Return non-nil when EMBED is a mergeable trailing image-only embed."
+  (let ((description (disco-embed--normalize-text
+                      (disco-util-object-get embed 'description)))
+        (fields (disco-util-object-get embed 'fields))
+        (images (disco-embed--embed-image-objects embed)))
+    (and (disco-embed--url-present-p url-key)
+         (equal (disco-embed--embed-url-key embed) url-key)
+         (null (disco-util-object-get embed 'timestamp))
+         (null (disco-util-object-get embed 'author))
+         (null (disco-util-object-get embed 'color))
+         (null description)
+         (disco-embed--seq-empty-p fields)
+         (null (disco-util-object-get embed 'thumbnail))
+         (null (disco-util-object-get embed 'video))
+         (null (disco-util-object-get embed 'footer))
+         (= (length images) 1))))
+
+(defun disco-embed--normalize-embeds (embeds)
+  "Normalize EMBEDS to match Discord client multi-image embed behavior."
+  (let* ((embed-list (cond
+                      ((vectorp embeds) (append embeds nil))
+                      ((listp embeds) embeds)
+                      (t nil)))
+         (result '())
+         (index 0)
+         (count (length embed-list)))
+    (while (< index count)
+      (let* ((embed (nth index embed-list))
+             (base-url (and embed (disco-embed--embed-url-key embed)))
+             (base-images (and embed (disco-embed--embed-image-objects embed)))
+             (merged-images base-images)
+             (next-index (1+ index))
+             (merged nil))
+        (when (and (disco-embed--url-present-p base-url)
+                   (not (null base-images)))
+          ;; Discord splits multi-image rich embeds into same-URL trailing image embeds.
+          (while (and (< next-index count)
+                      (disco-embed--trailing-image-embed-p
+                       (nth next-index embed-list)
+                       base-url))
+            (setq merged t)
+            (setq merged-images
+                  (append merged-images
+                          (disco-embed--embed-image-objects
+                           (nth next-index embed-list))))
+            (setq next-index (1+ next-index))))
+        (push (if merged
+                  (disco-embed--embed-with-images embed merged-images)
+                embed)
+              result)
+        (setq index next-index)))
+    (nreverse result)))
+
 (defun disco-embed--media-entry (embed)
   "Return media entry cons for EMBED as (KIND . OBJECT), or nil."
   (let ((image (disco-util-object-get embed 'image))
@@ -287,6 +416,23 @@
         (width . ,(and (listp media) (disco-util-object-get media 'width)))
         (height . ,(and (listp media) (disco-util-object-get media 'height)))))))
 
+(defun disco-embed--image-preview-attachment (msg embed-index image-index image image-url)
+  "Build pseudo attachment object used to render one embed IMAGE preview."
+  (let* ((message-id (format "%s" (or (alist-get 'id msg) "unknown")))
+         (cache-suffix (md5 (or image-url ""))))
+    (when (disco-embed--url-present-p image-url)
+      `((id . ,(format "embed:%s:%s:image:%s:%s"
+                       message-id
+                       embed-index
+                       image-index
+                       cache-suffix))
+        (filename . ,(format "embed-%s-image-%s" embed-index image-index))
+        (content_type . "image/embed")
+        (url . ,image-url)
+        (proxy_url . ,image-url)
+        (width . ,(and (listp image) (disco-util-object-get image 'width)))
+        (height . ,(and (listp image) (disco-util-object-get image 'height)))))))
+
 (defun disco-embed--description-line (embed)
   "Return one-line embed description for EMBED, respecting user limit."
   (let* ((raw (disco-util-object-get embed 'description))
@@ -324,38 +470,162 @@
         (add-text-properties field-start (point)
                              '(face disco-room-embed-card-meta))))))
 
+(defun disco-embed--preview-max-width ()
+  "Return max inline preview width in pixels."
+  (max 64
+       (if (numberp disco-room-attachment-preview-max-width)
+           disco-room-attachment-preview-max-width
+         460)))
+
+(defun disco-embed--preview-max-height ()
+  "Return max inline preview height in pixels."
+  (max 64
+       (if (numberp disco-room-attachment-preview-max-height)
+           disco-room-attachment-preview-max-height
+         360)))
+
+(defun disco-embed--preview-grid-max-width ()
+  "Return max per-image width used by multi-image embed grid previews."
+  (max 96
+       (/ (disco-embed--preview-max-width) 2)))
+
+(defun disco-embed--preview-image-from-file (file max-width)
+  "Create inline preview image from FILE constrained by MAX-WIDTH."
+  (let ((image
+         (ignore-errors
+           (create-image file nil nil
+                         :max-width max-width
+                         :max-height (disco-embed--preview-max-height)
+                         :ascent 'center))))
+    (unless (disco-media-image-object-valid-p image)
+      (when (image-type-available-p 'imagemagick)
+        (setq image
+              (ignore-errors
+                (create-image file 'imagemagick nil
+                              :max-width max-width
+                              :max-height (disco-embed--preview-max-height)
+                              :ascent 'center)))))
+    (and (disco-media-image-object-valid-p image)
+         image)))
+
+(defun disco-embed--preview-image-for-attachment (attachment max-width)
+  "Return inline preview image for ATTACHMENT with MAX-WIDTH, or nil."
+  (let* ((cache-key (disco-media-attachment-preview-cache-key attachment))
+         (cache-file (and cache-key
+                          (disco-media-attachment-preview-cache-existing-file cache-key))))
+    (and cache-file
+         (disco-embed--preview-image-from-file cache-file max-width))))
+
+(defun disco-embed--preview-status-label (status)
+  "Return compact text label for preview STATUS symbol."
+  (pcase status
+    ('disabled "[preview disabled]")
+    ('missing "[image unavailable]")
+    ('no-url "[no preview URL]")
+    (_ "[loading preview]")))
+
+(defun disco-embed--insert-grid-preview-row (items)
+  "Insert multi-image preview ITEMS as a two-column text grid."
+  (let ((preview-start (point))
+        (index 0)
+        (count (length items)))
+    (insert "    | ")
+    (dolist (item items)
+      (let ((image (plist-get item :image))
+            (status (plist-get item :status)))
+        (if image
+            (condition-case _
+                (insert-image image "[image]")
+              (error
+               (insert "[image unavailable]")))
+          (insert (disco-embed--preview-status-label status))))
+      (setq index (1+ index))
+      (when (< index count)
+        (if (= (% index 2) 0)
+            (insert "\n    | ")
+          (insert " "))))
+    (insert "\n")
+    (add-text-properties preview-start (point)
+                         '(face disco-room-embed-card-meta))))
+
 (defun disco-embed--insert-preview-row (msg embed embed-index media-kind media-url)
   "Insert media preview row for EMBED in MSG."
   (let* ((preview-rendering-available
           (and disco-room-show-embed-image-previews
                (disco-media-inline-image-rendering-available-p)))
-         (preview-attachment (disco-embed--preview-attachment msg embed embed-index))
-         (preview (and preview-attachment
-                       preview-rendering-available
-                       (disco-media-attachment-preview-image preview-attachment t)))
-         (preview-start (point)))
-    (insert "    | ")
-    (cond
-     ((memq media-kind '(image thumbnail))
-      (if preview
-          (condition-case _
-              (insert-image preview "[image]")
-            (error
-             (insert "[image unavailable]")))
+         (embed-images (disco-embed--embed-image-objects embed)))
+    (if (> (length embed-images) 1)
+        (let ((items '())
+              (image-index 0)
+              (grid-max-width (disco-embed--preview-grid-max-width)))
+          (dolist (image embed-images)
+            (setq image-index (1+ image-index))
+            (let* ((image-url (disco-embed--image-object-url msg image))
+                   (status 'loading)
+                   (display-image nil)
+                   (attachment (and (disco-embed--url-present-p image-url)
+                                    (disco-embed--image-preview-attachment
+                                     msg
+                                     embed-index
+                                     image-index
+                                     image
+                                     image-url))))
+              (cond
+               ((not preview-rendering-available)
+                (setq status 'disabled))
+               ((not (disco-embed--url-present-p image-url))
+                (setq status 'no-url))
+               ((not attachment)
+                (setq status 'no-url))
+               (t
+                (disco-media-attachment-preview-image attachment t)
+                (setq display-image
+                      (disco-embed--preview-image-for-attachment attachment grid-max-width))
+                (let* ((cache-key (disco-media-attachment-preview-cache-key attachment))
+                       (cache-state (and cache-key
+                                         (disco-media-attachment-preview-cache-state cache-key))))
+                  (setq status
+                        (cond
+                         (display-image 'ready)
+                         ((eq cache-state :missing) 'missing)
+                         (t 'loading))))))
+              (push (list :image display-image :status status) items)))
+          (disco-embed--insert-grid-preview-row (nreverse items)))
+      (let* ((preview-attachment (disco-embed--preview-attachment msg embed embed-index))
+             (preview (and preview-attachment
+                           preview-rendering-available
+                           (disco-media-attachment-preview-image preview-attachment t)))
+             (preview-cache-key (and preview-attachment
+                                     (disco-media-attachment-preview-cache-key
+                                      preview-attachment)))
+             (preview-cache-state (and preview-cache-key
+                                       (disco-media-attachment-preview-cache-state
+                                        preview-cache-key)))
+             (preview-start (point)))
+        (insert "    | ")
         (cond
-         ((not preview-rendering-available)
-          (insert "[preview disabled]"))
-         ((not (disco-embed--url-present-p media-url))
-          (insert "[no preview URL]"))
+         ((memq media-kind '(image thumbnail))
+          (if preview
+              (condition-case _
+                  (insert-image preview "[image]")
+                (error
+                 (insert "[image unavailable]")))
+            (cond
+             ((not preview-rendering-available)
+              (insert "[preview disabled]"))
+             ((not (disco-embed--url-present-p media-url))
+              (insert "[no preview URL]"))
+             ((eq preview-cache-state :missing)
+              (insert "[image unavailable]"))
+             (t
+              (insert "[loading preview]")))))
+         ((eq media-kind 'video)
+          (insert "[video embed]"))
          (t
-          (insert "[loading preview]")))))
-     ((eq media-kind 'video)
-      (insert "[video embed]"))
-     (t
-      (insert "[no preview]")))
-    (insert "\n")
-    (add-text-properties preview-start (point)
-                         '(face disco-room-embed-card-meta))))
+          (insert "[no preview]")))
+        (insert "\n")
+        (add-text-properties preview-start (point)
+                             '(face disco-room-embed-card-meta))))))
 
 (defun disco-embed--insert-action-row (main-url media-url author-url provider-url
                                                 author-icon-url)
@@ -507,8 +777,9 @@
 (defun disco-embed-insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
   (when disco-room-show-embeds
-    (let ((embed-index 0))
-      (dolist (embed (or (alist-get 'embeds msg) '()))
+    (let ((embed-index 0)
+          (embeds (disco-embed--normalize-embeds (alist-get 'embeds msg))))
+      (dolist (embed embeds)
         (setq embed-index (1+ embed-index))
         (condition-case _
             (if disco-room-use-rich-embed-cards
