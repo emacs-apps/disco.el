@@ -1148,12 +1148,12 @@ ATTACHMENTS is normalized attachment plist list, POLL is optional poll object."
       (push `(poll . ,poll) payload))
     (nreverse payload)))
 
-(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id attachments poll)
-  "Send message to CHANNEL-ID with ATTACHMENTS via multipart/form-data.
+(cl-defun disco-api-create-message (channel-id &key content reply-to-message-id attachments poll)
+  "Create one message in CHANNEL-ID.
 
-ATTACHMENTS is a list of file path strings or plists containing :path and
-optional :description/:filename/:content-type. POLL is an optional poll
-create-request object."
+CONTENT is optional text content. REPLY-TO-MESSAGE-ID adds message_reference.
+ATTACHMENTS is an optional list of upload descriptors.
+POLL is an optional poll create payload."
   (let* ((normalized-attachments
           (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
          (normalized-poll (disco-api--normalize-poll-request poll))
@@ -1166,62 +1166,84 @@ create-request object."
                 normalized-attachments
                 normalized-poll)
       (user-error "disco: message content, poll, and attachments are all empty"))
-    (if (null normalized-attachments)
-        (disco-api-send-message
-         channel-id
-         (or (alist-get 'content payload) "")
-         reply-to-message-id
-         normalized-poll)
-      (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
-             (boundary (car multipart))
-             (body (cdr multipart)))
-        (disco-api--request
-         "POST"
-         (format "/channels/%s/messages" channel-id)
-         nil
-         nil
-         nil
-         body
-         `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
-         'binary)))))
+    (if normalized-attachments
+        (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
+               (boundary (car multipart))
+               (body (cdr multipart)))
+          (disco-api--request
+           "POST"
+           (format "/channels/%s/messages" channel-id)
+           nil
+           nil
+           nil
+           body
+           `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
+           'binary))
+      (disco-api--request
+       "POST"
+       (format "/channels/%s/messages" channel-id)
+       payload
+       nil
+       nil))))
 
-(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id attachments poll on-success on-error)
+(cl-defun disco-api-create-message-async (channel-id &key content reply-to-message-id attachments poll on-success on-error)
+  "Asynchronously create one message in CHANNEL-ID.
+
+Keyword arguments are the same as `disco-api-create-message'."
+  (let* ((normalized-attachments
+          (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
+         (normalized-poll (disco-api--normalize-poll-request poll))
+         (payload (disco-api--message-send-payload
+                   content
+                   reply-to-message-id
+                   normalized-attachments
+                   normalized-poll)))
+    (unless (or (alist-get 'content payload)
+                normalized-attachments
+                normalized-poll)
+      (user-error "disco: message content, poll, and attachments are all empty"))
+    (if normalized-attachments
+        (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
+               (boundary (car multipart))
+               (body (cdr multipart)))
+          (disco-api--request-async
+           "POST"
+           (format "/channels/%s/messages" channel-id)
+           :raw-body body
+           :extra-headers `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
+           :body-type 'binary
+           :on-success on-success
+           :on-error on-error))
+      (disco-api--request-async
+       "POST"
+       (format "/channels/%s/messages" channel-id)
+       :payload payload
+       :on-success on-success
+       :on-error on-error))))
+
+(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id attachments)
+  "Send message to CHANNEL-ID with ATTACHMENTS.
+
+ATTACHMENTS is a list of file path strings or plists containing :path and
+optional :description/:filename/:content-type."
+  (disco-api-create-message
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :attachments attachments))
+
+(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id attachments on-success on-error)
   "Asynchronously send message to CHANNEL-ID with ATTACHMENTS.
 
 ATTACHMENTS is a list of file path strings or plists containing :path and
-optional :description/:filename/:content-type. POLL is an optional poll
-create-request object."
-  (let* ((normalized-attachments
-          (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
-         (normalized-poll (disco-api--normalize-poll-request poll))
-         (payload (disco-api--message-send-payload
-                   content
-                   reply-to-message-id
-                   normalized-attachments
-                   normalized-poll)))
-    (unless (or (alist-get 'content payload)
-                normalized-attachments
-                normalized-poll)
-      (user-error "disco: message content, poll, and attachments are all empty"))
-    (if (null normalized-attachments)
-        (disco-api-send-message-async
-         channel-id
-         (or (alist-get 'content payload) "")
-         :reply-to-message-id reply-to-message-id
-         :poll normalized-poll
-         :on-success on-success
-         :on-error on-error)
-      (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
-             (boundary (car multipart))
-             (body (cdr multipart)))
-        (disco-api--request-async
-         "POST"
-         (format "/channels/%s/messages" channel-id)
-         :raw-body body
-         :extra-headers `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
-         :body-type 'binary
-         :on-success on-success
-         :on-error on-error)))))
+optional :description/:filename/:content-type."
+  (disco-api-create-message-async
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :attachments attachments
+   :on-success on-success
+   :on-error on-error))
 
 (defun disco-api--normalize-reaction-emoji (emoji)
   "Normalize user-provided EMOJI string for Discord reaction endpoints."
@@ -1301,7 +1323,7 @@ create-request object."
     (delete-dups normalized)))
 
 (defun disco-api-create-poll-vote (channel-id message-id answer-ids)
-  "Submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID." 
+  "Submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID."
   (disco-api--request
    "PUT"
    (format "/channels/%s/polls/%s/answers/@me" channel-id message-id)
@@ -1310,7 +1332,7 @@ create-request object."
    nil))
 
 (cl-defun disco-api-create-poll-vote-async (channel-id message-id answer-ids &key on-success on-error)
-  "Asynchronously submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID." 
+  "Asynchronously submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID."
   (disco-api--request-async
    "PUT"
    (format "/channels/%s/polls/%s/answers/@me" channel-id message-id)
@@ -1319,7 +1341,7 @@ create-request object."
    :on-error on-error))
 
 (defun disco-api-expire-poll (channel-id message-id)
-  "End poll for MESSAGE-ID in CHANNEL-ID immediately." 
+  "End poll for MESSAGE-ID in CHANNEL-ID immediately."
   (disco-api--request
    "POST"
    (format "/channels/%s/polls/%s/expire" channel-id message-id)
@@ -1328,7 +1350,7 @@ create-request object."
    nil))
 
 (cl-defun disco-api-expire-poll-async (channel-id message-id &key on-success on-error)
-  "Asynchronously end poll for MESSAGE-ID in CHANNEL-ID." 
+  "Asynchronously end poll for MESSAGE-ID in CHANNEL-ID."
   (disco-api--request-async
    "POST"
    (format "/channels/%s/polls/%s/expire" channel-id message-id)
@@ -1340,21 +1362,11 @@ create-request object."
 
 When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message.
 When POLL is non-nil, include poll create payload."
-  (let* ((normalized-poll (disco-api--normalize-poll-request poll))
-         (payload (disco-api--message-send-payload
-                   content
-                   reply-to-message-id
-                   nil
-                   normalized-poll)))
-    (unless (or (alist-get 'content payload)
-                normalized-poll)
-      (user-error "disco: message content and poll are both empty"))
-    (disco-api--request
-     "POST"
-     (format "/channels/%s/messages" channel-id)
-     payload
-     nil
-     nil)))
+  (disco-api-create-message
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :poll poll))
 
 (cl-defun disco-api-send-message-async (channel-id content
                                                    &key reply-to-message-id
@@ -1363,21 +1375,13 @@ When POLL is non-nil, include poll create payload."
   "Send CONTENT into CHANNEL-ID asynchronously.
 
 When POLL is non-nil, include poll create payload."
-  (let* ((normalized-poll (disco-api--normalize-poll-request poll))
-         (payload (disco-api--message-send-payload
-                   content
-                   reply-to-message-id
-                   nil
-                   normalized-poll)))
-    (unless (or (alist-get 'content payload)
-                normalized-poll)
-      (user-error "disco: message content and poll are both empty"))
-    (disco-api--request-async
-     "POST"
-     (format "/channels/%s/messages" channel-id)
-     :payload payload
-     :on-success on-success
-     :on-error on-error)))
+  (disco-api-create-message-async
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :poll poll
+   :on-success on-success
+   :on-error on-error))
 
 (defun disco-api-edit-message (channel-id message-id content)
   "Edit MESSAGE-ID in CHANNEL-ID with new CONTENT."

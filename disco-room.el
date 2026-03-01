@@ -227,6 +227,71 @@ Set to 0 to disable embed description rendering, or nil for no limit."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-show-polls t
+  "When non-nil, render poll blocks under each message containing poll data."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-poll-show-voter-counts t
+  "When non-nil, render per-answer vote counts in poll rows."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-poll-show-total-votes t
+  "When non-nil, render total vote count in poll metadata line."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-poll-date-format "%Y-%m-%d %H:%M"
+  "Time format used for poll expiry labels."
+  :type 'string
+  :group 'disco)
+
+(defcustom disco-room-poll-auto-toggle-vote t
+  "When non-nil, clicking a poll option immediately submits vote change."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-poll-confirm-expire t
+  "When non-nil, ask before ending a poll via command/button."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-poll-default-duration-hours 24
+  "Default duration in hours used by `disco-room-send-poll'."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-poll-max-options 10
+  "Maximum number of options collected by `disco-room-send-poll'."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-poll-button-face 'disco-room-reaction
+  "Face used for poll action buttons in message rows."
+  :type 'face
+  :group 'disco)
+
+(defcustom disco-room-poll-voted-face 'disco-room-poll-option-selected
+  "Face used for poll options selected by current user."
+  :type 'face
+  :group 'disco)
+
+(defcustom disco-room-poll-option-face 'disco-room-poll-option
+  "Face used for unselected poll options."
+  :type 'face
+  :group 'disco)
+
+(defcustom disco-room-poll-meta-face 'disco-room-poll-meta
+  "Face used for poll metadata lines."
+  :type 'face
+  :group 'disco)
+
+(defcustom disco-room-poll-title-face 'disco-room-poll-title
+  "Face used for poll question/title lines."
+  :type 'face
+  :group 'disco)
+
 (defcustom disco-room-show-typing-indicators t
   "When non-nil, show live typing status above the room prompt.
 
@@ -344,6 +409,26 @@ Grouping applies when sender stays the same and timestamps are within
 (defface disco-room-reaction-selected
   '((t :inherit success :weight bold))
   "Face used for reactions selected by the current user."
+  :group 'disco)
+
+(defface disco-room-poll-title
+  '((t :inherit bold))
+  "Face used for poll title lines."
+  :group 'disco)
+
+(defface disco-room-poll-meta
+  '((t :inherit shadow))
+  "Face used for poll metadata lines."
+  :group 'disco)
+
+(defface disco-room-poll-option
+  '((t :inherit default))
+  "Face used for poll option rows."
+  :group 'disco)
+
+(defface disco-room-poll-option-selected
+  '((t :inherit success :weight bold))
+  "Face used for selected poll option rows."
   :group 'disco)
 
 (defface disco-room-date-separator
@@ -2254,20 +2339,31 @@ When TARGET-PATH is nil, prompt interactively for destination path."
   (let* ((content (or (alist-get 'content msg) ""))
          (attachments (or (alist-get 'attachments msg) '()))
          (embeds (or (alist-get 'embeds msg) '()))
+         (poll (disco-room--message-poll msg))
          (attachment-count (length attachments))
          (embed-count (length embeds))
+         (poll-count (if poll 1 0))
          (showing-attachments (and disco-room-show-attachments (> attachment-count 0)))
-         (showing-embeds (and disco-room-show-embeds (> embed-count 0))))
+         (showing-embeds (and disco-room-show-embeds (> embed-count 0)))
+         (showing-poll (and disco-room-show-polls (> poll-count 0))))
     (if (string-empty-p content)
         (cond
-         ((or showing-attachments showing-embeds)
+         ((or showing-attachments showing-embeds showing-poll)
           "")
+         ((and (> attachment-count 0) (> embed-count 0) (> poll-count 0))
+          (format "[attachment x%d, embed x%d, poll]" attachment-count embed-count))
          ((and (> attachment-count 0) (> embed-count 0))
           (format "[attachment x%d, embed x%d]" attachment-count embed-count))
+         ((and (> attachment-count 0) (> poll-count 0))
+          (format "[attachment x%d, poll]" attachment-count))
+         ((and (> embed-count 0) (> poll-count 0))
+          (format "[embed x%d, poll]" embed-count))
          ((> attachment-count 0)
           (format "[attachment x%d]" attachment-count))
          ((> embed-count 0)
           (format "[embed x%d]" embed-count))
+         ((> poll-count 0)
+          "[poll]")
          (t "[empty]"))
       content)))
 
@@ -2335,6 +2431,330 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 (defun disco-room--insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
   (disco-embed-insert-message-embeds msg))
+
+(defun disco-room--message-poll (msg)
+  "Return poll object from MSG, or nil when absent."
+  (let ((poll (alist-get 'poll msg)))
+    (and (listp poll) poll)))
+
+(defun disco-room--poll-results (poll)
+  "Return poll results object from POLL, or nil when unknown."
+  (let ((results (and (listp poll) (alist-get 'results poll))))
+    (and (listp results) results)))
+
+(defun disco-room--poll-answer-id (answer)
+  "Return normalized integer answer id from poll ANSWER, or nil."
+  (let ((raw (and (listp answer) (alist-get 'answer_id answer))))
+    (cond
+     ((integerp raw) raw)
+     ((and (stringp raw)
+           (string-match-p "\\`[0-9]+\\'" raw))
+      (string-to-number raw))
+     (t nil))))
+
+(defun disco-room--poll-answer-media (answer)
+  "Return poll media object for ANSWER."
+  (let ((media (and (listp answer) (alist-get 'poll_media answer))))
+    (and (listp media) media)))
+
+(defun disco-room--poll-answer-text (answer)
+  "Return display text for poll ANSWER."
+  (let* ((media (disco-room--poll-answer-media answer))
+         (text (and media (alist-get 'text media))))
+    (if (and (stringp text) (not (string-empty-p (string-trim text))))
+        (string-trim text)
+      "(no text)")))
+
+(defun disco-room--poll-answer-emoji (answer)
+  "Return emoji label for poll ANSWER, or nil."
+  (let* ((media (disco-room--poll-answer-media answer))
+         (emoji (and media (alist-get 'emoji media)))
+         (name (and (listp emoji) (alist-get 'name emoji))))
+    (and (stringp name)
+         (not (string-empty-p name))
+         name)))
+
+(defun disco-room--poll-question-text (poll)
+  "Return normalized question text for POLL."
+  (let* ((question (and (listp poll) (alist-get 'question poll)))
+         (text (cond
+                ((stringp question) question)
+                ((listp question) (alist-get 'text question))
+                (t nil))))
+    (if (and (stringp text) (not (string-empty-p (string-trim text))))
+        (string-trim text)
+      "(untitled poll)")))
+
+(defun disco-room--poll-answer-count-entry (poll answer-id)
+  "Return result count entry from POLL for ANSWER-ID, or nil."
+  (let ((counts (and (disco-room--poll-results poll)
+                     (alist-get 'answer_counts (disco-room--poll-results poll)))))
+    (seq-find
+     (lambda (entry)
+       (let ((entry-id (alist-get 'id entry)))
+         (or (and (integerp entry-id)
+                  (= entry-id answer-id))
+             (and (stringp entry-id)
+                  (string-match-p "\\`[0-9]+\\'" entry-id)
+                  (= (string-to-number entry-id) answer-id)))))
+     (or counts '()))))
+
+(defun disco-room--poll-answer-count (poll answer-id)
+  "Return vote count for ANSWER-ID in POLL."
+  (let* ((entry (disco-room--poll-answer-count-entry poll answer-id))
+         (count (and (listp entry) (alist-get 'count entry))))
+    (if (numberp count)
+        (max 0 count)
+      0)))
+
+(defun disco-room--poll-answer-me-voted-p (poll answer-id)
+  "Return non-nil when current user voted ANSWER-ID in POLL."
+  (let* ((entry (disco-room--poll-answer-count-entry poll answer-id))
+         (me-voted (and (listp entry) (alist-get 'me_voted entry))))
+    (disco-util-json-true-p me-voted)))
+
+(defun disco-room--poll-total-votes (poll)
+  "Return aggregate vote count from POLL results."
+  (let ((counts (and (disco-room--poll-results poll)
+                     (alist-get 'answer_counts (disco-room--poll-results poll))))
+        (total 0))
+    (dolist (entry (or counts '()) total)
+      (let ((count (and (listp entry) (alist-get 'count entry))))
+        (when (numberp count)
+          (setq total (+ total (max 0 count))))))))
+
+(defun disco-room--poll-multiselect-p (poll)
+  "Return non-nil when POLL allows multiple answers."
+  (disco-util-json-true-p (alist-get 'allow_multiselect poll)))
+
+(defun disco-room--poll-expired-p (poll)
+  "Return non-nil when POLL expiry is in the past."
+  (let ((expiry (and (listp poll) (alist-get 'expiry poll))))
+    (when (and (stringp expiry)
+               (not (string-empty-p expiry)))
+      (condition-case _
+          (<= (float-time (date-to-time expiry)) (float-time))
+        (error nil)))))
+
+(defun disco-room--poll-expiry-label (poll)
+  "Return formatted expiry text for POLL, or nil."
+  (let ((expiry (and (listp poll) (alist-get 'expiry poll))))
+    (when (and (stringp expiry)
+               (not (string-empty-p expiry)))
+      (condition-case _
+          (format-time-string disco-room-poll-date-format (date-to-time expiry))
+        (error nil)))))
+
+(defun disco-room--poll-state-label (poll)
+  "Return short status label for POLL."
+  (let* ((results (disco-room--poll-results poll))
+         (finalized (and (listp results)
+                         (disco-util-json-true-p (alist-get 'is_finalized results))))
+         (expired (disco-room--poll-expired-p poll)))
+    (cond
+     (finalized "finalized")
+     (expired "closed")
+     (t "open"))))
+
+(defun disco-room--poll-voted-answer-ids (poll)
+  "Return list of answer IDs voted by current user in POLL."
+  (let ((answers (or (alist-get 'answers poll) '()))
+        out)
+    (dolist (answer answers (nreverse out))
+      (let ((answer-id (disco-room--poll-answer-id answer)))
+        (when (and answer-id
+                   (disco-room--poll-answer-me-voted-p poll answer-id))
+          (push answer-id out))))))
+
+(defun disco-room--message-with-poll-vote-selection (msg selected-answer-ids)
+  "Return MSG copy with current-user poll votes set to SELECTED-ANSWER-IDS."
+  (let* ((updated (copy-tree msg))
+         (poll (copy-tree (disco-room--message-poll msg))))
+    (if (not (listp poll))
+        updated
+      (let* ((results (copy-tree (or (disco-room--poll-results poll) '())))
+             (counts (copy-tree (or (alist-get 'answer_counts results) '())))
+             (selected (delete-dups (copy-sequence (or selected-answer-ids '()))))
+             (previous (disco-room--poll-voted-answer-ids poll)))
+        (dolist (answer-id (delete-dups (append previous selected)))
+          (let* ((existing (seq-find (lambda (it)
+                                       (equal (alist-get 'id it) answer-id))
+                                     counts))
+                 (entry (or (copy-tree existing)
+                            `((id . ,answer-id)
+                              (count . 0)
+                              (me_voted . :false))))
+                 (count (max 0 (or (alist-get 'count entry) 0)))
+                 (was-voted (member answer-id previous))
+                 (now-voted (member answer-id selected)))
+            (when (and (not was-voted) now-voted)
+              (setq count (1+ count)))
+            (when (and was-voted (not now-voted))
+              (setq count (max 0 (1- count))))
+            (setf (alist-get 'count entry nil 'remove) count)
+            (setf (alist-get 'me_voted entry nil 'remove) (if now-voted t :false))
+            (if existing
+                (setq counts (mapcar (lambda (it)
+                                       (if (equal (alist-get 'id it) answer-id)
+                                           entry
+                                         it))
+                                     counts))
+              (setq counts (append counts (list entry))))))
+        (setf (alist-get 'answer_counts results nil 'remove) counts)
+        (setf (alist-get 'results poll nil 'remove) results)
+        (setf (alist-get 'poll updated nil 'remove) poll)
+        updated))))
+
+(defun disco-room--message-with-poll-vote-delta (msg answer-id addp user-id)
+  "Return MSG copy updated with one poll vote delta.
+
+ANSWER-ID is the poll answer receiving update. ADDP non-nil means add vote;
+otherwise remove. USER-ID is used to set `me_voted' when event is for self."
+  (let* ((updated (copy-tree msg))
+         (poll (copy-tree (disco-room--message-poll msg))))
+    (if (not (and (listp poll) (integerp answer-id)))
+        updated
+      (let* ((results (copy-tree (or (disco-room--poll-results poll) '())))
+             (counts (copy-tree (or (alist-get 'answer_counts results) '())))
+             (self-id (disco-gateway-current-user-id))
+             (is-self (and self-id user-id
+                           (equal (format "%s" self-id) (format "%s" user-id))))
+             (existing (seq-find (lambda (it)
+                                   (equal (alist-get 'id it) answer-id))
+                                 counts))
+             (entry (or (copy-tree existing)
+                        `((id . ,answer-id)
+                          (count . 0)
+                          (me_voted . :false))))
+             (count (max 0 (or (alist-get 'count entry) 0))))
+        (setq count (if addp
+                        (1+ count)
+                      (max 0 (1- count))))
+        (setf (alist-get 'count entry nil 'remove) count)
+        (when is-self
+          (setf (alist-get 'me_voted entry nil 'remove)
+                (if addp t :false)))
+        (if existing
+            (setq counts (mapcar (lambda (it)
+                                   (if (equal (alist-get 'id it) answer-id)
+                                       entry
+                                     it))
+                                 counts))
+          (setq counts (append counts (list entry))))
+        (setf (alist-get 'answer_counts results nil 'remove) counts)
+        (setf (alist-get 'results poll nil 'remove) results)
+        (setf (alist-get 'poll updated nil 'remove) poll)
+        updated))))
+
+(defun disco-room--apply-live-poll-vote-event-partially (event)
+  "Apply poll vote EVENT to local room state and EWOC incrementally."
+  (let* ((event-type (plist-get event :type))
+         (message-id (plist-get event :message-id))
+         (answer-id (plist-get event :answer-id))
+         (user-id (plist-get event :user-id)))
+    (and (integerp answer-id)
+         (pcase event-type
+           ('message-poll-vote-add
+            (disco-room--update-message-locally
+             message-id
+             (lambda (msg)
+               (disco-room--message-with-poll-vote-delta msg answer-id t user-id))))
+           ('message-poll-vote-remove
+            (disco-room--update-message-locally
+             message-id
+             (lambda (msg)
+               (disco-room--message-with-poll-vote-delta msg answer-id nil user-id))))
+           (_ nil)))))
+
+(defun disco-room--insert-message-poll (msg)
+  "Insert poll detail block for MSG when present."
+  (when disco-room-show-polls
+    (let* ((poll (disco-room--message-poll msg))
+           (message-id (alist-get 'id msg))
+           (question (and poll (disco-room--poll-question-text poll)))
+           (state (and poll (disco-room--poll-state-label poll)))
+           (expiry-label (and poll (disco-room--poll-expiry-label poll)))
+           (answers (and poll (or (alist-get 'answers poll) '()))))
+      (when poll
+        (let ((title-start (point)))
+          (insert "    [poll] " question "\n")
+          (add-text-properties title-start (point)
+                               `(face ,disco-room-poll-title-face
+                                      disco-message-id ,message-id)))
+        (let ((meta-start (point))
+              (parts (list (format "status=%s" state))))
+          (when (disco-room--poll-multiselect-p poll)
+            (setq parts (append parts '("multi"))))
+          (when (and disco-room-poll-show-total-votes
+                     (disco-room--poll-results poll))
+            (setq parts
+                  (append parts
+                          (list (format "votes=%d"
+                                        (disco-room--poll-total-votes poll))))))
+          (when expiry-label
+            (setq parts (append parts (list (format "ends=%s" expiry-label)))))
+          (insert "    " (mapconcat #'identity parts "   ") "\n")
+          (add-text-properties meta-start (point)
+                               `(face ,disco-room-poll-meta-face
+                                      disco-message-id ,message-id)))
+        (dolist (answer answers)
+          (let* ((answer-id (disco-room--poll-answer-id answer))
+                 (selected (and answer-id
+                                (disco-room--poll-answer-me-voted-p poll answer-id)))
+                 (count (and answer-id
+                             (disco-room--poll-answer-count poll answer-id)))
+                 (emoji (disco-room--poll-answer-emoji answer))
+                 (label (disco-room--poll-answer-text answer))
+                 (line-start (point)))
+            (insert "    ")
+            (if (and answer-id disco-room-poll-auto-toggle-vote)
+                (disco-ui-insert-action-button
+                 (format "%s %s%s"
+                         (if selected "[x]" "[ ]")
+                         (if emoji (concat emoji " ") "")
+                         label)
+                 (lambda ()
+                   (disco-room-toggle-poll-answer answer-id message-id))
+                 :face (if selected
+                           disco-room-poll-voted-face
+                         disco-room-poll-option-face)
+                 :help-echo "Toggle vote for this answer")
+              (insert (propertize
+                       (format "%s %s%s"
+                               (if selected "[x]" "[ ]")
+                               (if emoji (concat emoji " ") "")
+                               label)
+                       'face (if selected
+                                 disco-room-poll-voted-face
+                               disco-room-poll-option-face))))
+            (when (and disco-room-poll-show-voter-counts (integerp count))
+              (insert (format "  (%d)" count)))
+            (insert "\n")
+            (add-text-properties line-start (point)
+                                 `(disco-message-id ,message-id
+                                                    disco-poll-answer-id ,answer-id))))
+        (let ((actions-start (point))
+              (selected-ids (disco-room--poll-voted-answer-ids poll)))
+          (insert "    ")
+          (when selected-ids
+            (disco-ui-insert-action-button
+             "[Clear vote]"
+             (lambda ()
+               (disco-room-clear-poll-votes message-id))
+             :face disco-room-poll-button-face
+             :help-echo "Clear my vote(s) for this poll")
+            (insert " "))
+          (unless (disco-room--poll-expired-p poll)
+            (disco-ui-insert-action-button
+             "[End poll]"
+             (lambda ()
+               (disco-room-expire-poll message-id))
+             :face disco-room-poll-button-face
+             :help-echo "End this poll now"))
+          (insert "\n")
+          (add-text-properties actions-start (point)
+                               `(face ,disco-room-poll-meta-face
+                                      disco-message-id ,message-id)))))))
 
 (defun disco-room--reaction-emoji (reaction)
   "Extract display emoji string from REACTION object."
@@ -2647,6 +3067,7 @@ Return non-nil when a local message update was applied."
         (insert "\n")))
     (disco-room--insert-message-attachments msg)
     (disco-room--insert-message-embeds msg)
+    (disco-room--insert-message-poll msg)
     (disco-room--insert-message-reactions msg)
     (add-text-properties
      line-start
@@ -2784,7 +3205,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-p s/v/c/e: poll send/vote/clear/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -2954,6 +3375,11 @@ REASON is shown in the minibuffer."
                               message-reaction-remove-all
                               message-reaction-remove-emoji)))
       (unless (disco-room--apply-live-reaction-event-partially event)
+        (disco-room-refresh)))
+     ((and (equal event-channel-id disco-room--channel-id)
+           (memq event-type '(message-poll-vote-add
+                              message-poll-vote-remove)))
+      (unless (disco-room--apply-live-poll-vote-event-partially event)
         (disco-room-refresh))))))
 
 (defun disco-room--attach-live-updates ()
@@ -3271,6 +3697,221 @@ markers are appended in requested order."
     (if (disco-room--message-has-own-reaction-p msg emoji)
         (disco-room-remove-reaction emoji target-id)
       (disco-room-add-reaction emoji target-id))))
+
+(defun disco-room--poll-message-required (&optional message-id)
+  "Return poll message object by MESSAGE-ID or point, or raise user error."
+  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
+         (msg (or (disco-room--message-by-id target-id)
+                  (user-error "disco: message not found in room state")))
+         (poll (disco-room--message-poll msg)))
+    (unless poll
+      (user-error "disco: message %s has no poll" target-id))
+    msg))
+
+(defun disco-room--poll-answer-id-at-point ()
+  "Return poll answer id text property at point, or nil."
+  (let ((raw (or (get-text-property (point) 'disco-poll-answer-id)
+                 (save-excursion
+                   (beginning-of-line)
+                   (get-text-property (point) 'disco-poll-answer-id)))))
+    (cond
+     ((integerp raw) raw)
+     ((and (stringp raw)
+           (string-match-p "\\`[0-9]+\\'" raw))
+      (string-to-number raw))
+     (t nil))))
+
+(defun disco-room--poll-answer-choices (msg)
+  "Return completion choices for poll answers in MSG.
+
+Each item is (LABEL . ANSWER-ID)."
+  (let* ((poll (or (disco-room--message-poll msg) '()))
+         (answers (or (alist-get 'answers poll) '()))
+         out)
+    (dolist (answer answers (nreverse out))
+      (let ((answer-id (disco-room--poll-answer-id answer)))
+        (when answer-id
+          (let* ((emoji (disco-room--poll-answer-emoji answer))
+                 (text (disco-room--poll-answer-text answer))
+                 (label (format "%d: %s%s"
+                                answer-id
+                                (if emoji (concat emoji " ") "")
+                                text)))
+            (push (cons label answer-id) out)))))))
+
+(defun disco-room--read-poll-answer-id (msg &optional default)
+  "Prompt poll answer id for MSG, using DEFAULT answer id when provided."
+  (let* ((choices (disco-room--poll-answer-choices msg))
+         (labels (mapcar #'car choices))
+         (default-label (and default
+                             (car (rassoc default choices))))
+         (picked (completing-read
+                  (if default-label
+                      (format "Poll answer (default %s): " default-label)
+                    "Poll answer: ")
+                  labels
+                  nil
+                  t
+                  nil
+                  nil
+                  default-label)))
+    (or (cdr (assoc picked choices))
+        default
+        (user-error "disco: invalid poll answer"))))
+
+(defun disco-room--poll-next-selection (poll toggled-answer-id)
+  "Return next self vote answer-id list after toggling TOGGLED-ANSWER-ID in POLL."
+  (let* ((current (disco-room--poll-voted-answer-ids poll))
+         (has (member toggled-answer-id current))
+         (multiple (disco-room--poll-multiselect-p poll)))
+    (if multiple
+        (if has
+            (delete toggled-answer-id (copy-sequence current))
+          (append current (list toggled-answer-id)))
+      (if has
+          '()
+        (list toggled-answer-id)))))
+
+(defun disco-room--submit-poll-vote (message-id selected-answer-ids)
+  "Submit SELECTED-ANSWER-IDS for poll MESSAGE-ID asynchronously."
+  (let* ((msg (disco-room--poll-message-required message-id))
+         (room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (target-id (alist-get 'id msg))
+         (normalized (delete-dups (copy-sequence (or selected-answer-ids '())))))
+    (disco-api-create-poll-vote-async
+     channel-id
+     target-id
+     normalized
+     :on-success
+     (lambda (_response)
+       (when (disco-room--channel-buffer-p room-buffer channel-id)
+         (with-current-buffer room-buffer
+           (disco-room--update-message-locally
+            target-id
+            (lambda (message)
+              (disco-room--message-with-poll-vote-selection message normalized)))
+           (message "disco: poll vote updated"))))
+     :on-error
+     (lambda (err)
+       (when (disco-room--channel-buffer-p room-buffer channel-id)
+         (message "disco: poll vote failed: %s"
+                  (disco-room--async-error-message err)))))))
+
+(defun disco-room-toggle-poll-answer (&optional answer-id message-id)
+  "Toggle poll ANSWER-ID in MESSAGE-ID.
+
+When called interactively, default answer comes from point or prompt."
+  (interactive)
+  (let* ((msg (disco-room--poll-message-required message-id))
+         (target-id (alist-get 'id msg))
+         (poll (disco-room--message-poll msg))
+         (picked (or answer-id
+                     (disco-room--read-poll-answer-id
+                      msg
+                      (disco-room--poll-answer-id-at-point))))
+         (next-selection (disco-room--poll-next-selection poll picked)))
+    (disco-room--submit-poll-vote target-id next-selection)))
+
+(defun disco-room-clear-poll-votes (&optional message-id)
+  "Clear current user's votes for poll MESSAGE-ID at point."
+  (interactive)
+  (let* ((msg (disco-room--poll-message-required message-id))
+         (target-id (alist-get 'id msg)))
+    (disco-room--submit-poll-vote target-id '())))
+
+(defun disco-room-expire-poll (&optional message-id)
+  "End poll in MESSAGE-ID at point."
+  (interactive)
+  (let* ((msg (disco-room--poll-message-required message-id))
+         (target-id (alist-get 'id msg))
+         (room-buffer (current-buffer))
+         (channel-id disco-room--channel-id))
+    (when (or (not disco-room-poll-confirm-expire)
+              (y-or-n-p (format "End poll %s now? " target-id)))
+      (disco-api-expire-poll-async
+       channel-id
+       target-id
+       :on-success
+       (lambda (_response)
+         (when (disco-room--channel-buffer-p room-buffer channel-id)
+           (with-current-buffer room-buffer
+             (disco-room-refresh)
+             (message "disco: poll ended"))))
+       :on-error
+       (lambda (err)
+         (when (disco-room--channel-buffer-p room-buffer channel-id)
+           (message "disco: end poll failed: %s"
+                    (disco-room--async-error-message err))))))))
+
+(defun disco-room-send-poll (question options &optional duration allow-multiselect content)
+  "Create and send a poll with QUESTION and OPTIONS in current room.
+
+DURATION is in hours. ALLOW-MULTISELECT toggles multi-select behavior.
+CONTENT is optional extra text sent alongside the poll."
+  (interactive
+   (let* ((question-input (string-trim (read-string "Poll question: ")))
+          (duration-input (read-number "Poll duration (hours): "
+                                       disco-room-poll-default-duration-hours))
+          (allow-multi (y-or-n-p "Allow multiple answers? "))
+          (content-input (string-trim (read-string "Optional message content: ")))
+          (max-options (max 2 disco-room-poll-max-options))
+          (idx 1)
+          (options nil)
+          opt)
+     (while (and (<= idx max-options)
+                 (not (string-empty-p
+                       (setq opt (string-trim
+                                  (read-string
+                                   (format "Option %d (empty to finish): " idx)))))))
+       (push opt options)
+       (setq idx (1+ idx)))
+     (unless (and (stringp question-input)
+                  (not (string-empty-p question-input)))
+       (user-error "disco: poll question cannot be empty"))
+     (unless (>= (length options) 2)
+       (user-error "disco: poll requires at least 2 options"))
+     (list question-input
+           (nreverse options)
+           duration-input
+           allow-multi
+           (unless (string-empty-p content-input)
+             content-input))))
+  (let* ((poll `((question . ((text . ,question)))
+                 (answers . ,(mapcar (lambda (option)
+                                       `((poll_media . ((text . ,option)))) )
+                                     options))
+                 (duration . ,duration)
+                 (allow_multiselect . ,(if allow-multiselect t :false))))
+         (room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (required-permissions
+          (append (disco-room--required-send-permissions)
+                  '(send-polls))))
+    (disco-room--ensure-channel-permissions
+     required-permissions
+     :action "sending poll")
+    (setq disco-room--send-in-flight t)
+    (disco-room-render)
+    (disco-api-create-message-async
+     channel-id
+     :content content
+     :poll poll
+     :on-success
+     (lambda (_response)
+       (when (disco-room--channel-buffer-p room-buffer channel-id)
+         (with-current-buffer room-buffer
+           (setq disco-room--send-in-flight nil)
+           (disco-room-refresh)
+           (message "disco: poll sent"))))
+     :on-error
+     (lambda (err)
+       (when (disco-room--channel-buffer-p room-buffer channel-id)
+         (with-current-buffer room-buffer
+           (setq disco-room--send-in-flight nil)
+           (disco-room-render)
+           (message "disco: send poll failed: %s"
+                    (disco-room--async-error-message err))))))))
 
 (defun disco-room-attach-file (path &optional description)
   "Queue attachment PATH for next room send.
@@ -3815,6 +4456,10 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "!") #'disco-room-toggle-reaction)
     (define-key map (kbd "+") #'disco-room-add-reaction)
     (define-key map (kbd "-") #'disco-room-remove-reaction)
+    (define-key map (kbd "C-c C-p s") #'disco-room-send-poll)
+    (define-key map (kbd "C-c C-p v") #'disco-room-toggle-poll-answer)
+    (define-key map (kbd "C-c C-p c") #'disco-room-clear-poll-votes)
+    (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)

@@ -33,6 +33,7 @@ Event schema:
   `message-create' `message-update' `message-delete' `message-ack'
   `message-reaction-add' `message-reaction-remove'
   `message-reaction-remove-all' `message-reaction-remove-emoji'
+  `message-poll-vote-add' `message-poll-vote-remove'
   `channel-create' `channel-update' `channel-delete'
   `guild-create' `guild-update' `guild-delete' `guild-sync'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
@@ -47,6 +48,7 @@ Event schema:
 - :timestamp integer for typing-start when present
 - :member guild member object for typing-start in guild channels
 - :emoji reaction emoji object/string for reaction events when present
+- :answer-id integer for poll vote events when present
 - :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
 - :guild guild object for guild events
@@ -107,13 +109,17 @@ When `disco-gateway-identify-intents' is nil, intent filtering is disabled."
   (or (null disco-gateway-identify-intents)
       (/= 0 (logand disco-gateway-identify-intents bit))))
 
-(defun disco-gateway--warn-missing-typing-intents ()
-  "Log hints when custom intents disable typing events."
+(defun disco-gateway--warn-missing-intent-hints ()
+  "Log hints when custom intents disable optional live events."
   (when (integerp disco-gateway-identify-intents)
     (unless (disco-gateway--intent-enabled-p (ash 1 11))
       (message "disco: identify intents missing GUILD_MESSAGE_TYPING (1<<11); guild typing indicators will be unavailable"))
     (unless (disco-gateway--intent-enabled-p (ash 1 14))
-      (message "disco: identify intents missing DIRECT_MESSAGE_TYPING (1<<14); DM typing indicators will be unavailable"))))
+      (message "disco: identify intents missing DIRECT_MESSAGE_TYPING (1<<14); DM typing indicators will be unavailable"))
+    (unless (disco-gateway--intent-enabled-p (ash 1 24))
+      (message "disco: identify intents missing GUILD_MESSAGE_POLLS (1<<24); guild poll vote events will be unavailable"))
+    (unless (disco-gateway--intent-enabled-p (ash 1 25))
+      (message "disco: identify intents missing DIRECT_MESSAGE_POLLS (1<<25); DM poll vote events will be unavailable"))))
 
 (defun disco-gateway--channel-guild-id (channel-id)
   "Return guild ID for CHANNEL-ID from local state, or nil for non-guild channels."
@@ -401,7 +407,7 @@ This shape follows Discord gateway identify expectations."
 
 (defun disco-gateway--send-identify ()
   "Send identify payload (op 2)."
-  (disco-gateway--warn-missing-typing-intents)
+  (disco-gateway--warn-missing-intent-hints)
   (disco-gateway--send-op 2 (disco-gateway--identify-payload)))
 
 (defun disco-gateway--can-resume-p ()
@@ -665,6 +671,30 @@ Only CHANNEL read_state_type entries are used here."
                 :emoji (or (alist-get 'emoji data)
                            (alist-get 'emoji_name data))
                 :reaction-type (alist-get 'type data))))))
+    ("MESSAGE_POLL_VOTE_ADD"
+     (let ((channel-id (alist-get 'channel_id data))
+           (message-id (alist-get 'message_id data))
+           (answer-id (alist-get 'answer_id data)))
+       (when (and channel-id message-id)
+         (disco-gateway--emit
+          (list :type 'message-poll-vote-add
+                :channel-id channel-id
+                :guild-id (alist-get 'guild_id data)
+                :message-id message-id
+                :user-id (alist-get 'user_id data)
+                :answer-id answer-id)))))
+    ("MESSAGE_POLL_VOTE_REMOVE"
+     (let ((channel-id (alist-get 'channel_id data))
+           (message-id (alist-get 'message_id data))
+           (answer-id (alist-get 'answer_id data)))
+       (when (and channel-id message-id)
+         (disco-gateway--emit
+          (list :type 'message-poll-vote-remove
+                :channel-id channel-id
+                :guild-id (alist-get 'guild_id data)
+                :message-id message-id
+                :user-id (alist-get 'user_id data)
+                :answer-id answer-id)))))
     ("MESSAGE_ACK"
      (let ((channel-id (alist-get 'channel_id data))
            (message-id (alist-get 'message_id data))
