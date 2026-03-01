@@ -634,6 +634,17 @@ Grouping applies when sender stays the same and timestamps are within
          (>= pos prompt-start)
          (< pos input-start))))
 
+(defun disco-room--apply-input-text-properties ()
+  "Ensure current draft span stays editable and uses `disco-room-input-map'."
+  (let ((bounds (disco-room--input-region-bounds)))
+    (when bounds
+      (with-silent-modifications
+        (add-text-properties
+         (car bounds) (cdr bounds)
+         (list 'read-only nil
+               'local-map disco-room-input-map
+               'rear-nonsticky '(read-only)))))))
+
 (defun disco-room--post-command ()
   "Keep point out of prompt glyphs and off the synthetic trailing draft row."
   (unless disco-room--rendering
@@ -667,6 +678,7 @@ Grouping applies when sender stays the same and timestamps are within
       (when (and bounds
                  (< beg (cdr bounds))
                  (> end (car bounds)))
+        (disco-room--apply-input-text-properties)
         (disco-room--sync-draft-from-buffer)))))
 
 (defun disco-room--set-draft (text)
@@ -3074,19 +3086,12 @@ Footer marks the editable input tail using `disco-room-input' property."
   "Locate and bind editable input region from EWOC footer properties."
   (let ((input-start (text-property-any (point-min) (point-max) 'disco-room-input t)))
     (when input-start
-      (let* ((input-end (or (next-single-property-change
-                             input-start 'disco-room-input nil (point-max))
-                            (point-max)))
-             (probe-start (max (point-min) (- input-start 32)))
+      (let* ((probe-start (max (point-min) (- input-start 32)))
              (prompt-start (or (text-property-any probe-start input-start 'disco-room-prompt t)
                                (max (point-min) (1- input-start)))))
-        (add-text-properties
-         input-start input-end
-         (list 'read-only nil
-               'local-map disco-room-input-map
-               'rear-nonsticky '(read-only local-map)))
         (setq disco-room--input-prompt-marker (copy-marker prompt-start nil))
-        (setq disco-room--input-marker (copy-marker input-start nil))))))
+        (setq disco-room--input-marker (copy-marker input-start nil))
+        (disco-room--apply-input-text-properties)))))
 
 (defun disco-room--insert-message-node (msg)
   "Insert one message node for MSG at the end of room EWOC."
