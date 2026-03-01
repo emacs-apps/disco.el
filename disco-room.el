@@ -213,6 +213,16 @@ Set to nil to disable per-render capping."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-show-embed-author-icons t
+  "When non-nil, render inline author icons in embed metadata rows."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-embed-author-icon-size 18
+  "Pixel size used for inline embed author icons."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-room-show-reactions t
   "When non-nil, render reaction chips under each message."
   :type 'boolean
@@ -2722,6 +2732,61 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                            (disco-room--object-get author 'icon_canonical_url 'iconCanonicalUrl)))))
     (disco-room--resolve-attachment-scheme-url msg raw-url)))
 
+(defun disco-room--embed-author-icon-attachment (msg embed embed-index)
+  "Build pseudo attachment object for EMBED author icon in MSG."
+  (let* ((icon-url (disco-room--embed-author-icon-url msg embed))
+         (message-id (format "%s" (or (alist-get 'id msg) "unknown")))
+         (size (max 8
+                    (if (numberp disco-room-embed-author-icon-size)
+                        disco-room-embed-author-icon-size
+                      18))))
+    (when (and (stringp icon-url) (not (string-empty-p icon-url)))
+      `((id . ,(format "embed-author-icon:%s:%s:%s:%s"
+                       message-id
+                       embed-index
+                       size
+                       (md5 icon-url)))
+        (filename . ,(format "embed-author-%s-icon" embed-index))
+        (content_type . "image/embed")
+        (url . ,icon-url)
+        (proxy_url . ,icon-url)
+        (width . ,size)
+        (height . ,size)))))
+
+(defun disco-room--embed-author-icon-image (msg embed embed-index)
+  "Return inline author icon image for EMBED in MSG, or nil while loading."
+  (when (and disco-room-show-embed-author-icons
+             (disco-room--inline-image-rendering-available-p))
+    (let* ((size (max 8
+                      (if (numberp disco-room-embed-author-icon-size)
+                          disco-room-embed-author-icon-size
+                        18)))
+           (attachment (disco-room--embed-author-icon-attachment msg embed embed-index))
+           image)
+      (when attachment
+        ;; Reuse attachment preview fetch/cache pipeline for author icons.
+        (disco-room--attachment-preview-image attachment t)
+        (let* ((cache-key (disco-room--attachment-preview-cache-key attachment))
+               (cache-file (and cache-key
+                                (disco-room--attachment-preview-cache-existing-file cache-key))))
+          (when cache-file
+            (setq image
+                  (ignore-errors
+                    (create-image cache-file nil nil
+                                  :width size
+                                  :height size
+                                  :ascent 'center)))
+            (unless (disco-room--image-object-valid-p image)
+              (when (image-type-available-p 'imagemagick)
+                (setq image
+                      (ignore-errors
+                        (create-image cache-file 'imagemagick nil
+                                      :width size
+                                      :height size
+                                      :ascent 'center)))))
+            (when (disco-room--image-object-valid-p image)
+              image)))))))
+
 (defun disco-room--embed-main-url (msg embed)
   "Return primary URL for EMBED in MSG, resolving attachment:// links."
   (or (disco-room--resolve-attachment-scheme-url
@@ -2826,6 +2891,7 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
          (author-name (and (listp author) (disco-room--object-get author 'name)))
          (author-url (disco-room--embed-author-url msg embed))
          (author-icon-url (disco-room--embed-author-icon-url msg embed))
+         (author-icon-image (disco-room--embed-author-icon-image msg embed embed-index))
          (provider (disco-room--embed-provider-object embed))
          (provider-name (and (listp provider) (disco-room--object-get provider 'name)))
          (provider-url (disco-room--embed-provider-url msg embed))
@@ -2875,6 +2941,12 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
               (and (stringp author-icon-url) (not (string-empty-p author-icon-url))))
       (let ((author-start (point)))
         (insert "    | author: ")
+        (when author-icon-image
+          (condition-case _
+              (insert-image author-icon-image "[icon]")
+            (error
+             (insert "[icon]")))
+          (insert " "))
         (insert (if (and (stringp author-name) (not (string-empty-p author-name)))
                     author-name
                   "unknown"))
