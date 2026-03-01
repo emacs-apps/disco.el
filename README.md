@@ -25,6 +25,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
 - Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
 - Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, URL actions, and transfer state actions: Download/Cancel/Open Local/Save As, plus inline image preview loading).
+- Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).

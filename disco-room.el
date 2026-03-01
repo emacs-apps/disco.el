@@ -195,6 +195,21 @@ Set to nil to disable per-render capping."
   :type 'integer
   :group 'disco)
 
+(defcustom disco-room-show-embeds t
+  "When non-nil, render embed details under each message."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-use-rich-embed-cards t
+  "When non-nil, render telega-inspired rich cards for embeds."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-show-embed-image-previews t
+  "When non-nil, render inline image previews for embed media."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-room-show-reactions t
   "When non-nil, render reaction chips under each message."
   :type 'boolean
@@ -233,6 +248,11 @@ Grouping applies when sender stays the same and timestamps are within
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-show-embed-urls nil
+  "When non-nil, include raw embed URLs in message rendering."
+  :type 'boolean
+  :group 'disco)
+
 (defface disco-room-timestamp
   '((t :inherit shadow))
   "Face used for room message timestamps."
@@ -261,6 +281,26 @@ Grouping applies when sender stays the same and timestamps are within
 (defface disco-room-attachment-card-action
   '((t :inherit link))
   "Face used for attachment card action buttons."
+  :group 'disco)
+
+(defface disco-room-embed-card-border
+  '((t :inherit disco-room-attachment-card-border))
+  "Face used for embed card border glyphs."
+  :group 'disco)
+
+(defface disco-room-embed-card-title
+  '((t :inherit disco-room-attachment-card-title))
+  "Face used for embed card title row."
+  :group 'disco)
+
+(defface disco-room-embed-card-meta
+  '((t :inherit disco-room-attachment-card-meta))
+  "Face used for embed card metadata rows."
+  :group 'disco)
+
+(defface disco-room-embed-card-action
+  '((t :inherit disco-room-attachment-card-action))
+  "Face used for embed card action buttons."
   :group 'disco)
 
 (defface disco-room-reaction
@@ -1181,15 +1221,19 @@ When FACE is non-nil, apply FACE to each inserted line."
          (initials (upcase (concat first second))))
     (format "[%s]" initials)))
 
-(defun disco-room--image-rendering-available-p ()
-  "Return non-nil when avatar images can be shown in current frame."
-  (and disco-room-show-avatar-images
-       (display-images-p)
+(defun disco-room--inline-image-rendering-available-p ()
+  "Return non-nil when current frame supports inline image rendering."
+  (and (display-images-p)
        (or (image-type-available-p 'png)
            (image-type-available-p 'webp)
            (image-type-available-p 'jpeg)
            (image-type-available-p 'gif)
            (image-type-available-p 'imagemagick))))
+
+(defun disco-room--image-rendering-available-p ()
+  "Return non-nil when avatar images can be shown in current frame."
+  (and disco-room-show-avatar-images
+       (disco-room--inline-image-rendering-available-p)))
 
 (defun disco-room--author-avatar-hash (msg)
   "Extract Discord avatar hash string from MSG author, or nil."
@@ -1491,12 +1535,7 @@ If needed, schedule async fetch and fall back to text placeholder."
 (defun disco-room--attachment-preview-rendering-available-p ()
   "Return non-nil when inline attachment image previews are available."
   (and disco-room-show-attachment-image-previews
-       (display-images-p)
-       (or (image-type-available-p 'png)
-           (image-type-available-p 'webp)
-           (image-type-available-p 'jpeg)
-           (image-type-available-p 'gif)
-           (image-type-available-p 'imagemagick))))
+       (disco-room--inline-image-rendering-available-p)))
 
 (defun disco-room--attachment-preview-url (attachment)
   "Return best preview URL for ATTACHMENT object."
@@ -1641,37 +1680,42 @@ When IMAGE is nil and TARGET-FILE exists, TARGET-FILE is deleted."
                   cache-key
                   (disco-room--async-error-message err)))))))
 
-(defun disco-room--attachment-preview-image (attachment)
+(defun disco-room--attachment-preview-image (attachment &optional bypass-user-toggle)
   "Return preview image object for ATTACHMENT when available.
 
-If needed, schedule async fetch and return nil until ready."
-  (when (and (disco-room--attachment-preview-rendering-available-p)
-             (equal (disco-room--attachment-kind attachment) "img"))
-    (let* ((cache-key (disco-room--attachment-preview-cache-key attachment))
-           (cached (gethash cache-key disco-room--attachment-preview-image-cache)))
-      (cond
-       ((eq cached :missing)
-        nil)
-       ((and cached (disco-room--image-object-valid-p cached))
-        cached)
-       (cached
-        (remhash cache-key disco-room--attachment-preview-image-cache)
-        nil)
-       (t
-        (let* ((url (disco-room--attachment-preview-url attachment))
-               (cache-base (disco-room--attachment-preview-cache-file-base cache-key))
-               (cache-file (disco-room--attachment-preview-cache-existing-file cache-key))
-               (file-image (and cache-file (disco-room--attachment-preview-image-from-file cache-file))))
-          (cond
-           (file-image
-            (puthash cache-key file-image disco-room--attachment-preview-image-cache)
-            file-image)
-           ((and url cache-base)
-            (when (and cache-file (not file-image))
-              (ignore-errors (delete-file cache-file)))
-            (disco-room--start-attachment-preview-fetch cache-key url cache-base)
-            nil)
-           (t nil))))))))
+If needed, schedule async fetch and return nil until ready.
+When BYPASS-USER-TOGGLE is non-nil, ignore
+`disco-room-show-attachment-image-previews'."
+  (let ((rendering-ok (if bypass-user-toggle
+                          (disco-room--inline-image-rendering-available-p)
+                        (disco-room--attachment-preview-rendering-available-p))))
+    (when (and rendering-ok
+               (equal (disco-room--attachment-kind attachment) "img"))
+      (let* ((cache-key (disco-room--attachment-preview-cache-key attachment))
+             (cached (gethash cache-key disco-room--attachment-preview-image-cache)))
+        (cond
+         ((eq cached :missing)
+          nil)
+         ((and cached (disco-room--image-object-valid-p cached))
+          cached)
+         (cached
+          (remhash cache-key disco-room--attachment-preview-image-cache)
+          nil)
+         (t
+          (let* ((url (disco-room--attachment-preview-url attachment))
+                 (cache-base (disco-room--attachment-preview-cache-file-base cache-key))
+                 (cache-file (disco-room--attachment-preview-cache-existing-file cache-key))
+                 (file-image (and cache-file (disco-room--attachment-preview-image-from-file cache-file))))
+            (cond
+             (file-image
+              (puthash cache-key file-image disco-room--attachment-preview-image-cache)
+              file-image)
+             ((and url cache-base)
+              (when (and cache-file (not file-image))
+                (ignore-errors (delete-file cache-file)))
+              (disco-room--start-attachment-preview-fetch cache-key url cache-base)
+              nil)
+             (t nil)))))))))
 
 (defun disco-room--attachment-meta-line (attachment)
   "Return compact metadata line for ATTACHMENT object."
@@ -1931,6 +1975,16 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (meta (disco-room--attachment-meta-line attachment))
          (description (alist-get 'description attachment))
          (url (disco-room--attachment-download-url attachment))
+         (preview-url (disco-room--attachment-preview-url attachment))
+         (preview-rendering-available (disco-room--attachment-preview-rendering-available-p))
+         (preview-cache-key (and (equal (disco-room--attachment-kind attachment) "img")
+                                 (disco-room--attachment-preview-cache-key attachment)))
+         (preview-cache-state (and preview-cache-key
+                                   (gethash preview-cache-key
+                                            disco-room--attachment-preview-image-cache)))
+         (preview-fetching (and preview-cache-key
+                                (gethash preview-cache-key
+                                         disco-room--attachment-preview-fetching)))
          (preview (disco-room--attachment-preview-image attachment))
          (download-state (disco-room--attachment-download-state attachment))
          (download-status (plist-get download-state :status))
@@ -2040,7 +2094,17 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                 (insert-image preview "[image]")
               (error
                (insert "[image unavailable]")))
-          (insert "[loading preview]"))
+          (cond
+           ((not preview-rendering-available)
+            (insert "[preview disabled]"))
+           ((not (and (stringp preview-url) (not (string-empty-p preview-url))))
+            (insert "[no preview URL]"))
+           ((eq preview-cache-state :missing)
+            (insert "[image unavailable]"))
+           ((or preview-fetching preview-cache-key)
+            (insert "[loading preview]"))
+           (t
+            (insert "[image unavailable]"))))
         (insert "\n")
         (add-text-properties preview-start (point)
                              '(face disco-room-attachment-card-meta))))
@@ -2057,17 +2121,23 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
-  (let ((content (or (alist-get 'content msg) ""))
-        (attachments (or (alist-get 'attachments msg) '()))
-        (embeds (or (alist-get 'embeds msg) '())))
+  (let* ((content (or (alist-get 'content msg) ""))
+         (attachments (or (alist-get 'attachments msg) '()))
+         (embeds (or (alist-get 'embeds msg) '()))
+         (attachment-count (length attachments))
+         (embed-count (length embeds))
+         (showing-attachments (and disco-room-show-attachments (> attachment-count 0)))
+         (showing-embeds (and disco-room-show-embeds (> embed-count 0))))
     (if (string-empty-p content)
         (cond
-         ((and (not disco-room-show-attachments) (> (length attachments) 0))
-          (format "[attachment x%d]" (length attachments)))
-         ((> (length embeds) 0)
-          (format "[embed x%d]" (length embeds)))
-         ((> (length attachments) 0)
+         ((or showing-attachments showing-embeds)
           "")
+         ((and (> attachment-count 0) (> embed-count 0))
+          (format "[attachment x%d, embed x%d]" attachment-count embed-count))
+         ((> attachment-count 0)
+          (format "[attachment x%d]" attachment-count))
+         ((> embed-count 0)
+          (format "[embed x%d]" embed-count))
          (t "[empty]"))
       content)))
 
@@ -2131,6 +2201,424 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                        (format "%s" (or (alist-get 'id attachment) "unknown")))
                    " [render fallback]\n")
            (add-text-properties line-start (point) '(face shadow))))))))
+
+(defun disco-room--snake-to-camel-case (name)
+  "Convert snake_case NAME string into lowerCamelCase string."
+  (let* ((parts (split-string (or name "") "_" t))
+         (head (downcase (or (car parts) "")))
+         (tail (mapconcat (lambda (part)
+                            (capitalize (downcase part)))
+                          (cdr parts)
+                          "")))
+    (concat head tail)))
+
+(defun disco-room--object-key-candidates (key)
+  "Return key candidate list for KEY across symbol/string/keyword forms."
+  (let* ((raw-name (cond
+                    ((keywordp key) (substring (symbol-name key) 1))
+                    ((symbolp key) (symbol-name key))
+                    ((stringp key) key)
+                    (t (format "%s" key))))
+         (snake (replace-regexp-in-string "-" "_" raw-name))
+         (camel (if (string-match-p "_" snake)
+                    (disco-room--snake-to-camel-case snake)
+                  snake))
+         (names (delete-dups (list snake camel (downcase snake) (downcase camel))))
+         out)
+    (dolist (name names)
+      (push name out)
+      (push (intern name) out)
+      (push (intern (concat ":" name)) out))
+    (delete-dups (nreverse out))))
+
+(defun disco-room--object-get (object &rest keys)
+  "Return first non-nil value for KEYS found in OBJECT alist/plist."
+  (let ((candidates (delete-dups
+                     (apply #'append
+                            (mapcar #'disco-room--object-key-candidates keys)))))
+    (cond
+     ((and (listp object) (consp (car object)))
+      (catch 'found
+        (dolist (candidate candidates)
+          (let ((pair (assoc candidate object)))
+            (when (and pair (cdr pair))
+              (throw 'found (cdr pair)))))
+        nil))
+     ((listp object)
+      (catch 'found
+        (dolist (candidate candidates)
+          (when (keywordp candidate)
+            (let ((tail (plist-member object candidate)))
+              (when (and tail (cadr tail))
+                (throw 'found (cadr tail))))))
+        nil))
+     (t nil))))
+
+(defun disco-room--embed-type (embed)
+  "Return short embed type string for EMBED object."
+  (let ((raw (disco-room--object-get embed 'type)))
+    (if (and (stringp raw) (not (string-empty-p raw)))
+        (downcase raw)
+      "rich")))
+
+(defun disco-room--embed-summary (embed)
+  "Return one-line embed summary string for EMBED object."
+  (let* ((author (disco-room--object-get embed 'author))
+         (provider (disco-room--object-get embed 'provider))
+         (title (or (disco-room--object-get embed 'title)
+                    (and (listp author) (disco-room--object-get author 'name))
+                    (and (listp provider) (disco-room--object-get provider 'name))
+                    (disco-room--object-get embed 'description)
+                    (disco-room--object-get embed 'url)
+                    "embed"))
+         (headline (string-trim
+                    (replace-regexp-in-string "[\n\r\t]+" " "
+                                              (format "%s" title)))))
+    (format "[%s] %s"
+            (disco-room--embed-type embed)
+            (truncate-string-to-width headline 92 nil nil t))))
+
+(defun disco-room--embed-color-hex (embed)
+  "Return hexadecimal color string for EMBED, or nil."
+  (let ((value (disco-room--object-get embed 'color)))
+    (cond
+     ((and (integerp value) (>= value 0) (<= value #xFFFFFF))
+      (format "#%06x" value))
+     ((and (stringp value)
+           (string-match "\\`#?\\([0-9A-Fa-f]\\{6\\}\\)\\'" value))
+      (concat "#" (downcase (match-string 1 value))))
+     (t nil))))
+
+(defun disco-room--embed-meta-line (embed)
+  "Return compact metadata line for EMBED object."
+  (let* ((provider (disco-room--object-get embed 'provider))
+         (author (disco-room--object-get embed 'author))
+         (provider-name (and (listp provider) (disco-room--object-get provider 'name)))
+         (author-name (and (listp author) (disco-room--object-get author 'name)))
+         (timestamp (disco-room--object-get embed 'timestamp))
+         (timestamp-text (and (stringp timestamp)
+                              (not (string-empty-p timestamp))
+                              (format "time=%s" (disco-room--format-time timestamp))))
+         (fields (or (disco-room--object-get embed 'fields) '()))
+         (color (disco-room--embed-color-hex embed))
+         (parts (delq nil
+                      (list (format "type=%s" (disco-room--embed-type embed))
+                            (and (stringp provider-name)
+                                 (not (string-empty-p provider-name))
+                                 (format "provider=%s" provider-name))
+                            (and (stringp author-name)
+                                 (not (string-empty-p author-name))
+                                 (format "author=%s" author-name))
+                            (and (> (length fields) 0)
+                                 (format "fields=%d" (length fields)))
+                            timestamp-text
+                            (and color (format "color=%s" color))))))
+    (if parts
+        (mapconcat #'identity parts "  ")
+      "type=rich")))
+
+(defun disco-room--message-attachment-by-filename (msg filename)
+  "Return attachment from MSG matching FILENAME, or nil."
+  (when (and (stringp filename) (not (string-empty-p filename)))
+    (seq-find
+     (lambda (attachment)
+       (equal (disco-room--object-get attachment 'filename) filename))
+     (or (alist-get 'attachments msg) '()))))
+
+(defun disco-room--resolve-attachment-scheme-url (msg url)
+  "Resolve attachment:// URL in URL using attachments from MSG."
+  (cond
+   ((not (and (stringp url) (not (string-empty-p url))))
+    nil)
+   ((string-match "\\`attachment://\\(.+\\)\\'" url)
+    (let* ((filename (match-string 1 url))
+           (attachment (disco-room--message-attachment-by-filename msg filename)))
+      (or (and attachment (disco-room--attachment-preview-url attachment))
+          (and attachment (disco-room--attachment-download-url attachment))
+          (and attachment url))))
+   (t url)))
+
+(defun disco-room--embed-main-url (msg embed)
+  "Return primary URL for EMBED in MSG, resolving attachment:// links."
+  (disco-room--resolve-attachment-scheme-url
+   msg
+   (or (disco-room--object-get embed 'url)
+       (disco-room--object-get embed 'canonical_url 'canonicalUrl))))
+
+(defun disco-room--embed-media-entry (embed)
+  "Return media entry cons for EMBED as (KIND . OBJECT), or nil."
+  (let ((image (disco-room--object-get embed 'image))
+        (thumbnail (disco-room--object-get embed 'thumbnail))
+        (video (disco-room--object-get embed 'video))
+        (images (disco-room--object-get embed 'images)))
+    (cond
+     ((consp image) (cons 'image image))
+     ((and (listp images) (consp (car images))) (cons 'image (car images)))
+     ((and (vectorp images)
+           (> (length images) 0)
+           (consp (aref images 0)))
+      (cons 'image (aref images 0)))
+     ((consp thumbnail) (cons 'thumbnail thumbnail))
+     ((consp video) (cons 'video video))
+     ((equal (disco-room--embed-type embed) "image") (cons 'image nil))
+     (t nil))))
+
+(defun disco-room--embed-media-url (msg embed)
+  "Return best media URL for EMBED in MSG, resolving attachment:// links."
+  (let* ((media-entry (disco-room--embed-media-entry embed))
+         (media (cdr media-entry))
+         (proxy-url (and (listp media)
+                         (or (disco-room--object-get media 'proxy_url)
+                             (disco-room--object-get media 'proxyUrl))))
+         (source-url (and (listp media)
+                          (or (disco-room--object-get media 'url)
+                              (disco-room--object-get media 'canonical_url 'canonicalUrl))))
+         (resolved-proxy (disco-room--resolve-attachment-scheme-url msg proxy-url))
+         (resolved-source (disco-room--resolve-attachment-scheme-url msg source-url))
+         (main-url (disco-room--embed-main-url msg embed)))
+    (or (and (stringp resolved-proxy)
+             (not (string-empty-p resolved-proxy))
+             resolved-proxy)
+        (and (stringp resolved-source)
+             (not (string-empty-p resolved-source))
+             resolved-source)
+        (and (equal (disco-room--embed-type embed) "image")
+             (stringp main-url)
+             (not (string-empty-p main-url))
+             main-url))))
+
+(defun disco-room--embed-preview-attachment (msg embed embed-index)
+  "Build pseudo attachment object used to render EMBED preview from MSG.
+
+EMBED-INDEX is one-based position of EMBED in MSG embed list."
+  (let* ((media-entry (disco-room--embed-media-entry embed))
+         (media-kind (car media-entry))
+         (media (cdr media-entry))
+         (media-url (disco-room--embed-media-url msg embed))
+         (message-id (format "%s" (or (alist-get 'id msg) "unknown")))
+         (cache-suffix (md5 (or media-url ""))))
+    (when (and media-url (memq media-kind '(image thumbnail)))
+      `((id . ,(format "embed:%s:%s:%s:%s"
+                       message-id
+                       embed-index
+                       (symbol-name media-kind)
+                       cache-suffix))
+        (filename . ,(format "embed-%s-%s"
+                             embed-index
+                             (symbol-name media-kind)))
+        (content_type . "image/embed")
+        (url . ,media-url)
+        (proxy_url . ,media-url)
+        (width . ,(and (listp media) (disco-room--object-get media 'width)))
+        (height . ,(and (listp media) (disco-room--object-get media 'height)))))))
+
+(defun disco-room--insert-embed-action-button (label callback help-echo)
+  "Insert one embed action button with LABEL, CALLBACK and HELP-ECHO."
+  (disco-ui-insert-action-button
+   label
+   callback
+   :face 'disco-room-embed-card-action
+   :help-echo help-echo))
+
+(defun disco-room--insert-embed-card (msg embed embed-index)
+  "Insert one rich embed card for EMBED object from MSG.
+
+EMBED-INDEX is one-based position of EMBED in MSG embed list."
+  (let* ((summary (disco-room--embed-summary embed))
+         (meta (disco-room--embed-meta-line embed))
+         (description (disco-room--object-get embed 'description))
+         (fields (or (disco-room--object-get embed 'fields) '()))
+         (footer (disco-room--object-get embed 'footer))
+         (footer-value (and (listp footer) (disco-room--object-get footer 'text)))
+         (footer-text (and footer-value (format "%s" footer-value)))
+         (timestamp (disco-room--object-get embed 'timestamp))
+         (timestamp-text (and (stringp timestamp)
+                              (not (string-empty-p timestamp))
+                              (disco-room--format-time timestamp)))
+         (footer-line (string-join (delq nil (list footer-text timestamp-text)) "  ·  "))
+         (main-url (disco-room--embed-main-url msg embed))
+         (media-entry (disco-room--embed-media-entry embed))
+         (media-kind (car media-entry))
+         (media (cdr media-entry))
+         (media-url (disco-room--embed-media-url msg embed))
+         (media-width (and (listp media) (disco-room--object-get media 'width)))
+         (media-height (and (listp media) (disco-room--object-get media 'height)))
+         (media-dims (when (and (numberp media-width) (numberp media-height))
+                       (format "%dx%d" media-width media-height)))
+         (preview-rendering-available (and disco-room-show-embed-image-previews
+                                           (disco-room--inline-image-rendering-available-p)))
+         (preview-attachment (disco-room--embed-preview-attachment msg embed embed-index))
+         (preview-cache-key (and preview-attachment
+                                 (disco-room--attachment-preview-cache-key preview-attachment)))
+         (preview-cache-state (and preview-cache-key
+                                   (gethash preview-cache-key
+                                            disco-room--attachment-preview-image-cache)))
+         (preview-fetching (and preview-cache-key
+                                (gethash preview-cache-key
+                                         disco-room--attachment-preview-fetching)))
+         (preview (and preview-attachment
+                       preview-rendering-available
+                       (disco-room--attachment-preview-image preview-attachment t))))
+    (let ((top-start (point)))
+      (insert "    +-- ")
+      (insert summary)
+      (insert "\n")
+      (add-text-properties top-start (point)
+                           '(face disco-room-embed-card-title)))
+    (let ((meta-start (point)))
+      (insert "    | ")
+      (insert meta)
+      (insert "\n")
+      (add-text-properties meta-start (point)
+                           '(face disco-room-embed-card-meta)))
+    (when (and (stringp description) (not (string-empty-p description)))
+      (let ((desc-start (point)))
+        (insert "    | ")
+        (insert (replace-regexp-in-string "\n" "\n    | " description))
+        (insert "\n")
+        (add-text-properties desc-start (point)
+                             '(face disco-room-embed-card-meta))))
+    (let ((link-start (point)))
+      (insert "    | link: ")
+      (if (and (stringp main-url) (not (string-empty-p main-url)))
+          (progn
+            (disco-room--insert-embed-action-button
+             "[Open URL]"
+             (lambda () (browse-url main-url t))
+             "Open embed URL")
+            (insert " ")
+            (disco-room--insert-embed-action-button
+             "[Copy URL]"
+             (lambda ()
+               (kill-new main-url)
+               (message "disco: copied embed URL"))
+             "Copy embed URL"))
+        (insert "[No URL]"))
+      (insert "\n")
+      (add-text-properties link-start (point)
+                           '(face disco-room-embed-card-meta)))
+    (when (and (stringp media-url) (not (string-empty-p media-url)))
+      (let ((media-start (point)))
+        (insert "    | media: ")
+        (insert (format "[%s]" (if media-kind
+                                   (symbol-name media-kind)
+                                 "media")))
+        (insert " ")
+        (disco-room--insert-embed-action-button
+         "[Open Media]"
+         (lambda () (browse-url media-url t))
+         "Open embed media URL")
+        (insert " ")
+        (disco-room--insert-embed-action-button
+         "[Copy Media]"
+         (lambda ()
+           (kill-new media-url)
+           (message "disco: copied embed media URL"))
+         "Copy embed media URL")
+        (when media-dims
+          (insert (format "  %s" media-dims)))
+        (insert "\n")
+        (add-text-properties media-start (point)
+                             '(face disco-room-embed-card-meta))))
+    (when media-entry
+      (let ((preview-start (point)))
+        (insert "    | ")
+        (cond
+         ((memq media-kind '(image thumbnail))
+          (if preview
+              (condition-case _
+                  (insert-image preview "[image]")
+                (error
+                 (insert "[image unavailable]")))
+            (cond
+             ((not preview-rendering-available)
+              (insert "[preview disabled]"))
+             ((not (and (stringp media-url) (not (string-empty-p media-url))))
+              (insert "[no preview URL]"))
+             ((eq preview-cache-state :missing)
+              (insert "[image unavailable]"))
+             ((or preview-fetching preview-cache-key)
+              (insert "[loading preview]"))
+             (t
+              (insert "[image unavailable]")))))
+         ((eq media-kind 'video)
+          (insert "[video embed]"))
+         (t
+          (insert "[no preview]")))
+        (insert "\n")
+        (add-text-properties preview-start (point)
+                             '(face disco-room-embed-card-meta))))
+    (dolist (field fields)
+      (let* ((name-value (disco-room--object-get field 'name))
+             (field-value (disco-room--object-get field 'value))
+             (name (if (stringp name-value)
+                       name-value
+                     (if name-value (format "%s" name-value) "")))
+             (value (if (stringp field-value)
+                        field-value
+                      (if field-value (format "%s" field-value) "")))
+             (inline (disco-room--json-true-p (disco-room--object-get field 'inline))))
+        (when (or (not (string-empty-p name))
+                  (not (string-empty-p value)))
+          (let ((field-start (point)))
+            (insert "    | field")
+            (when inline
+              (insert " (inline)"))
+            (insert ": ")
+            (insert (if (string-empty-p name) "(unnamed)" name))
+            (insert "\n")
+            (add-text-properties field-start (point)
+                                 '(face disco-room-embed-card-meta)))
+          (when (not (string-empty-p value))
+            (let ((value-start (point)))
+              (insert "    |   ")
+              (insert (replace-regexp-in-string "\n" "\n    |   " value))
+              (insert "\n")
+              (add-text-properties value-start (point)
+                                   '(face disco-room-embed-card-meta)))))))
+    (when (and (stringp footer-line) (not (string-empty-p footer-line)))
+      (let ((footer-start (point)))
+        (insert "    | footer: ")
+        (insert footer-line)
+        (insert "\n")
+        (add-text-properties footer-start (point)
+                             '(face disco-room-embed-card-meta))))
+    (let ((bottom-start (point)))
+      (insert "    +--\n")
+      (add-text-properties bottom-start (point)
+                           '(face disco-room-embed-card-border)))
+    (when disco-room-show-embed-urls
+      (dolist (raw-url (delete-dups (delq nil (list main-url media-url))))
+        (when (and (stringp raw-url) (not (string-empty-p raw-url)))
+          (let ((url-start (point)))
+            (insert (format "      %s\n" raw-url))
+            (add-text-properties url-start (point) '(face shadow))))))))
+
+(defun disco-room--insert-message-embeds (msg)
+  "Insert embed detail lines for MSG."
+  (when disco-room-show-embeds
+    (let ((embed-index 0))
+      (dolist (embed (or (alist-get 'embeds msg) '()))
+        (setq embed-index (1+ embed-index))
+        (condition-case _
+            (if disco-room-use-rich-embed-cards
+                (disco-room--insert-embed-card msg embed embed-index)
+              (let* ((line-start (point))
+                     (url (disco-room--embed-main-url msg embed)))
+                (insert "    ")
+                (insert (disco-room--embed-summary embed))
+                (insert "\n")
+                (add-text-properties line-start (point) '(face disco-room-message-meta))
+                (when (and disco-room-show-embed-urls
+                           (stringp url)
+                           (not (string-empty-p url)))
+                  (let ((url-start (point)))
+                    (insert (format "      %s\n" url))
+                    (add-text-properties url-start (point) '(face shadow))))))
+          (error
+           (let ((line-start (point)))
+             (insert "    [embed] [render fallback]\n")
+             (add-text-properties line-start (point) '(face shadow)))))))))
 
 (defun disco-room--reaction-emoji (reaction)
   "Extract display emoji string from REACTION object."
@@ -2442,6 +2930,7 @@ Return non-nil when a local message update was applied."
                               'face 'shadow)))
         (insert "\n")))
     (disco-room--insert-message-attachments msg)
+    (disco-room--insert-message-embeds msg)
     (disco-room--insert-message-reactions msg)
     (add-text-properties
      line-start
