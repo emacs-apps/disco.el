@@ -24,6 +24,9 @@
 (require 'disco-embed)
 
 (declare-function disco-media-clear-preview-memory-cache "disco-media" ())
+(declare-function disco-api-create-message-async "disco-api" (&rest args))
+(declare-function disco-api-create-poll-vote-async "disco-api" (&rest args))
+(declare-function disco-api-expire-poll-async "disco-api" (&rest args))
 (require 'disco-view)
 (require 'disco-api)
 (require 'disco-gateway)
@@ -506,6 +509,7 @@ Grouping applies when sender stays the same and timestamps are within
   (define-key map (kbd "M-p") #'disco-room-draft-prev)
   (define-key map (kbd "M-n") #'disco-room-draft-next)
   (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
+  (define-key map (kbd "C-c C-p s") #'disco-room-send-poll)
   (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
   (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
   (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
@@ -2650,7 +2654,13 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
   "Apply poll vote EVENT to local room state and EWOC incrementally."
   (let* ((event-type (plist-get event :type))
          (message-id (plist-get event :message-id))
-         (answer-id (plist-get event :answer-id))
+         (raw-answer-id (plist-get event :answer-id))
+         (answer-id (cond
+                     ((integerp raw-answer-id) raw-answer-id)
+                     ((and (stringp raw-answer-id)
+                           (string-match-p "\\`[0-9]+\\'" raw-answer-id))
+                      (string-to-number raw-answer-id))
+                     (t nil)))
          (user-id (plist-get event :user-id)))
     (and (integerp answer-id)
          (pcase event-type
@@ -3811,13 +3821,18 @@ When called interactively, default answer comes from point or prompt."
                       msg
                       (disco-room--poll-answer-id-at-point))))
          (next-selection (disco-room--poll-next-selection poll picked)))
+    (when (disco-room--poll-expired-p poll)
+      (user-error "disco: poll is closed"))
     (disco-room--submit-poll-vote target-id next-selection)))
 
 (defun disco-room-clear-poll-votes (&optional message-id)
   "Clear current user's votes for poll MESSAGE-ID at point."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
-         (target-id (alist-get 'id msg)))
+         (target-id (alist-get 'id msg))
+         (poll (disco-room--message-poll msg)))
+    (when (disco-room--poll-expired-p poll)
+      (user-error "disco: poll is closed"))
     (disco-room--submit-poll-vote target-id '())))
 
 (defun disco-room-expire-poll (&optional message-id)
