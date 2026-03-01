@@ -129,9 +129,7 @@
 
 (defun disco-embed--line-prefix (embed)
   "Return colored visual line prefix string for EMBED card rows."
-  (concat "    "
-          (propertize "▏" 'face (disco-embed--accent-face embed))
-          " "))
+  (propertize "    ▏" 'face (disco-embed--accent-face embed)))
 
 (defun disco-embed--combine-faces (&rest faces)
   "Return one face value from FACES, dropping nil entries."

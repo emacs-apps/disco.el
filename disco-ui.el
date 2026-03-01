@@ -46,14 +46,21 @@ Return inserted span as (START . END)."
     (cons start (point))))
 
 (cl-defun disco-ui-insert-prefixed-lines (prefix text &key face properties)
-  "Insert TEXT as newline-separated lines, each prefixed by PREFIX.
+  "Insert TEXT as newline-separated lines using display-only PREFIX.
 
-FACE and PROPERTIES are applied to each inserted line span."
+FACE and PROPERTIES are applied to each inserted line span. PREFIX is set via
+`line-prefix' and `wrap-prefix' properties so copied text stays clean."
   (dolist (line (split-string (or text "") "\n" nil))
-    (disco-ui-insert-styled-line
-     (concat prefix line)
-     :face face
-     :properties properties)))
+    (let ((start (point)))
+      (insert line "\n")
+      (add-text-properties
+       start
+       (point)
+       (append properties
+               (when face
+                 (list 'face face))
+               (list 'line-prefix prefix
+                     'wrap-prefix prefix))))))
 
 (cl-defun disco-ui-render-list-view (&key title key-hints summary loading-note
                                           items item-inserter empty-text
