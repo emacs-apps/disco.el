@@ -13,14 +13,7 @@
 (require 'browse-url)
 (require 'disco-ui)
 (require 'disco-util)
-
-(declare-function disco-room--attachment-preview-url "disco-room" (attachment))
-(declare-function disco-room--attachment-download-url "disco-room" (attachment))
-(declare-function disco-room--attachment-preview-cache-key "disco-room" (attachment))
-(declare-function disco-room--attachment-preview-cache-existing-file "disco-room" (cache-key))
-(declare-function disco-room--attachment-preview-image "disco-room" (attachment &optional for-display))
-(declare-function disco-room--inline-image-rendering-available-p "disco-room" ())
-(declare-function disco-room--image-object-valid-p "disco-room" (image))
+(require 'disco-media)
 
 (defvar disco-room-show-embeds)
 (defvar disco-room-use-rich-embed-cards)
@@ -132,8 +125,8 @@
    ((string-match "\\`attachment://\\(.+\\)\\'" url)
     (let* ((filename (match-string 1 url))
            (attachment (disco-embed--message-attachment-by-filename msg filename)))
-      (or (and attachment (disco-room--attachment-preview-url attachment))
-          (and attachment (disco-room--attachment-download-url attachment))
+      (or (and attachment (disco-media-attachment-preview-url attachment))
+          (and attachment (disco-media-attachment-download-url attachment))
           (and attachment url))))
    (t url)))
 
@@ -192,7 +185,7 @@
 (defun disco-embed--author-icon-image (msg embed embed-index)
   "Return inline author icon image for EMBED in MSG, or nil while loading."
   (when (and disco-room-show-embed-author-icons
-             (disco-room--inline-image-rendering-available-p))
+             (disco-media-inline-image-rendering-available-p))
     (let* ((size (max 8
                       (if (numberp disco-room-embed-author-icon-size)
                           disco-room-embed-author-icon-size
@@ -201,10 +194,10 @@
            image)
       (when attachment
         ;; Reuse attachment preview fetch/cache pipeline for author icons.
-        (disco-room--attachment-preview-image attachment t)
-        (let* ((cache-key (disco-room--attachment-preview-cache-key attachment))
+        (disco-media-attachment-preview-image attachment t)
+        (let* ((cache-key (disco-media-attachment-preview-cache-key attachment))
                (cache-file (and cache-key
-                                (disco-room--attachment-preview-cache-existing-file cache-key))))
+                                (disco-media-attachment-preview-cache-existing-file cache-key))))
           (when cache-file
             (setq image
                   (ignore-errors
@@ -212,7 +205,7 @@
                                   :width size
                                   :height size
                                   :ascent 'center)))
-            (unless (disco-room--image-object-valid-p image)
+            (unless (disco-media-image-object-valid-p image)
               (when (image-type-available-p 'imagemagick)
                 (setq image
                       (ignore-errors
@@ -220,7 +213,7 @@
                                       :width size
                                       :height size
                                       :ascent 'center)))))
-            (when (disco-room--image-object-valid-p image)
+            (when (disco-media-image-object-valid-p image)
               image)))))))
 
 (defun disco-embed--main-url (msg embed)
@@ -335,11 +328,11 @@
   "Insert media preview row for EMBED in MSG."
   (let* ((preview-rendering-available
           (and disco-room-show-embed-image-previews
-               (disco-room--inline-image-rendering-available-p)))
+               (disco-media-inline-image-rendering-available-p)))
          (preview-attachment (disco-embed--preview-attachment msg embed embed-index))
          (preview (and preview-attachment
                        preview-rendering-available
-                       (disco-room--attachment-preview-image preview-attachment t)))
+                       (disco-media-attachment-preview-image preview-attachment t)))
          (preview-start (point)))
     (insert "    | ")
     (cond
