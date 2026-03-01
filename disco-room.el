@@ -378,6 +378,8 @@ Grouping applies when sender stays the same and timestamps are within
   (let ((map (make-sparse-keymap)))
     ;; Keep normal text editing in draft region, then layer room actions.
     (set-keymap-parent map (current-global-map))
+    (define-key map (kbd "C-b") #'disco-room-input-backward-char)
+    (define-key map (kbd "<left>") #'disco-room-input-backward-char)
     (define-key map (kbd "TAB") #'disco-room-complete-mention)
     (define-key map (kbd "<tab>") #'disco-room-complete-mention)
     (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
@@ -591,6 +593,19 @@ Grouping applies when sender stays the same and timestamps are within
     (and bounds
          (<= (car bounds) pos)
          (<= pos (cdr bounds)))))
+
+(defun disco-room-input-backward-char (&optional arg)
+  "Move backward by ARG chars inside draft input, stopping at prompt boundary."
+  (interactive "p")
+  (let* ((steps (or arg 1))
+         (bounds (disco-room--input-region-bounds))
+         (input-start (and bounds (car bounds))))
+    (if (and (integerp steps)
+             (> steps 0)
+             (number-or-marker-p input-start)
+             (<= (point) input-start))
+        (user-error "Beginning of line")
+      (backward-char steps))))
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
@@ -2949,8 +2964,9 @@ Return non-nil when a local message update was applied."
 Footer marks the editable input tail using `disco-room-input' property."
   (let ((prompt (propertize "\n>>> "
                             'read-only t
-                            'front-sticky '(read-only)
-                            'rear-nonsticky '(read-only disco-room-input)))
+                            'field 'disco-room-prompt
+                            'front-sticky '(read-only field)
+                            'rear-nonsticky '(read-only field disco-room-input)))
         (input (if (string-empty-p draft)
                    "\n"
                  (concat draft "\n"))))
