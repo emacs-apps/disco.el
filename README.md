@@ -64,6 +64,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-ui.el`: shared UI rendering primitives (buttons, styled lines, list sections).
 - `disco-api.el`: REST requests (sync + async callback paths).
 - `disco-http.el`: HTTP wrapper on `plz` (sync + async queue-backed paths).
+- `disco-permission.el`: shared Discord permission bitfield constants/parsing/check helpers.
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root.el`: root dashboard buffer.

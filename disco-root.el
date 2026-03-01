@@ -19,6 +19,7 @@
 (require 'disco-gateway)
 (require 'disco-room)
 (require 'disco-state)
+(require 'disco-permission)
 (require 'disco-transient)
 
 (defconst disco-root-buffer-name "*disco*"
@@ -365,12 +366,6 @@ Supports top-level sections, guild rows, and category rows."
       (eq value 'true)
       (equal value "true")))
 
-(defconst disco-root--permission-view-channel-bit (ash 1 10)
-  "Permission bit mask for VIEW_CHANNEL.")
-
-(defconst disco-root--permission-manage-threads-bit (ash 1 34)
-  "Permission bit mask for MANAGE_THREADS.")
-
 (defun disco-root--parse-decimal-integer (value)
   "Parse decimal integer VALUE and return integer or nil."
   (cond
@@ -386,33 +381,7 @@ Supports top-level sections, guild rows, and category rows."
 
 For guild channels, computed `permissions' is used when available.
 Channels lacking this field are treated as visible to avoid false negatives."
-  (let ((channel-type (alist-get 'type channel))
-        (guild-id (alist-get 'guild_id channel))
-        (permissions (alist-get 'permissions channel)))
-    (cond
-     ((memq channel-type '(1 3))
-      t)
-     ((null guild-id)
-      t)
-     ((null permissions)
-      t)
-     (t
-      (let ((bits (disco-root--parse-decimal-integer permissions)))
-        (if (integerp bits)
-            (not (zerop (logand bits disco-root--permission-view-channel-bit)))
-          t))))))
-
-(cl-defun disco-root--channel-has-permission-p (channel permission-bit &optional (unknown-value t))
-  "Return non-nil when CHANNEL has PERMISSION-BIT in computed permissions.
-
-If permissions are missing or unparsable, return UNKNOWN-VALUE (default t)."
-  (let ((permissions (alist-get 'permissions channel)))
-    (if (null permissions)
-        unknown-value
-      (let ((bits (disco-root--parse-decimal-integer permissions)))
-        (if (integerp bits)
-            (not (zerop (logand bits permission-bit)))
-          unknown-value)))))
+  (disco-permission-channel-viewable-p channel t))
 
 (defun disco-root--archived-source-fetch-allowed-p (source-name parent-channel)
   "Return non-nil when archived SOURCE-NAME is expected to be fetchable.
@@ -421,10 +390,7 @@ This prevents noisy permission errors for sources that require elevated access."
   (cond
    ;; Discord private archived thread listing requires MANAGE_THREADS.
    ((equal source-name "private")
-    (disco-root--channel-has-permission-p
-     parent-channel
-     disco-root--permission-manage-threads-bit
-     nil))
+    (disco-permission-channel-has-p parent-channel 'manage-threads nil))
    (t t)))
 
 (defun disco-root--archived-missing-access-error-p (err)

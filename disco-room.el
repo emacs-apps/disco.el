@@ -28,6 +28,7 @@
 (require 'disco-api)
 (require 'disco-gateway)
 (require 'disco-state)
+(require 'disco-permission)
 (require 'disco-transient)
 
 (defvar-local disco-room--channel-id nil)
@@ -487,6 +488,43 @@ Grouping applies when sender stays the same and timestamps are within
   "Signal user error when current room channel is itself a thread."
   (when (disco-room--thread-channel-p)
     (user-error "disco: open a parent channel room to create a new thread")))
+
+(defun disco-room--permission-display-name (permission)
+  "Return human-readable display name for PERMISSION symbol/designator."
+  (let* ((raw (cond
+               ((keywordp permission) (substring (symbol-name permission) 1))
+               ((symbolp permission) (symbol-name permission))
+               ((stringp permission) permission)
+               ((integerp permission) (format "0x%X" permission))
+               (t (format "%s" permission))))
+         (trimmed (replace-regexp-in-string "\\`:+" "" raw))
+         (snake (replace-regexp-in-string "[[:space:]-]+" "_" trimmed)))
+    (upcase snake)))
+
+(defun disco-room--required-send-permissions (&optional channel)
+  "Return permission list required to send message in CHANNEL.
+
+When CHANNEL is nil, use current room channel."
+  (if (disco-room--thread-channel-p channel)
+      '(send-messages-in-threads)
+    '(send-messages)))
+
+(cl-defun disco-room--ensure-channel-permissions (permissions &key action (unknown-value t))
+  "Signal user error when current room channel misses PERMISSIONS.
+
+ACTION is optional text appended to error message.
+When UNKNOWN-VALUE is non-nil, missing/unparseable channel permissions are
+treated as allowed."
+  (let* ((channel (disco-room--channel-object))
+         (missing (disco-permission-channel-missing channel permissions unknown-value)))
+    (when missing
+      (user-error
+       "disco: missing permission%s %s%s"
+       (if (> (length missing) 1) "s" "")
+       (mapconcat #'disco-room--permission-display-name missing ", ")
+       (if (and (stringp action) (not (string-empty-p action)))
+           (format " for %s" action)
+         "")))))
 
 (defun disco-room--typing-timeout-seconds ()
   "Return normalized typing indicator timeout in seconds."
@@ -3291,10 +3329,20 @@ When called with prefix argument, force draft edit in minibuffer first."
       (if (and (string-empty-p normalized)
                (not has-attachments))
           (message "disco: draft is empty")
-        (let ((room-buffer (current-buffer))
-              (channel-id disco-room--channel-id)
-              (reply-to disco-room--pending-reply-to)
-              (attachments (copy-tree token-attachments)))
+        (let* ((room-buffer (current-buffer))
+               (channel-id disco-room--channel-id)
+               (reply-to disco-room--pending-reply-to)
+               (attachments (copy-tree token-attachments))
+               (required-permissions
+                (append
+                 (disco-room--required-send-permissions)
+                 (when has-attachments
+                   '(attach-files))
+                 (when reply-to
+                   '(read-message-history)))))
+          (disco-room--ensure-channel-permissions
+           required-permissions
+           :action "sending messages")
           (unless (string-empty-p normalized)
             (disco-room--input-history-push normalized))
           (setq disco-room--draft-input "")
