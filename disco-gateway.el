@@ -129,7 +129,8 @@ When `disco-gateway-identify-intents' is nil, intent filtering is disabled."
      (typing . t)
      (activities . t)
      (threads . t)
-     (channels . ((,channel-id . ((0 99))))))))
+     ;; Use vectors for range arrays to avoid alist ambiguity in `json-encode'.
+     (channels . ((,channel-id . ,(vector (vector 0 99))))))))
 
 (defun disco-gateway--maybe-subscribe-watched-channel (channel-id &optional force)
   "Send channel lazy-subscription for CHANNEL-ID when needed.
