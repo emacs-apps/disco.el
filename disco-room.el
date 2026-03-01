@@ -2691,12 +2691,45 @@ When TARGET-PATH is nil, prompt interactively for destination path."
           (and attachment url))))
    (t url)))
 
+(defun disco-room--embed-author-object (embed)
+  "Return author object for EMBED, or nil."
+  (let ((author (disco-room--object-get embed 'author)))
+    (and (consp author) author)))
+
+(defun disco-room--embed-provider-object (embed)
+  "Return provider object for EMBED, or nil."
+  (let ((provider (disco-room--object-get embed 'provider)))
+    (and (consp provider) provider)))
+
+(defun disco-room--embed-author-url (msg embed)
+  "Return author URL for EMBED in MSG, if available."
+  (let* ((author (disco-room--embed-author-object embed))
+         (raw-url (and author (disco-room--object-get author 'url))))
+    (disco-room--resolve-attachment-scheme-url msg raw-url)))
+
+(defun disco-room--embed-provider-url (msg embed)
+  "Return provider URL for EMBED in MSG, if available."
+  (let* ((provider (disco-room--embed-provider-object embed))
+         (raw-url (and provider (disco-room--object-get provider 'url))))
+    (disco-room--resolve-attachment-scheme-url msg raw-url)))
+
+(defun disco-room--embed-author-icon-url (msg embed)
+  "Return author icon URL for EMBED in MSG, if available."
+  (let* ((author (disco-room--embed-author-object embed))
+         (raw-url (and author
+                       (or (disco-room--object-get author 'proxy_icon_url 'proxyIconUrl)
+                           (disco-room--object-get author 'icon_url 'iconUrl)
+                           (disco-room--object-get author 'icon_canonical_url 'iconCanonicalUrl)))))
+    (disco-room--resolve-attachment-scheme-url msg raw-url)))
+
 (defun disco-room--embed-main-url (msg embed)
   "Return primary URL for EMBED in MSG, resolving attachment:// links."
-  (disco-room--resolve-attachment-scheme-url
-   msg
-   (or (disco-room--object-get embed 'url)
-       (disco-room--object-get embed 'canonical_url 'canonicalUrl))))
+  (or (disco-room--resolve-attachment-scheme-url
+       msg
+       (or (disco-room--object-get embed 'url)
+           (disco-room--object-get embed 'canonical_url 'canonicalUrl)))
+      (disco-room--embed-author-url msg embed)
+      (disco-room--embed-provider-url msg embed)))
 
 (defun disco-room--embed-media-entry (embed)
   "Return media entry cons for EMBED as (KIND . OBJECT), or nil."
@@ -2789,6 +2822,13 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
                               (not (string-empty-p timestamp))
                               (disco-room--format-time timestamp)))
          (footer-line (string-join (delq nil (list footer-text timestamp-text)) "  ·  "))
+         (author (disco-room--embed-author-object embed))
+         (author-name (and (listp author) (disco-room--object-get author 'name)))
+         (author-url (disco-room--embed-author-url msg embed))
+         (author-icon-url (disco-room--embed-author-icon-url msg embed))
+         (provider (disco-room--embed-provider-object embed))
+         (provider-name (and (listp provider) (disco-room--object-get provider 'name)))
+         (provider-url (disco-room--embed-provider-url msg embed))
          (main-url (disco-room--embed-main-url msg embed))
          (media-entry (disco-room--embed-media-entry embed))
          (media-kind (car media-entry))
@@ -2830,6 +2870,64 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
         (insert (replace-regexp-in-string "\n" "\n    | " description))
         (insert "\n")
         (add-text-properties desc-start (point)
+                             '(face disco-room-embed-card-meta))))
+    (when (or (and (stringp author-url) (not (string-empty-p author-url)))
+              (and (stringp author-icon-url) (not (string-empty-p author-icon-url))))
+      (let ((author-start (point)))
+        (insert "    | author: ")
+        (insert (if (and (stringp author-name) (not (string-empty-p author-name)))
+                    author-name
+                  "unknown"))
+        (when (and (stringp author-url) (not (string-empty-p author-url)))
+          (insert " ")
+          (disco-room--insert-embed-action-button
+           "[Open Author]"
+           (lambda () (browse-url author-url t))
+           "Open embed author URL")
+          (insert " ")
+          (disco-room--insert-embed-action-button
+           "[Copy Author]"
+           (lambda ()
+             (kill-new author-url)
+             (message "disco: copied embed author URL"))
+           "Copy embed author URL"))
+        (when (and (stringp author-icon-url) (not (string-empty-p author-icon-url)))
+          (insert " ")
+          (disco-room--insert-embed-action-button
+           "[Open Icon]"
+           (lambda () (browse-url author-icon-url t))
+           "Open embed author icon URL")
+          (insert " ")
+          (disco-room--insert-embed-action-button
+           "[Copy Icon]"
+           (lambda ()
+             (kill-new author-icon-url)
+             (message "disco: copied embed author icon URL"))
+           "Copy embed author icon URL"))
+        (insert "\n")
+        (add-text-properties author-start (point)
+                             '(face disco-room-embed-card-meta))))
+    (when (and (stringp provider-url) (not (string-empty-p provider-url)))
+      (let ((provider-start (point)))
+        (insert "    | provider: ")
+        (insert (if (and (stringp provider-name) (not (string-empty-p provider-name)))
+                    provider-name
+                  "unknown"))
+        (when (and (stringp provider-url) (not (string-empty-p provider-url)))
+          (insert " ")
+          (disco-room--insert-embed-action-button
+           "[Open Provider]"
+           (lambda () (browse-url provider-url t))
+           "Open embed provider URL")
+          (insert " ")
+          (disco-room--insert-embed-action-button
+           "[Copy Provider]"
+           (lambda ()
+             (kill-new provider-url)
+             (message "disco: copied embed provider URL"))
+           "Copy embed provider URL"))
+        (insert "\n")
+        (add-text-properties provider-start (point)
                              '(face disco-room-embed-card-meta))))
     (let ((link-start (point)))
       (insert "    | link: ")
