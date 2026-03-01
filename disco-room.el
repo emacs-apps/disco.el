@@ -51,6 +51,8 @@
 (defvar-local disco-room--pending-attachments nil)
 (defvar-local disco-room--attachment-token-table nil)
 (defvar-local disco-room--attachment-token-seq 0)
+(defvar-local disco-room--typing-users nil)
+(defvar-local disco-room--typing-expire-timer nil)
 
 (defconst disco-room--attachment-token-regexp "\\[file:\\([0-9]+\\)\\]"
   "Regexp used to match attachment tokens in room draft input.")
@@ -216,6 +218,22 @@ Set to nil to disable per-render capping."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-show-typing-indicators t
+  "When non-nil, show live typing status above the room prompt.
+
+Typing events require Discord gateway typing intents when custom intents are
+specified via `disco-gateway-identify-intents'."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-typing-indicator-timeout 10
+  "Seconds after which a typing indicator is considered stale.
+
+Discord typing indicators are ephemeral and should expire quickly when no new
+`TYPING_START' event arrives."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-room-group-messages t
   "When non-nil, collapse repeated message headers for same sender.
 
@@ -262,6 +280,11 @@ Grouping applies when sender stays the same and timestamps are within
 (defface disco-room-message-meta
   '((t :inherit shadow))
   "Face used for room message metadata rows."
+  :group 'disco)
+
+(defface disco-room-typing-indicator
+  '((t :inherit shadow :slant italic))
+  "Face used for transient typing indicator text near the room prompt."
   :group 'disco)
 
 (defface disco-room-attachment-card-border
@@ -462,6 +485,218 @@ Grouping applies when sender stays the same and timestamps are within
   "Signal user error when current room channel is itself a thread."
   (when (disco-room--thread-channel-p)
     (user-error "disco: open a parent channel room to create a new thread")))
+
+(defun disco-room--typing-timeout-seconds ()
+  "Return normalized typing indicator timeout in seconds."
+  (max 1 (or disco-room-typing-indicator-timeout 10)))
+
+(defun disco-room--typing-normalize-user-id (user-id)
+  "Return USER-ID as string, or nil when missing."
+  (and user-id (format "%s" user-id)))
+
+(defun disco-room--typing-member-display-name (member)
+  "Extract display name from gateway MEMBER payload."
+  (when (listp member)
+    (let* ((nick (alist-get 'nick member))
+           (user (alist-get 'user member))
+           (global-name (and (listp user) (alist-get 'global_name user)))
+           (username (and (listp user) (alist-get 'username user))))
+      (seq-find (lambda (candidate)
+                  (and (stringp candidate)
+                       (not (string-empty-p candidate))))
+                (list nick global-name username)))))
+
+(defun disco-room--typing-channel-recipient-display-name (user-id)
+  "Resolve USER-ID display name from current DM/group channel metadata."
+  (let* ((channel (disco-room--channel-object))
+         (recipients (and (listp channel) (alist-get 'recipients channel)))
+         (match
+          (seq-find
+           (lambda (recipient)
+             (and (listp recipient)
+                  (equal (disco-room--typing-normalize-user-id
+                          (alist-get 'id recipient))
+                         user-id)))
+           (or recipients '()))))
+    (when (listp match)
+      (let ((global-name (alist-get 'global_name match))
+            (username (alist-get 'username match)))
+        (seq-find (lambda (candidate)
+                    (and (stringp candidate)
+                         (not (string-empty-p candidate))))
+                  (list global-name username))))))
+
+(defun disco-room--typing-history-display-name (user-id)
+  "Resolve USER-ID display name from loaded room message history."
+  (let ((found nil))
+    (dolist (msg (or (disco-state-messages disco-room--channel-id) '()))
+      (when (and (null found)
+                 (equal (disco-room--typing-normalize-user-id
+                         (disco-room--message-author-id msg))
+                        user-id))
+        (let ((candidate (disco-room--message-author msg)))
+          (when (and (stringp candidate) (not (string-empty-p candidate)))
+            (setq found candidate)))))
+    found))
+
+(defun disco-room--typing-display-name (user-id &optional member)
+  "Return best-effort display name for typing USER-ID and MEMBER payload."
+  (or (disco-room--typing-member-display-name member)
+      (let ((existing (and (hash-table-p disco-room--typing-users)
+                           (gethash user-id disco-room--typing-users))))
+        (and (listp existing)
+             (plist-get existing :display-name)))
+      (disco-room--typing-channel-recipient-display-name user-id)
+      (disco-room--typing-history-display-name user-id)
+      (format "user-%s"
+              (if (> (length user-id) 4)
+                  (substring user-id (- (length user-id) 4))
+                user-id))))
+
+(defun disco-room--typing-prune-expired (&optional now)
+  "Drop expired typing entries and return non-nil when anything changed."
+  (let ((cutoff (or now (float-time)))
+        stale-ids)
+    (when (hash-table-p disco-room--typing-users)
+      (maphash
+       (lambda (user-id entry)
+         (let ((expires-at (plist-get entry :expires-at)))
+           (when (or (not (numberp expires-at))
+                     (<= expires-at cutoff))
+             (push user-id stale-ids))))
+       disco-room--typing-users))
+    (dolist (user-id stale-ids)
+      (remhash user-id disco-room--typing-users))
+    (and stale-ids t)))
+
+(defun disco-room--typing-active-entries ()
+  "Return active typing entries sorted by recent typing timestamp."
+  (disco-room--typing-prune-expired)
+  (let (entries)
+    (when (hash-table-p disco-room--typing-users)
+      (maphash
+       (lambda (_user-id entry)
+         (when (listp entry)
+           (push entry entries)))
+       disco-room--typing-users))
+    (sort entries
+          (lambda (left right)
+            (let ((left-updated (or (plist-get left :updated-at) 0))
+                  (right-updated (or (plist-get right :updated-at) 0))
+                  (left-name (or (plist-get left :display-name) ""))
+                  (right-name (or (plist-get right :display-name) "")))
+              (if (= left-updated right-updated)
+                  (string-lessp (downcase left-name) (downcase right-name))
+                (> left-updated right-updated)))))))
+
+(defun disco-room--typing-indicator-text ()
+  "Return one-line typing indicator text, or nil when idle."
+  (when disco-room-show-typing-indicators
+    (let* ((entries (disco-room--typing-active-entries))
+           (names (mapcar (lambda (entry)
+                            (or (plist-get entry :display-name) "unknown"))
+                          entries))
+           (count (length names)))
+      (pcase count
+        (0 nil)
+        (1 (format "%s is typing..." (nth 0 names)))
+        (2 (format "%s and %s are typing..." (nth 0 names) (nth 1 names)))
+        (3 (format "%s, %s and %s are typing..."
+                   (nth 0 names) (nth 1 names) (nth 2 names)))
+        (_ (format "%s, %s and %d others are typing..."
+                   (nth 0 names) (nth 1 names) (- count 2)))))))
+
+(defun disco-room--typing-next-expiry ()
+  "Return nearest typing expiry timestamp, or nil when none remain."
+  (let (next-expiry)
+    (when (hash-table-p disco-room--typing-users)
+      (maphash
+       (lambda (_user-id entry)
+         (let ((expires-at (plist-get entry :expires-at)))
+           (when (numberp expires-at)
+             (setq next-expiry
+                   (if (or (null next-expiry)
+                           (< expires-at next-expiry))
+                       expires-at
+                     next-expiry)))))
+       disco-room--typing-users))
+    next-expiry))
+
+(defun disco-room--typing-cancel-expire-timer ()
+  "Cancel room-local typing expiry timer when active."
+  (when (timerp disco-room--typing-expire-timer)
+    (cancel-timer disco-room--typing-expire-timer))
+  (setq disco-room--typing-expire-timer nil))
+
+(defun disco-room--typing-expire-timer-callback (buffer)
+  "Expire stale typing entries for room BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq disco-room--typing-expire-timer nil)
+      (when (disco-room--typing-prune-expired)
+        (unless disco-room--rendering
+          (disco-room--render-preserving-point)))
+      (disco-room--typing-reschedule-expire-timer))))
+
+(defun disco-room--typing-reschedule-expire-timer ()
+  "Reschedule room-local timer for the next typing expiry."
+  (disco-room--typing-cancel-expire-timer)
+  (let ((next-expiry (disco-room--typing-next-expiry)))
+    (when next-expiry
+      (let ((delay (max 0.1 (- next-expiry (float-time))))
+            (room-buffer (current-buffer)))
+        (setq disco-room--typing-expire-timer
+              (run-at-time delay nil
+                           #'disco-room--typing-expire-timer-callback
+                           room-buffer))))))
+
+(defun disco-room--typing-reset ()
+  "Clear all local typing indicator state for current room."
+  (disco-room--typing-cancel-expire-timer)
+  (setq disco-room--typing-users (make-hash-table :test #'equal)))
+
+(defun disco-room--typing-track-user (user-id &optional member timestamp)
+  "Track typing state for USER-ID with optional MEMBER and TIMESTAMP."
+  (when disco-room-show-typing-indicators
+    (let* ((normalized-id (disco-room--typing-normalize-user-id user-id))
+           (self-id (disco-gateway-current-user-id)))
+      (when (and normalized-id
+                 (not (equal normalized-id self-id)))
+        (unless (hash-table-p disco-room--typing-users)
+          (setq disco-room--typing-users (make-hash-table :test #'equal)))
+        (let* ((now (float-time))
+               (base-time (if (numberp timestamp)
+                              (float timestamp)
+                            now))
+               (expires-at (+ base-time (disco-room--typing-timeout-seconds))))
+          (when (> expires-at now)
+            (let* ((display-name (disco-room--typing-display-name normalized-id member))
+                   (existing (gethash normalized-id disco-room--typing-users))
+                   (changed (or (null existing)
+                                (not (equal (plist-get existing :display-name) display-name)))))
+              (puthash normalized-id
+                       (list :user-id normalized-id
+                             :display-name display-name
+                             :expires-at expires-at
+                             :updated-at now)
+                       disco-room--typing-users)
+              (disco-room--typing-reschedule-expire-timer)
+              (when changed
+                (unless disco-room--rendering
+                  (disco-room--render-preserving-point))))))))))
+
+(defun disco-room--typing-stop-user (user-id &optional no-rerender)
+  "Remove USER-ID from typing indicators.
+
+When NO-RERENDER is non-nil, update local state without rendering."
+  (let ((normalized-id (disco-room--typing-normalize-user-id user-id)))
+    (when (and normalized-id
+               (hash-table-p disco-room--typing-users)
+               (gethash normalized-id disco-room--typing-users))
+      (remhash normalized-id disco-room--typing-users)
+      (disco-room--typing-reschedule-expire-timer)
+      (unless (or no-rerender disco-room--rendering)
+        (disco-room--render-preserving-point)))))
 
 (defun disco-room--latest-message-id ()
   "Return newest known message ID for current room, or nil."
@@ -3065,7 +3300,8 @@ Return non-nil when a local message update was applied."
   "Build EWOC footer text containing room prompt with DRAFT.
 
 Footer marks the editable input tail using `disco-room-input' property."
-  (let ((prompt (propertize ">>> "
+  (let ((typing-text (disco-room--typing-indicator-text))
+        (prompt (propertize ">>> "
                             'read-only t
                             'field 'disco-room-prompt
                             'cursor-intangible t
@@ -3077,6 +3313,14 @@ Footer marks the editable input tail using `disco-room-input' property."
                    "\n"
                  draft)))
     (concat "\n"
+            (if (and (stringp typing-text)
+                     (not (string-empty-p typing-text)))
+                (propertize (concat typing-text "\n")
+                            'read-only t
+                            'face 'disco-room-typing-indicator
+                            'front-sticky '(read-only)
+                            'rear-nonsticky '(read-only))
+              "")
             prompt
             (propertize input
                         'disco-room-input t
@@ -3315,17 +3559,29 @@ REASON is shown in the minibuffer."
             (disco-room-render)
           (disco-room--render-preserving-point))))
      ((and (equal event-channel-id disco-room--channel-id)
+           (eq event-type 'typing-start))
+      (disco-room--typing-track-user
+       (plist-get event :user-id)
+       (plist-get event :member)
+       (plist-get event :timestamp)))
+     ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-create message-update message-delete)))
-      (let ((at-bottom (disco-room--at-message-bottom-p)))
+      (let* ((message (and (eq event-type 'message-create)
+                           (plist-get event :message)))
+             (author (and (listp message) (alist-get 'author message)))
+             (author-id (and (listp author) (alist-get 'id author)))
+             (message-id (and (listp message) (alist-get 'id message)))
+             (at-bottom (disco-room--at-message-bottom-p)))
+        (when author-id
+          ;; Message arrival implicitly ends visible typing state for sender.
+          (disco-room--typing-stop-user author-id t))
         ;; Message grouping/date/unread layout depends on surrounding rows,
         ;; so message create/update/delete keeps a full room rerender.
         (if at-bottom
             (disco-room-render)
           (disco-room--render-preserving-point))
         (when (eq event-type 'message-create)
-          (let* ((message (plist-get event :message))
-                 (message-id (and (listp message) (alist-get 'id message))))
-            (disco-room--mark-read message-id)))))
+          (disco-room--mark-read message-id))))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-reaction-add
                               message-reaction-remove
@@ -3356,7 +3612,8 @@ REASON is shown in the minibuffer."
     (remove-hook 'disco-gateway-event-hook disco-room--gateway-handler)
     (setq disco-room--gateway-handler nil))
   (when disco-room--channel-id
-    (disco-gateway-unwatch-channel disco-room--channel-id)))
+    (disco-gateway-unwatch-channel disco-room--channel-id))
+  (disco-room--typing-reset))
 
 (defun disco-room--pending-attachment-labels ()
   "Return compact filename labels for pending composer attachments."
@@ -4212,6 +4469,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   "Major mode for disco.el room buffers."
   (setq buffer-read-only nil)
   (setq truncate-lines t)
+  (disco-room--typing-cancel-expire-timer)
   (setq-local disco-room--draft-input "")
   (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))
   (setq-local disco-room--input-index nil)
@@ -4226,6 +4484,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--pending-attachments nil)
   (setq-local disco-room--attachment-token-table (make-hash-table :test #'equal))
   (setq-local disco-room--attachment-token-seq 0)
+  (setq-local disco-room--typing-users (make-hash-table :test #'equal))
+  (setq-local disco-room--typing-expire-timer nil)
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (when (fboundp 'cursor-intangible-mode)
     (cursor-intangible-mode 1))

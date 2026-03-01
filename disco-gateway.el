@@ -12,7 +12,7 @@
 ;; - `disco-gateway-watch-global'
 ;; - `disco-gateway-unwatch-global'
 ;; - `disco-gateway-event-hook' events with
-;;   :type one of message/channel/guild/thread event symbols,
+;;   :type one of message/channel/guild/thread/typing event symbols,
 ;;   plus event-scoped payload fields (e.g., :channel-id, :guild-id).
 
 ;;; Code:
@@ -36,13 +36,16 @@ Event schema:
   `channel-create' `channel-update' `channel-delete'
   `guild-create' `guild-update' `guild-delete' `guild-sync'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
-  `thread-member-update' `thread-members-update'
-- :channel-id string for message/channel/thread events
-- :guild-id string for guild/channel/thread events
+  `thread-member-update' `thread-members-update' `typing-start'
+- :channel-id string for message/channel/thread/typing events
+- :guild-id string for guild/channel/thread/typing events
 - :thread-id string for thread and thread-member events
+- :user-id string for typing/thread-member/reaction events when present
 - :message message object for create/update
 - :message-id string for message delete
 - :mention-count integer for message ack when present
+- :timestamp integer for typing-start when present
+- :member guild member object for typing-start in guild channels
 - :emoji reaction emoji object/string for reaction events when present
 - :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
@@ -67,6 +70,8 @@ Event schema:
 (defvar disco-gateway--seq nil)
 (defvar disco-gateway--session-id nil)
 (defvar disco-gateway--resume-url nil)
+(defvar disco-gateway--current-user-id nil
+  "Cached current account user ID from READY/USER_UPDATE payloads.")
 
 (defvar disco-gateway--heartbeat-interval-ms nil)
 (defvar disco-gateway--heartbeat-timer nil)
@@ -88,6 +93,10 @@ Event schema:
   "Return non-nil when gateway transport is active or connecting."
   (or disco-gateway--connecting
       (and disco-gateway--ws (websocket-openp disco-gateway--ws))))
+
+(defun disco-gateway-current-user-id ()
+  "Return current Discord account user ID from gateway session, or nil."
+  disco-gateway--current-user-id)
 
 (defun disco-gateway--emit (event)
   "Emit EVENT plist to `disco-gateway-event-hook'."
@@ -226,6 +235,7 @@ If CLEAR-SESSION is non-nil, drop resume-related values too."
     (setq disco-gateway--seq nil)
     (setq disco-gateway--session-id nil)
     (setq disco-gateway--resume-url nil)
+    (setq disco-gateway--current-user-id nil)
     (disco-gateway--reset-reconnect-backoff)))
 
 (defun disco-gateway--reconnect (&optional delay clear-session)
@@ -473,6 +483,10 @@ Only CHANNEL read_state_type entries are used here."
     ("READY"
      (setq disco-gateway--session-id (alist-get 'session_id data))
      (setq disco-gateway--resume-url (alist-get 'resume_gateway_url data))
+     (let ((ready-user (alist-get 'user data)))
+       (setq disco-gateway--current-user-id
+             (and (listp ready-user)
+                  (alist-get 'id ready-user))))
      (disco-gateway--ingest-ready-read-states (alist-get 'read_state data))
      (when (assq 'guilds data)
        (disco-gateway--ingest-ready-guilds
@@ -593,6 +607,20 @@ Only CHANNEL read_state_type entries are used here."
                 :channel-id channel-id
                 :message-id message-id
                 :mention-count mention-count)))))
+    ("TYPING_START"
+     (let ((channel-id (alist-get 'channel_id data))
+           (guild-id (alist-get 'guild_id data))
+           (user-id (alist-get 'user_id data))
+           (timestamp (alist-get 'timestamp data))
+           (member (alist-get 'member data)))
+       (when channel-id
+         (disco-gateway--emit
+          (list :type 'typing-start
+                :channel-id channel-id
+                :guild-id guild-id
+                :user-id user-id
+                :timestamp timestamp
+                :member member)))))
     ("THREAD_CREATE"
      (disco-state-upsert-channel data)
      (disco-gateway--emit-channel-event 'thread-create data))
@@ -657,7 +685,10 @@ Only CHANNEL read_state_type entries are used here."
               :member-count member-count))))
     ("USER_UPDATE"
      ;; Read-state ack tokens are account-scoped and should be reset on user updates.
-     (disco-state-reset-ack-tokens))))
+     (disco-state-reset-ack-tokens)
+     (let ((user-id (alist-get 'id data)))
+       (when user-id
+         (setq disco-gateway--current-user-id user-id))))))
 
 (defun disco-gateway--handle-payload (payload)
   "Handle one decoded gateway PAYLOAD."
