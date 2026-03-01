@@ -43,6 +43,7 @@
 (defvar-local disco-room--send-in-flight nil)
 (defvar-local disco-room--last-search-query nil)
 (defvar-local disco-room--input-marker nil)
+(defvar-local disco-room--input-prompt-marker nil)
 (defvar-local disco-room--rendering nil)
 (defvar-local disco-room--ewoc nil)
 (defvar-local disco-room--message-node-table nil)
@@ -374,29 +375,38 @@ Grouping applies when sender stays the same and timestamps are within
    disco-room-author-color-8]
   "Palette used for deterministic per-author name coloring.")
 
+(defun disco-room--configure-input-map (map)
+  "Apply draft-input bindings to MAP and return MAP."
+  ;; Keep normal text editing in draft region, then layer room actions.
+  (set-keymap-parent map (current-global-map))
+  (define-key map (kbd "C-b") #'disco-room-input-backward-char)
+  (define-key map (kbd "<left>") #'disco-room-input-backward-char)
+  (define-key map (kbd "C-a") #'disco-room-input-beginning-of-line)
+  (define-key map (kbd "M-b") #'disco-room-input-backward-word)
+  (define-key map (kbd "M-DEL") #'disco-room-input-backward-kill-word)
+  (define-key map (kbd "TAB") #'disco-room-complete-mention)
+  (define-key map (kbd "<tab>") #'disco-room-complete-mention)
+  (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
+  (define-key map (kbd "RET") #'disco-room-return-dwim)
+  (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+  (define-key map (kbd "C-c '") #'disco-room-edit-draft)
+  (define-key map (kbd "M-p") #'disco-room-draft-prev)
+  (define-key map (kbd "M-n") #'disco-room-draft-next)
+  (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
+  (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+  (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
+  (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
+  (define-key map (kbd "C-c M-l") #'disco-room-list-attachments)
+  (define-key map (kbd "C-c M-e") #'disco-room-edit-attachment-description)
+  (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
+  map)
+
 (defvar disco-room-input-map
-  (let ((map (make-sparse-keymap)))
-    ;; Keep normal text editing in draft region, then layer room actions.
-    (set-keymap-parent map (current-global-map))
-    (define-key map (kbd "C-b") #'disco-room-input-backward-char)
-    (define-key map (kbd "<left>") #'disco-room-input-backward-char)
-    (define-key map (kbd "TAB") #'disco-room-complete-mention)
-    (define-key map (kbd "<tab>") #'disco-room-complete-mention)
-    (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
-    (define-key map (kbd "RET") #'disco-room-return-dwim)
-    (define-key map (kbd "C-c C-c") #'disco-room-send-message)
-    (define-key map (kbd "C-c '") #'disco-room-edit-draft)
-    (define-key map (kbd "M-p") #'disco-room-draft-prev)
-    (define-key map (kbd "M-n") #'disco-room-draft-next)
-    (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
-    (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
-    (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
-    (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
-    (define-key map (kbd "C-c M-l") #'disco-room-list-attachments)
-    (define-key map (kbd "C-c M-e") #'disco-room-edit-attachment-description)
-    (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
-    map)
+  (disco-room--configure-input-map (make-sparse-keymap))
   "Keymap active when point is inside the room draft region.")
+
+;; Refresh bindings on reload since `defvar' preserves existing map objects.
+(disco-room--configure-input-map disco-room-input-map)
 
 (defun disco-room--channel-object ()
   "Return current room channel object from state."
@@ -586,6 +596,11 @@ Grouping applies when sender stays the same and timestamps are within
         ;; avoids depending on field-property propagation edge cases.
         (cons start (point-max))))))
 
+(defun disco-room--input-start-position ()
+  "Return draft input start position for current room buffer, or nil."
+  (let ((bounds (disco-room--input-region-bounds)))
+    (and bounds (car bounds))))
+
 (defun disco-room--point-in-input-p (&optional position)
   "Return non-nil when POSITION (or point) is inside draft input region."
   (let* ((bounds (disco-room--input-region-bounds))
@@ -597,15 +612,67 @@ Grouping applies when sender stays the same and timestamps are within
 (defun disco-room-input-backward-char (&optional arg)
   "Move backward by ARG chars inside draft input, stopping at prompt boundary."
   (interactive "p")
-  (let* ((steps (or arg 1))
-         (bounds (disco-room--input-region-bounds))
-         (input-start (and bounds (car bounds))))
+  (let ((steps (or arg 1))
+        (input-start (disco-room--input-start-position)))
     (if (and (integerp steps)
              (> steps 0)
              (number-or-marker-p input-start)
              (<= (point) input-start))
         (user-error "Beginning of line")
       (backward-char steps))))
+
+(defun disco-room-input-beginning-of-line (&optional arg)
+  "Move to draft-input beginning; with ARG, keep line movement within input."
+  (interactive "p")
+  (let ((input-start (disco-room--input-start-position))
+        (n (or arg 1)))
+    (if (or (null input-start) (= n 1))
+        (when input-start
+          (goto-char input-start))
+      (move-beginning-of-line n)
+      (when (< (point) input-start)
+        (goto-char input-start)))))
+
+(defun disco-room-input-backward-word (&optional arg)
+  "Move backward by ARG words inside draft input, stopping at prompt boundary."
+  (interactive "p")
+  (let ((input-start (disco-room--input-start-position))
+        (steps (max 1 (or arg 1))))
+    (when (or (null input-start)
+              (<= (point) input-start))
+      (user-error "Beginning of line"))
+    (backward-word steps)
+    (when (< (point) input-start)
+      (goto-char input-start))))
+
+(defun disco-room-input-backward-kill-word (&optional arg)
+  "Kill ARG words backward without crossing prompt boundary."
+  (interactive "p")
+  (let ((input-start (disco-room--input-start-position))
+        (steps (max 1 (or arg 1))))
+    (unless input-start
+      (user-error "disco: input region is unavailable"))
+    (when (<= (point) input-start)
+      (user-error "Beginning of line"))
+    (let* ((here (point))
+           (target (save-excursion
+                     (backward-word steps)
+                     (point))))
+      (kill-region (max input-start target) here))))
+
+(defun disco-room--post-command ()
+  "Keep point out of prompt glyphs and at draft start when entering prompt span."
+  (unless disco-room--rendering
+    (let* ((input-start (disco-room--input-start-position))
+           (prompt-start (and (markerp disco-room--input-prompt-marker)
+                              (eq (marker-buffer disco-room--input-prompt-marker)
+                                  (current-buffer))
+                              (marker-position disco-room--input-prompt-marker))))
+      (when (and (number-or-marker-p prompt-start)
+                 (number-or-marker-p input-start)
+                 (>= (point) prompt-start)
+                 (< (point) input-start))
+        (goto-char input-start)))))
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
@@ -2965,8 +3032,11 @@ Footer marks the editable input tail using `disco-room-input' property."
   (let ((prompt (propertize "\n>>> "
                             'read-only t
                             'field 'disco-room-prompt
-                            'front-sticky '(read-only field)
-                            'rear-nonsticky '(read-only field disco-room-input)))
+                            'cursor-intangible t
+                            'disco-room-prompt t
+                            'front-sticky '(read-only field cursor-intangible)
+                            'rear-nonsticky
+                            '(read-only field cursor-intangible disco-room-input)))
         (input (if (string-empty-p draft)
                    "\n"
                  (concat draft "\n"))))
@@ -2979,15 +3049,19 @@ Footer marks the editable input tail using `disco-room-input' property."
   "Locate and bind editable input region from EWOC footer properties."
   (let ((input-start (text-property-any (point-min) (point-max) 'disco-room-input t)))
     (when input-start
-      (let ((input-end (or (next-single-property-change
-                            input-start 'disco-room-input nil (point-max))
-                           (point-max))))
+      (let* ((input-end (or (next-single-property-change
+                             input-start 'disco-room-input nil (point-max))
+                            (point-max)))
+             (probe-start (max (point-min) (- input-start 32)))
+             (prompt-start (or (text-property-any probe-start input-start 'disco-room-prompt t)
+                               (max (point-min) (1- input-start)))))
         (add-text-properties
          input-start input-end
          (list 'read-only nil
                'field 'disco-room-input
                'local-map disco-room-input-map
                'rear-nonsticky '(read-only field local-map)))
+        (setq disco-room--input-prompt-marker (copy-marker prompt-start nil))
         (setq disco-room--input-marker (copy-marker input-start nil))))))
 
 (defun disco-room--insert-message-node (msg)
@@ -3095,6 +3169,7 @@ Return non-nil when handled without full room rerender."
           (setq header-end (point))
           (put-text-property (point-min) header-end 'read-only t)
           (setq disco-room--input-marker nil)
+          (setq disco-room--input-prompt-marker nil)
           (setq disco-room--message-node-table (make-hash-table :test #'equal))
           (setq disco-room--ewoc
                 (ewoc-create
@@ -4113,6 +4188,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--send-in-flight nil)
   (setq-local disco-room--last-search-query nil)
   (setq-local disco-room--input-marker nil)
+  (setq-local disco-room--input-prompt-marker nil)
   (setq-local disco-room--rendering nil)
   (setq-local disco-room--ewoc nil)
   (setq-local disco-room--render-context-by-message-id (make-hash-table :test #'equal))
@@ -4120,7 +4196,10 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--attachment-token-table (make-hash-table :test #'equal))
   (setq-local disco-room--attachment-token-seq 0)
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
-  (add-hook 'after-change-functions #'disco-room--after-change nil t))
+  (when (fboundp 'cursor-intangible-mode)
+    (cursor-intangible-mode 1))
+  (add-hook 'after-change-functions #'disco-room--after-change nil t)
+  (add-hook 'post-command-hook #'disco-room--post-command nil t))
 
 (defun disco-room-open (channel-id channel-name)
   "Open room for CHANNEL-ID with CHANNEL-NAME."
