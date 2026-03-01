@@ -27,6 +27,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, URL actions, and transfer state actions: Download/Cancel/Open Local/Save As, plus inline image preview loading).
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
+- Message rows render poll blocks with answer vote toggles, clear-vote/end controls, and live vote-count updates from gateway poll vote events.
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
 - Room prompt footer now shows telega-style live typing indicators when other users are typing (DM + guild channels).
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
@@ -94,7 +95,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
-- Room transient (`?`): includes attachment queue/token and reaction actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`).
+- Room poll actions: `C-c C-p s` send poll, `C-c C-p v` toggle vote at point (or prompt answer), `C-c C-p c` clear own votes, `C-c C-p e` end poll.
+- Room transient (`?`): includes attachment queue/token and reaction/poll actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `W`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
@@ -105,6 +107,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway-zlib-max-buffer-bytes`: safety cap for accumulated compressed stream bytes.
 - `disco-gateway-identify-intents`: optional identify intents bitmask.
   - If intents are explicitly set, include `GUILD_MESSAGE_TYPING` (`1<<11`) and/or `DIRECT_MESSAGE_TYPING` (`1<<14`) to receive typing events.
+  - Include `GUILD_MESSAGE_POLLS` (`1<<24`) and/or `DIRECT_MESSAGE_POLLS` (`1<<25`) to receive `MESSAGE_POLL_VOTE_ADD` / `MESSAGE_POLL_VOTE_REMOVE` events.
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
 - `disco-gateway-enable-lazy-channel-subscriptions`: when non-nil, send Gateway op 14 channel subscriptions for watched guild channels (needed in user sessions so guild `TYPING_START` is delivered reliably).
@@ -126,7 +129,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
-- Room EWOC state keeps message-node indexes; reaction events patch rows locally while create/update/delete rerender fully to preserve grouping/day/unread layout correctness.
+- Room EWOC state keeps message-node indexes; reaction and poll-vote events patch rows locally while create/update/delete rerender fully to preserve grouping/day/unread layout correctness.
 - Shared `disco-ui` primitives are reused by room cards and forum/thread list buffers to keep UI interactions and list layout consistent.
 - Avatar fetch/render pipeline is asynchronous and rerenders room buffers when images become available.
 - Mention completion is token-boundary aware (start/whitespace + `@`), mirroring chat-client autocomplete behavior.
