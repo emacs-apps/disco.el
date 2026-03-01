@@ -19,6 +19,7 @@
 (require 'url-handlers)
 (require 'plz)
 (require 'disco-ui)
+(require 'disco-embed)
 (require 'disco-view)
 (require 'disco-api)
 (require 'disco-gateway)
@@ -221,6 +222,16 @@ Set to nil to disable per-render capping."
 (defcustom disco-room-embed-author-icon-size 18
   "Pixel size used for inline embed author icons."
   :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-embed-description-limit 280
+  "Maximum description length rendered in embed cards.
+
+Set to 0 to disable embed description rendering, or nil for no limit."
+  :type '(choice
+          (const :tag "No limit" nil)
+          (const :tag "Disable description" 0)
+          integer)
   :group 'disco)
 
 (defcustom disco-room-show-reactions t
@@ -3119,29 +3130,7 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
 
 (defun disco-room--insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
-  (when disco-room-show-embeds
-    (let ((embed-index 0))
-      (dolist (embed (or (alist-get 'embeds msg) '()))
-        (setq embed-index (1+ embed-index))
-        (condition-case _
-            (if disco-room-use-rich-embed-cards
-                (disco-room--insert-embed-card msg embed embed-index)
-              (let* ((line-start (point))
-                     (url (disco-room--embed-main-url msg embed)))
-                (insert "    ")
-                (insert (disco-room--embed-summary embed))
-                (insert "\n")
-                (add-text-properties line-start (point) '(face disco-room-message-meta))
-                (when (and disco-room-show-embed-urls
-                           (stringp url)
-                           (not (string-empty-p url)))
-                  (let ((url-start (point)))
-                    (insert (format "      %s\n" url))
-                    (add-text-properties url-start (point) '(face shadow))))))
-          (error
-           (let ((line-start (point)))
-             (insert "    [embed] [render fallback]\n")
-             (add-text-properties line-start (point) '(face shadow)))))))))
+  (disco-embed-insert-message-embeds msg))
 
 (defun disco-room--reaction-emoji (reaction)
   "Extract display emoji string from REACTION object."
