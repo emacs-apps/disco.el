@@ -491,22 +491,10 @@
 
 (defun disco-embed--preview-image-from-file (file max-width)
   "Create inline preview image from FILE constrained by MAX-WIDTH."
-  (let ((image
-         (ignore-errors
-           (create-image file nil nil
-                         :max-width max-width
-                         :max-height (disco-embed--preview-max-height)
-                         :ascent 'center))))
-    (unless (disco-media-image-object-valid-p image)
-      (when (image-type-available-p 'imagemagick)
-        (setq image
-              (ignore-errors
-                (create-image file 'imagemagick nil
-                              :max-width max-width
-                              :max-height (disco-embed--preview-max-height)
-                              :ascent 'center)))))
-    (and (disco-media-image-object-valid-p image)
-         image)))
+  (disco-media-preview-image-from-file
+   file
+   max-width
+   (disco-embed--preview-max-height)))
 
 (defun disco-embed--preview-image-for-attachment (attachment max-width)
   "Return inline preview image for ATTACHMENT with MAX-WIDTH, or nil."
@@ -532,10 +520,13 @@
     (insert "    | ")
     (dolist (item items)
       (let ((image (plist-get item :image))
-            (status (plist-get item :status)))
+            (status (plist-get item :status))
+            (url (plist-get item :url)))
         (if image
             (condition-case _
-                (insert-image image "[image]")
+                (let ((image-start (point)))
+                  (insert-image image "[image]")
+                  (disco-media-add-open-url-properties image-start (point) url))
               (error
                (insert "[image unavailable]")))
           (insert (disco-embed--preview-status-label status))))
@@ -589,7 +580,7 @@
                          (display-image 'ready)
                          ((eq cache-state :missing) 'missing)
                          (t 'loading))))))
-              (push (list :image display-image :status status) items)))
+              (push (list :image display-image :status status :url image-url) items)))
           (disco-embed--insert-grid-preview-row (nreverse items)))
       (let* ((preview-attachment (disco-embed--preview-attachment msg embed embed-index))
              (preview (and preview-attachment
@@ -607,7 +598,7 @@
          ((memq media-kind '(image thumbnail))
           (if preview
               (condition-case _
-                  (insert-image preview "[image]")
+                  (disco-media-insert-image-slices preview media-url "    | " "[image]")
                 (error
                  (insert "[image unavailable]")))
             (cond

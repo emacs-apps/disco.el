@@ -2165,11 +2165,16 @@ When TARGET-PATH is nil, prompt interactively for destination path."
       (add-text-properties transfer-start (point)
                            '(face disco-room-attachment-card-meta)))
     (when (equal (disco-room--attachment-kind attachment) "img")
-      (let ((preview-start (point)))
+      (let ((preview-start (point))
+            (preview-open-url (or preview-url url)))
         (insert "    | ")
         (if preview
             (condition-case _
-                (insert-image preview "[image]")
+                (disco-media-insert-image-slices
+                 preview
+                 preview-open-url
+                 "    | "
+                 "[image]")
               (error
                (insert "[image unavailable]")))
           (cond
@@ -3783,6 +3788,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
   "Major mode for disco.el room buffers."
   (setq buffer-read-only nil)
   (setq truncate-lines t)
+  ;; Avoid visible seams between vertically sliced inline images.
+  (setq-local line-spacing 0)
   (disco-room--typing-cancel-expire-timer)
   (setq-local disco-room--draft-input "")
   (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))

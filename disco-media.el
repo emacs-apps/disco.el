@@ -11,6 +11,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'cl-lib)
+(require 'browse-url)
 (require 'plz)
 
 (defvar disco-room-show-attachment-image-previews)
@@ -60,6 +61,63 @@ Values are image objects or the symbol `:missing'.")
              (image-size image t)
              t)
          (error nil))))
+
+(defun disco-media-url-present-p (url)
+  "Return non-nil when URL is a non-empty string."
+  (and (stringp url)
+       (not (string-empty-p url))))
+
+(defun disco-media-add-open-url-properties (start end url)
+  "Attach mouse/key handlers to open URL for text between START and END."
+  (when (and (disco-media-url-present-p url)
+             (< start end))
+    (let* ((open-callback
+            (lambda (&optional _event)
+              (interactive)
+              (browse-url url t)))
+           (open-map (make-sparse-keymap)))
+      (define-key open-map [mouse-1] open-callback)
+      (define-key open-map (kbd "RET") open-callback)
+      (add-text-properties
+       start
+       end
+       (list 'keymap open-map
+             'mouse-face 'highlight
+             'help-echo (format "Open media: %s" url))))))
+
+(defun disco-media-image-slice-count (image)
+  "Return line count used to render IMAGE as vertical slices."
+  (let* ((size (and (disco-media-image-object-valid-p image)
+                    (ignore-errors
+                      (image-size image nil (selected-frame)))))
+         (height (and (consp size) (cdr size))))
+    (max 1
+         (if (numberp height)
+             (ceiling height)
+           1))))
+
+(defun disco-media-insert-slice-newline ()
+  "Insert newline between image slices without adding extra line gap."
+  (let ((newline-start (point)))
+    (insert "\n")
+    (add-text-properties newline-start (point)
+                         '(line-height t
+                           rear-nonsticky (line-height)))))
+
+(defun disco-media-insert-image-slices (image &optional url prefix-str fallback)
+  "Insert IMAGE as line slices with optional URL open behavior."
+  (let* ((slice-count (disco-media-image-slice-count image))
+         (slice-height (/ 1.0 slice-count))
+         (label (or fallback "[image]")))
+    (dotimes (slice-index slice-count)
+      (when (> slice-index 0)
+        (disco-media-insert-slice-newline)
+        (when prefix-str
+          (insert prefix-str)))
+      (let ((slice-start (point))
+            (slice (list 0.0 (* slice-index slice-height) 1.0 slice-height)))
+        (insert-image image label nil slice)
+        (disco-media-add-open-url-properties slice-start (point) url)))))
 
 (defun disco-media-attachment-preview-rendering-available-p ()
   "Return non-nil when inline attachment image previews are available."
@@ -157,22 +215,14 @@ VALUE should be nil for uncapped mode or a non-negative integer."
       (when (file-exists-p old-file)
         (ignore-errors (delete-file old-file))))))
 
-(defun disco-media--attachment-preview-image-from-file (file)
-  "Create inline attachment preview image from FILE, or nil when unavailable."
-  (let* ((max-width (max 64
-                         (if (numberp disco-room-attachment-preview-max-width)
-                             disco-room-attachment-preview-max-width
-                           460)))
-         (max-height (max 64
-                          (if (numberp disco-room-attachment-preview-max-height)
-                              disco-room-attachment-preview-max-height
-                            360)))
-         (image
-          (ignore-errors
-            (create-image file nil nil
-                          :max-width max-width
-                          :max-height max-height
-                          :ascent 'center))))
+(defun disco-media-preview-image-from-file (file max-width max-height)
+  "Create inline preview image from FILE constrained by MAX-WIDTH/MAX-HEIGHT."
+  (let ((image
+         (ignore-errors
+           (create-image file nil nil
+                         :max-width max-width
+                         :max-height max-height
+                         :ascent 'center))))
     (unless (disco-media-image-object-valid-p image)
       (when (image-type-available-p 'imagemagick)
         (setq image
@@ -181,8 +231,20 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                               :max-width max-width
                               :max-height max-height
                               :ascent 'center)))))
-    (when (disco-media-image-object-valid-p image)
-      image)))
+    (and (disco-media-image-object-valid-p image)
+         image)))
+
+(defun disco-media--attachment-preview-image-from-file (file)
+  "Create inline attachment preview image from FILE, or nil when unavailable."
+  (let ((max-width (max 64
+                        (if (numberp disco-room-attachment-preview-max-width)
+                            disco-room-attachment-preview-max-width
+                          460)))
+        (max-height (max 64
+                         (if (numberp disco-room-attachment-preview-max-height)
+                             disco-room-attachment-preview-max-height
+                           360))))
+    (disco-media-preview-image-from-file file max-width max-height)))
 
 (defun disco-media--notify-preview-cache-updated ()
   "Notify UI after preview cache updates."
