@@ -510,6 +510,8 @@ Grouping applies when sender stays the same and timestamps are within
   (define-key map (kbd "M-n") #'disco-room-draft-next)
   (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
   (define-key map (kbd "C-c C-p s") #'disco-room-send-poll)
+  (define-key map (kbd "C-c C-p +") #'disco-room-vote-poll-answer)
+  (define-key map (kbd "C-c C-p -") #'disco-room-remove-poll-vote)
   (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
   (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
   (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
@@ -597,6 +599,52 @@ When CHANNEL is nil, use current room channel."
   (if (disco-room--thread-channel-p channel)
       '(send-messages-in-threads)
     '(send-messages)))
+
+(defun disco-room--poll-vote-required-permissions (&optional channel)
+  "Return required permissions for poll vote actions in CHANNEL."
+  (disco-room--required-send-permissions channel))
+
+(defun disco-room--poll-expire-required-permissions (&optional channel)
+  "Return required permissions for poll expire action in CHANNEL."
+  (append (disco-room--required-send-permissions channel)
+          '(send-polls)))
+
+(cl-defun disco-room--channel-has-permissions-p (permissions &optional channel (unknown-value t))
+  "Return non-nil when CHANNEL has all PERMISSIONS.
+
+CHANNEL defaults to current room channel. UNKNOWN-VALUE controls fallback when
+computed permissions are unavailable."
+  (disco-permission-channel-has-all-p
+   (or channel (disco-room--channel-object))
+   permissions
+   unknown-value))
+
+(cl-defun disco-room--poll-owned-by-current-user-p (msg &optional (unknown-value t))
+  "Return non-nil when poll in MSG is owned by current user.
+
+If current user identity is unknown, return UNKNOWN-VALUE."
+  (let* ((author-id (and (listp msg) (disco-room--message-author-id msg)))
+         (self-id (disco-gateway-current-user-id)))
+    (if (or (null author-id) (null self-id))
+        unknown-value
+      (equal (format "%s" author-id) (format "%s" self-id)))))
+
+(defun disco-room--poll-can-vote-p (msg)
+  "Return non-nil when current user can vote in poll message MSG."
+  (let ((poll (disco-room--message-poll msg)))
+    (and poll
+         (not (disco-room--poll-expired-p poll))
+         (disco-room--channel-has-permissions-p
+          (disco-room--poll-vote-required-permissions)))))
+
+(defun disco-room--poll-can-expire-p (msg)
+  "Return non-nil when current user can end poll message MSG."
+  (let ((poll (disco-room--message-poll msg)))
+    (and poll
+         (not (disco-room--poll-expired-p poll))
+         (disco-room--poll-owned-by-current-user-p msg t)
+         (disco-room--channel-has-permissions-p
+          (disco-room--poll-expire-required-permissions)))))
 
 (cl-defun disco-room--ensure-channel-permissions (permissions &key action (unknown-value t))
   "Signal user error when current room channel misses PERMISSIONS.
@@ -2684,13 +2732,15 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
            (question (and poll (disco-room--poll-question-text poll)))
            (state (and poll (disco-room--poll-state-label poll)))
            (expiry-label (and poll (disco-room--poll-expiry-label poll)))
-           (answers (and poll (or (alist-get 'answers poll) '()))))
+           (answers (and poll (or (alist-get 'answers poll) '())))
+           (can-vote (and poll (disco-room--poll-can-vote-p msg)))
+           (can-expire (and poll (disco-room--poll-can-expire-p msg))))
       (when poll
         (let ((title-start (point)))
           (insert "    [poll] " question "\n")
           (add-text-properties title-start (point)
                                `(face ,disco-room-poll-title-face
-                                      disco-message-id ,message-id)))
+                                 disco-message-id ,message-id)))
         (let ((meta-start (point))
               (parts (list (format "status=%s" state))))
           (when (disco-room--poll-multiselect-p poll)
@@ -2706,7 +2756,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
           (insert "    " (mapconcat #'identity parts "   ") "\n")
           (add-text-properties meta-start (point)
                                `(face ,disco-room-poll-meta-face
-                                      disco-message-id ,message-id)))
+                                 disco-message-id ,message-id)))
         (dolist (answer answers)
           (let* ((answer-id (disco-room--poll-answer-id answer))
                  (selected (and answer-id
@@ -2717,7 +2767,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                  (label (disco-room--poll-answer-text answer))
                  (line-start (point)))
             (insert "    ")
-            (if (and answer-id disco-room-poll-auto-toggle-vote)
+            (if (and can-vote answer-id disco-room-poll-auto-toggle-vote)
                 (disco-ui-insert-action-button
                  (format "%s %s%s"
                          (if selected "[x]" "[ ]")
@@ -2742,29 +2792,49 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (insert "\n")
             (add-text-properties line-start (point)
                                  `(disco-message-id ,message-id
-                                                    disco-poll-answer-id ,answer-id))))
+                                   disco-poll-answer-id ,answer-id))))
         (let ((actions-start (point))
-              (selected-ids (disco-room--poll-voted-answer-ids poll)))
+              (selected-ids (disco-room--poll-voted-answer-ids poll))
+              (inserted nil))
           (insert "    ")
-          (when selected-ids
+          (when can-vote
             (disco-ui-insert-action-button
-             "[Clear vote]"
+             "[Vote...]"
              (lambda ()
-               (disco-room-clear-poll-votes message-id))
+               (disco-room-vote-poll-answer nil message-id))
              :face disco-room-poll-button-face
-             :help-echo "Clear my vote(s) for this poll")
-            (insert " "))
-          (unless (disco-room--poll-expired-p poll)
+             :help-echo "Vote for one poll answer")
+            (insert " ")
+            (setq inserted t)
+            (when selected-ids
+              (disco-ui-insert-action-button
+               "[Unvote...]"
+               (lambda ()
+                 (disco-room-remove-poll-vote nil message-id))
+               :face disco-room-poll-button-face
+               :help-echo "Remove vote for one poll answer")
+              (insert " ")
+              (disco-ui-insert-action-button
+               "[Clear vote]"
+               (lambda ()
+                 (disco-room-clear-poll-votes message-id))
+               :face disco-room-poll-button-face
+               :help-echo "Clear my vote(s) for this poll")
+              (insert " ")))
+          (when can-expire
             (disco-ui-insert-action-button
              "[End poll]"
              (lambda ()
                (disco-room-expire-poll message-id))
              :face disco-room-poll-button-face
-             :help-echo "End this poll now"))
+             :help-echo "End this poll now")
+            (setq inserted t))
+          (unless inserted
+            (insert (propertize "[no poll actions available]" 'face 'shadow)))
           (insert "\n")
           (add-text-properties actions-start (point)
                                `(face ,disco-room-poll-meta-face
-                                      disco-message-id ,message-id)))))))
+                                 disco-message-id ,message-id)))))))
 
 (defun disco-room--reaction-emoji (reaction)
   "Extract display emoji string from REACTION object."
@@ -3215,7 +3285,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-p s/v/c/e: poll send/vote/clear/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-p s/+/-/v/c/e: poll send/vote/unvote/toggle/clear/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -3782,13 +3852,33 @@ Each item is (LABEL . ANSWER-ID)."
           '()
         (list toggled-answer-id)))))
 
+(defun disco-room--poll-add-selection (poll answer-id)
+  "Return next self vote answer-id list by adding ANSWER-ID in POLL."
+  (if (disco-room--poll-multiselect-p poll)
+      (let ((current (disco-room--poll-voted-answer-ids poll)))
+        (if (member answer-id current)
+            current
+          (append current (list answer-id))))
+    (list answer-id)))
+
+(defun disco-room--poll-remove-selection (poll answer-id)
+  "Return next self vote answer-id list by removing ANSWER-ID in POLL."
+  (delete answer-id
+          (copy-sequence (disco-room--poll-voted-answer-ids poll))))
+
 (defun disco-room--submit-poll-vote (message-id selected-answer-ids)
   "Submit SELECTED-ANSWER-IDS for poll MESSAGE-ID asynchronously."
   (let* ((msg (disco-room--poll-message-required message-id))
+         (poll (disco-room--message-poll msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
          (target-id (alist-get 'id msg))
          (normalized (delete-dups (copy-sequence (or selected-answer-ids '())))))
+    (when (disco-room--poll-expired-p poll)
+      (user-error "disco: poll is closed"))
+    (disco-room--ensure-channel-permissions
+     (disco-room--poll-vote-required-permissions)
+     :action "poll voting")
     (disco-api-create-poll-vote-async
      channel-id
      target-id
@@ -3808,6 +3898,40 @@ Each item is (LABEL . ANSWER-ID)."
          (message "disco: poll vote failed: %s"
                   (disco-room--async-error-message err)))))))
 
+(defun disco-room--pick-poll-answer-id (msg &optional explicit-answer-id)
+  "Return poll answer id from EXPLICIT-ANSWER-ID, point, or prompt for MSG."
+  (or explicit-answer-id
+      (disco-room--poll-answer-id-at-point)
+      (disco-room--read-poll-answer-id msg nil)))
+
+(defun disco-room-vote-poll-answer (&optional answer-id message-id)
+  "Vote ANSWER-ID for poll MESSAGE-ID.
+
+When called interactively, ANSWER-ID defaults to answer at point or prompt."
+  (interactive)
+  (let* ((msg (disco-room--poll-message-required message-id))
+         (target-id (alist-get 'id msg))
+         (poll (disco-room--message-poll msg))
+         (picked (disco-room--pick-poll-answer-id msg answer-id))
+         (next-selection (disco-room--poll-add-selection poll picked)))
+    (disco-room--submit-poll-vote target-id next-selection)))
+
+(defun disco-room-remove-poll-vote (&optional answer-id message-id)
+  "Remove vote ANSWER-ID from poll MESSAGE-ID.
+
+When called interactively, ANSWER-ID defaults to answer at point or prompt."
+  (interactive)
+  (let* ((msg (disco-room--poll-message-required message-id))
+         (target-id (alist-get 'id msg))
+         (poll (disco-room--message-poll msg))
+         (current (disco-room--poll-voted-answer-ids poll))
+         (picked (disco-room--pick-poll-answer-id msg answer-id)))
+    (unless (member picked current)
+      (user-error "disco: current user has not voted for answer %s" picked))
+    (disco-room--submit-poll-vote
+     target-id
+     (disco-room--poll-remove-selection poll picked))))
+
 (defun disco-room-toggle-poll-answer (&optional answer-id message-id)
   "Toggle poll ANSWER-ID in MESSAGE-ID.
 
@@ -3816,32 +3940,32 @@ When called interactively, default answer comes from point or prompt."
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
          (poll (disco-room--message-poll msg))
-         (picked (or answer-id
-                     (disco-room--read-poll-answer-id
-                      msg
-                      (disco-room--poll-answer-id-at-point))))
+         (picked (disco-room--pick-poll-answer-id msg answer-id))
          (next-selection (disco-room--poll-next-selection poll picked)))
-    (when (disco-room--poll-expired-p poll)
-      (user-error "disco: poll is closed"))
     (disco-room--submit-poll-vote target-id next-selection)))
 
 (defun disco-room-clear-poll-votes (&optional message-id)
   "Clear current user's votes for poll MESSAGE-ID at point."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
-         (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg)))
-    (when (disco-room--poll-expired-p poll)
-      (user-error "disco: poll is closed"))
+         (target-id (alist-get 'id msg)))
     (disco-room--submit-poll-vote target-id '())))
 
 (defun disco-room-expire-poll (&optional message-id)
   "End poll in MESSAGE-ID at point."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
+         (poll (disco-room--message-poll msg))
          (target-id (alist-get 'id msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id))
+    (when (disco-room--poll-expired-p poll)
+      (user-error "disco: poll is already closed"))
+    (unless (disco-room--poll-owned-by-current-user-p msg nil)
+      (user-error "disco: only poll author can end this poll"))
+    (disco-room--ensure-channel-permissions
+     (disco-room--poll-expire-required-permissions)
+     :action "ending polls")
     (when (or (not disco-room-poll-confirm-expire)
               (y-or-n-p (format "End poll %s now? " target-id)))
       (disco-api-expire-poll-async
@@ -4472,6 +4596,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "+") #'disco-room-add-reaction)
     (define-key map (kbd "-") #'disco-room-remove-reaction)
     (define-key map (kbd "C-c C-p s") #'disco-room-send-poll)
+    (define-key map (kbd "C-c C-p +") #'disco-room-vote-poll-answer)
+    (define-key map (kbd "C-c C-p -") #'disco-room-remove-poll-vote)
     (define-key map (kbd "C-c C-p v") #'disco-room-toggle-poll-answer)
     (define-key map (kbd "C-c C-p c") #'disco-room-clear-poll-votes)
     (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)

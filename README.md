@@ -95,8 +95,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
-- Room poll actions: `C-c C-p s` send poll, `C-c C-p v` toggle vote at point (or prompt answer), `C-c C-p c` clear own votes, `C-c C-p e` end poll.
-- Room transient (`?`): includes attachment queue/token and reaction/poll actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `W`, `X`).
+- Room poll actions: `C-c C-p s` send poll, `C-c C-p +` vote answer, `C-c C-p -` remove answer vote, `C-c C-p v` toggle vote at point (or prompt answer), `C-c C-p c` clear own votes, `C-c C-p e` end poll.
+- Room transient (`?`): includes attachment queue/token and reaction/poll actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 

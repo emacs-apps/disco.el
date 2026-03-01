@@ -1312,15 +1312,17 @@ optional :description/:filename/:content-type."
     value))
 
 (defun disco-api--normalize-poll-answer-ids (answer-ids)
-  "Normalize ANSWER-IDS into a deduped integer list."
+  "Normalize ANSWER-IDS into a deduped integer vector.
+
+Vector return type avoids JSON nil/list ambiguity for empty arrays."
   (let* ((source
           (cond
            ((null answer-ids) '())
            ((vectorp answer-ids) (append answer-ids nil))
            ((listp answer-ids) answer-ids)
            (t (list answer-ids))))
-         (normalized (mapcar #'disco-api--normalize-poll-answer-id source)))
-    (delete-dups normalized)))
+         (normalized (delete-dups (mapcar #'disco-api--normalize-poll-answer-id source))))
+    (vconcat normalized)))
 
 (defun disco-api-create-poll-vote (channel-id message-id answer-ids)
   "Submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID."

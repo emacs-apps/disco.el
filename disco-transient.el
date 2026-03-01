@@ -36,6 +36,8 @@
 (declare-function disco-room-add-reaction "disco-room")
 (declare-function disco-room-remove-reaction "disco-room")
 (declare-function disco-room-send-poll "disco-room")
+(declare-function disco-room-vote-poll-answer "disco-room")
+(declare-function disco-room-remove-poll-vote "disco-room")
 (declare-function disco-room-toggle-poll-answer "disco-room")
 (declare-function disco-room-clear-poll-votes "disco-room")
 (declare-function disco-room-expire-poll "disco-room")
@@ -124,7 +126,9 @@
    ("+" "Add reaction" disco-room-add-reaction)
    ("-" "Remove reaction" disco-room-remove-reaction)
    ("p" "Send poll" disco-room-send-poll)
-   ("w" "Toggle poll vote" disco-room-toggle-poll-answer)
+   ("w" "Vote answer" disco-room-vote-poll-answer)
+   ("u" "Unvote answer" disco-room-remove-poll-vote)
+   ("t" "Toggle poll vote" disco-room-toggle-poll-answer)
    ("W" "Clear poll votes" disco-room-clear-poll-votes)
    ("X" "End poll" disco-room-expire-poll)]
    ["Thread"
