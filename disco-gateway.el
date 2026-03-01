@@ -72,6 +72,8 @@ Event schema:
 (defvar disco-gateway--resume-url nil)
 (defvar disco-gateway--current-user-id nil
   "Cached current account user ID from READY/USER_UPDATE payloads.")
+(defvar disco-gateway--lazy-subscribed-channels (make-hash-table :test #'equal)
+  "Hash table of channel IDs already subscribed via Gateway op 14.")
 
 (defvar disco-gateway--heartbeat-interval-ms nil)
 (defvar disco-gateway--heartbeat-timer nil)
@@ -97,6 +99,66 @@ Event schema:
 (defun disco-gateway-current-user-id ()
   "Return current Discord account user ID from gateway session, or nil."
   disco-gateway--current-user-id)
+
+(defun disco-gateway--intent-enabled-p (bit)
+  "Return non-nil when identify intents include BIT.
+
+When `disco-gateway-identify-intents' is nil, intent filtering is disabled."
+  (or (null disco-gateway-identify-intents)
+      (/= 0 (logand disco-gateway-identify-intents bit))))
+
+(defun disco-gateway--warn-missing-typing-intents ()
+  "Log hints when custom intents disable typing events."
+  (when (integerp disco-gateway-identify-intents)
+    (unless (disco-gateway--intent-enabled-p (ash 1 11))
+      (message "disco: identify intents missing GUILD_MESSAGE_TYPING (1<<11); guild typing indicators will be unavailable"))
+    (unless (disco-gateway--intent-enabled-p (ash 1 14))
+      (message "disco: identify intents missing DIRECT_MESSAGE_TYPING (1<<14); DM typing indicators will be unavailable"))))
+
+(defun disco-gateway--channel-guild-id (channel-id)
+  "Return guild ID for CHANNEL-ID from local state, or nil for non-guild channels."
+  (let ((channel (and channel-id (disco-state-channel channel-id))))
+    (and (listp channel)
+         (alist-get 'guild_id channel))))
+
+(defun disco-gateway--send-lazy-channel-subscription (guild-id channel-id)
+  "Send Gateway op 14 subscription for one GUILD-ID/CHANNEL-ID pair."
+  (disco-gateway--send-op
+   14
+   `((guild_id . ,guild-id)
+     (typing . t)
+     (activities . t)
+     (threads . t)
+     (channels . ((,channel-id . ((0 99))))))))
+
+(defun disco-gateway--maybe-subscribe-watched-channel (channel-id &optional force)
+  "Send channel lazy-subscription for CHANNEL-ID when needed.
+
+When FORCE is non-nil, resend even when CHANNEL-ID was already subscribed."
+  (when (and disco-gateway-enable-lazy-channel-subscriptions
+             (disco-gateway--intent-enabled-p (ash 1 11)))
+    (let* ((normalized-channel-id (and channel-id (format "%s" channel-id)))
+           (guild-id (and normalized-channel-id
+                          (disco-gateway--channel-guild-id normalized-channel-id)))
+           (already (and normalized-channel-id
+                         (gethash normalized-channel-id
+                                  disco-gateway--lazy-subscribed-channels))))
+      (when (and normalized-channel-id
+                 guild-id
+                 (or force (not already)))
+        (disco-gateway--send-lazy-channel-subscription guild-id normalized-channel-id)
+        (puthash normalized-channel-id guild-id
+                 disco-gateway--lazy-subscribed-channels)))))
+
+(defun disco-gateway--subscribe-watched-guild-channels (&optional force)
+  "Send lazy-subscription payloads for all watched guild channels.
+
+When FORCE is non-nil, resend subscriptions even when already tracked."
+  (when (disco-gateway--intent-enabled-p (ash 1 11))
+    (maphash
+     (lambda (channel-id _count)
+       (disco-gateway--maybe-subscribe-watched-channel channel-id force))
+     disco-gateway--watch-counts)))
 
 (defun disco-gateway--emit (event)
   "Emit EVENT plist to `disco-gateway-event-hook'."
@@ -226,6 +288,7 @@ If CLEAR-SESSION is non-nil, drop resume-related values too."
   (setq disco-gateway--heartbeat-interval-ms nil)
   (setq disco-gateway--awaiting-heartbeat-ack nil)
   (disco-gateway--zlib-reset-state)
+  (clrhash disco-gateway--lazy-subscribed-channels)
 
   (when disco-gateway--ws
     (ignore-errors (websocket-close disco-gateway--ws))
@@ -337,6 +400,7 @@ This shape follows Discord gateway identify expectations."
 
 (defun disco-gateway--send-identify ()
   "Send identify payload (op 2)."
+  (disco-gateway--warn-missing-typing-intents)
   (disco-gateway--send-op 2 (disco-gateway--identify-payload)))
 
 (defun disco-gateway--can-resume-p ()
@@ -494,9 +558,11 @@ Only CHANNEL read_state_type entries are used here."
      (when (assq 'private_channels data)
        (disco-gateway--ingest-ready-private-channels
         (alist-get 'private_channels data)))
+     (disco-gateway--subscribe-watched-guild-channels t)
      (disco-gateway--reset-reconnect-backoff)
      (message "disco: gateway READY"))
     ("RESUMED"
+     (disco-gateway--subscribe-watched-guild-channels t)
      (disco-gateway--reset-reconnect-backoff)
      (message "disco: gateway RESUMED"))
     ("GUILD_CREATE"
@@ -512,9 +578,15 @@ Only CHANNEL read_state_type entries are used here."
        (disco-gateway--emit-guild-event 'guild-delete data)))
     ("CHANNEL_CREATE"
      (disco-state-upsert-channel data)
+     (let ((channel-id (alist-get 'id data)))
+       (when (and channel-id (disco-gateway--channel-watched-p channel-id))
+         (disco-gateway--maybe-subscribe-watched-channel channel-id t)))
      (disco-gateway--emit-channel-event 'channel-create data))
     ("CHANNEL_UPDATE"
      (disco-state-upsert-channel data)
+     (let ((channel-id (alist-get 'id data)))
+       (when (and channel-id (disco-gateway--channel-watched-p channel-id))
+         (disco-gateway--maybe-subscribe-watched-channel channel-id t)))
      (disco-gateway--emit-channel-event 'channel-update data))
     ("CHANNEL_DELETE"
      (let ((channel-id (alist-get 'id data)))
@@ -623,9 +695,15 @@ Only CHANNEL read_state_type entries are used here."
                 :member member)))))
     ("THREAD_CREATE"
      (disco-state-upsert-channel data)
+     (let ((thread-id (alist-get 'id data)))
+       (when (and thread-id (disco-gateway--channel-watched-p thread-id))
+         (disco-gateway--maybe-subscribe-watched-channel thread-id t)))
      (disco-gateway--emit-channel-event 'thread-create data))
     ("THREAD_UPDATE"
      (disco-state-upsert-channel data)
+     (let ((thread-id (alist-get 'id data)))
+       (when (and thread-id (disco-gateway--channel-watched-p thread-id))
+         (disco-gateway--maybe-subscribe-watched-channel thread-id t)))
      (disco-gateway--emit-channel-event 'thread-update data))
     ("THREAD_DELETE"
      (let ((thread-id (alist-get 'id data)))
@@ -812,7 +890,8 @@ Only CHANNEL read_state_type entries are used here."
   (let ((count (gethash channel-id disco-gateway--watch-counts 0)))
     (puthash channel-id (1+ count) disco-gateway--watch-counts))
   (when disco-enable-live-updates
-    (disco-gateway-start)))
+    (disco-gateway-start)
+    (disco-gateway--maybe-subscribe-watched-channel channel-id)))
 
 (defun disco-gateway-watch-global ()
   "Start watching gateway dispatch globally for non-channel consumers."
@@ -825,7 +904,8 @@ Only CHANNEL read_state_type entries are used here."
   (let ((count (gethash channel-id disco-gateway--watch-counts 0)))
     (cond
      ((<= count 1)
-      (remhash channel-id disco-gateway--watch-counts))
+      (remhash channel-id disco-gateway--watch-counts)
+      (remhash channel-id disco-gateway--lazy-subscribed-channels))
      (t
       (puthash channel-id (1- count) disco-gateway--watch-counts))))
   (unless (disco-gateway--watchers-active-p)

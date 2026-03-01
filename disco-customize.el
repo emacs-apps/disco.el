@@ -152,6 +152,14 @@ Provide this as an alist matching Discord Gateway presence schema."
   :type '(choice (const :tag "Unset" nil) sexp)
   :group 'disco)
 
+(defcustom disco-gateway-enable-lazy-channel-subscriptions t
+  "When non-nil, send Gateway op 14 subscriptions for watched guild channels.
+
+Discord user sessions generally need these per-channel subscriptions to
+receive `TYPING_START` events in guild channels (DM typing does not need it)."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-rate-limit-max-retries 2
   "Maximum retries for 429 responses in one API call."
   :type 'integer

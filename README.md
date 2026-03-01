@@ -28,7 +28,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
-- Room prompt footer now shows telega-style live typing indicators when other users are typing.
+- Room prompt footer now shows telega-style live typing indicators when other users are typing (DM + guild channels).
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
@@ -106,6 +106,7 @@ This repository currently contains an MVP scaffold designed with these reference
   - If intents are explicitly set, include `GUILD_MESSAGE_TYPING` (`1<<11`) and/or `DIRECT_MESSAGE_TYPING` (`1<<14`) to receive typing events.
 - `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
+- `disco-gateway-enable-lazy-channel-subscriptions`: when non-nil, send Gateway op 14 channel subscriptions for watched guild channels (needed in user sessions so guild `TYPING_START` is delivered reliably).
 - `disco-fetch-guild-active-threads`: optionally fetch `/guilds/{id}/threads/active` during root refresh (Discord docs mark this route bot-only; user accounts return 403).
 - `disco-thread-archive-fetch-limit`: page size used by archived thread fetchers (2-100).
 - `disco-gateway-reconnect-delay`: base reconnect delay.
