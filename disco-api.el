@@ -1039,11 +1039,94 @@ Return cons cell (BOUNDARY . BODY)."
       (disco-api--multipart-write-string (format "--%s--\r\n" boundary))
       (cons boundary (buffer-string)))))
 
-(defun disco-api--message-send-payload (content reply-to-message-id attachments)
+(defun disco-api--normalize-poll-answer-media (answer index)
+  "Normalize one poll ANSWER into create-request answer object.
+
+INDEX is used for user-facing validation messages."
+  (let* ((source-media
+          (cond
+           ((stringp answer)
+            `((text . ,answer)))
+           ((listp answer)
+            (or (alist-get 'poll_media answer)
+                (alist-get 'poll-media answer)
+                (and (assq 'text answer) answer)))
+           (t nil)))
+         (text (and (listp source-media)
+                    (alist-get 'text source-media)))
+         (normalized-text (and (stringp text)
+                               (string-trim text)))
+         (emoji (and (listp source-media)
+                     (alist-get 'emoji source-media)))
+         (emoji-id (and (listp emoji) (alist-get 'id emoji)))
+         (emoji-name (and (listp emoji) (alist-get 'name emoji)))
+         (media nil))
+    (unless (and (stringp normalized-text)
+                 (not (string-empty-p normalized-text)))
+      (user-error "disco: poll answer %d text cannot be empty" (1+ index)))
+    (push `(text . ,normalized-text) media)
+    (when (or emoji-id emoji-name)
+      (push `(emoji . ((id . ,emoji-id)
+                       (name . ,emoji-name)))
+            media))
+    `((poll_media . ,(nreverse media)))))
+
+(defun disco-api--normalize-poll-request (poll)
+  "Normalize POLL payload into Discord poll create-request object.
+
+When POLL is nil, return nil."
+  (when poll
+    (unless (listp poll)
+      (user-error "disco: poll payload must be an alist"))
+    (let* ((raw-question (alist-get 'question poll))
+           (question-text
+            (cond
+             ((stringp raw-question) (string-trim raw-question))
+             ((listp raw-question)
+              (let ((text (alist-get 'text raw-question)))
+                (and (stringp text) (string-trim text))))
+             (t nil)))
+           (raw-answers (or (alist-get 'answers poll) '()))
+           (normalized-answers
+            (cl-loop for answer in raw-answers
+                     for idx from 0
+                     collect (disco-api--normalize-poll-answer-media answer idx)))
+           (duration (alist-get 'duration poll))
+           (layout-type (alist-get 'layout_type poll))
+           (allow-multiselect-pair
+            (or (assq 'allow_multiselect poll)
+                (assq 'allow-multiselect poll)))
+           payload)
+      (unless (and (stringp question-text)
+                   (not (string-empty-p question-text)))
+        (user-error "disco: poll question cannot be empty"))
+      (when (or (< (length normalized-answers) 2)
+                (> (length normalized-answers) 10))
+        (user-error "disco: poll must have between 2 and 10 answers"))
+      (push `(question . ((text . ,question-text))) payload)
+      (push `(answers . ,normalized-answers) payload)
+      (when duration
+        (unless (and (numberp duration)
+                     (>= duration 1)
+                     (<= duration (* 32 24)))
+          (user-error "disco: poll duration must be 1..768 hours"))
+        (push `(duration . ,(truncate duration)) payload))
+      (when allow-multiselect-pair
+        (push `(allow_multiselect . ,(if (disco-api--json-true-p (cdr allow-multiselect-pair))
+                                         t
+                                       :false))
+              payload))
+      (when layout-type
+        (unless (integerp layout-type)
+          (user-error "disco: poll layout_type must be an integer"))
+        (push `(layout_type . ,layout-type) payload))
+      (nreverse payload))))
+
+(defun disco-api--message-send-payload (content reply-to-message-id attachments poll)
   "Build message create payload.
 
 CONTENT is optional message text, REPLY-TO-MESSAGE-ID optional reply target,
-ATTACHMENTS is normalized attachment plist list."
+ATTACHMENTS is normalized attachment plist list, POLL is optional poll object."
   (let (payload)
     (when (and (stringp content)
                (not (string-empty-p (string-trim-right content))))
@@ -1061,20 +1144,34 @@ ATTACHMENTS is normalized attachment plist list."
                           (setq entry (append entry `((description . ,description))))))
                       (push entry attachment-objects)))
         (push `(attachments . ,(nreverse attachment-objects)) payload)))
+    (when poll
+      (push `(poll . ,poll) payload))
     (nreverse payload)))
 
-(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id attachments)
+(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id attachments poll)
   "Send message to CHANNEL-ID with ATTACHMENTS via multipart/form-data.
 
 ATTACHMENTS is a list of file path strings or plists containing :path and
-optional :description/:filename/:content-type."
+optional :description/:filename/:content-type. POLL is an optional poll
+create-request object."
   (let* ((normalized-attachments
           (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
-         (payload (disco-api--message-send-payload content reply-to-message-id normalized-attachments)))
-    (unless (or (alist-get 'content payload) normalized-attachments)
-      (user-error "disco: message content and attachments are both empty"))
+         (normalized-poll (disco-api--normalize-poll-request poll))
+         (payload (disco-api--message-send-payload
+                   content
+                   reply-to-message-id
+                   normalized-attachments
+                   normalized-poll)))
+    (unless (or (alist-get 'content payload)
+                normalized-attachments
+                normalized-poll)
+      (user-error "disco: message content, poll, and attachments are all empty"))
     (if (null normalized-attachments)
-        (disco-api-send-message channel-id (or (alist-get 'content payload) "") reply-to-message-id)
+        (disco-api-send-message
+         channel-id
+         (or (alist-get 'content payload) "")
+         reply-to-message-id
+         normalized-poll)
       (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
              (boundary (car multipart))
              (body (cdr multipart)))
@@ -1088,21 +1185,32 @@ optional :description/:filename/:content-type."
          `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
          'binary)))))
 
-(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id attachments on-success on-error)
+(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id attachments poll on-success on-error)
   "Asynchronously send message to CHANNEL-ID with ATTACHMENTS.
 
 ATTACHMENTS is a list of file path strings or plists containing :path and
-optional :description/:filename/:content-type."
+optional :description/:filename/:content-type. POLL is an optional poll
+create-request object."
   (let* ((normalized-attachments
           (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
-         (payload (disco-api--message-send-payload content reply-to-message-id normalized-attachments)))
-    (unless (or (alist-get 'content payload) normalized-attachments)
-      (user-error "disco: message content and attachments are both empty"))
+         (normalized-poll (disco-api--normalize-poll-request poll))
+         (payload (disco-api--message-send-payload
+                   content
+                   reply-to-message-id
+                   normalized-attachments
+                   normalized-poll)))
+    (unless (or (alist-get 'content payload)
+                normalized-attachments
+                normalized-poll)
+      (user-error "disco: message content, poll, and attachments are all empty"))
     (if (null normalized-attachments)
-        (disco-api-send-message-async channel-id (or (alist-get 'content payload) "")
-                                      :reply-to-message-id reply-to-message-id
-                                      :on-success on-success
-                                      :on-error on-error)
+        (disco-api-send-message-async
+         channel-id
+         (or (alist-get 'content payload) "")
+         :reply-to-message-id reply-to-message-id
+         :poll normalized-poll
+         :on-success on-success
+         :on-error on-error)
       (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
              (boundary (car multipart))
              (body (cdr multipart)))
@@ -1168,15 +1276,79 @@ optional :description/:filename/:content-type."
    :on-success on-success
    :on-error on-error))
 
-(defun disco-api-send-message (channel-id content &optional reply-to-message-id)
+(defun disco-api--normalize-poll-answer-id (answer-id)
+  "Normalize poll ANSWER-ID to an integer."
+  (let ((value
+         (cond
+          ((integerp answer-id) answer-id)
+          ((and (stringp answer-id)
+                (string-match-p "\\`[0-9]+\\'" answer-id))
+           (string-to-number answer-id))
+          (t nil))))
+    (unless (and (integerp value) (> value 0))
+      (user-error "disco: poll answer id must be a positive integer"))
+    value))
+
+(defun disco-api--normalize-poll-answer-ids (answer-ids)
+  "Normalize ANSWER-IDS into a deduped integer list."
+  (let* ((source
+          (cond
+           ((null answer-ids) '())
+           ((vectorp answer-ids) (append answer-ids nil))
+           ((listp answer-ids) answer-ids)
+           (t (list answer-ids))))
+         (normalized (mapcar #'disco-api--normalize-poll-answer-id source)))
+    (delete-dups normalized)))
+
+(defun disco-api-create-poll-vote (channel-id message-id answer-ids)
+  "Submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID." 
+  (disco-api--request
+   "PUT"
+   (format "/channels/%s/polls/%s/answers/@me" channel-id message-id)
+   `((answer_ids . ,(disco-api--normalize-poll-answer-ids answer-ids)))
+   nil
+   nil))
+
+(cl-defun disco-api-create-poll-vote-async (channel-id message-id answer-ids &key on-success on-error)
+  "Asynchronously submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID." 
+  (disco-api--request-async
+   "PUT"
+   (format "/channels/%s/polls/%s/answers/@me" channel-id message-id)
+   :payload `((answer_ids . ,(disco-api--normalize-poll-answer-ids answer-ids)))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-expire-poll (channel-id message-id)
+  "End poll for MESSAGE-ID in CHANNEL-ID immediately." 
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/polls/%s/expire" channel-id message-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-expire-poll-async (channel-id message-id &key on-success on-error)
+  "Asynchronously end poll for MESSAGE-ID in CHANNEL-ID." 
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/polls/%s/expire" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-send-message (channel-id content &optional reply-to-message-id poll)
   "Send CONTENT into CHANNEL-ID.
 
-When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message."
-  (let ((payload `((content . ,content))))
-    (when reply-to-message-id
-      (setq payload
-            (append payload
-                    `((message_reference . ((message_id . ,reply-to-message-id)))))))
+When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message.
+When POLL is non-nil, include poll create payload."
+  (let* ((normalized-poll (disco-api--normalize-poll-request poll))
+         (payload (disco-api--message-send-payload
+                   content
+                   reply-to-message-id
+                   nil
+                   normalized-poll)))
+    (unless (or (alist-get 'content payload)
+                normalized-poll)
+      (user-error "disco: message content and poll are both empty"))
     (disco-api--request
      "POST"
      (format "/channels/%s/messages" channel-id)
@@ -1186,13 +1358,20 @@ When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message."
 
 (cl-defun disco-api-send-message-async (channel-id content
                                                    &key reply-to-message-id
+                                                   poll
                                                    on-success on-error)
-  "Send CONTENT into CHANNEL-ID asynchronously."
-  (let ((payload `((content . ,content))))
-    (when reply-to-message-id
-      (setq payload
-            (append payload
-                    `((message_reference . ((message_id . ,reply-to-message-id)))))))
+  "Send CONTENT into CHANNEL-ID asynchronously.
+
+When POLL is non-nil, include poll create payload."
+  (let* ((normalized-poll (disco-api--normalize-poll-request poll))
+         (payload (disco-api--message-send-payload
+                   content
+                   reply-to-message-id
+                   nil
+                   normalized-poll)))
+    (unless (or (alist-get 'content payload)
+                normalized-poll)
+      (user-error "disco: message content and poll are both empty"))
     (disco-api--request-async
      "POST"
      (format "/channels/%s/messages" channel-id)
