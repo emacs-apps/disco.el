@@ -11,6 +11,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'browse-url)
+(require 'color)
 (require 'disco-ui)
 (require 'disco-util)
 (require 'disco-media)
@@ -83,6 +84,26 @@
       (concat "#" (downcase (match-string 1 value))))
      (t nil))))
 
+(defun disco-embed--accent-rgb (embed)
+  "Return EMBED color as RGB triple, or nil."
+  (when-let* ((hex (disco-embed--color-hex embed)))
+    (ignore-errors (color-name-to-rgb hex))))
+
+(defun disco-embed--blend-rgb (fg-rgb bg-rgb alpha)
+  "Blend FG-RGB over BG-RGB with ALPHA and return RGB triple."
+  (when (and (listp fg-rgb) (listp bg-rgb))
+    (list (+ (* alpha (nth 0 fg-rgb)) (* (- 1 alpha) (nth 0 bg-rgb)))
+          (+ (* alpha (nth 1 fg-rgb)) (* (- 1 alpha) (nth 1 bg-rgb)))
+          (+ (* alpha (nth 2 fg-rgb)) (* (- 1 alpha) (nth 2 bg-rgb))))))
+
+(defun disco-embed--background-face (embed)
+  "Return subtle background face plist for EMBED, or nil."
+  (let* ((accent (disco-embed--accent-rgb embed))
+         (default-bg (ignore-errors (color-name-to-rgb (face-background 'default nil t))))
+         (blended (disco-embed--blend-rgb accent default-bg 0.10)))
+    (when blended
+      `(:background ,(apply #'color-rgb-to-hex (append blended '(2))) :extend t))))
+
 (defun disco-embed--accent-face (embed)
   "Return face used for EMBED accent marker."
   (let ((color (disco-embed--color-hex embed)))
@@ -91,14 +112,33 @@
       'disco-room-embed-card-border)))
 
 (defun disco-embed--line-prefix (embed)
-  "Return colored left-prefix string for EMBED card rows."
+  "Return colored visual line prefix string for EMBED card rows."
   (concat "    "
-          (propertize "|" 'face (disco-embed--accent-face embed))
+          (propertize "▏" 'face (disco-embed--accent-face embed))
           " "))
 
-(defun disco-embed--insert-line-prefix (prefix-str)
-  "Insert PREFIX-STR and return content start position."
-  (insert prefix-str)
+(defun disco-embed--combine-faces (&rest faces)
+  "Return one face value from FACES, dropping nil entries."
+  (let ((values (delq nil faces)))
+    (cond
+     ((null values) nil)
+     ((null (cdr values)) (car values))
+     (t values))))
+
+(defun disco-embed--apply-line-prefix (start end prefix-str)
+  "Apply PREFIX-STR as line/wrap prefix for region START..END."
+  (when (< start end)
+    (add-text-properties start end
+                         (list 'line-prefix prefix-str
+                               'wrap-prefix prefix-str))))
+
+(defun disco-embed--append-face (start end face)
+  "Append FACE to region START..END."
+  (when (and face (< start end))
+    (add-face-text-property start end face 'append)))
+
+(defun disco-embed--insert-line-prefix (_prefix-str)
+  "Compatibility helper returning current point as content start."
   (point))
 
 (defun disco-embed--meta-line (embed)
@@ -468,7 +508,7 @@
    :face 'disco-room-embed-card-action
    :help-echo help-echo))
 
-(defun disco-embed--insert-field-row (field prefix-str)
+(defun disco-embed--insert-field-row (field embed prefix-str)
   "Insert one field row for FIELD object."
   (let* ((name (disco-embed--normalize-text
                 (disco-util-object-get field 'name)))
@@ -476,7 +516,7 @@
          (value (disco-embed--normalize-text raw-value))
          (inline (disco-util-json-true-p (disco-util-object-get field 'inline))))
     (when (or name value)
-      (let ((content-start (disco-embed--insert-line-prefix prefix-str)))
+      (let ((content-start (point)))
         (insert (if name name "(unnamed field)"))
         (when inline
           (insert " [inline]"))
@@ -484,8 +524,13 @@
           (insert ": ")
           (insert value))
         (insert "\n")
-        (add-text-properties content-start (point)
-                             '(face disco-room-embed-card-meta))))))
+        (disco-embed--apply-line-prefix content-start (point) prefix-str)
+        (disco-embed--append-face
+         content-start
+         (point)
+         (disco-embed--combine-faces
+          (disco-embed--background-face embed)
+          'disco-room-embed-card-meta))))))
 
 (defun disco-embed--preview-max-width ()
   "Return max inline preview width in pixels."
@@ -529,10 +574,10 @@
     ('no-url "[no preview URL]")
     (_ "[loading preview]")))
 
-(defun disco-embed--insert-grid-preview-row (items prefix-str)
+(defun disco-embed--insert-grid-preview-row (items embed prefix-str)
   "Insert multi-image preview ITEMS as a two-column text grid."
-  (disco-embed--insert-line-prefix prefix-str)
-  (let ((index 0)
+  (let ((content-start (point))
+        (index 0)
         (count (length items)))
     (dolist (item items)
       (let ((image (plist-get item :image))
@@ -545,16 +590,20 @@
                   (disco-media-add-open-url-properties image-start (point) url))
               (error
                (insert "[image unavailable]")))
-          (insert (propertize (disco-embed--preview-status-label status)
-                              'face 'disco-room-embed-card-meta))))
+          (insert (disco-embed--preview-status-label status))))
       (setq index (1+ index))
       (when (< index count)
         (if (= (% index 2) 0)
-            (progn
-              (insert "\n")
-              (disco-embed--insert-line-prefix prefix-str))
-          (insert " ")))))
-  (insert "\n"))
+            (insert "\n")
+          (insert " "))))
+    (insert "\n")
+    (disco-embed--apply-line-prefix content-start (point) prefix-str)
+    (disco-embed--append-face
+     content-start
+     (point)
+     (disco-embed--combine-faces
+      (disco-embed--background-face embed)
+      'disco-room-embed-card-meta))))
 
 (defun disco-embed--insert-preview-row (msg embed embed-index media-kind media-url prefix-str)
   "Insert media preview row for EMBED in MSG."
@@ -598,7 +647,7 @@
                          ((eq cache-state :missing) 'missing)
                          (t 'loading))))))
               (push (list :image display-image :status status :url image-url) items)))
-          (disco-embed--insert-grid-preview-row (nreverse items) prefix-str))
+          (disco-embed--insert-grid-preview-row (nreverse items) embed prefix-str))
       (let* ((preview-attachment (disco-embed--preview-attachment msg embed embed-index))
              (preview (and preview-attachment
                            preview-rendering-available
@@ -609,7 +658,7 @@
              (preview-cache-state (and preview-cache-key
                                        (disco-media-attachment-preview-cache-state
                                         preview-cache-key)))
-             (content-start (disco-embed--insert-line-prefix prefix-str))
+             (content-start (point))
              (apply-meta-face t))
         (cond
          ((memq media-kind '(image thumbnail))
@@ -617,7 +666,7 @@
               (condition-case _
                   (progn
                     (setq apply-meta-face nil)
-                    (disco-media-insert-image-slices preview media-url prefix-str "[image]"))
+                    (disco-media-insert-image-slices preview media-url nil "[image]"))
                 (error
                  (insert "[image unavailable]")))
             (cond
@@ -634,12 +683,18 @@
          (t
           (insert "[no preview]")))
         (insert "\n")
-        (when apply-meta-face
-          (add-text-properties content-start (point)
-                               '(face disco-room-embed-card-meta)))))))
+        (disco-embed--apply-line-prefix content-start (point) prefix-str)
+        (disco-embed--append-face
+         content-start
+         (point)
+         (if apply-meta-face
+             (disco-embed--combine-faces
+              (disco-embed--background-face embed)
+              'disco-room-embed-card-meta)
+           (disco-embed--background-face embed)))))))
 
 (defun disco-embed--insert-action-row (main-url media-url author-url provider-url
-                                                author-icon-url prefix-str)
+                                                author-icon-url embed prefix-str)
   "Insert compact action buttons row for one embed."
   (let ((actions '()))
     (when (disco-embed--url-present-p main-url)
@@ -679,7 +734,7 @@
                   "Open embed author icon URL")
             actions))
     (when actions
-      (let ((content-start (disco-embed--insert-line-prefix prefix-str))
+      (let ((content-start (point))
             (first t))
         (dolist (action (nreverse actions))
           (unless first
@@ -690,8 +745,11 @@
            (nth 1 action)
            (nth 2 action)))
         (insert "\n")
-        (add-text-properties content-start (point)
-                             '(face disco-room-embed-card-meta))))))
+        (disco-embed--apply-line-prefix content-start (point) prefix-str)
+        (disco-embed--append-face
+         content-start
+         (point)
+         (disco-embed--background-face embed))))))
 
 (defun disco-embed-insert-card (msg embed embed-index)
   "Insert one telega-inspired rich embed card for EMBED from MSG."
@@ -736,15 +794,25 @@
                                       (not (equal author-name provider-name))
                                       author-name)
                                  timestamp-text)))
-         (prefix-str (disco-embed--line-prefix embed)))
-    (let ((title-start (disco-embed--insert-line-prefix prefix-str)))
+         (prefix-str (disco-embed--line-prefix embed))
+         (accent-color (disco-embed--color-hex embed))
+         (card-bg-face (disco-embed--background-face embed))
+         (title-face (disco-embed--combine-faces
+                      card-bg-face
+                      (and accent-color `(:foreground ,accent-color))
+                      'disco-room-embed-card-title))
+         (meta-face (disco-embed--combine-faces
+                     card-bg-face
+                     'disco-room-embed-card-meta))
+         (shadow-face (disco-embed--combine-faces card-bg-face 'shadow)))
+    (let ((title-start (point)))
       (insert summary)
       (when (disco-embed--url-present-p main-url)
         (disco-media-add-open-url-properties title-start (point) main-url))
       (insert "\n")
-      (add-text-properties title-start (point)
-                           '(face disco-room-embed-card-title)))
-    (let ((meta-start (disco-embed--insert-line-prefix prefix-str)))
+      (disco-embed--apply-line-prefix title-start (point) prefix-str)
+      (disco-embed--append-face title-start (point) title-face))
+    (let ((meta-start (point)))
       (when author-icon-image
         (condition-case _
             (insert-image author-icon-image "[icon]")
@@ -757,33 +825,34 @@
       (when media-dims
         (insert "  [" media-dims "]"))
       (insert "\n")
-      (add-text-properties meta-start (point)
-                           '(face disco-room-embed-card-meta)))
+      (disco-embed--apply-line-prefix meta-start (point) prefix-str)
+      (disco-embed--append-face meta-start (point) meta-face))
     (when description
-      (let ((desc-start (disco-embed--insert-line-prefix prefix-str)))
+      (let ((desc-start (point)))
         (insert description "\n")
-        (add-text-properties desc-start (point)
-                             '(face disco-room-embed-card-meta))))
+        (disco-embed--apply-line-prefix desc-start (point) prefix-str)
+        (disco-embed--append-face desc-start (point) meta-face)))
     (when media-entry
       (disco-embed--insert-preview-row
        msg embed embed-index media-kind media-url prefix-str))
     (dolist (field fields)
-      (disco-embed--insert-field-row field prefix-str))
+      (disco-embed--insert-field-row field embed prefix-str))
     (when footer-line
-      (let ((footer-start (disco-embed--insert-line-prefix prefix-str)))
+      (let ((footer-start (point)))
         (insert footer-line "\n")
-        (add-text-properties footer-start (point)
-                             '(face disco-room-embed-card-meta))))
+        (disco-embed--apply-line-prefix footer-start (point) prefix-str)
+        (disco-embed--append-face footer-start (point) meta-face)))
     (disco-embed--insert-action-row
-     main-url media-url author-url provider-url author-icon-url prefix-str)
+     main-url media-url author-url provider-url author-icon-url embed prefix-str)
     (when disco-room-show-embed-urls
       (dolist (raw-url (delete-dups (delq nil (list main-url media-url author-url
                                                     provider-url author-icon-url))))
         (when (disco-embed--url-present-p raw-url)
-          (let ((url-start (disco-embed--insert-line-prefix prefix-str)))
+          (let ((url-start (point)))
             (insert raw-url "\n")
             (disco-media-add-open-url-properties url-start (1- (point)) raw-url)
-            (add-text-properties url-start (point) '(face shadow))))))))
+            (disco-embed--apply-line-prefix url-start (point) prefix-str)
+            (disco-embed--append-face url-start (point) shadow-face)))))))
 
 (defun disco-embed-insert-message-embeds (msg)
   "Insert embed detail lines for MSG."

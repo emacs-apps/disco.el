@@ -1890,6 +1890,18 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
     (disco-media-clear-preview-memory-cache)
     (disco-room--rerender-open-rooms)))
 
+(defun disco-room--buffer-substring-filter (beg end delete)
+  "Copy region BEG..END while stripping display-only prefix properties."
+  (let ((text (buffer-substring beg end)))
+    (when delete
+      (save-excursion
+        (goto-char beg)
+        (delete-region beg end)))
+    (remove-text-properties 0 (length text)
+                            '(line-prefix nil wrap-prefix nil)
+                            text)
+    text))
+
 (setq disco-media-preview-rerender-function #'disco-room--rerender-open-rooms)
 
 (defun disco-room--start-avatar-fetch (cache-key url cache-base)
@@ -4747,6 +4759,9 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq truncate-lines t)
   ;; Avoid visible seams between vertically sliced inline images.
   (setq-local line-spacing 0)
+  ;; Strip visual-only line prefixes from copied text.
+  (setq-local filter-buffer-substring-function
+              #'disco-room--buffer-substring-filter)
   (disco-room--typing-cancel-expire-timer)
   (setq-local disco-room--draft-input "")
   (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))
