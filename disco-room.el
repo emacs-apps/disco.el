@@ -19,6 +19,7 @@
 (require 'url-handlers)
 (require 'plz)
 (require 'disco-ui)
+(require 'disco-util)
 (require 'disco-embed)
 (require 'disco-view)
 (require 'disco-api)
@@ -60,11 +61,6 @@
 
 (defconst disco-room--message-flag-has-thread (ash 1 5)
   "Bit mask indicating message has an associated starter thread.")
-
-(declare-function plz-error-p "plz" (obj))
-(declare-function plz-error-message "plz" (plz-error))
-(declare-function plz-error-response "plz" (plz-error))
-(declare-function plz-response-status "plz" (response))
 
 (defvar disco-room--avatar-image-cache (make-hash-table :test #'equal)
   "Global avatar image cache keyed by avatar cache key.
@@ -452,12 +448,6 @@ Grouping applies when sender stays the same and timestamps are within
   "Return current room channel object from state."
   (disco-state-channel disco-room--channel-id))
 
-(defun disco-room--json-true-p (value)
-  "Return non-nil when VALUE semantically represents JSON true."
-  (or (eq value t)
-      (eq value 'true)
-      (equal value "true")))
-
 (defun disco-room--thread-channel-p (&optional channel)
   "Return non-nil when CHANNEL (or current room channel) is a thread."
   (let ((target (or channel (disco-room--channel-object))))
@@ -472,15 +462,15 @@ Grouping applies when sender stays the same and timestamps are within
   "Return non-nil when CHANNEL thread is archived."
   (let* ((target (or channel (disco-room--channel-object)))
          (meta (disco-room--thread-metadata target)))
-    (or (disco-room--json-true-p (alist-get 'archived meta))
-        (disco-room--json-true-p (alist-get 'archived target)))))
+    (or (disco-util-json-true-p (alist-get 'archived meta))
+        (disco-util-json-true-p (alist-get 'archived target)))))
 
 (defun disco-room--thread-locked-p (&optional channel)
   "Return non-nil when CHANNEL thread is locked."
   (let* ((target (or channel (disco-room--channel-object)))
          (meta (disco-room--thread-metadata target)))
-    (or (disco-room--json-true-p (alist-get 'locked meta))
-        (disco-room--json-true-p (alist-get 'locked target)))))
+    (or (disco-util-json-true-p (alist-get 'locked meta))
+        (disco-util-json-true-p (alist-get 'locked target)))))
 
 (defun disco-room--thread-header-suffix ()
   "Return human-readable status suffix for thread header."
@@ -1445,18 +1435,9 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
 
-(defun disco-room--format-time (iso8601)
-  "Format ISO8601 into a compact local string."
-  (condition-case _
-      (format-time-string "%Y-%m-%d %H:%M"
-                          (date-to-time iso8601))
-    (error "unknown-time")))
-
-(defun disco-room--format-time-short (iso8601)
-  "Format ISO8601 into HH:MM local string."
-  (condition-case _
-      (format-time-string "%H:%M" (date-to-time iso8601))
-    (error "--:--")))
+(defun disco-util-format-time-short (iso8601)
+  "Compatibility shim for `disco-util-format-time-short'."
+  (disco-util-format-time-short iso8601))
 
 (defun disco-room--insert-right-aligned-text (text &optional face)
   "Insert TEXT aligned to right edge on current line.
@@ -2235,7 +2216,7 @@ When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
                :else
                (lambda (err)
                  (let* ((current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
-                        (cancel-requested (disco-room--json-true-p (plist-get current :cancel-requested)))
+                        (cancel-requested (disco-util-json-true-p (plist-get current :cancel-requested)))
                         (err-msg (unless cancel-requested
                                    (disco-room--async-error-message err))))
                    (if cancel-requested
@@ -2576,348 +2557,42 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                    " [render fallback]\n")
            (add-text-properties line-start (point) '(face shadow))))))))
 
-(defun disco-room--snake-to-camel-case (name)
-  "Convert snake_case NAME string into lowerCamelCase string."
-  (let* ((parts (split-string (or name "") "_" t))
-         (head (downcase (or (car parts) "")))
-         (tail (mapconcat (lambda (part)
-                            (capitalize (downcase part)))
-                          (cdr parts)
-                          "")))
-    (concat head tail)))
-
-(defun disco-room--object-key-candidates (key)
-  "Return key candidate list for KEY across symbol/string/keyword forms."
-  (let* ((raw-name (cond
-                    ((keywordp key) (substring (symbol-name key) 1))
-                    ((symbolp key) (symbol-name key))
-                    ((stringp key) key)
-                    (t (format "%s" key))))
-         (snake (replace-regexp-in-string "-" "_" raw-name))
-         (camel (if (string-match-p "_" snake)
-                    (disco-room--snake-to-camel-case snake)
-                  snake))
-         (names (delete-dups (list snake camel (downcase snake) (downcase camel))))
-         out)
-    (dolist (name names)
-      (push name out)
-      (push (intern name) out)
-      (push (intern (concat ":" name)) out))
-    (delete-dups (nreverse out))))
-
-(defun disco-room--object-get (object &rest keys)
-  "Return first non-nil value for KEYS found in OBJECT alist/plist."
-  (let ((candidates (delete-dups
-                     (apply #'append
-                            (mapcar #'disco-room--object-key-candidates keys)))))
-    (cond
-     ((and (listp object) (consp (car object)))
-      (catch 'found
-        (dolist (candidate candidates)
-          (let ((pair (assoc candidate object)))
-            (when (and pair (cdr pair))
-              (throw 'found (cdr pair)))))
-        nil))
-     ((listp object)
-      (catch 'found
-        (dolist (candidate candidates)
-          (when (keywordp candidate)
-            (let ((tail (plist-member object candidate)))
-              (when (and tail (cadr tail))
-                (throw 'found (cadr tail))))))
-        nil))
-     (t nil))))
-
-(defun disco-room--embed-type (embed)
-  "Return short embed type string for EMBED object."
-  (let ((raw (disco-room--object-get embed 'type)))
-    (if (and (stringp raw) (not (string-empty-p raw)))
-        (downcase raw)
-      "rich")))
-
-(defun disco-room--embed-summary (embed)
-  "Return one-line embed summary string for EMBED object."
-  (let* ((author (disco-room--object-get embed 'author))
-         (provider (disco-room--object-get embed 'provider))
-         (title (or (disco-room--object-get embed 'title)
-                    (and (listp author) (disco-room--object-get author 'name))
-                    (and (listp provider) (disco-room--object-get provider 'name))
-                    (disco-room--object-get embed 'description)
-                    (disco-room--object-get embed 'url)
-                    "embed"))
-         (headline (string-trim
-                    (replace-regexp-in-string "[\n\r\t]+" " "
-                                              (format "%s" title)))))
-    (format "[%s] %s"
-            (disco-room--embed-type embed)
-            (truncate-string-to-width headline 92 nil nil t))))
-
-(defun disco-room--embed-color-hex (embed)
-  "Return hexadecimal color string for EMBED, or nil."
-  (let ((value (disco-room--object-get embed 'color)))
-    (cond
-     ((and (integerp value) (>= value 0) (<= value #xFFFFFF))
-      (format "#%06x" value))
-     ((and (stringp value)
-           (string-match "\\`#?\\([0-9A-Fa-f]\\{6\\}\\)\\'" value))
-      (concat "#" (downcase (match-string 1 value))))
-     (t nil))))
-
-(defun disco-room--embed-meta-line (embed)
-  "Return compact metadata line for EMBED object."
-  (let* ((provider (disco-room--object-get embed 'provider))
-         (author (disco-room--object-get embed 'author))
-         (provider-name (and (listp provider) (disco-room--object-get provider 'name)))
-         (author-name (and (listp author) (disco-room--object-get author 'name)))
-         (timestamp (disco-room--object-get embed 'timestamp))
-         (timestamp-text (and (stringp timestamp)
-                              (not (string-empty-p timestamp))
-                              (format "time=%s" (disco-room--format-time timestamp))))
-         (fields (or (disco-room--object-get embed 'fields) '()))
-         (color (disco-room--embed-color-hex embed))
-         (parts (delq nil
-                      (list (format "type=%s" (disco-room--embed-type embed))
-                            (and (stringp provider-name)
-                                 (not (string-empty-p provider-name))
-                                 (format "provider=%s" provider-name))
-                            (and (stringp author-name)
-                                 (not (string-empty-p author-name))
-                                 (format "author=%s" author-name))
-                            (and (> (length fields) 0)
-                                 (format "fields=%d" (length fields)))
-                            timestamp-text
-                            (and color (format "color=%s" color))))))
-    (if parts
-        (mapconcat #'identity parts "  ")
-      "type=rich")))
-
-(defun disco-room--message-attachment-by-filename (msg filename)
-  "Return attachment from MSG matching FILENAME, or nil."
-  (when (and (stringp filename) (not (string-empty-p filename)))
-    (seq-find
-     (lambda (attachment)
-       (equal (disco-room--object-get attachment 'filename) filename))
-     (or (alist-get 'attachments msg) '()))))
-
-(defun disco-room--resolve-attachment-scheme-url (msg url)
-  "Resolve attachment:// URL in URL using attachments from MSG."
-  (cond
-   ((not (and (stringp url) (not (string-empty-p url))))
-    nil)
-   ((string-match "\\`attachment://\\(.+\\)\\'" url)
-    (let* ((filename (match-string 1 url))
-           (attachment (disco-room--message-attachment-by-filename msg filename)))
-      (or (and attachment (disco-room--attachment-preview-url attachment))
-          (and attachment (disco-room--attachment-download-url attachment))
-          (and attachment url))))
-   (t url)))
-
-(defun disco-room--embed-author-object (embed)
-  "Return author object for EMBED, or nil."
-  (let ((author (disco-room--object-get embed 'author)))
-    (and (consp author) author)))
-
-(defun disco-room--embed-provider-object (embed)
-  "Return provider object for EMBED, or nil."
-  (let ((provider (disco-room--object-get embed 'provider)))
-    (and (consp provider) provider)))
-
-(defun disco-room--embed-author-url (msg embed)
-  "Return author URL for EMBED in MSG, if available."
-  (let* ((author (disco-room--embed-author-object embed))
-         (raw-url (and author (disco-room--object-get author 'url))))
-    (disco-room--resolve-attachment-scheme-url msg raw-url)))
-
-(defun disco-room--embed-provider-url (msg embed)
-  "Return provider URL for EMBED in MSG, if available."
-  (let* ((provider (disco-room--embed-provider-object embed))
-         (raw-url (and provider (disco-room--object-get provider 'url))))
-    (disco-room--resolve-attachment-scheme-url msg raw-url)))
-
-(defun disco-room--embed-author-icon-url (msg embed)
-  "Return author icon URL for EMBED in MSG, if available."
-  (let* ((author (disco-room--embed-author-object embed))
-         (raw-url (and author
-                       (or (disco-room--object-get author 'proxy_icon_url 'proxyIconUrl)
-                           (disco-room--object-get author 'icon_url 'iconUrl)
-                           (disco-room--object-get author 'icon_canonical_url 'iconCanonicalUrl)))))
-    (disco-room--resolve-attachment-scheme-url msg raw-url)))
-
-(defun disco-room--embed-author-icon-attachment (msg embed embed-index)
-  "Build pseudo attachment object for EMBED author icon in MSG."
-  (let* ((icon-url (disco-room--embed-author-icon-url msg embed))
-         (message-id (format "%s" (or (alist-get 'id msg) "unknown")))
-         (size (max 8
-                    (if (numberp disco-room-embed-author-icon-size)
-                        disco-room-embed-author-icon-size
-                      18))))
-    (when (and (stringp icon-url) (not (string-empty-p icon-url)))
-      `((id . ,(format "embed-author-icon:%s:%s:%s:%s"
-                       message-id
-                       embed-index
-                       size
-                       (md5 icon-url)))
-        (filename . ,(format "embed-author-%s-icon" embed-index))
-        (content_type . "image/embed")
-        (url . ,icon-url)
-        (proxy_url . ,icon-url)
-        (width . ,size)
-        (height . ,size)))))
-
-(defun disco-room--embed-author-icon-image (msg embed embed-index)
-  "Return inline author icon image for EMBED in MSG, or nil while loading."
-  (when (and disco-room-show-embed-author-icons
-             (disco-room--inline-image-rendering-available-p))
-    (let* ((size (max 8
-                      (if (numberp disco-room-embed-author-icon-size)
-                          disco-room-embed-author-icon-size
-                        18)))
-           (attachment (disco-room--embed-author-icon-attachment msg embed embed-index))
-           image)
-      (when attachment
-        ;; Reuse attachment preview fetch/cache pipeline for author icons.
-        (disco-room--attachment-preview-image attachment t)
-        (let* ((cache-key (disco-room--attachment-preview-cache-key attachment))
-               (cache-file (and cache-key
-                                (disco-room--attachment-preview-cache-existing-file cache-key))))
-          (when cache-file
-            (setq image
-                  (ignore-errors
-                    (create-image cache-file nil nil
-                                  :width size
-                                  :height size
-                                  :ascent 'center)))
-            (unless (disco-room--image-object-valid-p image)
-              (when (image-type-available-p 'imagemagick)
-                (setq image
-                      (ignore-errors
-                        (create-image cache-file 'imagemagick nil
-                                      :width size
-                                      :height size
-                                      :ascent 'center)))))
-            (when (disco-room--image-object-valid-p image)
-              image)))))))
-
-(defun disco-room--embed-main-url (msg embed)
-  "Return primary URL for EMBED in MSG, resolving attachment:// links."
-  (or (disco-room--resolve-attachment-scheme-url
-       msg
-       (or (disco-room--object-get embed 'url)
-           (disco-room--object-get embed 'canonical_url 'canonicalUrl)))
-      (disco-room--embed-author-url msg embed)
-      (disco-room--embed-provider-url msg embed)))
-
-(defun disco-room--embed-media-entry (embed)
-  "Return media entry cons for EMBED as (KIND . OBJECT), or nil."
-  (let ((image (disco-room--object-get embed 'image))
-        (thumbnail (disco-room--object-get embed 'thumbnail))
-        (video (disco-room--object-get embed 'video))
-        (images (disco-room--object-get embed 'images)))
-    (cond
-     ((consp image) (cons 'image image))
-     ((and (listp images) (consp (car images))) (cons 'image (car images)))
-     ((and (vectorp images)
-           (> (length images) 0)
-           (consp (aref images 0)))
-      (cons 'image (aref images 0)))
-     ((consp thumbnail) (cons 'thumbnail thumbnail))
-     ((consp video) (cons 'video video))
-     ((equal (disco-room--embed-type embed) "image") (cons 'image nil))
-     (t nil))))
-
-(defun disco-room--embed-media-url (msg embed)
-  "Return best media URL for EMBED in MSG, resolving attachment:// links."
-  (let* ((media-entry (disco-room--embed-media-entry embed))
-         (media (cdr media-entry))
-         (proxy-url (and (listp media)
-                         (or (disco-room--object-get media 'proxy_url)
-                             (disco-room--object-get media 'proxyUrl))))
-         (source-url (and (listp media)
-                          (or (disco-room--object-get media 'url)
-                              (disco-room--object-get media 'canonical_url 'canonicalUrl))))
-         (resolved-proxy (disco-room--resolve-attachment-scheme-url msg proxy-url))
-         (resolved-source (disco-room--resolve-attachment-scheme-url msg source-url))
-         (main-url (disco-room--embed-main-url msg embed)))
-    (or (and (stringp resolved-proxy)
-             (not (string-empty-p resolved-proxy))
-             resolved-proxy)
-        (and (stringp resolved-source)
-             (not (string-empty-p resolved-source))
-             resolved-source)
-        (and (equal (disco-room--embed-type embed) "image")
-             (stringp main-url)
-             (not (string-empty-p main-url))
-             main-url))))
-
-(defun disco-room--embed-preview-attachment (msg embed embed-index)
-  "Build pseudo attachment object used to render EMBED preview from MSG.
-
-EMBED-INDEX is one-based position of EMBED in MSG embed list."
-  (let* ((media-entry (disco-room--embed-media-entry embed))
-         (media-kind (car media-entry))
-         (media (cdr media-entry))
-         (media-url (disco-room--embed-media-url msg embed))
-         (message-id (format "%s" (or (alist-get 'id msg) "unknown")))
-         (cache-suffix (md5 (or media-url ""))))
-    (when (and media-url (memq media-kind '(image thumbnail)))
-      `((id . ,(format "embed:%s:%s:%s:%s"
-                       message-id
-                       embed-index
-                       (symbol-name media-kind)
-                       cache-suffix))
-        (filename . ,(format "embed-%s-%s"
-                             embed-index
-                             (symbol-name media-kind)))
-        (content_type . "image/embed")
-        (url . ,media-url)
-        (proxy_url . ,media-url)
-        (width . ,(and (listp media) (disco-room--object-get media 'width)))
-        (height . ,(and (listp media) (disco-room--object-get media 'height)))))))
-
-(defun disco-room--insert-embed-action-button (label callback help-echo)
-  "Insert one embed action button with LABEL, CALLBACK and HELP-ECHO."
-  (disco-ui-insert-action-button
-   label
-   callback
-   :face 'disco-room-embed-card-action
-   :help-echo help-echo))
-
 (defun disco-room--insert-embed-card (msg embed embed-index)
   "Insert one rich embed card for EMBED object from MSG.
 
 EMBED-INDEX is one-based position of EMBED in MSG embed list."
-  (let* ((summary (disco-room--embed-summary embed))
-         (meta (disco-room--embed-meta-line embed))
-         (description (disco-room--object-get embed 'description))
-         (fields (or (disco-room--object-get embed 'fields) '()))
-         (footer (disco-room--object-get embed 'footer))
-         (footer-value (and (listp footer) (disco-room--object-get footer 'text)))
+  (let* ((summary (disco-embed--summary embed))
+         (meta (disco-embed--meta-line embed))
+         (description (disco-util-object-get embed 'description))
+         (fields (or (disco-util-object-get embed 'fields) '()))
+         (footer (disco-util-object-get embed 'footer))
+         (footer-value (and (listp footer) (disco-util-object-get footer 'text)))
          (footer-text (and footer-value (format "%s" footer-value)))
-         (timestamp (disco-room--object-get embed 'timestamp))
+         (timestamp (disco-util-object-get embed 'timestamp))
          (timestamp-text (and (stringp timestamp)
                               (not (string-empty-p timestamp))
-                              (disco-room--format-time timestamp)))
+                              (disco-util-format-time timestamp)))
          (footer-line (string-join (delq nil (list footer-text timestamp-text)) "  ·  "))
-         (author (disco-room--embed-author-object embed))
-         (author-name (and (listp author) (disco-room--object-get author 'name)))
-         (author-url (disco-room--embed-author-url msg embed))
-         (author-icon-url (disco-room--embed-author-icon-url msg embed))
-         (author-icon-image (disco-room--embed-author-icon-image msg embed embed-index))
-         (provider (disco-room--embed-provider-object embed))
-         (provider-name (and (listp provider) (disco-room--object-get provider 'name)))
-         (provider-url (disco-room--embed-provider-url msg embed))
-         (main-url (disco-room--embed-main-url msg embed))
-         (media-entry (disco-room--embed-media-entry embed))
+         (author (disco-embed--author-object embed))
+         (author-name (and (listp author) (disco-util-object-get author 'name)))
+         (author-url (disco-embed--author-url msg embed))
+         (author-icon-url (disco-embed--author-icon-url msg embed))
+         (author-icon-image (disco-embed--author-icon-image msg embed embed-index))
+         (provider (disco-embed--provider-object embed))
+         (provider-name (and (listp provider) (disco-util-object-get provider 'name)))
+         (provider-url (disco-embed--provider-url msg embed))
+         (main-url (disco-embed--main-url msg embed))
+         (media-entry (disco-embed--media-entry embed))
          (media-kind (car media-entry))
          (media (cdr media-entry))
-         (media-url (disco-room--embed-media-url msg embed))
-         (media-width (and (listp media) (disco-room--object-get media 'width)))
-         (media-height (and (listp media) (disco-room--object-get media 'height)))
+         (media-url (disco-embed--media-url msg embed))
+         (media-width (and (listp media) (disco-util-object-get media 'width)))
+         (media-height (and (listp media) (disco-util-object-get media 'height)))
          (media-dims (when (and (numberp media-width) (numberp media-height))
                        (format "%dx%d" media-width media-height)))
          (preview-rendering-available (and disco-room-show-embed-image-previews
                                            (disco-room--inline-image-rendering-available-p)))
-         (preview-attachment (disco-room--embed-preview-attachment msg embed embed-index))
+         (preview-attachment (disco-embed--preview-attachment msg embed embed-index))
          (preview-cache-key (and preview-attachment
                                  (disco-room--attachment-preview-cache-key preview-attachment)))
          (preview-cache-state (and preview-cache-key
@@ -2963,12 +2638,12 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
                   "unknown"))
         (when (and (stringp author-url) (not (string-empty-p author-url)))
           (insert " ")
-          (disco-room--insert-embed-action-button
+          (disco-embed--insert-action-button
            "[Open Author]"
            (lambda () (browse-url author-url t))
            "Open embed author URL")
           (insert " ")
-          (disco-room--insert-embed-action-button
+          (disco-embed--insert-action-button
            "[Copy Author]"
            (lambda ()
              (kill-new author-url)
@@ -2976,12 +2651,12 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
            "Copy embed author URL"))
         (when (and (stringp author-icon-url) (not (string-empty-p author-icon-url)))
           (insert " ")
-          (disco-room--insert-embed-action-button
+          (disco-embed--insert-action-button
            "[Open Icon]"
            (lambda () (browse-url author-icon-url t))
            "Open embed author icon URL")
           (insert " ")
-          (disco-room--insert-embed-action-button
+          (disco-embed--insert-action-button
            "[Copy Icon]"
            (lambda ()
              (kill-new author-icon-url)
@@ -2998,12 +2673,12 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
                   "unknown"))
         (when (and (stringp provider-url) (not (string-empty-p provider-url)))
           (insert " ")
-          (disco-room--insert-embed-action-button
+          (disco-embed--insert-action-button
            "[Open Provider]"
            (lambda () (browse-url provider-url t))
            "Open embed provider URL")
           (insert " ")
-          (disco-room--insert-embed-action-button
+          (disco-embed--insert-action-button
            "[Copy Provider]"
            (lambda ()
              (kill-new provider-url)
@@ -3016,12 +2691,12 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
       (insert "    | link: ")
       (if (and (stringp main-url) (not (string-empty-p main-url)))
           (progn
-            (disco-room--insert-embed-action-button
+            (disco-embed--insert-action-button
              "[Open URL]"
              (lambda () (browse-url main-url t))
              "Open embed URL")
             (insert " ")
-            (disco-room--insert-embed-action-button
+            (disco-embed--insert-action-button
              "[Copy URL]"
              (lambda ()
                (kill-new main-url)
@@ -3038,12 +2713,12 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
                                    (symbol-name media-kind)
                                  "media")))
         (insert " ")
-        (disco-room--insert-embed-action-button
+        (disco-embed--insert-action-button
          "[Open Media]"
          (lambda () (browse-url media-url t))
          "Open embed media URL")
         (insert " ")
-        (disco-room--insert-embed-action-button
+        (disco-embed--insert-action-button
          "[Copy Media]"
          (lambda ()
            (kill-new media-url)
@@ -3083,15 +2758,15 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
         (add-text-properties preview-start (point)
                              '(face disco-room-embed-card-meta))))
     (dolist (field fields)
-      (let* ((name-value (disco-room--object-get field 'name))
-             (field-value (disco-room--object-get field 'value))
+      (let* ((name-value (disco-util-object-get field 'name))
+             (field-value (disco-util-object-get field 'value))
              (name (if (stringp name-value)
                        name-value
                      (if name-value (format "%s" name-value) "")))
              (value (if (stringp field-value)
                         field-value
                       (if field-value (format "%s" field-value) "")))
-             (inline (disco-room--json-true-p (disco-room--object-get field 'inline))))
+             (inline (disco-util-json-true-p (disco-util-object-get field 'inline))))
         (when (or (not (string-empty-p name))
                   (not (string-empty-p value)))
           (let ((field-start (point)))
@@ -3149,8 +2824,8 @@ EMBED-INDEX is one-based position of EMBED in MSG embed list."
 
 (defun disco-room--reaction-selected-p (reaction)
   "Return non-nil when REACTION is selected by current user."
-  (or (disco-room--json-true-p (alist-get 'me reaction))
-      (disco-room--json-true-p (alist-get 'is_chosen reaction))))
+  (or (disco-util-json-true-p (alist-get 'me reaction))
+      (disco-util-json-true-p (alist-get 'is_chosen reaction))))
 
 (defun disco-room--message-reactions (msg)
   "Return normalized reactions list for MSG."
@@ -3352,11 +3027,11 @@ Return non-nil when a local message update was applied."
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
   (let* ((context (or (disco-room--message-render-context msg) '()))
-         (compact (disco-room--json-true-p (plist-get context :compact)))
+         (compact (disco-util-json-true-p (plist-get context :compact)))
          (insert-date (plist-get context :insert-date))
-         (insert-unread (disco-room--json-true-p (plist-get context :insert-unread)))
-         (timestamp (disco-room--format-time (or (alist-get 'timestamp msg) "")))
-         (short-time (disco-room--format-time-short (or (alist-get 'timestamp msg) "")))
+         (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
+         (timestamp (disco-util-format-time (or (alist-get 'timestamp msg) "")))
+         (short-time (disco-util-format-time-short (or (alist-get 'timestamp msg) "")))
          (author (disco-room--message-author msg))
          (author-face (disco-room--author-face msg))
          (content (disco-room--message-display-content msg))
