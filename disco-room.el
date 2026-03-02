@@ -3081,13 +3081,44 @@ When TARGET-PATH is nil, prompt interactively for destination path."
     (when (and (stringp display) (not (string-empty-p (string-trim display))))
       (string-trim display))))
 
+(defun disco-room--message-guild-name (msg)
+  "Return display guild name for MSG, or nil if unavailable."
+  (let* ((msg-guild-id (disco-room--normalize-id (alist-get 'guild_id msg)))
+         (guild-id (or msg-guild-id disco-room--guild-id))
+         (guild (and guild-id (disco-room--guild-by-id guild-id))))
+    (when (listp guild)
+      (let ((name (alist-get 'name guild)))
+        (and (stringp name)
+             (not (string-empty-p name))
+             name)))))
+
+(defun disco-room--message-system-auto-moderation-content (msg)
+  "Return human-readable auto moderation line for MSG."
+  (let* ((embed (car (disco-room--message-effective-embeds msg)))
+         (title (and (listp embed) (disco-util-object-get embed 'title)))
+         (description (and (listp embed) (disco-util-object-get embed 'description)))
+         (title-text (and (stringp title) (string-trim title)))
+         (desc-text (and (stringp description) (string-trim description))))
+    (cond
+     ((and title-text desc-text
+           (not (string-empty-p title-text))
+           (not (string-empty-p desc-text)))
+      (format "Auto moderation action: %s — %s" title-text desc-text))
+     ((and title-text (not (string-empty-p title-text)))
+      (format "Auto moderation action: %s" title-text))
+     ((and desc-text (not (string-empty-p desc-text)))
+      (format "Auto moderation action: %s" desc-text))
+     (t
+      "Auto moderation action was triggered."))))
+
 (defun disco-room--message-system-content (msg)
   "Return rendered system content for MSG type, or nil if not handled."
   (let* ((type (disco-room--message-type msg))
          (author (disco-room--message-author msg))
          (content (string-trim (disco-util-unescape-markdown-punctuation
                                 (or (alist-get 'content msg) ""))))
-         (boost-times (and (not (string-empty-p content)) content)))
+         (boost-times (and (not (string-empty-p content)) content))
+         (guild-name (or (disco-room--message-guild-name msg) "this server")))
     (pcase type
       (6
        (format "%s pinned a message to this channel. View all pinned messages." author))
@@ -3106,6 +3137,14 @@ When TARGET-PATH is nil, prompt interactively for destination path."
        (format "%s has added %s to this channel. Its most important updates will show up here."
                author
                (if (string-empty-p content) "a followed channel" content)))
+      (14
+       "This server has been removed from Server Discovery because it no longer passes all the requirements. Check Server Settings for more details.")
+      (15
+       "This server is eligible for Server Discovery again and has been automatically relisted!")
+      (16
+       "This server has failed Discovery activity requirements for 1 week. If this server fails for 4 weeks in a row, it will be automatically removed from Discovery.")
+      (17
+       "This server has failed Discovery activity requirements for 3 weeks in a row. If this server fails for 1 more week, it will be removed from Discovery.")
       (18
        (if (string-empty-p content)
            (format "%s started a thread. See all threads." author)
@@ -3115,6 +3154,40 @@ When TARGET-PATH is nil, prompt interactively for destination path."
            "Sorry, we couldn't load the first message in this thread."))
       (22
        "Wondering who to invite? Start by inviting anyone who can help you build the server!")
+      (24
+       (disco-room--message-system-auto-moderation-content msg))
+      (25
+       (let* ((role-subscription
+               (and (listp msg)
+                    (disco-util-object-get msg 'role_subscription_data)))
+              (tier-name (and (listp role-subscription)
+                              (disco-util-object-get role-subscription 'tier_name)))
+              (months (and (listp role-subscription)
+                           (disco-util-object-get role-subscription
+                                                  'total_months_subscribed)))
+              (renewal (and (listp role-subscription)
+                            (disco-util-json-true-p
+                             (disco-util-object-get role-subscription 'is_renewal))))
+              (tier-label (if (and (stringp tier-name)
+                                   (not (string-empty-p tier-name)))
+                              tier-name
+                            "a role subscription tier")))
+         (if (numberp months)
+             (format "%s %s %s and has been a subscriber of %s for %d month%s!"
+                     author
+                     (if renewal "renewed" "joined")
+                     tier-label
+                     guild-name
+                     months
+                     (if (= months 1) "" "s"))
+           (format "%s %s %s."
+                   author
+                   (if renewal "renewed" "joined")
+                   tier-label))))
+      (26
+       (if (string-empty-p content)
+           "A premium interaction upsell message was sent."
+         content))
       (27
        (if (string-empty-p content)
            (format "%s started a Stage." author)
@@ -3131,6 +3204,42 @@ When TARGET-PATH is nil, prompt interactively for destination path."
        (if (string-empty-p content)
            (format "%s changed the Stage topic." author)
          (format "%s changed the Stage topic: %s" author content)))
+      (32
+       (let* ((application (and (listp msg)
+                                (disco-util-object-get msg 'application)))
+              (app-name (and (listp application)
+                             (disco-util-object-get application 'name))))
+         (format "%s upgraded %s to premium for this server!"
+                 author
+                 (if (and (stringp app-name) (not (string-empty-p app-name)))
+                     app-name
+                   "a deleted application"))))
+      (36
+       (if (string-empty-p content)
+           (format "%s enabled security actions." author)
+         (format "%s enabled security actions until %s." author content)))
+      (37
+       (format "%s disabled security actions." author))
+      (38
+       (format "%s reported a raid in %s." author guild-name))
+      (39
+       (format "%s reported a false alarm in %s." author guild-name))
+      (44
+       (let* ((purchase-notification (and (listp msg)
+                                          (disco-util-object-get msg
+                                                                 'purchase_notification)))
+              (guild-product-purchase
+               (and (listp purchase-notification)
+                    (disco-util-object-get purchase-notification
+                                           'guild_product_purchase)))
+              (product-name (and (listp guild-product-purchase)
+                                 (disco-util-object-get guild-product-purchase
+                                                        'product_name))))
+         (if (and (stringp product-name) (not (string-empty-p product-name)))
+             (format "%s has purchased %s!" author product-name)
+           (format "%s completed a guild product purchase." author))))
+      (46
+       "A poll result was finalized.")
       (_ nil))))
 
 (defun disco-room--message-display-content (msg)
@@ -3149,40 +3258,39 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (showing-embeds (and disco-room-show-embeds (> embed-count 0)))
          (showing-poll (and disco-room-show-polls (> poll-count 0)))
          (msg-type (disco-room--message-type msg))
-         (system-content (and (string-empty-p content)
-                              (disco-room--message-system-content msg)))
+         (system-content (disco-room--message-system-content msg))
          (forwarded-summary (and (string-empty-p content)
                                  (not disco-room-use-rich-forward-cards)
                                  (disco-room--forwarded-summary-content msg))))
-    (if (string-empty-p content)
-        (cond
-         ((and (stringp system-content) (not (string-empty-p system-content)))
-          system-content)
-         ((and (stringp forwarded-summary) (not (string-empty-p forwarded-summary)))
-          forwarded-summary)
-         ((and disco-room-use-rich-forward-cards
-               (disco-room--message-forwarded-p msg))
-          "")
-         ((or showing-attachments showing-embeds showing-poll)
-          "")
-         ((and (> attachment-count 0) (> embed-count 0) (> poll-count 0))
-          (format "[attachment x%d, embed x%d, poll]" attachment-count embed-count))
-         ((and (> attachment-count 0) (> embed-count 0))
-          (format "[attachment x%d, embed x%d]" attachment-count embed-count))
-         ((and (> attachment-count 0) (> poll-count 0))
-          (format "[attachment x%d, poll]" attachment-count))
-         ((and (> embed-count 0) (> poll-count 0))
-          (format "[embed x%d, poll]" embed-count))
-         ((> attachment-count 0)
-          (format "[attachment x%d]" attachment-count))
-         ((> embed-count 0)
-          (format "[embed x%d]" embed-count))
-         ((> poll-count 0)
-          "[poll]")
-         ((/= msg-type 0)
-          (format "[system message type %d]" msg-type))
-         (t "[empty]"))
-      content)))
+    (if (and (stringp system-content) (not (string-empty-p system-content)))
+        system-content
+      (if (string-empty-p content)
+          (cond
+           ((and (stringp forwarded-summary) (not (string-empty-p forwarded-summary)))
+            forwarded-summary)
+           ((and disco-room-use-rich-forward-cards
+                 (disco-room--message-forwarded-p msg))
+            "")
+           ((or showing-attachments showing-embeds showing-poll)
+            "")
+           ((and (> attachment-count 0) (> embed-count 0) (> poll-count 0))
+            (format "[attachment x%d, embed x%d, poll]" attachment-count embed-count))
+           ((and (> attachment-count 0) (> embed-count 0))
+            (format "[attachment x%d, embed x%d]" attachment-count embed-count))
+           ((and (> attachment-count 0) (> poll-count 0))
+            (format "[attachment x%d, poll]" attachment-count))
+           ((and (> embed-count 0) (> poll-count 0))
+            (format "[embed x%d, poll]" embed-count))
+           ((> attachment-count 0)
+            (format "[attachment x%d]" attachment-count))
+           ((> embed-count 0)
+            (format "[embed x%d]" embed-count))
+           ((> poll-count 0)
+            "[poll]")
+           ((/= msg-type 0)
+            (format "[system message type %d]" msg-type))
+           (t "[empty]"))
+        content))))
 
 (defun disco-room--attachment-kind (attachment)
   "Return short attachment kind string for ATTACHMENT object."

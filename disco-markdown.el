@@ -35,6 +35,12 @@ custom emoji markers, and Discord timestamps."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-markdown-enable-spoiler-render t
+  "When non-nil, render Discord spoiler syntax (`||spoiler||`) in
+markdown-mode backend."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-markdown-cache-enabled t
   "When non-nil, cache Markdown render results by backend/context/text."
   :type 'boolean
@@ -67,6 +73,16 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
   "Face used for rendered custom emoji markers."
   :group 'disco)
 
+(defface disco-markdown-navigation-face
+  '((t :inherit font-lock-function-name-face))
+  "Face used for rendered Discord guild navigation tokens."
+  :group 'disco)
+
+(defface disco-markdown-spoiler-face
+  '((t :inherit shadow))
+  "Face used for rendered Discord spoiler contents."
+  :group 'disco)
+
 (defconst disco-markdown--regexp-user-mention "<@!?\\([0-9]+\\)>"
   "Regexp matching user mention tokens.")
 
@@ -84,6 +100,18 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 
 (defconst disco-markdown--regexp-timestamp "<t:\\([0-9]+\\)\\(?::\\([tTdDfFRsS]\\)\\)?>"
   "Regexp matching Discord timestamp tokens.")
+
+(defconst disco-markdown--regexp-guild-navigation "<id:\\([^>]+\\)>"
+  "Regexp matching Discord guild navigation tokens.")
+
+(defconst disco-markdown--regexp-guild-navigation-bare "\\_<id:[[:alnum:]:_-]+\\_>"
+  "Regexp matching guild navigation tokens after markdown angle-bracket stripping.")
+
+(defconst disco-markdown--regexp-everyone-mention "@\\(?:everyone\\|here\\)"
+  "Regexp matching @everyone/@here mention tokens.")
+
+(defconst disco-markdown--regexp-spoiler "||\\([^|\n][^|\n]*?\\)||"
+  "Regexp matching single-line Discord spoiler tokens.")
 
 (defvar disco-markdown--cache (make-hash-table :test #'equal)
   "Cache table for rendered Markdown strings.")
@@ -358,6 +386,18 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
         (?R (disco-markdown--relative-time-label seconds))
         (_ (format-time-string "%B %d, %Y %H:%M" time))))))
 
+(defun disco-markdown--format-guild-navigation (raw)
+  "Return display label for guild navigation token RAW."
+  (let ((token (string-trim (or raw ""))))
+    (if (string-empty-p token)
+        "id:unknown"
+      (format "id:%s" token))))
+
+(defun disco-markdown--contains-relative-timestamp-p (text)
+  "Return non-nil when TEXT contains Discord relative timestamp tokens."
+  (and (stringp text)
+       (string-match-p "<t:[0-9]+:R>" text)))
+
 (defun disco-markdown--code-face-p (face)
   "Return non-nil when FACE denotes markdown code/preformatted text."
   (when face
@@ -398,56 +438,90 @@ BACKEND controls whether code-face regions are protected from replacements."
 
 BACKEND controls code-region behavior. MESSAGE carries mention/channel context."
   (if (not (and (eq backend 'markdown-mode)
-                disco-markdown-enable-discord-tokens
                 (disco-markdown--string-present-p text)))
       text
     (let* ((user-map (disco-markdown--build-user-name-map message))
            (channel-map (disco-markdown--build-channel-name-map message))
            (role-map (disco-markdown--build-role-name-map message))
-           (replacements
-            (list
-             (cons disco-markdown--regexp-user-mention
-                   (lambda ()
-                     (let* ((id (match-string-no-properties 1))
-                            (name (or (gethash id user-map)
-                                      (format "user:%s" id))))
-                       (propertize (concat "@" name)
-                                   'face 'disco-markdown-mention-face))))
-             (cons disco-markdown--regexp-role-mention
-                   (lambda ()
-                     (let* ((id (match-string-no-properties 1))
-                            (name (or (gethash id role-map)
-                                      (format "role:%s" id))))
-                       (propertize (concat "@" name)
-                                   'face 'disco-markdown-mention-face))))
-             (cons disco-markdown--regexp-channel-mention
-                   (lambda ()
-                     (let* ((id (match-string-no-properties 1))
-                            (name (or (gethash id channel-map)
-                                      (disco-markdown--state-channel-name id)
-                                      (format "channel:%s" id))))
-                       (propertize (concat "#" name)
-                                   'face 'disco-markdown-mention-face))))
-             (cons disco-markdown--regexp-command-mention
-                   (lambda ()
-                     (let* ((name (string-trim (match-string-no-properties 1)))
-                            (command (if (string-prefix-p "/" name)
-                                         name
-                                       (concat "/" name))))
-                       (propertize command 'face 'disco-markdown-command-face))))
-             (cons disco-markdown--regexp-custom-emoji
-                   (lambda ()
-                     (let ((name (match-string-no-properties 1)))
-                       (propertize (format ":%s:" name)
-                                   'face 'disco-markdown-emoji-face))))
-             (cons disco-markdown--regexp-timestamp
-                   (lambda ()
-                     (let ((seconds (match-string-no-properties 1))
-                           (style (match-string-no-properties 2)))
-                       (propertize
-                        (disco-markdown--format-discord-timestamp seconds style)
-                        'face 'disco-markdown-timestamp-face)))))))
-      (disco-markdown--apply-regexp-replacements text backend replacements))))
+           (replacements nil))
+      (when disco-markdown-enable-discord-tokens
+        (setq replacements
+              (append
+               replacements
+               (list
+                (cons disco-markdown--regexp-user-mention
+                      (lambda ()
+                        (let* ((id (match-string-no-properties 1))
+                               (name (or (gethash id user-map)
+                                         (format "user:%s" id))))
+                          (propertize (concat "@" name)
+                                      'face 'disco-markdown-mention-face))))
+                (cons disco-markdown--regexp-role-mention
+                      (lambda ()
+                        (let* ((id (match-string-no-properties 1))
+                               (name (or (gethash id role-map)
+                                         (format "role:%s" id))))
+                          (propertize (concat "@" name)
+                                      'face 'disco-markdown-mention-face))))
+                (cons disco-markdown--regexp-channel-mention
+                      (lambda ()
+                        (let* ((id (match-string-no-properties 1))
+                               (name (or (gethash id channel-map)
+                                         (disco-markdown--state-channel-name id)
+                                         (format "channel:%s" id))))
+                          (propertize (concat "#" name)
+                                      'face 'disco-markdown-mention-face))))
+                (cons disco-markdown--regexp-command-mention
+                      (lambda ()
+                        (let* ((name (string-trim (match-string-no-properties 1)))
+                               (command (if (string-prefix-p "/" name)
+                                            name
+                                          (concat "/" name))))
+                          (propertize command 'face 'disco-markdown-command-face))))
+                (cons disco-markdown--regexp-custom-emoji
+                      (lambda ()
+                        (let ((name (match-string-no-properties 1)))
+                          (propertize (format ":%s:" name)
+                                      'face 'disco-markdown-emoji-face))))
+                (cons disco-markdown--regexp-timestamp
+                      (lambda ()
+                        (let ((seconds (match-string-no-properties 1))
+                              (style (match-string-no-properties 2)))
+                          (propertize
+                           (disco-markdown--format-discord-timestamp seconds style)
+                           'face 'disco-markdown-timestamp-face))))
+                (cons disco-markdown--regexp-guild-navigation
+                      (lambda ()
+                        (let ((raw (match-string-no-properties 1)))
+                          (propertize
+                           (disco-markdown--format-guild-navigation raw)
+                           'face 'disco-markdown-navigation-face))))
+                (cons disco-markdown--regexp-guild-navigation-bare
+                      (lambda ()
+                        (let* ((token (match-string-no-properties 0))
+                               (raw (if (string-prefix-p "id:" token)
+                                        (substring token 3)
+                                      token)))
+                          (propertize
+                           (disco-markdown--format-guild-navigation raw)
+                           'face 'disco-markdown-navigation-face))))
+                (cons disco-markdown--regexp-everyone-mention
+                      (lambda ()
+                        (propertize (match-string-no-properties 0)
+                                    'face 'disco-markdown-mention-face)))))))
+      (when disco-markdown-enable-spoiler-render
+        (setq replacements
+              (append
+               replacements
+               (list
+                (cons disco-markdown--regexp-spoiler
+                      (lambda ()
+                        (propertize (match-string-no-properties 1)
+                                    'face 'disco-markdown-spoiler-face
+                                    'help-echo "spoiler")))))))
+      (if replacements
+          (disco-markdown--apply-regexp-replacements text backend replacements)
+        text))))
 
 (cl-defun disco-markdown-render (text &key context message)
   "Render Markdown TEXT for display.
@@ -457,8 +531,13 @@ MESSAGE is optional message data used to resolve mention-like tokens."
   (let* ((source (if (stringp text) text ""))
          (backend (disco-markdown--resolve-backend))
          (message-context-key (disco-markdown--message-context-key message))
-         (cache-key (and disco-markdown-cache-enabled
-                         (disco-markdown--cache-key backend context
+         (cache-context (list context
+                              disco-markdown-enable-discord-tokens
+                              disco-markdown-enable-spoiler-render))
+         (cacheable-p (and disco-markdown-cache-enabled
+                           (not (disco-markdown--contains-relative-timestamp-p source))))
+         (cache-key (and cacheable-p
+                         (disco-markdown--cache-key backend cache-context
                                                     source message-context-key)))
          (cached (disco-markdown--cache-get cache-key)))
     (or cached
