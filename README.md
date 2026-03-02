@@ -34,7 +34,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
 - Room can render inline Discord avatar images (async, cached) with automatic placeholder fallback.
-- Draft input supports `TAB` @mention completion (from loaded participants) and inserts Discord mention syntax.
+- Draft input supports dynamic `TAB` completion for `@`/`#` tokens (users, roles, `@everyone`/`@here`, and guild channels) and inserts Discord mention syntax.
 - Room provides `C-c C-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
@@ -70,6 +70,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root.el`: root dashboard buffer.
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
+- `disco-company.el`: composer completion engine (`@`/`#`, CAPF, optional company backend).
 
 ## Runtime Observability
 
@@ -101,6 +102,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room transient (`?`): includes attachment/forward and reaction/poll actions (`f`, `F`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
 - Mention send policy can be tuned via `disco-room-allowed-mentions` and `disco-room-reply-mention-replied-user`.
+- `disco-room-enable-company-backend` controls optional company integration for composer completion (`disco-room-company-completion`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration
@@ -135,7 +137,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room EWOC state keeps message-node indexes; reaction and poll-vote events patch rows locally while create/update/delete rerender fully to preserve grouping/day/unread layout correctness.
 - Shared `disco-ui` primitives are reused by room cards and forum/thread list buffers to keep UI interactions and list layout consistent.
 - Avatar fetch/render pipeline is asynchronous and rerenders room buffers when images become available.
-- Mention completion is token-boundary aware (start/whitespace + `@`), mirroring chat-client autocomplete behavior.
+- Composer completion is token-boundary aware for `@`/`#`, with dynamic candidate lists and optional company backend integration (`disco-room-company-completion`).
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.

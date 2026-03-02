@@ -29,6 +29,10 @@
 (require 'disco-state)
 (require 'disco-permission)
 (require 'disco-transient)
+(require 'disco-company)
+
+(defvar company-backends
+  "Forward declaration for optional company backend integration.")
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
@@ -126,6 +130,14 @@ Each value is a plist carrying :status, :path, :process, :error and
 
 (defcustom disco-room-send-on-return t
   "When non-nil, `RET' in room buffer sends current draft."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-enable-company-backend t
+  "When non-nil, register `disco-room-company-completion' for room buffers.
+
+The backend is only used when `company' is loaded and `company-mode' is
+active."
   :type 'boolean
   :group 'disco)
 
@@ -1287,84 +1299,6 @@ When INDEX is nil, restore pending draft text."
         (if (< target 0)
             (disco-room--input-history-goto nil)
           (disco-room--input-history-goto target))))))
-
-(defun disco-room--mention-candidates ()
-  "Return mention completion candidates from loaded room messages.
-
-Each element is a cons cell (DISPLAY . USER-ID)."
-  (let ((seen-ids (make-hash-table :test #'equal))
-        (seen-labels (make-hash-table :test #'equal))
-        out)
-    (dolist (msg (or (disco-state-messages disco-room--channel-id) '()))
-      (let* ((author (alist-get 'author msg))
-             (user-id (and (listp author) (alist-get 'id author)))
-             (name (or (and (listp author) (alist-get 'global_name author))
-                       (and (listp author) (alist-get 'username author))
-                       "unknown")))
-        (when (and user-id (not (gethash user-id seen-ids)))
-          (puthash user-id t seen-ids)
-          (let ((label (format "@%s" name)))
-            (when (gethash label seen-labels)
-              (setq label (format "%s (%s)"
-                                  label
-                                  (substring user-id (max 0 (- (length user-id) 4))))))
-            (puthash label t seen-labels)
-            (push (cons label user-id) out)))))
-    (sort out (lambda (a b)
-                (string-lessp (downcase (car a))
-                              (downcase (car b)))))))
-
-(defun disco-room--mention-token-bounds ()
-  "Return bounds of @mention token at point as (START . END), or nil."
-  (save-excursion
-    (let ((end (point)))
-      (skip-chars-backward "A-Za-z0-9._-")
-      (when (eq (char-before) ?@)
-        (let* ((start (1- (point)))
-               (left (char-before start)))
-          ;; Trigger mention completion only at token boundaries.
-          (when (or (null left)
-                    (eq left ?\s)
-                    (eq left ?\t)
-                    (eq left ?\n)
-                    (eq left ?\r))
-            (cons start end)))))))
-
-(defun disco-room-complete-mention ()
-  "Complete @mention at point using authors in loaded room history.
-
-Completion inserts Discord mention syntax `<@USER-ID>`."
-  (interactive)
-  (let ((bounds (disco-room--mention-token-bounds)))
-    (if (not bounds)
-        (message "disco: point is not on an @mention token")
-      (let* ((start (car bounds))
-             (end (cdr bounds))
-             (prefix (buffer-substring-no-properties (1+ start) end))
-             (search-prefix (if (string-prefix-p "@" prefix)
-                                (substring prefix 1)
-                              prefix))
-             (all (disco-room--mention-candidates))
-             (matches (seq-filter (lambda (it)
-                                    (string-prefix-p (downcase search-prefix)
-                                                     (downcase (substring (car it) 1))))
-                                  all)))
-        (if (null matches)
-            (message "disco: no mention candidates for @%s" prefix)
-          (let* ((choice-label
-                  (if (= (length matches) 1)
-                      (car (car matches))
-                    (completing-read (format "Mention @%s: " prefix)
-                                     (mapcar #'car matches)
-                                     nil t nil nil search-prefix)))
-                 (choice-id (cdr (assoc choice-label matches))))
-            (unless choice-id
-              (user-error "disco: invalid mention selection"))
-            (delete-region start end)
-            (insert (format "<@%s>" choice-id))
-            (unless (memq (char-after) '(?\s ?\t))
-              (insert " "))
-            (disco-room--sync-draft-from-buffer)))))))
 
 (defun disco-room-edit-draft ()
   "Edit current room draft in minibuffer and re-render room."
@@ -4405,7 +4339,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f/C-F: attach/forward   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f/C-F: attach/forward   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -6102,6 +6036,20 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (when (fboundp 'cursor-intangible-mode)
     (cursor-intangible-mode 1))
+  (setq-local completion-at-point-functions
+              (cons #'disco-room-complete-at-point
+                    completion-at-point-functions))
+  (when (and disco-room-enable-company-backend
+             (featurep 'company)
+             (boundp 'company-backends))
+    (let* ((existing (cond
+                      ((null company-backends) nil)
+                      ((listp company-backends) company-backends)
+                      (t (list company-backends))))
+           (filtered (cl-remove 'disco-room-company-completion existing
+                                :test #'equal)))
+      (setq-local company-backends
+                  (cons 'disco-room-company-completion filtered))))
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command nil t))
