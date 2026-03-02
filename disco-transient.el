@@ -39,6 +39,7 @@
 (declare-function disco-room-vote-poll-answer "disco-room")
 (declare-function disco-room-remove-poll-vote "disco-room")
 (declare-function disco-room-toggle-poll-answer "disco-room")
+(declare-function disco-room-submit-poll-vote "disco-room")
 (declare-function disco-room-clear-poll-votes "disco-room")
 (declare-function disco-room-expire-poll "disco-room")
 (declare-function disco-room-create-thread-from-message "disco-room")
@@ -126,10 +127,11 @@
    ("+" "Add reaction" disco-room-add-reaction)
    ("-" "Remove reaction" disco-room-remove-reaction)
    ("p" "Send poll" disco-room-send-poll)
-   ("w" "Vote answer" disco-room-vote-poll-answer)
-   ("u" "Unvote answer" disco-room-remove-poll-vote)
-   ("t" "Toggle poll vote" disco-room-toggle-poll-answer)
-   ("W" "Clear poll votes" disco-room-clear-poll-votes)
+   ("w" "Select answer" disco-room-vote-poll-answer)
+   ("u" "Unselect answer" disco-room-remove-poll-vote)
+   ("t" "Toggle staged answer" disco-room-toggle-poll-answer)
+   ("W" "Submit staged vote" disco-room-submit-poll-vote)
+   ("C" "Remove my vote" disco-room-clear-poll-votes)
    ("X" "End poll" disco-room-expire-poll)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message)

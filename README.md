@@ -27,7 +27,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, URL actions, and transfer state actions: Download/Cancel/Open Local/Save As, plus inline image preview loading).
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
-- Message rows render poll blocks with answer vote toggles, clear-vote/end controls, and live vote-count updates from gateway poll vote events.
+- Message rows render poll blocks with staged answer selection, explicit submit/remove/end controls, and live vote-count updates from gateway poll vote events.
 - Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
 - Room prompt footer now shows telega-style live typing indicators when other users are typing (DM + guild channels).
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
@@ -95,8 +95,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
-- Room poll actions: `C-c C-p s` send poll, `C-c C-p +` vote answer, `C-c C-p -` remove answer vote, `C-c C-p v` toggle vote at point (or prompt answer), `C-c C-p c` clear own votes, `C-c C-p e` end poll.
-- Room transient (`?`): includes attachment queue/token and reaction/poll actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `X`).
+- Room poll actions: `C-c C-p s` send poll, `C-c C-p +` select answer, `C-c C-p -` unselect answer, `C-c C-p t` toggle staged answer, `C-c C-p v` submit staged vote, `C-c C-p c` remove own vote, `C-c C-p e` end poll.
+- Room transient (`?`): includes attachment queue/token and reaction/poll actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
