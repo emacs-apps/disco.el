@@ -65,6 +65,25 @@
 (defconst disco-room--message-flag-has-thread (ash 1 5)
   "Bit mask indicating message has an associated starter thread.")
 
+(defconst disco-room--message-flag-has-snapshot (ash 1 14)
+  "Bit mask indicating message carries a forward snapshot payload.")
+
+(defconst disco-room--user-join-message-templates
+  '["%s joined the party."
+    "%s is here."
+    "Welcome, %s. We hope you brought pizza."
+    "A wild %s appeared."
+    "%s just landed."
+    "%s just slid into the server."
+    "%s just showed up!"
+    "Welcome %s. Say hi!"
+    "%s hopped into the server."
+    "Everyone welcome %s!"
+    "Glad you're here, %s."
+    "Good to see you, %s."
+    "Yay you made it, %s!"]
+  "Rendered templates for USER_JOIN system messages (type 7).")
+
 (defvar disco-room--avatar-image-cache (make-hash-table :test #'equal)
   "Global avatar image cache keyed by avatar cache key.
 
@@ -2473,20 +2492,201 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         (disco-ui-apply-line-prefix url-start (point) prefix-str)
         (disco-ui-append-face url-start (point) 'shadow)))))
 
+(defun disco-room--normalize-list-sequence (value)
+  "Normalize VALUE into a list, preserving list/vector elements."
+  (cond
+   ((vectorp value) (append value nil))
+   ((listp value) value)
+   (t nil)))
+
+(defun disco-room--message-reference-type (msg)
+  "Return numeric `message_reference.type' for MSG, defaulting to 0."
+  (let* ((reference (and (listp msg) (alist-get 'message_reference msg)))
+         (raw-type (and (listp reference) (alist-get 'type reference))))
+    (cond
+     ((integerp raw-type) raw-type)
+     ((and (stringp raw-type)
+           (string-match-p "\\`[0-9]+\\'" raw-type))
+      (string-to-number raw-type))
+     (t 0))))
+
+(defun disco-room--message-forward-snapshot (msg)
+  "Return first forwarded snapshot message object for MSG, or nil."
+  (let* ((snapshots (disco-room--normalize-list-sequence
+                     (alist-get 'message_snapshots msg)))
+         (first (car snapshots))
+         (snapshot-msg (cond
+                        ((and (listp first) (listp (alist-get 'message first)))
+                         (alist-get 'message first))
+                        ((listp first) first)
+                        (t nil))))
+    (and (listp snapshot-msg) snapshot-msg)))
+
+(defun disco-room--message-forwarded-p (msg)
+  "Return non-nil when MSG is a forwarded message."
+  (or (= (disco-room--message-reference-type msg) 1)
+      (not (null (disco-room--message-forward-snapshot msg)))
+      (not (zerop (logand (disco-room--message-flags msg)
+                          disco-room--message-flag-has-snapshot)))))
+
+(defun disco-room--message-effective-attachments (msg)
+  "Return attachments to render for MSG, including forward snapshots."
+  (let ((attachments (disco-room--normalize-list-sequence (alist-get 'attachments msg))))
+    (or attachments
+        (let ((snapshot (disco-room--message-forward-snapshot msg)))
+          (disco-room--normalize-list-sequence
+           (and (listp snapshot) (alist-get 'attachments snapshot)))))))
+
+(defun disco-room--message-effective-embeds (msg)
+  "Return embeds to render for MSG, including forward snapshots."
+  (let ((embeds (disco-room--normalize-list-sequence (alist-get 'embeds msg))))
+    (or embeds
+        (let ((snapshot (disco-room--message-forward-snapshot msg)))
+          (disco-room--normalize-list-sequence
+           (and (listp snapshot) (alist-get 'embeds snapshot)))))))
+
+(defun disco-room--message-with-effective-embeds (msg)
+  "Return MSG copy with effective embeds/attachments for render context."
+  (let* ((effective-attachments (disco-room--message-effective-attachments msg))
+         (effective-embeds (disco-room--message-effective-embeds msg))
+         (raw-attachments (disco-room--normalize-list-sequence
+                           (alist-get 'attachments msg)))
+         (raw-embeds (disco-room--normalize-list-sequence
+                      (alist-get 'embeds msg))))
+    (if (and (equal effective-attachments raw-attachments)
+             (equal effective-embeds raw-embeds))
+        msg
+      (let ((copy (copy-tree msg)))
+        (setf (alist-get 'attachments copy nil 'remove) effective-attachments)
+        (setf (alist-get 'embeds copy nil 'remove) effective-embeds)
+        copy))))
+
+(defun disco-room--forwarded-summary-content (msg)
+  "Return one-line summary for forwarded MSG content, or nil."
+  (when (disco-room--message-forwarded-p msg)
+    (let* ((snapshot (disco-room--message-forward-snapshot msg))
+           (text (and (listp snapshot) (alist-get 'content snapshot)))
+           (trimmed (and (stringp text) (string-trim text))))
+      (if (and (stringp trimmed) (not (string-empty-p trimmed)))
+          (format "[forwarded] %s" trimmed)
+        "[forwarded message]"))))
+
+(defun disco-room--message-type (msg)
+  "Return numeric message type for MSG, defaulting to 0."
+  (let ((raw (alist-get 'type msg)))
+    (cond
+     ((integerp raw) raw)
+     ((and (stringp raw)
+           (string-match-p "\\`[0-9]+\\'" raw))
+      (string-to-number raw))
+     (t 0))))
+
+(defun disco-room--message-reply-type-p (msg)
+  "Return non-nil when MSG is a standard reply message."
+  (= (disco-room--message-type msg) 19))
+
+(defun disco-room--user-join-message (msg author)
+  "Return rendered USER_JOIN (type 7) message for MSG and AUTHOR."
+  (let* ((raw-ts (alist-get 'timestamp msg))
+         (n (length disco-room--user-join-message-templates))
+         (idx (if (and (stringp raw-ts)
+                       (not (string-empty-p raw-ts))
+                       (> n 0))
+                  (condition-case _
+                      (mod (floor (* 1000.0 (float-time (date-to-time raw-ts)))) n)
+                    (error 0))
+                0))
+         (template (if (> n 0)
+                       (aref disco-room--user-join-message-templates idx)
+                     "%s joined.")))
+    (format template author)))
+
+(defun disco-room--thread-starter-reference-content (msg)
+  "Return referenced message content for thread starter MSG, or nil."
+  (let* ((ref (alist-get 'referenced_message msg))
+         (ref-id (or (and (listp ref) (alist-get 'id ref))
+                     (and (listp (alist-get 'message_reference msg))
+                          (alist-get 'message_id (alist-get 'message_reference msg)))))
+         (resolved (or (and (listp ref) ref)
+                       (and ref-id (disco-room--message-by-id ref-id))))
+         (text (and (listp resolved) (alist-get 'content resolved))))
+    (when (and (stringp text) (not (string-empty-p (string-trim text))))
+      (string-trim text))))
+
+(defun disco-room--message-system-content (msg)
+  "Return rendered system content for MSG type, or nil if not handled."
+  (let* ((type (disco-room--message-type msg))
+         (author (disco-room--message-author msg))
+         (content (string-trim (or (alist-get 'content msg) "")))
+         (boost-times (and (not (string-empty-p content)) content)))
+    (pcase type
+      (6
+       (format "%s pinned a message to this channel. View all pinned messages." author))
+      (7
+       (disco-room--user-join-message msg author))
+      ((or 8 9 10 11)
+       (let ((base (if boost-times
+                       (format "%s just boosted the server %s times!" author boost-times)
+                     (format "%s just boosted the server!" author))))
+         (pcase type
+           (8 base)
+           (9 (concat base " Server has reached Level 1!"))
+           (10 (concat base " Server has reached Level 2!"))
+           (11 (concat base " Server has reached Level 3!")))))
+      (12
+       (format "%s has added %s to this channel. Its most important updates will show up here."
+               author
+               (if (string-empty-p content) "a followed channel" content)))
+      (18
+       (if (string-empty-p content)
+           (format "%s started a thread. See all threads." author)
+         (format "%s started a thread: %s. See all threads." author content)))
+      (21
+       (or (disco-room--thread-starter-reference-content msg)
+           "Sorry, we couldn't load the first message in this thread."))
+      (22
+       "Wondering who to invite? Start by inviting anyone who can help you build the server!")
+      (27
+       (if (string-empty-p content)
+           (format "%s started a Stage." author)
+         (format "%s started %s" author content)))
+      (28
+       (if (string-empty-p content)
+           (format "%s ended a Stage." author)
+         (format "%s ended %s" author content)))
+      (29
+       (format "%s is now a speaker." author))
+      (30
+       (format "%s requested to speak." author))
+      (31
+       (if (string-empty-p content)
+           (format "%s changed the Stage topic." author)
+         (format "%s changed the Stage topic: %s" author content)))
+      (_ nil))))
+
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
   (let* ((content (or (alist-get 'content msg) ""))
-         (attachments (or (alist-get 'attachments msg) '()))
-         (embeds (or (alist-get 'embeds msg) '()))
+         (attachments (disco-room--message-effective-attachments msg))
+         (embeds (disco-room--message-effective-embeds msg))
          (poll (disco-room--message-poll msg))
          (attachment-count (length attachments))
          (embed-count (length embeds))
          (poll-count (if poll 1 0))
          (showing-attachments (and disco-room-show-attachments (> attachment-count 0)))
          (showing-embeds (and disco-room-show-embeds (> embed-count 0)))
-         (showing-poll (and disco-room-show-polls (> poll-count 0))))
+         (showing-poll (and disco-room-show-polls (> poll-count 0)))
+         (msg-type (disco-room--message-type msg))
+         (system-content (and (string-empty-p content)
+                              (disco-room--message-system-content msg)))
+         (forwarded-summary (and (string-empty-p content)
+                                 (disco-room--forwarded-summary-content msg))))
     (if (string-empty-p content)
         (cond
+         ((and (stringp system-content) (not (string-empty-p system-content)))
+          system-content)
+         ((and (stringp forwarded-summary) (not (string-empty-p forwarded-summary)))
+          forwarded-summary)
          ((or showing-attachments showing-embeds showing-poll)
           "")
          ((and (> attachment-count 0) (> embed-count 0) (> poll-count 0))
@@ -2503,6 +2703,8 @@ When TARGET-PATH is nil, prompt interactively for destination path."
           (format "[embed x%d]" embed-count))
          ((> poll-count 0)
           "[poll]")
+         ((/= msg-type 0)
+          (format "[system message type %d]" msg-type))
          (t "[empty]"))
       content)))
 
@@ -2543,7 +2745,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 (defun disco-room--insert-message-attachments (msg)
   "Insert attachment detail lines for MSG."
   (when disco-room-show-attachments
-    (dolist (attachment (or (alist-get 'attachments msg) '()))
+    (dolist (attachment (or (disco-room--message-effective-attachments msg) '()))
       (condition-case _
           (if disco-room-use-rich-attachment-cards
               (disco-room--insert-attachment-card attachment)
@@ -2570,7 +2772,8 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 
 (defun disco-room--insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
-  (disco-embed-insert-message-embeds msg))
+  (disco-embed-insert-message-embeds
+   (disco-room--message-with-effective-embeds msg)))
 
 (defun disco-room--message-poll (msg)
   "Return poll object from MSG, or nil when absent."
@@ -3222,25 +3425,27 @@ Return non-nil when a local message update was applied."
       (_ nil))))
 
 (defun disco-room--reply-reference-id (msg)
-  "Return referenced message ID for MSG, or nil."
-  (or (and (listp (alist-get 'referenced_message msg))
-           (alist-get 'id (alist-get 'referenced_message msg)))
-      (and (listp (alist-get 'message_reference msg))
-           (alist-get 'message_id (alist-get 'message_reference msg)))))
+  "Return referenced message ID for reply MSG, or nil."
+  (when (disco-room--message-reply-type-p msg)
+    (or (and (listp (alist-get 'referenced_message msg))
+             (alist-get 'id (alist-get 'referenced_message msg)))
+        (and (listp (alist-get 'message_reference msg))
+             (alist-get 'message_id (alist-get 'message_reference msg))))))
 
 (defun disco-room--reply-preview (msg)
   "Return one-line preview string of MSG reply target, or nil."
-  (let* ((ref (alist-get 'referenced_message msg))
-         (ref-id (or (and (listp ref) (alist-get 'id ref))
-                     (disco-room--reply-reference-id msg)))
-         (resolved (or (and (listp ref) ref)
-                       (and ref-id (disco-room--message-by-id ref-id)))))
-    (when ref-id
-      (if resolved
-          (let* ((author (disco-room--message-author resolved))
-                 (content (disco-room--message-display-content resolved)))
-            (format "%s: %s" author (truncate-string-to-width content 72 nil nil t)))
-        (format "Original message unavailable (%s)" ref-id)))))
+  (when (disco-room--message-reply-type-p msg)
+    (let* ((ref (alist-get 'referenced_message msg))
+           (ref-id (or (and (listp ref) (alist-get 'id ref))
+                       (disco-room--reply-reference-id msg)))
+           (resolved (or (and (listp ref) ref)
+                         (and ref-id (disco-room--message-by-id ref-id)))))
+      (when ref-id
+        (if resolved
+            (let* ((author (disco-room--message-author resolved))
+                   (content (disco-room--message-display-content resolved)))
+              (format "%s: %s" author (truncate-string-to-width content 72 nil nil t)))
+          (format "Original message unavailable (%s)" ref-id))))))
 
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
