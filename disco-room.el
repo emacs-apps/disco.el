@@ -2421,12 +2421,13 @@ If needed, schedule async fetch and fall back to text placeholder."
 
 (defun disco-room--avatar-image-char-width (image)
   "Return rendered width in columns for IMAGE, defaulting to 1."
-  (let* ((size (and (disco-media-image-object-valid-p image)
-                    (ignore-errors (image-size image nil (selected-frame)))))
-         (width (and (consp size) (car size))))
+  (let* ((size-px (and (disco-media-image-object-valid-p image)
+                       (ignore-errors (image-size image t (selected-frame)))))
+         (width-px (and (consp size-px) (car size-px)))
+         (char-width (max 1 (frame-char-width))))
     (max 1
-         (if (numberp width)
-             (round width)
+         (if (numberp width-px)
+             (ceiling (/ (float width-px) (float char-width)))
            1))))
 
 (defun disco-room--avatar-image-slice-display (image slice-index &optional resized)
@@ -4236,21 +4237,6 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
         (disco-room--insert-forward-card msg)
       (disco-room--insert-forward-reference-line msg prefix))))
 
-(defun disco-room--message-has-followup-sections-p (msg)
-  "Return non-nil when MSG has sections rendered after body text."
-  (or (disco-room--message-forwarded-p msg)
-      (disco-room--message-has-thread-p msg)
-      (and disco-room-show-attachments
-           (disco-room--message-effective-attachments msg))
-      (and disco-room-show-embeds
-           (let* ((effective (disco-room--message-with-effective-embeds msg))
-                  (embeds (and (listp effective) (alist-get 'embeds effective))))
-             embeds))
-      (and disco-room-show-polls
-           (disco-room--message-poll msg))
-      (and disco-room-show-reactions
-           (disco-room--message-reactions msg))))
-
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
   (let* ((context (or (disco-room--message-render-context msg) '()))
@@ -4266,8 +4252,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
          (message-id (alist-get 'id msg))
          line-start
          author-start
-         section-prefix-state
-         (body-prefix-used nil))
+         section-prefix-state)
     (when (and (stringp insert-date)
                (not (string-empty-p insert-date)))
       (disco-room--insert-date-separator-row insert-date))
@@ -4312,8 +4297,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  (car time-span)
                  (cdr time-span)
                  (list 'help-echo timestamp)))
-              (insert "\n")))
-          (setq body-prefix-used t))
+              (insert "\n"))))
       (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
              (header-prefix (or (plist-get avatar-prefixes :header) ""))
              (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
@@ -4335,17 +4319,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
              (list 'help-echo timestamp))))
         (insert "\n")
         (when reply
-          (disco-room--insert-reply-preview-line msg reply section-prefix-state)
-          (setq body-prefix-used t))
+          (disco-room--insert-reply-preview-line msg reply section-prefix-state))
         (unless (string-empty-p content)
-          (disco-room--insert-prefixed-lines section-prefix-state content)
-          (setq body-prefix-used t))))
-    (when (and section-prefix-state
-               (not body-prefix-used)
-               (disco-room--message-has-followup-sections-p msg))
-      ;; Reserve the second avatar slice before rendering cards/sections.
-      (insert (disco-room--line-prefix-string section-prefix-state t) "\n")
-      (setq body-prefix-used t))
+          (disco-room--insert-prefixed-lines section-prefix-state content))))
     (let ((disco-ui-card-indent-prefix-state section-prefix-state)
           (disco-ui-card-indent-prefix
            (disco-room--line-prefix-string section-prefix-state nil "    ")))
