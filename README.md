@@ -22,7 +22,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
 - Send plain text message with `C-c C-c` in room buffer.
 - Send file attachments from room buffer (multipart upload) with draft tokens: add via `C-c C-f`, remove token at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
-- Reply/edit/delete message from room buffer (`r`, `e`, `d`) and load older history (`M-<`).
+- Reply/edit/delete/forward message from room buffer (`r`, `e`, `d`, `C-c C-F`) and load older history (`M-<`).
 - Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
 - Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, URL actions, and transfer state actions: Download/Cancel/Open Local/Save As, plus inline image preview loading).
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
@@ -91,13 +91,15 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Message Commands
 
 - Room buffer: `r` set reply target from message-at-point, `C-c C-k` clears pending reply.
+- Room buffer: `C-c C-F` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`).
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
 - Room poll actions: `C-c C-p s` send poll, `C-c C-p +` select answer, `C-c C-p -` unselect answer, `C-c C-p t` toggle staged answer, `C-c C-p v` submit staged vote, `C-c C-p c` remove own vote, `C-c C-p e` end poll.
-- Room transient (`?`): includes attachment queue/token and reaction/poll actions (`f`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
+- Room transient (`?`): includes attachment/forward and reaction/poll actions (`f`, `F`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
+- Mention send policy can be tuned via `disco-room-allowed-mentions` and `disco-room-reply-mention-replied-user`.
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration

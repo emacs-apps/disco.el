@@ -1355,14 +1355,18 @@ REPLY-TO-MESSAGE-ID remains as backwards-compatible shorthand for replies."
 CONTENT is optional message text. REPLY-TO-MESSAGE-ID and MESSAGE-REFERENCE
 select attribution metadata. ATTACHMENTS is normalized attachment plist list,
 POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing."
-  (let ((normalized-message-reference
-         (disco-api--normalize-message-reference message-reference reply-to-message-id))
-        (normalized-allowed-mentions
-         (disco-api--normalize-allowed-mentions allowed-mentions))
-        payload)
-    (when (and (stringp content)
-               (not (string-empty-p (string-trim-right content))))
-      (push `(content . ,(string-trim-right content)) payload))
+  (let* ((normalized-message-reference
+          (disco-api--normalize-message-reference message-reference reply-to-message-id))
+         (normalized-content
+          (and (stringp content)
+               (let ((trimmed (string-trim-right content)))
+                 (unless (string-empty-p trimmed)
+                   trimmed))))
+         (normalized-allowed-mentions
+          (disco-api--normalize-allowed-mentions allowed-mentions))
+         payload)
+    (when normalized-content
+      (push `(content . ,normalized-content) payload))
     (when normalized-message-reference
       (push `(message_reference . ,normalized-message-reference) payload))
     (when attachments

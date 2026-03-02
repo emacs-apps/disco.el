@@ -5098,6 +5098,49 @@ send votes to Discord."
            (message "disco: end poll failed: %s"
                     (disco-room--async-error-message err))))))))
 
+(defun disco-room--split-csv-values (raw)
+  "Split comma-separated RAW string into trimmed non-empty values."
+  (let ((trimmed (string-trim (or raw ""))))
+    (unless (string-empty-p trimmed)
+      (mapcar #'string-trim
+              (split-string trimmed "," t "[[:space:]]*")))))
+
+(defun disco-room--parse-forward-embed-indices (raw)
+  "Parse RAW comma-separated embed indices into a vector or nil."
+  (let ((tokens (disco-room--split-csv-values raw))
+        values)
+    (dolist (token tokens)
+      (unless (string-match-p "\\`[0-9]+\\'" token)
+        (user-error "disco: forward embed indices must be non-negative integers"))
+      (push (string-to-number token) values))
+    (when values
+      (vconcat (nreverse values)))))
+
+(defun disco-room--parse-forward-attachment-ids (raw)
+  "Parse RAW comma-separated attachment ids into a vector or nil."
+  (let ((tokens (disco-room--split-csv-values raw)))
+    (when tokens
+      (vconcat tokens))))
+
+(defun disco-room--read-forward-only ()
+  "Read optional forward_only selection from minibuffer prompts."
+  (when (y-or-n-p "Forward only selected embeds/attachments? ")
+    (let* ((embed-input
+            (read-string "Embed indices (comma-separated, empty for none): "))
+           (attachment-input
+            (read-string "Attachment IDs (comma-separated, empty for none): "))
+           (embed-indices (disco-room--parse-forward-embed-indices embed-input))
+           (attachment-ids (disco-room--parse-forward-attachment-ids
+                            attachment-input))
+           payload)
+      (when embed-indices
+        (push `(embed_indices . ,embed-indices) payload))
+      (when attachment-ids
+        (push `(attachment_ids . ,attachment-ids) payload))
+      (unless payload
+        (user-error "disco: forward-only selection requires embed indices or attachment ids"))
+      (nreverse payload))))
+
 (defun disco-room--send-allowed-mentions (&optional replying-p)
   "Return normalized allowed_mentions payload for outgoing message send/edit.
 
@@ -5385,10 +5428,11 @@ When called interactively, defaults to message under point."
   (disco-room-render)
   (message "disco: next message will reply to %s" message-id))
 
-(defun disco-room-forward-message (&optional message-id source-channel-id content)
+(defun disco-room-forward-message (&optional message-id source-channel-id content forward-only)
   "Forward MESSAGE-ID from SOURCE-CHANNEL-ID into current room.
 
-CONTENT is optional text sent alongside the forwarded reference."
+CONTENT is optional text sent alongside the forwarded reference.
+FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
   (interactive
    (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
           (fallback-message (or at-point (disco-room--latest-message-id)))
@@ -5409,17 +5453,19 @@ CONTENT is optional text sent alongside the forwarded reference."
                                  (or fallback-channel
                                      (user-error "disco: no source channel id provided"))
                                channel-raw))
-          (content-raw (string-trim (read-string "Optional forward comment: "))))
+          (content-raw (string-trim (read-string "Optional forward comment: ")))
+          (forward-only (disco-room--read-forward-only)))
      (list message-id
            source-channel-id
            (unless (string-empty-p content-raw)
-             content-raw))))
+             content-raw)
+           forward-only)))
   (let* ((target-channel-id disco-room--channel-id)
          (source-channel-id (or source-channel-id disco-room--channel-id))
          (source-channel (and source-channel-id
                               (disco-room--resolve-target-channel source-channel-id)))
          (room-buffer (current-buffer))
-         (allowed-mentions (disco-room--send-allowed-mentions)))
+         (allowed-mentions (and content (disco-room--send-allowed-mentions))))
     (unless (and message-id (not (string-empty-p (format "%s" message-id))))
       (user-error "disco: message id cannot be empty"))
     (unless (and source-channel-id
@@ -5436,6 +5482,7 @@ CONTENT is optional text sent alongside the forwarded reference."
      message-id
      source-channel-id
      :content content
+     :forward-only forward-only
      :allowed-mentions allowed-mentions
      :on-success
      (lambda (_response)
@@ -5451,8 +5498,14 @@ CONTENT is optional text sent alongside the forwarded reference."
          (with-current-buffer room-buffer
            (setq disco-room--send-in-flight nil)
            (disco-room-render)
-           (message "disco: forward failed: %s"
-                    (disco-room--async-error-message err))))))))
+           (let* ((msg (disco-room--async-error-message err))
+                  (status (and (listp err) (plist-get err :status))))
+             (if (and (stringp msg)
+                      (numberp status)
+                      (= status 400)
+                      (string-match-p "Forward messages cannot have additional content" msg))
+                 (message "disco: forward comment was rejected by API in this session: %s" msg)
+               (message "disco: forward failed: %s" msg)))))))))
 
 (defun disco-room-cancel-reply ()
   "Cancel pending reply target for next send."
