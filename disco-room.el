@@ -93,6 +93,12 @@ Values are either image objects or the symbol `:missing'.")
 (defvar disco-room--avatar-fetching (make-hash-table :test #'equal)
   "Global set of avatar cache keys currently being fetched.")
 
+(defvar disco-room--forward-guild-icon-image-cache (make-hash-table :test #'equal)
+  "Global forwarded-source guild icon cache keyed by icon cache key.")
+
+(defvar disco-room--forward-guild-icon-fetching (make-hash-table :test #'equal)
+  "Global set of forwarded-source guild icon cache keys currently fetching.")
+
 (defvar disco-room--attachment-download-state-table (make-hash-table :test #'equal)
   "Global attachment download state keyed by attachment download key.
 
@@ -242,6 +248,21 @@ When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
 
 (defcustom disco-room-embed-author-icon-size 18
   "Pixel size used for inline embed author icons."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-use-rich-forward-cards t
+  "When non-nil, render forwarded-message metadata as rich cards."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-show-forward-guild-icons t
+  "When non-nil, show guild icons in forwarded-source metadata rows."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-forward-guild-icon-size 16
+  "Pixel size used for forwarded-source guild icons."
   :type 'integer
   :group 'disco)
 
@@ -432,6 +453,26 @@ Grouping applies when sender stays the same and timestamps are within
 (defface disco-room-embed-card-action
   '((t :inherit disco-room-attachment-card-action))
   "Face used for embed card action buttons."
+  :group 'disco)
+
+(defface disco-room-forward-card-border
+  '((t :inherit disco-room-embed-card-border))
+  "Face used for forwarded-message card border glyphs."
+  :group 'disco)
+
+(defface disco-room-forward-card-title
+  '((t :inherit disco-room-embed-card-title))
+  "Face used for forwarded-message card title row."
+  :group 'disco)
+
+(defface disco-room-forward-card-meta
+  '((t :inherit disco-room-embed-card-meta))
+  "Face used for forwarded-message card metadata rows."
+  :group 'disco)
+
+(defface disco-room-forward-card-action
+  '((t :inherit disco-room-embed-card-action))
+  "Face used for forwarded-message card action buttons."
   :group 'disco)
 
 (defface disco-room-reaction
@@ -1405,9 +1446,18 @@ updates, and keep draft cursor stable when point is in the composer."
             (or (disco-state-messages disco-room--channel-id) '())))
 
 (defun disco-room--normalize-id (value)
-  "Return VALUE coerced to string identifier, or nil."
-  (when value
-    (format "%s" value)))
+  "Return normalized snowflake-like ID string from VALUE, or nil.
+
+String IDs are trimmed; integer IDs are stringified. Empty results are
+rejected."
+  (let ((normalized
+         (cond
+          ((stringp value) (string-trim value))
+          ((integerp value) (number-to-string value))
+          (t nil))))
+    (when (and (stringp normalized)
+               (not (string-empty-p normalized)))
+      normalized)))
 
 (defun disco-room--message-reference-id (msg)
   "Return generic referenced message ID for MSG, or nil."
@@ -1420,6 +1470,12 @@ updates, and keep draft cursor stable when point is in the composer."
   (let ((reference (and (listp msg) (alist-get 'message_reference msg))))
     (disco-room--normalize-id
      (and (listp reference) (alist-get 'channel_id reference)))))
+
+(defun disco-room--message-reference-guild-id (msg)
+  "Return generic referenced guild ID for MSG, or nil."
+  (let ((reference (and (listp msg) (alist-get 'message_reference msg))))
+    (disco-room--normalize-id
+     (and (listp reference) (alist-get 'guild_id reference)))))
 
 (defun disco-room--message-position (message-id)
   "Return buffer position for MESSAGE-ID in current room render, or nil."
@@ -1461,7 +1517,44 @@ Return non-nil when jump succeeds without fetching older history."
             (setq disco-room--pending-jump-message-id nil)
             (message "disco: message %s not found in channel history" target))
         (unless disco-room--older-in-flight
-          (disco-room-load-older-messages))))))
+          (when disco-room--oldest-message-id
+            (disco-room-load-older-messages)))))))
+
+(defun disco-room--channel-permissions-known-p (channel)
+  "Return non-nil when CHANNEL has a parseable computed permissions field."
+  (let ((raw (and (listp channel) (alist-get 'permissions channel))))
+    (or (integerp raw)
+        (and (stringp raw)
+             (string-match-p "\\`[0-9]+\\'" raw)))))
+
+(defun disco-room--jump-required-permissions (channel)
+  "Return channel permissions required to jump into CHANNEL.
+
+Guild channels require both visibility and read-history access."
+  (when (and (listp channel)
+             (alist-get 'guild_id channel)
+             (not (disco-state-private-channel-p channel)))
+    '(view-channel read-message-history)))
+
+(defun disco-room--ensure-jump-permissions (channel-id channel)
+  "Signal user error when jump target CHANNEL-ID cannot be viewed/read."
+  (unless (listp channel)
+    (user-error
+     "disco: cannot verify jump permissions for unknown channel %s"
+     channel-id))
+  (let ((required (disco-room--jump-required-permissions channel)))
+    (when required
+      (if (disco-room--channel-permissions-known-p channel)
+          (let ((missing (disco-permission-channel-missing channel required nil)))
+            (when missing
+              (user-error
+               "disco: missing permission%s %s for jump target channel %s"
+               (if (> (length missing) 1) "s" "")
+               (mapconcat #'disco-room--permission-display-name missing ", ")
+               channel-id)))
+        (message
+         "disco: target channel %s permissions unavailable in local cache; continuing"
+         channel-id)))))
 
 (defun disco-room-jump-to-message (message-id &optional channel-id)
   "Jump to MESSAGE-ID, optionally in CHANNEL-ID.
@@ -1487,6 +1580,7 @@ incrementally until found or history is exhausted."
                                    (alist-get 'name target-chan-obj))
                               target-channel))
              (target-buffer-name (disco-room--buffer-name target-name target-channel)))
+        (disco-room--ensure-jump-permissions target-channel target-chan-obj)
         (disco-room-open target-channel target-name)
         (when-let* ((target-buffer (get-buffer target-buffer-name)))
           (with-current-buffer target-buffer
@@ -1860,6 +1954,109 @@ When FACE is non-nil, apply FACE to each inserted line."
                    ""))
          (initials (upcase (concat first second))))
     (format "[%s]" initials)))
+
+(defun disco-room--guild-by-id (guild-id)
+  "Return guild object for GUILD-ID, or nil."
+  (when (and (stringp guild-id) (not (string-empty-p guild-id)))
+    (seq-find (lambda (guild)
+                (equal (alist-get 'id guild) guild-id))
+              (or (disco-state-guilds) '()))))
+
+(defun disco-room--forward-guild-icon-hash (guild)
+  "Return icon hash string from GUILD, or nil when unavailable."
+  (let ((icon (and (listp guild) (alist-get 'icon guild))))
+    (and (stringp icon)
+         (not (string-empty-p icon))
+         icon)))
+
+(defun disco-room--forward-guild-icon-url (guild)
+  "Return Discord CDN guild icon URL for GUILD, or nil."
+  (let ((guild-id (and (listp guild) (alist-get 'id guild)))
+        (icon-hash (disco-room--forward-guild-icon-hash guild)))
+    (when (and guild-id icon-hash)
+      (format "https://cdn.discordapp.com/icons/%s/%s.png?size=64"
+              guild-id icon-hash))))
+
+(defun disco-room--forward-guild-icon-cache-key (guild)
+  "Build stable cache key for forwarded-source guild icon image."
+  (let ((guild-id (and (listp guild) (alist-get 'id guild)))
+        (icon-hash (disco-room--forward-guild-icon-hash guild)))
+    (when (and guild-id icon-hash)
+      (format "%s:%s:%s"
+              guild-id icon-hash disco-room-forward-guild-icon-size))))
+
+(defun disco-room--forward-guild-icon-fallback (guild)
+  "Return fallback textual icon for GUILD when image is unavailable."
+  (let* ((name (or (and (listp guild) (alist-get 'name guild)) "?"))
+         (initial (if (and (stringp name) (> (length name) 0))
+                      (upcase (substring name 0 1))
+                    "?")))
+    (format "[%s]" initial)))
+
+(defun disco-room--forward-guild-icon-image-valid-p (image)
+  "Return non-nil when IMAGE object appears renderable."
+  (disco-media-image-object-valid-p image))
+
+(defun disco-room--forward-guild-icon-rendering-available-p ()
+  "Return non-nil when forwarded-source guild icons can be rendered."
+  (and disco-room-show-forward-guild-icons
+       (disco-media-inline-image-rendering-available-p)
+       (fboundp 'plz)))
+
+(defun disco-room--start-forward-guild-icon-fetch (cache-key url)
+  "Start asynchronous guild icon fetch for CACHE-KEY from URL."
+  (unless (or (gethash cache-key disco-room--forward-guild-icon-fetching)
+              (gethash cache-key disco-room--forward-guild-icon-image-cache))
+    (puthash cache-key t disco-room--forward-guild-icon-fetching)
+    (plz 'get url
+      :as 'binary
+      :headers '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
+      :then
+      (lambda (bytes)
+        (let ((image
+               (ignore-errors
+                 (create-image bytes 'png t
+                               :width disco-room-forward-guild-icon-size
+                               :height disco-room-forward-guild-icon-size
+                               :ascent 'center))))
+          (puthash cache-key
+                   (if (disco-room--forward-guild-icon-image-valid-p image)
+                       image
+                     :missing)
+                   disco-room--forward-guild-icon-image-cache)
+          (remhash cache-key disco-room--forward-guild-icon-fetching)
+          (disco-room--rerender-open-rooms)))
+      :else
+      (lambda (_err)
+        (puthash cache-key :missing disco-room--forward-guild-icon-image-cache)
+        (remhash cache-key disco-room--forward-guild-icon-fetching)))))
+
+(defun disco-room--forward-guild-icon-image (guild)
+  "Return image object for forwarded-source GUILD icon when available."
+  (when (disco-room--forward-guild-icon-rendering-available-p)
+    (let* ((cache-key (disco-room--forward-guild-icon-cache-key guild))
+           (cached (and cache-key
+                        (gethash cache-key disco-room--forward-guild-icon-image-cache))))
+      (cond
+       ((null cache-key)
+        nil)
+       ((eq cached :missing)
+        nil)
+       ((disco-room--forward-guild-icon-image-valid-p cached)
+        cached)
+       (t
+        (let ((url (disco-room--forward-guild-icon-url guild)))
+          (when (and (stringp url) (not (string-empty-p url)))
+            (disco-room--start-forward-guild-icon-fetch cache-key url)))
+        nil)))))
+
+(defun disco-room--insert-forward-guild-icon (guild)
+  "Insert one forwarded-source guild icon for GUILD."
+  (let ((fallback (disco-room--forward-guild-icon-fallback guild))
+        (image (disco-room--forward-guild-icon-image guild)))
+    (if (disco-room--forward-guild-icon-image-valid-p image)
+        (insert-image image fallback)
+      (insert fallback))))
 
 (defun disco-room--image-rendering-available-p ()
   "Return non-nil when avatar images can be shown in current frame."
@@ -2619,6 +2816,108 @@ When TARGET-PATH is nil, prompt interactively for destination path."
       (not (zerop (logand (disco-room--message-flags msg)
                           disco-room--message-flag-has-snapshot)))))
 
+(defun disco-room--forward-recipient-display-name (recipient)
+  "Return best display name for one DM RECIPIENT user object."
+  (when (listp recipient)
+    (or (alist-get 'global_name recipient)
+        (alist-get 'username recipient)
+        (alist-get 'id recipient)
+        "unknown-user")))
+
+(defun disco-room--forward-private-channel-display-name (channel)
+  "Return best display name for private CHANNEL."
+  (let* ((channel-type (and (listp channel) (alist-get 'type channel)))
+         (explicit-name (and (listp channel)
+                             (stringp (alist-get 'name channel))
+                             (not (string-empty-p (alist-get 'name channel)))
+                             (alist-get 'name channel)))
+         (recipients (and (listp channel) (alist-get 'recipients channel)))
+         (recipient-names
+          (delq nil
+                (mapcar #'disco-room--forward-recipient-display-name
+                        (or recipients '())))))
+    (pcase channel-type
+      (1 (or (car recipient-names) explicit-name "direct-message"))
+      (3 (or explicit-name
+             (and recipient-names (mapconcat #'identity recipient-names ", "))
+             "group-dm"))
+      (_ (or explicit-name "(no-name)")))))
+
+(defun disco-room--forward-channel-name (channel)
+  "Return display name for CHANNEL independent of badge prefixes."
+  (if (and (listp channel) (memq (alist-get 'type channel) '(1 3)))
+      (disco-room--forward-private-channel-display-name channel)
+    (or (and (listp channel) (alist-get 'name channel)) "(no-name)")))
+
+(defun disco-room--forward-source-channel-label (channel channel-id)
+  "Return human-readable source channel label for CHANNEL/CHANNEL-ID."
+  (if (not (listp channel))
+      (if (and (stringp channel-id) (not (string-empty-p channel-id)))
+          (format "channel:%s" channel-id)
+        "unknown-channel")
+    (let* ((channel-type (alist-get 'type channel))
+           (name (disco-room--forward-channel-name channel)))
+      (cond
+       ((memq channel-type '(1 3))
+        (if (= channel-type 3)
+            (format "group:%s" name)
+          (format "@%s" name)))
+       ((disco-state-channel-thread-p channel)
+        (let* ((parent-id (disco-room--normalize-id (alist-get 'parent_id channel)))
+               (parent (and parent-id (disco-state-channel parent-id)))
+               (parent-name (and (listp parent)
+                                 (disco-room--forward-channel-name parent))))
+          (if (and (stringp parent-name) (not (string-empty-p parent-name)))
+              (format "#%s / #%s (thread)" parent-name name)
+            (format "#%s (thread)" name))))
+       (t
+        (format "#%s" name))))))
+
+(defun disco-room--forward-source-context (msg)
+  "Return source context plist for forwarded MSG."
+  (let* ((ref-channel-id (disco-room--message-reference-channel-id msg))
+         (ref-guild-id (disco-room--message-reference-guild-id msg))
+         (channel (and ref-channel-id (disco-state-channel ref-channel-id)))
+         (resolved-guild-id
+          (or ref-guild-id
+              (disco-room--normalize-id
+               (and (listp channel) (alist-get 'guild_id channel)))))
+         (guild (and resolved-guild-id (disco-room--guild-by-id resolved-guild-id)))
+         (guild-label
+          (cond
+           ((and (listp guild)
+                 (stringp (alist-get 'name guild))
+                 (not (string-empty-p (alist-get 'name guild))))
+            (alist-get 'name guild))
+           ((and (stringp resolved-guild-id)
+                 (not (string-empty-p resolved-guild-id)))
+            (format "guild:%s" resolved-guild-id))
+           (t
+            "direct message")))
+         (channel-label (disco-room--forward-source-channel-label channel ref-channel-id)))
+    (list :guild guild
+          :guild-id resolved-guild-id
+          :guild-label guild-label
+          :channel-id ref-channel-id
+          :channel-label channel-label)))
+
+(defun disco-room--forward-snapshot-time-label (msg)
+  "Return formatted snapshot timestamp for forwarded MSG, or nil."
+  (let* ((snapshot (disco-room--message-forward-snapshot msg))
+         (timestamp (and (listp snapshot) (alist-get 'timestamp snapshot))))
+    (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+      (disco-util-format-time timestamp))))
+
+(defun disco-room--forward-snapshot-preview (msg)
+  "Return one-line snapshot content preview for forwarded MSG, or nil."
+  (let* ((snapshot (disco-room--message-forward-snapshot msg))
+         (text (and (listp snapshot) (alist-get 'content snapshot)))
+         (trimmed (and (stringp text)
+                       (string-trim
+                        (replace-regexp-in-string "[\n\r]+" " " text)))))
+    (when (and (stringp trimmed) (not (string-empty-p trimmed)))
+      (truncate-string-to-width trimmed 120 nil nil t))))
+
 (defun disco-room--message-effective-attachments (msg)
   "Return attachments to render for MSG, including forward snapshots."
   (let ((attachments (disco-room--normalize-list-sequence (alist-get 'attachments msg))))
@@ -2770,6 +3069,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (system-content (and (string-empty-p content)
                               (disco-room--message-system-content msg)))
          (forwarded-summary (and (string-empty-p content)
+                                 (not disco-room-use-rich-forward-cards)
                                  (disco-room--forwarded-summary-content msg))))
     (if (string-empty-p content)
         (cond
@@ -2777,6 +3077,9 @@ When TARGET-PATH is nil, prompt interactively for destination path."
           system-content)
          ((and (stringp forwarded-summary) (not (string-empty-p forwarded-summary)))
           forwarded-summary)
+         ((and disco-room-use-rich-forward-cards
+               (disco-room--message-forwarded-p msg))
+          "")
          ((or showing-attachments showing-embeds showing-poll)
           "")
          ((and (> attachment-count 0) (> embed-count 0) (> poll-count 0))
@@ -3536,13 +3839,15 @@ Return non-nil when a local message update was applied."
               (format "%s: %s" author (truncate-string-to-width content 72 nil nil t)))
           (format "Original message unavailable (%s)" ref-id))))))
 
-(defun disco-room--insert-reference-jump-button (message-id channel-id label)
-  "Insert jump button for MESSAGE-ID in CHANNEL-ID with LABEL."
+(defun disco-room--insert-reference-jump-button (message-id channel-id label &optional face)
+  "Insert jump button for MESSAGE-ID in CHANNEL-ID with LABEL.
+
+When FACE is non-nil, use it for button text."
   (disco-ui-insert-action-button
    label
    (lambda ()
      (disco-room-jump-to-message message-id channel-id))
-   :face 'shadow
+   :face (or face 'shadow)
    :help-echo (if (and (stringp channel-id)
                        (not (string-empty-p channel-id))
                        (not (equal (disco-room--normalize-id channel-id)
@@ -3563,7 +3868,7 @@ Return non-nil when a local message update was applied."
     (add-text-properties line-start (point) '(face shadow))))
 
 (defun disco-room--insert-forward-reference-line (msg)
-  "Insert one forward-source jump line for MSG when applicable."
+  "Insert one compact forward-source jump line for MSG."
   (when (disco-room--message-forwarded-p msg)
     (let ((ref-id (disco-room--message-reference-id msg))
           (ref-channel (disco-room--message-reference-channel-id msg)))
@@ -3574,6 +3879,56 @@ Return non-nil when a local message update was applied."
            ref-id ref-channel "[Jump to source]")
           (insert "\n")
           (add-text-properties line-start (point) '(face shadow)))))))
+
+(defun disco-room--insert-forward-card (msg)
+  "Insert one rich forwarded-message card for MSG."
+  (let* ((ref-id (disco-room--message-reference-id msg))
+         (ref-channel (disco-room--message-reference-channel-id msg))
+         (source (disco-room--forward-source-context msg))
+         (guild (plist-get source :guild))
+         (guild-label (or (plist-get source :guild-label) "direct message"))
+         (channel-label (or (plist-get source :channel-label) "unknown-channel"))
+         (sent-at (disco-room--forward-snapshot-time-label msg))
+         (preview (disco-room--forward-snapshot-preview msg))
+         (prefix-str (disco-ui-card-line-prefix :face 'disco-room-forward-card-border)))
+    (let ((title-start (point)))
+      (insert "[forwarded message]" "\n")
+      (disco-ui-apply-line-prefix title-start (point) prefix-str)
+      (disco-ui-append-face title-start (point) 'disco-room-forward-card-title))
+    (let ((source-start (point)))
+      (insert "source: ")
+      (when (listp guild)
+        (disco-room--insert-forward-guild-icon guild)
+        (insert " "))
+      (insert guild-label)
+      (insert " / " channel-label)
+      (insert "\n")
+      (disco-ui-apply-line-prefix source-start (point) prefix-str)
+      (disco-ui-append-face source-start (point) 'disco-room-forward-card-meta))
+    (when (and (stringp sent-at) (not (string-empty-p sent-at)))
+      (let ((time-start (point)))
+        (insert "sent: " sent-at "\n")
+        (disco-ui-apply-line-prefix time-start (point) prefix-str)
+        (disco-ui-append-face time-start (point) 'disco-room-forward-card-meta)))
+    (when (and (stringp preview) (not (string-empty-p preview)))
+      (let ((preview-start (point)))
+        (insert "preview: " preview "\n")
+        (disco-ui-apply-line-prefix preview-start (point) prefix-str)
+        (disco-ui-append-face preview-start (point) 'disco-room-forward-card-meta)))
+    (when (and (stringp ref-id) (not (string-empty-p ref-id)))
+      (let ((action-start (point)))
+        (disco-room--insert-reference-jump-button
+         ref-id ref-channel "[Jump to source]" 'disco-room-forward-card-action)
+        (insert "\n")
+        (disco-ui-apply-line-prefix action-start (point) prefix-str)
+        (disco-ui-append-face action-start (point) 'disco-room-forward-card-meta)))))
+
+(defun disco-room--insert-forward-section (msg)
+  "Insert forwarded-message block for MSG when applicable."
+  (when (disco-room--message-forwarded-p msg)
+    (if disco-room-use-rich-forward-cards
+        (disco-room--insert-forward-card msg)
+      (disco-room--insert-forward-reference-line msg))))
 
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
@@ -3646,7 +4001,7 @@ Return non-nil when a local message update was applied."
         (disco-room--insert-reply-preview-line msg reply))
       (unless (string-empty-p content)
         (disco-room--insert-prefixed-lines "    " content)))
-    (disco-room--insert-forward-reference-line msg)
+    (disco-room--insert-forward-section msg)
     (when (disco-room--message-has-thread-p msg)
       (let* ((message-id (alist-get 'id msg))
              (thread (disco-room--thread-from-message msg))
