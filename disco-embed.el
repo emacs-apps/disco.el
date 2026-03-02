@@ -14,6 +14,7 @@
 (require 'color)
 (require 'disco-ui)
 (require 'disco-util)
+(require 'disco-markdown)
 (require 'disco-media)
 
 (defvar disco-room-show-embeds)
@@ -33,10 +34,10 @@
 (defun disco-embed--stringify (value)
   "Return VALUE as display string, or nil when VALUE is nil.
 
-Keeps original line breaks and unescapes Markdown punctuation escapes."
+Keeps original line breaks and applies markdown renderer pipeline."
   (and value
-       (disco-util-unescape-markdown-punctuation
-        (format "%s" value))))
+       (disco-markdown-render (format "%s" value)
+                              :context 'embed-text)))
 
 (defun disco-embed--truncate-text (text limit)
   "Truncate TEXT to LIMIT characters with ellipsis when needed."

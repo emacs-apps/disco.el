@@ -20,6 +20,7 @@
 (require 'plz)
 (require 'disco-ui)
 (require 'disco-util)
+(require 'disco-markdown)
 (require 'disco-media)
 (require 'disco-embed)
 (require 'disco-view)
@@ -2986,7 +2987,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
   (let* ((snapshot (disco-room--message-forward-snapshot msg))
          (text (and (listp snapshot) (alist-get 'content snapshot))))
     (when (and (stringp text) (not (string-empty-p text)))
-      (disco-util-unescape-markdown-punctuation text))))
+      (disco-markdown-render text :context 'forward-snapshot))))
 
 (defun disco-room--message-effective-attachments (msg)
   "Return attachments to render for MSG, including forward snapshots."
@@ -3131,7 +3132,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
   (let* ((raw-content (or (alist-get 'content msg) ""))
-         (content (disco-util-unescape-markdown-punctuation raw-content))
+         (content (disco-markdown-render raw-content :context 'room-message))
          (attachments (disco-room--message-effective-attachments msg))
          (embeds (disco-room--message-effective-embeds msg))
          (poll (disco-room--message-poll msg))
