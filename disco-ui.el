@@ -45,22 +45,51 @@ Return inserted span as (START . END)."
                  (list 'face face)))))
     (cons start (point))))
 
-(cl-defun disco-ui-insert-prefixed-lines (prefix text &key face properties)
-  "Insert TEXT as newline-separated lines using display-only PREFIX.
+(defconst disco-ui--prefix-state-tag 'disco-ui-prefix-state
+  "Internal marker used to identify line-prefix state objects.")
 
-FACE and PROPERTIES are applied to each inserted line span. PREFIX is set via
-`line-prefix' and `wrap-prefix' properties so copied text stays clean."
-  (dolist (line (split-string (or text "") "\n" nil))
-    (let ((start (point)))
-      (insert line "\n")
-      (add-text-properties
-       start
-       (point)
-       (append properties
-               (when face
-                 (list 'face face))
-               (list 'line-prefix prefix
-                     'wrap-prefix prefix))))))
+(defun disco-ui-prefix-state-p (value)
+  "Return non-nil when VALUE is a `disco-ui' line-prefix state object."
+  (and (vectorp value)
+       (= (length value) 4)
+       (eq (aref value 0) disco-ui--prefix-state-tag)))
+
+(defun disco-ui-make-prefix-state (first-prefix rest-prefix)
+  "Return mutable line-prefix state with FIRST-PREFIX and REST-PREFIX."
+  (vector disco-ui--prefix-state-tag first-prefix rest-prefix nil))
+
+(defun disco-ui-prefix-state-current (state)
+  "Return current prefix string for prefix STATE without consuming it."
+  (when (disco-ui-prefix-state-p state)
+    (if (aref state 3)
+        (aref state 2)
+      (or (aref state 1) (aref state 2)))))
+
+(defun disco-ui-prefix-state-rest (state)
+  "Return rest-prefix string from prefix STATE."
+  (when (disco-ui-prefix-state-p state)
+    (aref state 2)))
+
+(defun disco-ui-prefix-state-consume (state)
+  "Return current prefix from STATE and mark first-prefix as consumed."
+  (when (disco-ui-prefix-state-p state)
+    (let ((prefix (disco-ui-prefix-state-current state)))
+      (aset state 3 t)
+      prefix)))
+
+(defun disco-ui-prefix-string (prefix &optional consume default)
+  "Return normalized prefix string from PREFIX source.
+
+When PREFIX is state and CONSUME is non-nil, consume its first-prefix.
+DEFAULT is used when PREFIX yields nil."
+  (or (cond
+       ((disco-ui-prefix-state-p prefix)
+        (if consume
+            (disco-ui-prefix-state-consume prefix)
+          (disco-ui-prefix-state-current prefix)))
+       ((stringp prefix) prefix)
+       (t nil))
+      (or default "")))
 
 (defun disco-ui-combine-faces (&rest faces)
   "Return one face value from FACES, dropping nil entries."
@@ -73,6 +102,9 @@ FACE and PROPERTIES are applied to each inserted line span. PREFIX is set via
 (defvar disco-ui-card-indent-prefix "    "
   "Dynamic base indent prefix used by `disco-ui-card-line-prefix'.")
 
+(defvar disco-ui-card-indent-prefix-state nil
+  "Dynamic line-prefix state used by card renderers in current insertion scope.")
+
 (cl-defun disco-ui-card-line-prefix (&key face (indent disco-ui-card-indent-prefix)
                                           (marker "▏"))
   "Return a display-only card prefix string.
@@ -83,12 +115,67 @@ FACE is applied to MARKER while INDENT is kept plain."
               (propertize marker 'face face)
             marker)))
 
-(defun disco-ui-apply-line-prefix (start end prefix-str)
-  "Apply PREFIX-STR as display prefix for region START..END."
+(cl-defun disco-ui-card-prefix-state (&key face (marker "▏") indent)
+  "Return card line-prefix state for current insertion scope.
+
+When `disco-ui-card-indent-prefix-state' is bound to a prefix-state, this
+function consumes its first prefix for the card's first row and uses its rest
+prefix for subsequent card rows."
+  (let* ((line-state disco-ui-card-indent-prefix-state)
+         (default-indent (or indent disco-ui-card-indent-prefix))
+         (first-indent (disco-ui-prefix-string line-state t default-indent))
+         (rest-indent (disco-ui-prefix-string line-state nil default-indent)))
+    (disco-ui-make-prefix-state
+     (disco-ui-card-line-prefix :face face :indent first-indent :marker marker)
+     (disco-ui-card-line-prefix :face face :indent rest-indent :marker marker))))
+
+(defun disco-ui--apply-line-prefix-span (start end prefix-str)
+  "Apply PREFIX-STR to START..END span as line/wrap prefix."
   (when (< start end)
     (add-text-properties start end
                          (list 'line-prefix prefix-str
                                'wrap-prefix prefix-str))))
+
+(defun disco-ui-apply-line-prefix (start end prefix)
+  "Apply PREFIX as display prefix for region START..END.
+
+PREFIX can be a string or a mutable prefix-state created by
+`disco-ui-make-prefix-state'."
+  (when (< start end)
+    (if (disco-ui-prefix-state-p prefix)
+        (let ((pos start)
+              (line-prefix (disco-ui-prefix-state-consume prefix))
+              (rest-prefix (disco-ui-prefix-state-rest prefix)))
+          (save-excursion
+            (goto-char start)
+            (while (< pos end)
+              (goto-char pos)
+              (let* ((line-end (line-end-position))
+                     (next-pos (if (< line-end end)
+                                   (1+ line-end)
+                                 end)))
+                (disco-ui--apply-line-prefix-span pos next-pos line-prefix)
+                (setq line-prefix rest-prefix)
+                (setq pos next-pos)))))
+      (disco-ui--apply-line-prefix-span
+       start end (disco-ui-prefix-string prefix nil "")))))
+
+(cl-defun disco-ui-insert-prefixed-lines (prefix text &key face properties)
+  "Insert TEXT as newline-separated lines using display-only PREFIX.
+
+PREFIX can be a prefix string or prefix-state. FACE and PROPERTIES are applied
+per inserted line so copied text stays clean."
+  (dolist (line (split-string (or text "") "\n" nil))
+    (let ((start (point)))
+      (insert line "\n")
+      (when (or face properties)
+        (add-text-properties
+         start
+         (point)
+         (append properties
+                 (when face
+                   (list 'face face)))))
+      (disco-ui-apply-line-prefix start (point) prefix))))
 
 (defun disco-ui-append-face (start end face)
   "Append FACE to region START..END."

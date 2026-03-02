@@ -27,6 +27,7 @@
 (defvar disco-room-attachment-preview-max-width)
 (defvar disco-room-attachment-preview-max-height)
 (defvar disco-ui-card-indent-prefix)
+(defvar disco-ui-card-indent-prefix-state)
 
 (defun disco-embed--url-present-p (url)
   "Return non-nil when URL is a non-empty string."
@@ -130,8 +131,8 @@ Keeps original line breaks and applies markdown renderer pipeline."
       'disco-room-embed-card-border)))
 
 (defun disco-embed--line-prefix (embed)
-  "Return colored visual line prefix string for EMBED card rows."
-  (disco-ui-card-line-prefix :face (disco-embed--accent-face embed)))
+  "Return colored visual line prefix state for EMBED card rows."
+  (disco-ui-card-prefix-state :face (disco-embed--accent-face embed)))
 
 (defun disco-embed--meta-line (embed)
   "Return compact metadata line for EMBED object."
@@ -899,7 +900,11 @@ Keeps original line breaks and applies markdown renderer pipeline."
         (condition-case _
             (if disco-room-use-rich-embed-cards
                 (disco-embed-insert-card msg embed embed-index)
-              (let* ((line-prefix (or disco-ui-card-indent-prefix "    "))
+              (let* ((line-prefix
+                      (disco-ui-prefix-string
+                       disco-ui-card-indent-prefix-state
+                       t
+                       (or disco-ui-card-indent-prefix "    ")))
                      (line-start (point))
                      (url (disco-embed--main-url msg embed)))
                 (insert line-prefix (disco-embed--summary embed) "\n")
@@ -907,10 +912,18 @@ Keeps original line breaks and applies markdown renderer pipeline."
                 (when (and disco-room-show-embed-urls
                            (disco-embed--url-present-p url))
                   (let ((url-start (point)))
-                    (insert line-prefix "  " url "\n")
+                    (insert (disco-ui-prefix-string
+                             disco-ui-card-indent-prefix-state
+                             nil
+                             (or disco-ui-card-indent-prefix "    "))
+                            "  " url "\n")
                     (add-text-properties url-start (point) '(face shadow))))))
           (error
-           (let* ((line-prefix (or disco-ui-card-indent-prefix "    "))
+           (let* ((line-prefix
+                   (disco-ui-prefix-string
+                    disco-ui-card-indent-prefix-state
+                    t
+                    (or disco-ui-card-indent-prefix "    ")))
                   (line-start (point)))
              (insert line-prefix "[embed] [render fallback]\n")
              (add-text-properties line-start (point) '(face shadow)))))))))

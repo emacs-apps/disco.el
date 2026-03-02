@@ -36,6 +36,7 @@
 (defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--oldest-message-id nil)
 (defvar disco-ui-card-indent-prefix)
+(defvar disco-ui-card-indent-prefix-state)
 (defvar-local disco-room--newest-message-id nil)
 (defvar-local disco-room--history-exhausted nil)
 (defvar-local disco-room--pending-reply-to nil)
@@ -1850,6 +1851,13 @@ When FACE is non-nil, apply FACE to TEXT."
 When FACE is non-nil, apply FACE to each inserted line."
   (disco-ui-insert-prefixed-lines prefix text :face face))
 
+(defun disco-room--line-prefix-string (prefix &optional consume default)
+  "Return normalized PREFIX as a string.
+
+When PREFIX is a mutable prefix-state, consume first-prefix when CONSUME is
+non-nil. DEFAULT falls back to four spaces."
+  (disco-ui-prefix-string prefix consume (or default "    ")))
+
 (defun disco-room--insert-prefixed-lines-with-first-prefix (first-prefix rest-prefix text
                                                                          &optional face)
   "Insert TEXT with FIRST-PREFIX on first line and REST-PREFIX thereafter."
@@ -2725,23 +2733,23 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (download-status (plist-get download-state :status))
          (download-path (plist-get download-state :path))
          (download-error (plist-get download-state :error))
-         (prefix-str (disco-ui-card-line-prefix :face 'disco-room-attachment-card-border)))
+         (prefix-state (disco-ui-card-prefix-state :face 'disco-room-attachment-card-border)))
     (let ((title-start (point)))
       (insert summary "\n")
       (when (and (stringp url) (not (string-empty-p url)))
         (disco-media-add-open-url-properties title-start (1- (point)) url))
-      (disco-ui-apply-line-prefix title-start (point) prefix-str)
+      (disco-ui-apply-line-prefix title-start (point) prefix-state)
       (disco-ui-append-face
        title-start (point) 'disco-room-attachment-card-title))
     (let ((meta-start (point)))
       (insert meta "\n")
-      (disco-ui-apply-line-prefix meta-start (point) prefix-str)
+      (disco-ui-apply-line-prefix meta-start (point) prefix-state)
       (disco-ui-append-face
        meta-start (point) 'disco-room-attachment-card-meta))
     (when (and (stringp description) (not (string-empty-p description)))
       (let ((desc-start (point)))
         (insert "caption: " description "\n")
-        (disco-ui-apply-line-prefix desc-start (point) prefix-str)
+        (disco-ui-apply-line-prefix desc-start (point) prefix-state)
         (disco-ui-append-face
          desc-start (point) 'disco-room-attachment-card-meta)))
     (let ((action-start (point)))
@@ -2767,7 +2775,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
              "Copy attachment URL"))
         (insert "[No URL]"))
       (insert "\n")
-      (disco-ui-apply-line-prefix action-start (point) prefix-str)
+      (disco-ui-apply-line-prefix action-start (point) prefix-state)
       (disco-ui-append-face
        action-start (point) 'disco-room-attachment-card-meta))
     (let ((transfer-start (point)))
@@ -2847,7 +2855,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                 "Download attachment to chosen path"))
            (insert "[No URL]"))))
       (insert "\n")
-      (disco-ui-apply-line-prefix transfer-start (point) prefix-str)
+      (disco-ui-apply-line-prefix transfer-start (point) prefix-state)
       (disco-ui-append-face
        transfer-start (point) 'disco-room-attachment-card-meta))
     (when (member kind '("img" "video"))
@@ -2891,7 +2899,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                         "[video preview unavailable]"
                       "[image unavailable]")))))
         (insert "\n")
-        (disco-ui-apply-line-prefix preview-start (point) prefix-str)
+        (disco-ui-apply-line-prefix preview-start (point) prefix-state)
         (when apply-meta-face
           (disco-ui-append-face
            preview-start (point) 'disco-room-attachment-card-meta))))
@@ -2901,7 +2909,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
       (let ((url-start (point)))
         (insert url "\n")
         (disco-media-add-open-url-properties url-start (1- (point)) url)
-        (disco-ui-apply-line-prefix url-start (point) prefix-str)
+        (disco-ui-apply-line-prefix url-start (point) prefix-state)
         (disco-ui-append-face url-start (point) 'shadow)))))
 
 (defun disco-room--normalize-list-sequence (value)
@@ -3381,33 +3389,33 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 (defun disco-room--insert-message-attachments (msg &optional prefix)
   "Insert attachment detail lines for MSG.
 
-When PREFIX is non-nil, use it for plain fallback rendering indentation."
-  (let ((line-prefix (or prefix "    ")))
-    (when disco-room-show-attachments
-      (dolist (attachment (or (disco-room--message-effective-attachments msg) '()))
-        (condition-case _
-            (if disco-room-use-rich-attachment-cards
-                (disco-room--insert-attachment-card attachment)
-              (let ((line-start (point))
-                    (url (or (alist-get 'url attachment)
-                             (alist-get 'proxy_url attachment))))
-                (insert line-prefix)
-                (insert (disco-room--attachment-summary attachment))
-                (insert "\n")
-                (add-text-properties line-start (point) '(face disco-room-message-meta))
-                (when (and disco-room-show-attachment-urls
-                           (stringp url)
-                           (not (string-empty-p url)))
-                  (let ((url-start (point)))
-                    (insert (concat line-prefix "  " url "\n"))
-                    (add-text-properties url-start (point) '(face shadow))))))
-          (error
-           (let ((line-start (point)))
-             (insert line-prefix "[file] "
-                     (or (alist-get 'filename attachment)
-                         (format "%s" (or (alist-get 'id attachment) "unknown")))
-                     " [render fallback]\n")
-             (add-text-properties line-start (point) '(face shadow)))))))))
+PREFIX can be a fixed prefix string or mutable prefix-state."
+  (when disco-room-show-attachments
+    (dolist (attachment (or (disco-room--message-effective-attachments msg) '()))
+      (condition-case _
+          (if disco-room-use-rich-attachment-cards
+              (disco-room--insert-attachment-card attachment)
+            (let ((line-start (point))
+                  (url (or (alist-get 'url attachment)
+                           (alist-get 'proxy_url attachment))))
+              (insert (disco-room--line-prefix-string prefix t))
+              (insert (disco-room--attachment-summary attachment))
+              (insert "\n")
+              (add-text-properties line-start (point) '(face disco-room-message-meta))
+              (when (and disco-room-show-attachment-urls
+                         (stringp url)
+                         (not (string-empty-p url)))
+                (let ((url-start (point)))
+                  (insert (disco-room--line-prefix-string prefix nil) "  " url "\n")
+                  (add-text-properties url-start (point) '(face shadow))))))
+        (error
+         (let ((line-start (point)))
+           (insert (disco-room--line-prefix-string prefix t)
+                   "[file] "
+                   (or (alist-get 'filename attachment)
+                       (format "%s" (or (alist-get 'id attachment) "unknown")))
+                   " [render fallback]\n")
+           (add-text-properties line-start (point) '(face shadow))))))))
 
 (defun disco-room--insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
@@ -3764,10 +3772,10 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
            (can-vote (and poll (disco-room--poll-can-vote-p msg)))
            (can-expire (and poll (disco-room--poll-can-expire-p msg))))
       (when poll
-        (let ((prefix-str (disco-ui-card-line-prefix :face 'disco-room-attachment-card-border)))
+        (let ((prefix-state (disco-ui-card-prefix-state :face 'disco-room-attachment-card-border)))
           (let ((title-start (point)))
             (insert "[poll] " question "\n")
-            (disco-ui-apply-line-prefix title-start (point) prefix-str)
+            (disco-ui-apply-line-prefix title-start (point) prefix-state)
             (add-text-properties title-start (point)
                                  `(disco-message-id ,message-id))
             (disco-ui-append-face
@@ -3785,7 +3793,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (when expiry-label
               (setq parts (append parts (list (format "ends=%s" expiry-label)))))
             (insert (mapconcat #'identity parts "   ") "\n")
-            (disco-ui-apply-line-prefix meta-start (point) prefix-str)
+            (disco-ui-apply-line-prefix meta-start (point) prefix-state)
             (add-text-properties meta-start (point)
                                  `(disco-message-id ,message-id))
             (disco-ui-append-face
@@ -3823,7 +3831,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                 (insert (propertize (format "  (%d)" count)
                                     'face disco-room-poll-meta-face)))
               (insert "\n")
-              (disco-ui-apply-line-prefix line-start (point) prefix-str)
+              (disco-ui-apply-line-prefix line-start (point) prefix-state)
               (add-text-properties line-start (point)
                                    `(disco-message-id ,message-id
                                      disco-poll-answer-id ,answer-id))))
@@ -3861,7 +3869,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (unless inserted
               (insert (propertize "[no poll actions available]" 'face 'shadow)))
             (insert "\n")
-            (disco-ui-apply-line-prefix actions-start (point) prefix-str)
+            (disco-ui-apply-line-prefix actions-start (point) prefix-state)
             (add-text-properties actions-start (point)
                                  `(disco-message-id ,message-id))
             (disco-ui-append-face
@@ -3896,14 +3904,13 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
 (defun disco-room--insert-message-reactions (msg &optional prefix)
   "Insert reaction chip line for MSG.
 
-When PREFIX is non-nil, use it for reaction row indentation."
+PREFIX can be a fixed prefix string or mutable prefix-state."
   (when disco-room-show-reactions
     (let ((reactions (disco-room--message-reactions msg))
           (line-start (point))
-          (line-prefix (or prefix "    "))
           (first t))
       (when reactions
-        (insert line-prefix)
+        (insert (disco-room--line-prefix-string prefix t))
         (dolist (reaction reactions)
           (unless first
             (insert " "))
@@ -4111,7 +4118,7 @@ PREFIX defaults to four spaces for room body alignment."
   (let ((line-start (point))
         (ref-id (disco-room--reply-reference-id msg))
         (ref-channel (disco-room--message-reference-channel-id msg)))
-    (insert (or prefix "    ") "↪ " reply)
+    (insert (disco-room--line-prefix-string prefix t) "↪ " reply)
     (when (and (stringp ref-id) (not (string-empty-p ref-id)))
       (insert " ")
       (disco-room--insert-reference-jump-button ref-id ref-channel "[Jump]"))
@@ -4124,11 +4131,10 @@ PREFIX defaults to four spaces for room body alignment."
 When PREFIX is non-nil, use it for line indentation."
   (when (disco-room--message-forwarded-p msg)
     (let ((ref-id (disco-room--message-reference-id msg))
-          (ref-channel (disco-room--message-reference-channel-id msg))
-          (line-prefix (or prefix "    ")))
+          (ref-channel (disco-room--message-reference-channel-id msg)))
       (when (and (stringp ref-id) (not (string-empty-p ref-id)))
         (let ((line-start (point)))
-          (insert line-prefix "↪ ")
+          (insert (disco-room--line-prefix-string prefix t) "↪ ")
           (disco-room--insert-reference-jump-button
            ref-id ref-channel "[Jump to source]")
           (insert "\n")
@@ -4144,10 +4150,10 @@ When PREFIX is non-nil, use it for line indentation."
          (channel-label (or (plist-get source :channel-label) "unknown-channel"))
          (sent-at (disco-room--forward-snapshot-time-label msg))
          (content (disco-room--forward-snapshot-content msg))
-         (prefix-str (disco-ui-card-line-prefix :face 'disco-room-forward-card-border)))
+         (prefix-state (disco-ui-card-prefix-state :face 'disco-room-forward-card-border)))
     (let ((title-start (point)))
       (insert "[forwarded message]" "\n")
-      (disco-ui-apply-line-prefix title-start (point) prefix-str)
+      (disco-ui-apply-line-prefix title-start (point) prefix-state)
       (disco-ui-append-face title-start (point) 'disco-room-forward-card-title))
     (let ((source-start (point)))
       (insert "source: ")
@@ -4157,25 +4163,25 @@ When PREFIX is non-nil, use it for line indentation."
       (insert guild-label)
       (insert " / " channel-label)
       (insert "\n")
-      (disco-ui-apply-line-prefix source-start (point) prefix-str)
+      (disco-ui-apply-line-prefix source-start (point) prefix-state)
       (disco-ui-append-face source-start (point) 'disco-room-forward-card-meta))
     (when (and (stringp sent-at) (not (string-empty-p sent-at)))
       (let ((time-start (point)))
         (insert "sent: " sent-at "\n")
-        (disco-ui-apply-line-prefix time-start (point) prefix-str)
+        (disco-ui-apply-line-prefix time-start (point) prefix-state)
         (disco-ui-append-face time-start (point) 'disco-room-forward-card-meta)))
     (when (and (stringp content) (not (string-empty-p content)))
       (let ((content-start (point)))
         (insert content)
         (unless (string-suffix-p "\n" content)
           (insert "\n"))
-        (disco-ui-apply-line-prefix content-start (point) prefix-str)))
+        (disco-ui-apply-line-prefix content-start (point) prefix-state)))
     (when (and (stringp ref-id) (not (string-empty-p ref-id)))
       (let ((action-start (point)))
         (disco-room--insert-reference-jump-button
          ref-id ref-channel "[Jump to source]" 'disco-room-forward-card-action)
         (insert "\n")
-        (disco-ui-apply-line-prefix action-start (point) prefix-str)
+        (disco-ui-apply-line-prefix action-start (point) prefix-state)
         (disco-ui-append-face action-start (point) 'disco-room-forward-card-meta)))))
 
 (defun disco-room--insert-forward-section (msg &optional prefix)
@@ -4202,7 +4208,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
          (message-id (alist-get 'id msg))
          line-start
          author-start
-         (section-prefix "    "))
+         section-prefix-state)
     (when (and (stringp insert-date)
                (not (string-empty-p insert-date)))
       (disco-room--insert-date-separator-row insert-date))
@@ -4212,12 +4218,13 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
     (if compact
         (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
                (compact-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
-          (setq section-prefix compact-prefix)
+          (setq section-prefix-state
+                (disco-ui-make-prefix-state compact-prefix compact-prefix))
           (when reply
-            (disco-room--insert-reply-preview-line msg reply compact-prefix))
+            (disco-room--insert-reply-preview-line msg reply section-prefix-state))
           (if (string-empty-p content)
               (let ((time-span nil))
-                (insert compact-prefix)
+                (insert (disco-room--line-prefix-string section-prefix-state t))
                 (setq time-span
                       (disco-room--insert-right-aligned-text
                        short-time
@@ -4228,13 +4235,15 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                    (cdr time-span)
                    (list 'help-echo timestamp)))
                 (insert "\n"))
-            (let* ((compact-content
+            (let* ((first-prefix (disco-room--line-prefix-string section-prefix-state t))
+                   (rest-prefix (disco-room--line-prefix-string section-prefix-state nil))
+                   (compact-content
                     (replace-regexp-in-string
                      "\n"
-                     (concat "\n" compact-prefix)
+                     (concat "\n" rest-prefix)
                      content))
                    (time-span nil))
-              (insert compact-prefix compact-content)
+              (insert first-prefix compact-content)
               (setq time-span
                     (disco-room--insert-right-aligned-text
                      short-time
@@ -4248,9 +4257,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
       (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
              (header-prefix (or (plist-get avatar-prefixes :header) ""))
              (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
-             (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    "))
-             (body-used nil))
-        (setq section-prefix body-first-prefix)
+             (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
+        (setq section-prefix-state
+              (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
         (insert header-prefix)
         (setq author-start (point))
         (insert author)
@@ -4266,48 +4275,44 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
              (list 'help-echo timestamp))))
         (insert "\n")
         (when reply
-          (disco-room--insert-reply-preview-line msg reply body-first-prefix)
-          (setq body-used t))
+          (disco-room--insert-reply-preview-line msg reply section-prefix-state))
         (unless (string-empty-p content)
-          (disco-room--insert-prefixed-lines-with-first-prefix
-           (if body-used body-rest-prefix body-first-prefix)
-           body-rest-prefix
-           content)
-          (setq body-used t))
-        (setq section-prefix body-rest-prefix))
-      (let ((disco-ui-card-indent-prefix section-prefix))
-        (disco-room--insert-forward-section msg section-prefix)
-        (when (disco-room--message-has-thread-p msg)
-          (let* ((message-id (alist-get 'id msg))
-                 (thread (disco-room--thread-from-message msg))
-                 (target-thread-id (or (and (listp thread) (alist-get 'id thread))
-                                       (and (stringp message-id) message-id)))
-                 (target-thread-name (or (and (listp thread) (alist-get 'name thread))
-                                         (and (stringp message-id)
-                                              (format "thread:%s" message-id)))))
-            (insert section-prefix)
-            (if target-thread-id
-                (disco-ui-insert-action-button
-                 "[Open thread]"
-                 (lambda ()
-                   (disco-room-open
-                    target-thread-id
-                    (or target-thread-name target-thread-id)))
-                 :face 'disco-room-message-meta
-                 :help-echo "Open starter thread for this message")
-              (insert (propertize "[Thread id unavailable]"
-                                  'face 'shadow)))
-            (insert "\n")))
-        (disco-room--insert-message-attachments msg section-prefix)
-        (disco-room--insert-message-embeds msg)
-        (disco-room--insert-message-poll msg))
-      (disco-room--insert-message-reactions msg section-prefix)
-      (add-text-properties
-       line-start
-       (point)
-       (list 'read-only t
-             'front-sticky '(read-only)
-             'disco-message-id message-id)))))
+          (disco-room--insert-prefixed-lines section-prefix-state content))))
+    (let ((disco-ui-card-indent-prefix-state section-prefix-state)
+          (disco-ui-card-indent-prefix
+           (disco-room--line-prefix-string section-prefix-state nil "    ")))
+      (disco-room--insert-forward-section msg section-prefix-state)
+      (when (disco-room--message-has-thread-p msg)
+        (let* ((message-id (alist-get 'id msg))
+               (thread (disco-room--thread-from-message msg))
+               (target-thread-id (or (and (listp thread) (alist-get 'id thread))
+                                     (and (stringp message-id) message-id)))
+               (target-thread-name (or (and (listp thread) (alist-get 'name thread))
+                                       (and (stringp message-id)
+                                            (format "thread:%s" message-id)))))
+          (insert (disco-room--line-prefix-string section-prefix-state t))
+          (if target-thread-id
+              (disco-ui-insert-action-button
+               "[Open thread]"
+               (lambda ()
+                 (disco-room-open
+                  target-thread-id
+                  (or target-thread-name target-thread-id)))
+               :face 'disco-room-message-meta
+               :help-echo "Open starter thread for this message")
+            (insert (propertize "[Thread id unavailable]"
+                                'face 'shadow)))
+          (insert "\n")))
+      (disco-room--insert-message-attachments msg section-prefix-state)
+      (disco-room--insert-message-embeds msg)
+      (disco-room--insert-message-poll msg))
+    (disco-room--insert-message-reactions msg section-prefix-state)
+    (add-text-properties
+     line-start
+     (point)
+     (list 'read-only t
+           'front-sticky '(read-only)
+           'disco-message-id message-id))))
 
 (defun disco-room--ewoc-printer (msg)
   "EWOC pretty-printer for one room message MSG."
