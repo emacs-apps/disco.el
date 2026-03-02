@@ -26,6 +26,7 @@
 (defvar disco-room-embed-description-limit)
 (defvar disco-room-attachment-preview-max-width)
 (defvar disco-room-attachment-preview-max-height)
+(defvar disco-ui-card-indent-prefix)
 
 (defun disco-embed--url-present-p (url)
   "Return non-nil when URL is a non-empty string."
@@ -898,18 +899,20 @@ Keeps original line breaks and applies markdown renderer pipeline."
         (condition-case _
             (if disco-room-use-rich-embed-cards
                 (disco-embed-insert-card msg embed embed-index)
-              (let* ((line-start (point))
+              (let* ((line-prefix (or disco-ui-card-indent-prefix "    "))
+                     (line-start (point))
                      (url (disco-embed--main-url msg embed)))
-                (insert "    " (disco-embed--summary embed) "\n")
+                (insert line-prefix (disco-embed--summary embed) "\n")
                 (add-text-properties line-start (point) '(face disco-room-message-meta))
                 (when (and disco-room-show-embed-urls
                            (disco-embed--url-present-p url))
                   (let ((url-start (point)))
-                    (insert "      " url "\n")
+                    (insert line-prefix "  " url "\n")
                     (add-text-properties url-start (point) '(face shadow))))))
           (error
-           (let ((line-start (point)))
-             (insert "    [embed] [render fallback]\n")
+           (let* ((line-prefix (or disco-ui-card-indent-prefix "    "))
+                  (line-start (point)))
+             (insert line-prefix "[embed] [render fallback]\n")
              (add-text-properties line-start (point) '(face shadow)))))))))
 
 (provide 'disco-embed)

@@ -70,11 +70,15 @@ FACE and PROPERTIES are applied to each inserted line span. PREFIX is set via
      ((null (cdr values)) (car values))
      (t values))))
 
-(cl-defun disco-ui-card-line-prefix (&key face (indent "    ") (marker "▏"))
+(defvar disco-ui-card-indent-prefix "    "
+  "Dynamic base indent prefix used by `disco-ui-card-line-prefix'.")
+
+(cl-defun disco-ui-card-line-prefix (&key face (indent disco-ui-card-indent-prefix)
+                                          (marker "▏"))
   "Return a display-only card prefix string.
 
 FACE is applied to MARKER while INDENT is kept plain."
-  (concat indent
+  (concat (or indent "")
           (if face
               (propertize marker 'face face)
             marker)))

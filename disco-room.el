@@ -35,6 +35,7 @@
 (defvar-local disco-room--channel-name nil)
 (defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--oldest-message-id nil)
+(defvar disco-ui-card-indent-prefix)
 (defvar-local disco-room--newest-message-id nil)
 (defvar-local disco-room--history-exhausted nil)
 (defvar-local disco-room--pending-reply-to nil)
@@ -2357,15 +2358,19 @@ If needed, schedule async fetch and fall back to text placeholder."
             nil)
            (t nil))))))))
 
+(defun disco-room--avatar-line-pixel-height ()
+  "Return effective line height in pixels for current room rendering."
+  (max 1
+       (or (ignore-errors (line-pixel-height))
+           (frame-char-height)
+           16)))
+
 (defun disco-room--avatar-display-size ()
-  "Return avatar size in pixels for current room line metrics."
-  (let* ((line-height (max 1
-                           (or (ignore-errors (line-pixel-height))
-                               (frame-char-height)
-                               16)))
-         (base-height (max 1 (frame-char-height)))
-         (scale (/ (float line-height) (float base-height))))
-    (max 8 (round (* disco-room-avatar-image-size scale)))))
+  "Return avatar size in pixels tuned for two-line avatar rendering."
+  (let* ((line-height (disco-room--avatar-line-pixel-height))
+         (configured (max 8 disco-room-avatar-image-size))
+         (target (* 2 line-height)))
+    (max configured target)))
 
 (defun disco-room--avatar-image-resized (image pixel-size)
   "Return IMAGE resized to PIXEL-SIZE, or nil when IMAGE is invalid."
@@ -2381,13 +2386,17 @@ If needed, schedule async fetch and fall back to text placeholder."
   "Return display spec for IMAGE slice at SLICE-INDEX (0 or 1)."
   (when (disco-media-image-object-valid-p image)
     (let* ((pixel-size (disco-room--avatar-display-size))
+           (line-height (disco-room--avatar-line-pixel-height))
+           (slice-height (max 1 line-height))
            (scaled (disco-room--avatar-image-resized image pixel-size)))
       (when (disco-media-image-object-valid-p scaled)
-        (let* ((top-height (max 1 (/ pixel-size 2)))
-               (bottom-height (max 1 (- pixel-size top-height)))
-               (slice (if (= slice-index 0)
-                          (list 'slice 0 0 1.0 top-height)
-                        (list 'slice 0 top-height 1.0 bottom-height))))
+        (let* ((window-height (* 2 slice-height))
+               (offset (max 0 (/ (- pixel-size window-height) 2)))
+               (max-y (max 0 (- pixel-size slice-height)))
+               (slice-y (if (= slice-index 0)
+                            offset
+                          (+ offset slice-height)))
+               (slice (list 'slice 0 (min max-y slice-y) 1.0 slice-height)))
           (list slice scaled))))))
 
 (defun disco-room--avatar-prefixes (msg)
@@ -4252,31 +4261,32 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
            content)
           (setq body-used t))
         (setq section-prefix body-rest-prefix))
-      (disco-room--insert-forward-section msg section-prefix)
-      (when (disco-room--message-has-thread-p msg)
-        (let* ((message-id (alist-get 'id msg))
-               (thread (disco-room--thread-from-message msg))
-               (target-thread-id (or (and (listp thread) (alist-get 'id thread))
-                                     (and (stringp message-id) message-id)))
-               (target-thread-name (or (and (listp thread) (alist-get 'name thread))
-                                       (and (stringp message-id)
-                                            (format "thread:%s" message-id)))))
-          (insert section-prefix)
-          (if target-thread-id
-              (disco-ui-insert-action-button
-               "[Open thread]"
-               (lambda ()
-                 (disco-room-open
-                  target-thread-id
-                  (or target-thread-name target-thread-id)))
-               :face 'disco-room-message-meta
-               :help-echo "Open starter thread for this message")
-            (insert (propertize "[Thread id unavailable]"
-                                'face 'shadow)))
-          (insert "\n")))
-      (disco-room--insert-message-attachments msg section-prefix)
-      (disco-room--insert-message-embeds msg)
-      (disco-room--insert-message-poll msg)
+      (let ((disco-ui-card-indent-prefix section-prefix))
+        (disco-room--insert-forward-section msg section-prefix)
+        (when (disco-room--message-has-thread-p msg)
+          (let* ((message-id (alist-get 'id msg))
+                 (thread (disco-room--thread-from-message msg))
+                 (target-thread-id (or (and (listp thread) (alist-get 'id thread))
+                                       (and (stringp message-id) message-id)))
+                 (target-thread-name (or (and (listp thread) (alist-get 'name thread))
+                                         (and (stringp message-id)
+                                              (format "thread:%s" message-id)))))
+            (insert section-prefix)
+            (if target-thread-id
+                (disco-ui-insert-action-button
+                 "[Open thread]"
+                 (lambda ()
+                   (disco-room-open
+                    target-thread-id
+                    (or target-thread-name target-thread-id)))
+                 :face 'disco-room-message-meta
+                 :help-echo "Open starter thread for this message")
+              (insert (propertize "[Thread id unavailable]"
+                                  'face 'shadow)))
+            (insert "\n")))
+        (disco-room--insert-message-attachments msg section-prefix)
+        (disco-room--insert-message-embeds msg)
+        (disco-room--insert-message-poll msg))
       (disco-room--insert-message-reactions msg section-prefix)
       (add-text-properties
        line-start
