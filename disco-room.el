@@ -2419,16 +2419,59 @@ If needed, schedule async fetch and fall back to text placeholder."
       (setq props (plist-put props :ascent 'center))
       (cons type props))))
 
+(defun disco-room--avatar-text-fit-width (text width)
+  "Return TEXT truncated/padded to WIDTH columns."
+  (let* ((target (max 1 width))
+         (trimmed (truncate-string-to-width (or text "") target nil nil ""))
+         (trim-width (string-width trimmed)))
+    (if (< trim-width target)
+        (concat trimmed (make-string (- target trim-width) ?\s))
+      trimmed)))
+
+(defun disco-room--avatar-image-with-text (image fallback pixel-size)
+  "Return IMAGE resized to PIXEL-SIZE with stable two-line fallback text."
+  (when (disco-media-image-object-valid-p image)
+    (let* ((resized (disco-room--avatar-image-resized image pixel-size))
+           (char-width (max 1 (frame-char-width)))
+           (width-chars (max 1
+                            (ceiling (/ (float pixel-size)
+                                        (float char-width))))))
+      (when (disco-media-image-object-valid-p resized)
+        (let* ((type (car resized))
+               (props (copy-sequence (cdr resized)))
+               (top-text (disco-room--avatar-text-fit-width fallback width-chars))
+               (bottom-text (make-string width-chars ?\s)))
+          (setq props (plist-put props :disco-text (list top-text bottom-text)))
+          (setq props (plist-put props :disco-nslices 2))
+          (cons type props))))))
+
+(defun disco-room--avatar-image-text (image &optional slice-index)
+  "Return textual fallback for IMAGE and optional SLICE-INDEX."
+  (let ((text (and (consp image)
+                   (plist-get (cdr image) :disco-text))))
+    (cond
+     ((stringp text) text)
+     ((and (listp text)
+           (numberp slice-index)
+           (>= slice-index 0)
+           (< slice-index (length text)))
+      (nth slice-index text))
+     ((listp text)
+      (mapconcat #'identity text "\n"))
+     (t nil))))
+
 (defun disco-room--avatar-image-char-width (image)
   "Return rendered width in columns for IMAGE, defaulting to 1."
-  (let* ((size-px (and (disco-media-image-object-valid-p image)
-                       (ignore-errors (image-size image t (selected-frame)))))
-         (width-px (and (consp size-px) (car size-px)))
-         (char-width (max 1 (frame-char-width))))
-    (max 1
-         (if (numberp width-px)
-             (ceiling (/ (float width-px) (float char-width)))
-           1))))
+  (or (and (stringp (disco-room--avatar-image-text image 1))
+           (max 1 (string-width (disco-room--avatar-image-text image 1))))
+      (let* ((size-px (and (disco-media-image-object-valid-p image)
+                           (ignore-errors (image-size image t (selected-frame)))))
+             (width-px (and (consp size-px) (car size-px)))
+             (char-width (max 1 (frame-char-width))))
+        (max 1
+             (if (numberp width-px)
+                 (ceiling (/ (float width-px) (float char-width)))
+               1)))))
 
 (defun disco-room--avatar-image-slice-display (image slice-index &optional resized)
   "Return display spec for IMAGE slice at SLICE-INDEX (0 or 1).
@@ -2447,24 +2490,32 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
                         (list 'slice 0 top-height 1.0 bottom-height))))
           (list slice scaled))))))
 
+(defun disco-room--avatar-image-slice-string (image slice-index)
+  "Return propertized avatar slice string for IMAGE at SLICE-INDEX."
+  (let* ((text (or (disco-room--avatar-image-text image slice-index)
+                   (make-string (disco-room--avatar-image-char-width image) ?\s)))
+         (display (disco-room--avatar-image-slice-display image slice-index t)))
+    (if display
+        (propertize text 'display display 'rear-nonsticky '(display))
+      text)))
+
 (defun disco-room--avatar-prefixes (msg)
   "Return avatar-aware prefixes plist for MSG header/body lines."
   (let* ((image (disco-room--avatar-image msg))
          (fallback (disco-room--avatar-placeholder msg))
          (fallback-indent (max 1 (1+ (string-width fallback)))))
     (if (disco-media-image-object-valid-p image)
-        (let* ((scaled (disco-room--avatar-image-resized
+        (let* ((scaled (disco-room--avatar-image-with-text
                         image
+                        fallback
                         (disco-room--avatar-display-size)))
                (image-indent (1+ (disco-room--avatar-image-char-width scaled)))
                (rest-prefix (make-string image-indent ?\s))
-               (top-display (disco-room--avatar-image-slice-display scaled 0 t))
-               (bottom-display (disco-room--avatar-image-slice-display scaled 1 t))
-               (top (if top-display
-                        (propertize " " 'display top-display)
+               (top (if (disco-media-image-object-valid-p scaled)
+                        (disco-room--avatar-image-slice-string scaled 0)
                       fallback))
-               (bottom (if bottom-display
-                           (propertize " " 'display bottom-display)
+               (bottom (if (disco-media-image-object-valid-p scaled)
+                           (disco-room--avatar-image-slice-string scaled 1)
                          (make-string (max 1 (string-width fallback)) ?\s))))
           (list :header (concat top " ")
                 :first-body (concat bottom " ")
