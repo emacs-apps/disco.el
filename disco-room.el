@@ -31,9 +31,6 @@
 (require 'disco-transient)
 (require 'disco-company)
 
-(defvar company-backends
-  "Forward declaration for optional company backend integration.")
-
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
 (defvar-local disco-room--guild-id nil)
@@ -6036,20 +6033,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (when (fboundp 'cursor-intangible-mode)
     (cursor-intangible-mode 1))
-  (setq-local completion-at-point-functions
-              (cons #'disco-room-complete-at-point
-                    completion-at-point-functions))
-  (when (and disco-room-enable-company-backend
-             (featurep 'company)
-             (boundp 'company-backends))
-    (let* ((existing (cond
-                      ((null company-backends) nil)
-                      ((listp company-backends) company-backends)
-                      (t (list company-backends))))
-           (filtered (cl-remove 'disco-room-company-completion existing
-                                :test #'equal)))
-      (setq-local company-backends
-                  (cons 'disco-room-company-completion filtered))))
+  (funcall #'disco-company-setup-room-buffer)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command nil t))

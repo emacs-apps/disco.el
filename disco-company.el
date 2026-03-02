@@ -14,7 +14,9 @@
 (require 'disco-state)
 
 (defvar company-mode)
+(defvar company-backends)
 (defvar completion-at-point-functions)
+(defvar disco-room-enable-company-backend)
 (defvar disco-room-show-avatar-images)
 
 (defcustom disco-company-show-user-avatars t
@@ -27,6 +29,31 @@
 (defvar-local disco-room--typing-users nil)
 (defvar-local disco-room--input-marker nil)
 (defvar-local disco-room--draft-input "")
+
+(defun disco-company--as-list (value)
+  "Return VALUE normalized as a proper list."
+  (cond
+   ((null value) nil)
+   ((listp value) value)
+   (t (list value))))
+
+(defun disco-company-setup-room-buffer ()
+  "Install CAPF/company completion hooks for current room buffer."
+  (let* ((existing-capf (disco-company--as-list completion-at-point-functions))
+         (filtered-capf (cl-remove #'disco-room-complete-at-point
+                                   existing-capf
+                                   :test #'eq)))
+    (setq-local completion-at-point-functions
+                (cons #'disco-room-complete-at-point filtered-capf)))
+  (when (and disco-room-enable-company-backend
+             (featurep 'company)
+             (boundp 'company-backends))
+    (let* ((existing-backends (disco-company--as-list company-backends))
+           (filtered-backends (cl-remove 'disco-room-company-completion
+                                         existing-backends
+                                         :test #'equal)))
+      (setq-local company-backends
+                  (cons 'disco-room-company-completion filtered-backends)))))
 
 (defun disco-company--input-region-bounds ()
   "Return writable room draft region as (START . END), or nil."
@@ -90,13 +117,13 @@
                      ""
                      (buffer-substring-no-properties (car bounds) (cdr bounds))))))))
 
-(defun disco-room--completion-token-boundary-p (char)
+(defun disco-company--completion-token-boundary-p (char)
   "Return non-nil when CHAR is a valid left boundary for token completion."
   (or (null char)
       (let ((syntax (char-syntax char)))
         (not (memq syntax '(?w ?_))))))
 
-(defun disco-room--completion-token-bounds ()
+(defun disco-company--completion-token-bounds ()
   "Return completion token metadata at point, or nil.
 
 Returned plist contains :start, :end, :trigger, :raw and :query.
@@ -109,7 +136,7 @@ Supported trigger characters are `@' and `#'."
           (when (memq trigger '(?@ ?#))
             (let* ((start (1- (point)))
                    (left (char-before start)))
-              (when (disco-room--completion-token-boundary-p left)
+              (when (disco-company--completion-token-boundary-p left)
                 (let ((raw (buffer-substring-no-properties start end)))
                   (list :start start
                         :end end
@@ -117,30 +144,30 @@ Supported trigger characters are `@' and `#'."
                         :raw raw
                         :query (buffer-substring-no-properties (1+ start) end)))))))))))
 
-(defun disco-room--completion-string-present-p (value)
+(defun disco-company--completion-string-present-p (value)
   "Return non-nil when VALUE is a non-empty trimmed string."
   (and (stringp value)
        (not (string-empty-p (string-trim value)))))
 
-(defun disco-room--completion-first-present (&rest values)
+(defun disco-company--completion-first-present (&rest values)
   "Return first non-empty trimmed string from VALUES, or nil."
-  (seq-find #'disco-room--completion-string-present-p
+  (seq-find #'disco-company--completion-string-present-p
             (mapcar (lambda (value)
                       (and (stringp value)
                            (string-trim value)))
                     values)))
 
-(defun disco-room--completion-short-id (id)
+(defun disco-company--completion-short-id (id)
   "Return short suffix label for snowflake-like ID."
   (let ((text (or (disco-company--normalize-id id) "????")))
     (if (> (length text) 4)
         (substring text (- (length text) 4))
       text)))
 
-(defun disco-room--completion-disambiguate-label (base hint seen-labels)
+(defun disco-company--completion-disambiguate-label (base hint seen-labels)
   "Return unique completion label from BASE using HINT against SEEN-LABELS."
   (let* ((seed (or base ""))
-         (suffix (if (disco-room--completion-string-present-p hint)
+         (suffix (if (disco-company--completion-string-present-p hint)
                      (format " (%s)" hint)
                    ""))
          (index 0)
@@ -155,14 +182,14 @@ Supported trigger characters are `@' and `#'."
     (puthash candidate t seen-labels)
     candidate))
 
-(defun disco-room--completion-make-candidate (label insert annotation sort-key &rest props)
+(defun disco-company--completion-make-candidate (label insert annotation sort-key &rest props)
   "Build one completion candidate plist.
 
 PROPS is appended as additional plist metadata."
   (append (list :label label :insert insert :annotation annotation :sort-key sort-key)
           props))
 
-(cl-defun disco-room--completion--merge-user
+(cl-defun disco-company--completion--merge-user
     (table user-id &key username global-name nick avatar display-name)
   "Merge one user record into TABLE by USER-ID."
   (let ((id (disco-company--normalize-id user-id)))
@@ -176,7 +203,7 @@ PROPS is appended as additional plist metadata."
           (let* ((field (car field-value))
                  (raw-value (cdr field-value))
                  (value (and (stringp raw-value) (string-trim raw-value))))
-            (when (disco-room--completion-string-present-p value)
+            (when (disco-company--completion-string-present-p value)
               (setq entry (plist-put entry field value)))))
         (let ((display-rank (or (plist-get entry :display-rank) 0))
               (display (plist-get entry :display-name)))
@@ -187,24 +214,24 @@ PROPS is appended as additional plist metadata."
             (let* ((rank (car choice))
                    (raw-value (cdr choice))
                    (value (and (stringp raw-value) (string-trim raw-value))))
-              (when (and (disco-room--completion-string-present-p value)
+              (when (and (disco-company--completion-string-present-p value)
                          (> rank display-rank))
                 (setq display-rank rank)
                 (setq display value))))
           (setq entry (plist-put entry :display-rank display-rank))
-          (when (disco-room--completion-string-present-p display)
+          (when (disco-company--completion-string-present-p display)
             (setq entry (plist-put entry :display-name display))))
         (puthash id entry table)))))
 
-(defun disco-room--completion-user-annotation-text (username user-id)
+(defun disco-company--completion-user-annotation-text (username user-id)
   "Return annotation text for a user completion row."
   (format " user %s | id:%s"
-          (if (disco-room--completion-string-present-p username)
+          (if (disco-company--completion-string-present-p username)
               (format "@%s" username)
             "@unknown")
           user-id))
 
-(defun disco-room--completion-collect-user-name-map ()
+(defun disco-company--completion-collect-user-name-map ()
   "Return hash table of user-id -> metadata plist for current room context."
   (let ((table (make-hash-table :test #'equal)))
     (let* ((channel (disco-company--channel-object))
@@ -213,7 +240,7 @@ PROPS is appended as additional plist metadata."
                              (alist-get 'recipients channel)))))
       (dolist (recipient recipients)
         (when (listp recipient)
-          (disco-room--completion--merge-user
+          (disco-company--completion--merge-user
            table
            (alist-get 'id recipient)
            :username (alist-get 'username recipient)
@@ -222,7 +249,7 @@ PROPS is appended as additional plist metadata."
     (when (hash-table-p disco-room--typing-users)
       (maphash
        (lambda (user-id entry)
-         (disco-room--completion--merge-user
+         (disco-company--completion--merge-user
           table
           user-id
           :display-name (and (listp entry)
@@ -232,7 +259,7 @@ PROPS is appended as additional plist metadata."
       (let* ((author (alist-get 'author msg))
              (member (alist-get 'member msg)))
         (when (listp author)
-          (disco-room--completion--merge-user
+          (disco-company--completion--merge-user
            table
            (alist-get 'id author)
            :username (alist-get 'username author)
@@ -241,28 +268,28 @@ PROPS is appended as additional plist metadata."
            :avatar (alist-get 'avatar author)))))
     (when (disco-company--thread-channel-p)
       (dolist (user-id (or (disco-state-thread-member-ids disco-room--channel-id) '()))
-        (disco-room--completion--merge-user table user-id)))
+        (disco-company--completion--merge-user table user-id)))
     table))
 
-(defun disco-room--completion-user-candidates ()
+(defun disco-company--completion-user-candidates ()
   "Return `@' user mention candidates for current room context."
-  (let ((user-map (disco-room--completion-collect-user-name-map))
+  (let ((user-map (disco-company--completion-collect-user-name-map))
         (seen-labels (make-hash-table :test #'equal))
         out)
     (maphash
      (lambda (user-id entry)
        (let* ((display-name (or (and (listp entry) (plist-get entry :display-name))
-                                (format "user-%s" (disco-room--completion-short-id user-id))))
+                                (format "user-%s" (disco-company--completion-short-id user-id))))
               (username (and (listp entry) (plist-get entry :username)))
               (avatar-hash (and (listp entry) (plist-get entry :avatar)))
-              (label (disco-room--completion-disambiguate-label
+              (label (disco-company--completion-disambiguate-label
                       (format "@%s" display-name)
-                      (disco-room--completion-short-id user-id)
+                      (disco-company--completion-short-id user-id)
                       seen-labels)))
-         (push (disco-room--completion-make-candidate
+         (push (disco-company--completion-make-candidate
                 label
                 (format "<@%s>" user-id)
-                (disco-room--completion-user-annotation-text username user-id)
+                (disco-company--completion-user-annotation-text username user-id)
                 (downcase display-name)
                 :kind 'user
                 :user-id user-id
@@ -275,7 +302,7 @@ PROPS is appended as additional plist metadata."
                 (string-lessp (or (plist-get left :sort-key) "")
                               (or (plist-get right :sort-key) ""))))))
 
-(defun disco-room--completion-role-candidates ()
+(defun disco-company--completion-role-candidates ()
   "Return `@' role mention candidates from current guild state."
   (let* ((guild-id (disco-company--normalize-id disco-room--guild-id))
          (guild (and guild-id (disco-company--guild-by-id guild-id)))
@@ -289,13 +316,13 @@ PROPS is appended as additional plist metadata."
              (role-name (and (listp role) (alist-get 'name role)))
              (name (and (stringp role-name) (string-trim role-name))))
         (when (and role-id
-                   (disco-room--completion-string-present-p name)
+                   (disco-company--completion-string-present-p name)
                    (not (equal role-id guild-id)))
-          (let ((label (disco-room--completion-disambiguate-label
+          (let ((label (disco-company--completion-disambiguate-label
                         (format "@%s" name)
-                        (disco-room--completion-short-id role-id)
+                        (disco-company--completion-short-id role-id)
                         seen-labels)))
-            (push (disco-room--completion-make-candidate
+            (push (disco-company--completion-make-candidate
                    label
                    (format "<@&%s>" role-id)
                    " role"
@@ -307,17 +334,17 @@ PROPS is appended as additional plist metadata."
                 (string-lessp (or (plist-get left :sort-key) "")
                               (or (plist-get right :sort-key) ""))))))
 
-(defun disco-room--completion-special-candidates ()
+(defun disco-company--completion-special-candidates ()
   "Return special `@everyone' and `@here' candidates for guild channels."
   (when (disco-company--normalize-id disco-room--guild-id)
-    (list (disco-room--completion-make-candidate
+    (list (disco-company--completion-make-candidate
            "@everyone" "@everyone" " special" "@everyone"
            :kind 'special)
-          (disco-room--completion-make-candidate
+          (disco-company--completion-make-candidate
            "@here" "@here" " special" "@here"
            :kind 'special))))
 
-(defun disco-room--completion-channel-type-label (channel)
+(defun disco-company--completion-channel-type-label (channel)
   "Return human-readable channel type label for CHANNEL."
   (pcase (and (listp channel) (alist-get 'type channel))
     (0 " text")
@@ -329,15 +356,15 @@ PROPS is appended as additional plist metadata."
     (16 " media")
     (_ " channel")))
 
-(defun disco-room--completion-mentionable-channel-p (channel)
+(defun disco-company--completion-mentionable-channel-p (channel)
   "Return non-nil when CHANNEL should be offered for `#' completion."
   (let ((type (and (listp channel) (alist-get 'type channel))))
     (and (listp channel)
          (not (eq type 4))
-         (disco-room--completion-string-present-p (alist-get 'name channel))
+         (disco-company--completion-string-present-p (alist-get 'name channel))
          (disco-company--normalize-id (alist-get 'id channel)))))
 
-(defun disco-room--completion-channel-candidates ()
+(defun disco-company--completion-channel-candidates ()
   "Return `#' channel mention candidates from current guild state."
   (let* ((guild-id (disco-company--normalize-id disco-room--guild-id))
          (channels (and guild-id
@@ -346,19 +373,19 @@ PROPS is appended as additional plist metadata."
          (seen-labels (make-hash-table :test #'equal))
          out)
     (dolist (channel (or channels '()))
-      (when (disco-room--completion-mentionable-channel-p channel)
+      (when (disco-company--completion-mentionable-channel-p channel)
         (let* ((channel-id (disco-company--normalize-id (alist-get 'id channel)))
                (name (string-trim (alist-get 'name channel))))
           (unless (gethash channel-id seen-ids)
             (puthash channel-id t seen-ids)
-            (let ((label (disco-room--completion-disambiguate-label
+            (let ((label (disco-company--completion-disambiguate-label
                           (format "#%s" name)
-                          (disco-room--completion-short-id channel-id)
+                          (disco-company--completion-short-id channel-id)
                           seen-labels)))
-              (push (disco-room--completion-make-candidate
+              (push (disco-company--completion-make-candidate
                      label
                      (format "<#%s>" channel-id)
-                     (disco-room--completion-channel-type-label channel)
+                     (disco-company--completion-channel-type-label channel)
                      (downcase name)
                      :kind 'channel
                      :channel-id channel-id)
@@ -367,7 +394,7 @@ PROPS is appended as additional plist metadata."
                 (string-lessp (or (plist-get left :sort-key) "")
                               (or (plist-get right :sort-key) ""))))))
 
-(defun disco-room--completion-uniquify-candidates (candidates)
+(defun disco-company--completion-uniquify-candidates (candidates)
   "Return CANDIDATES with globally unique display labels."
   (let ((seen-labels (make-hash-table :test #'equal))
         out)
@@ -375,16 +402,16 @@ PROPS is appended as additional plist metadata."
       (let* ((copy (copy-sequence candidate))
              (label (or (plist-get copy :label) ""))
              (hint (or (and (plist-get copy :user-id)
-                            (disco-room--completion-short-id
+                            (disco-company--completion-short-id
                              (plist-get copy :user-id)))
                        (and (plist-get copy :role-id)
-                            (disco-room--completion-short-id
+                            (disco-company--completion-short-id
                              (plist-get copy :role-id)))
                        (and (plist-get copy :channel-id)
-                            (disco-room--completion-short-id
+                            (disco-company--completion-short-id
                              (plist-get copy :channel-id)))
                        (string-trim (or (plist-get copy :annotation) ""))))
-             (unique (disco-room--completion-disambiguate-label
+             (unique (disco-company--completion-disambiguate-label
                       label
                       hint
                       seen-labels)))
@@ -392,17 +419,17 @@ PROPS is appended as additional plist metadata."
         (push copy out)))
     (nreverse out)))
 
-(defun disco-room--completion-candidates-for-trigger (trigger)
+(defun disco-company--completion-candidates-for-trigger (trigger)
   "Return completion candidates for TRIGGER in current room context."
-  (disco-room--completion-uniquify-candidates
+  (disco-company--completion-uniquify-candidates
    (pcase trigger
-     (?@ (append (or (disco-room--completion-special-candidates) '())
-                 (disco-room--completion-role-candidates)
-                 (disco-room--completion-user-candidates)))
-     (?# (disco-room--completion-channel-candidates))
+     (?@ (append (or (disco-company--completion-special-candidates) '())
+                 (disco-company--completion-role-candidates)
+                 (disco-company--completion-user-candidates)))
+     (?# (disco-company--completion-channel-candidates))
      (_ nil))))
 
-(defun disco-room--completion-filter-candidates (candidates prefix)
+(defun disco-company--completion-filter-candidates (candidates prefix)
   "Return CANDIDATES matching PREFIX case-insensitively."
   (let ((needle (downcase (or prefix ""))))
     (if (string-empty-p needle)
@@ -426,14 +453,14 @@ PROPS is appended as additional plist metadata."
                         (string-prefix-p needle user-id-with-at))))))
        candidates))))
 
-(defun disco-room--completion-apply-candidate (completed replacement)
+(defun disco-company--completion-apply-candidate (completed replacement)
   "Replace COMPLETED text before point with mention REPLACEMENT.
 
 Return non-nil when replacement was applied."
   (let ((choice (and (stringp completed)
                      (substring-no-properties completed))))
-    (when (and (disco-room--completion-string-present-p choice)
-               (disco-room--completion-string-present-p replacement))
+    (when (and (disco-company--completion-string-present-p choice)
+               (disco-company--completion-string-present-p replacement))
       (let ((end (point))
             (start (- (point) (length choice))))
         (when (and (>= start (point-min))
@@ -448,7 +475,7 @@ Return non-nil when replacement was applied."
           (disco-company--sync-room-draft)
           t)))))
 
-(defun disco-room--completion-user-initials (candidate)
+(defun disco-company--completion-user-initials (candidate)
   "Return text avatar initials for user CANDIDATE."
   (let* ((name (or (plist-get candidate :display-name)
                    (plist-get candidate :username)
@@ -460,7 +487,7 @@ Return non-nil when replacement was applied."
                    "")))
     (upcase (concat first second))))
 
-(defun disco-room--completion-user-avatar-image (candidate)
+(defun disco-company--completion-user-avatar-image (candidate)
   "Return avatar image object for user CANDIDATE when available."
   (when (and disco-company-show-user-avatars
              (boundp 'disco-room-show-avatar-images)
@@ -470,34 +497,34 @@ Return non-nil when replacement was applied."
            (avatar-hash (plist-get candidate :avatar-hash)))
       (when user-id
         (let ((author `((id . ,user-id))))
-          (when (disco-room--completion-string-present-p avatar-hash)
+          (when (disco-company--completion-string-present-p avatar-hash)
             (setq author (append author `((avatar . ,avatar-hash)))))
           (ignore-errors
             (funcall #'disco-room--avatar-image
                      `((author . ,author)))))))))
 
-(defun disco-room--completion-company-user-annotation (candidate)
+(defun disco-company--completion-company-user-annotation (candidate)
   "Return company annotation string for user CANDIDATE."
   (let* ((username (plist-get candidate :username))
          (user-id (plist-get candidate :user-id))
-         (image (disco-room--completion-user-avatar-image candidate))
+         (image (disco-company--completion-user-avatar-image candidate))
          (icon (if image
                    (propertize " " 'display image)
-                 (format "[%s]" (disco-room--completion-user-initials candidate)))))
+                 (format "[%s]" (disco-company--completion-user-initials candidate)))))
     (format "  %s %s | id:%s"
             icon
-            (if (disco-room--completion-string-present-p username)
+            (if (disco-company--completion-string-present-p username)
                 (format "@%s" username)
               "@unknown")
             (or user-id "?"))))
 
-(defun disco-room--completion-company-annotation (candidate)
+(defun disco-company--completion-company-annotation (candidate)
   "Return company annotation string for CANDIDATE plist."
   (if (eq (plist-get candidate :kind) 'user)
-      (disco-room--completion-company-user-annotation candidate)
+      (disco-company--completion-company-user-annotation candidate)
     (or (plist-get candidate :annotation) "")))
 
-(defun disco-room--completion-company-meta (candidate)
+(defun disco-company--completion-company-meta (candidate)
   "Return company metadata string for CANDIDATE plist."
   (if (eq (plist-get candidate :kind) 'user)
       (format "display:%s username:%s id:%s"
@@ -510,12 +537,12 @@ Return non-nil when replacement was applied."
   "Return completion data for `@' and `#' tokens at point.
 
 This function is suitable for `completion-at-point-functions'."
-  (let ((token (disco-room--completion-token-bounds)))
+  (let ((token (disco-company--completion-token-bounds)))
     (when token
       (let* ((trigger (plist-get token :trigger))
              (start (plist-get token :start))
              (end (plist-get token :end))
-             (all-candidates (disco-room--completion-candidates-for-trigger trigger))
+             (all-candidates (disco-company--completion-candidates-for-trigger trigger))
              (candidate-table (make-hash-table :test #'equal)))
         (dolist (candidate all-candidates)
           (puthash (plist-get candidate :label) candidate candidate-table))
@@ -527,7 +554,7 @@ This function is suitable for `completion-at-point-functions'."
                '(metadata (category . unicode-name)
                           (display-sort-function . identity)
                           (cycle-sort-function . identity))
-             (let* ((matches (disco-room--completion-filter-candidates
+             (let* ((matches (disco-company--completion-filter-candidates
                               all-candidates
                               string))
                     (labels (mapcar (lambda (candidate)
@@ -544,7 +571,7 @@ This function is suitable for `completion-at-point-functions'."
                                      (gethash key candidate-table))))
                 (list label ""
                       (if candidate
-                          (disco-room--completion-company-annotation candidate)
+                          (disco-company--completion-company-annotation candidate)
                         ""))))
             labels))
          :annotation-function
@@ -554,7 +581,7 @@ This function is suitable for `completion-at-point-functions'."
                   (candidate (and key
                                   (gethash key candidate-table))))
              (if candidate
-                 (disco-room--completion-company-annotation candidate)
+                 (disco-company--completion-company-annotation candidate)
                "")))
          :exit-function
          (lambda (label status)
@@ -565,21 +592,21 @@ This function is suitable for `completion-at-point-functions'."
                                     (gethash key candidate-table)))
                     (replacement (and candidate (plist-get candidate :insert))))
                (when replacement
-                 (disco-room--completion-apply-candidate key replacement)))))
+                 (disco-company--completion-apply-candidate key replacement)))))
          :exclusive 'no)))))
 
-(defun disco-room--company-prefix ()
+(defun disco-company--company-prefix ()
   "Return current completion token for company backend, or nil."
-  (let ((token (disco-room--completion-token-bounds)))
+  (let ((token (disco-company--completion-token-bounds)))
     (when token
       (plist-get token :raw))))
 
-(defun disco-room--company-candidates (prefix)
+(defun disco-company--company-candidates (prefix)
   "Return company candidate strings for PREFIX."
   (when (and (stringp prefix) (> (length prefix) 0))
     (let* ((trigger (aref prefix 0))
-           (matches (disco-room--completion-filter-candidates
-                     (disco-room--completion-candidates-for-trigger trigger)
+           (matches (disco-company--completion-filter-candidates
+                     (disco-company--completion-candidates-for-trigger trigger)
                      prefix)))
       (mapcar (lambda (candidate)
                 (propertize (plist-get candidate :label)
@@ -600,16 +627,16 @@ This function is suitable for `completion-at-point-functions'."
     ('prefix
      (when (and (derived-mode-p 'disco-room-mode)
                 (disco-company--point-in-input-p))
-       (disco-room--company-prefix)))
+       (disco-company--company-prefix)))
     ('sorted t)
     ('require-match 'never)
     ('candidates
-     (disco-room--company-candidates arg))
+     (disco-company--company-candidates arg))
     ('annotation
      (let ((candidate (and (stringp arg)
                            (get-text-property 0 'disco-room-completion-candidate arg))))
        (if candidate
-           (disco-room--completion-company-annotation candidate)
+           (disco-company--completion-company-annotation candidate)
          (or (and (stringp arg)
                   (get-text-property 0 'disco-room-completion-annotation arg))
              ""))))
@@ -617,27 +644,27 @@ This function is suitable for `completion-at-point-functions'."
      (let ((candidate (and (stringp arg)
                            (get-text-property 0 'disco-room-completion-candidate arg))))
        (if candidate
-           (disco-room--completion-company-meta candidate)
+           (disco-company--completion-company-meta candidate)
          (or arg ""))))
     ('post-completion
      (let ((replacement (and (stringp arg)
                              (get-text-property 0 'disco-room-completion-insert arg))))
        (when replacement
-         (disco-room--completion-apply-candidate arg replacement))))))
+         (disco-company--completion-apply-candidate arg replacement))))))
 
-(defun disco-room--complete-with-capf ()
+(defun disco-company--complete-with-capf ()
   "Try CAPF completion for mention/channel token at point."
   (let ((completion-ignore-case t)
         (completion-at-point-functions
          (cons #'disco-room-complete-at-point completion-at-point-functions)))
     (completion-at-point)))
 
-(defun disco-room--complete-with-company ()
+(defun disco-company--complete-with-company ()
   "Try company backend completion for mention/channel token at point."
   (when (and (bound-and-true-p company-mode)
              (fboundp 'company-begin-backend)
              (fboundp 'company-complete)
-             (disco-room--completion-token-bounds))
+             (disco-company--completion-token-bounds))
     (funcall 'company-begin-backend 'disco-room-company-completion)
     (funcall 'company-complete)))
 
@@ -646,11 +673,11 @@ This function is suitable for `completion-at-point-functions'."
 
 This command prefers company completion when available and falls back to CAPF."
   (interactive)
-  (let ((token (disco-room--completion-token-bounds)))
+  (let ((token (disco-company--completion-token-bounds)))
     (if (not token)
         (message "disco: point is not on @mention or #channel token")
-      (or (disco-room--complete-with-company)
-          (disco-room--complete-with-capf)
+      (or (disco-company--complete-with-company)
+          (disco-company--complete-with-capf)
           (message "disco: no completion candidates for %s"
                    (plist-get token :raw))))))
 
