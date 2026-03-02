@@ -18,6 +18,7 @@
 (require 'browse-url)
 (require 'url-handlers)
 (require 'plz)
+(require 'svg nil t)
 (require 'disco-ui)
 (require 'disco-util)
 (require 'disco-markdown)
@@ -96,6 +97,9 @@ Values are either image objects or the symbol `:missing'.")
 
 (defvar disco-room--avatar-fetching (make-hash-table :test #'equal)
   "Global set of avatar cache keys currently being fetched.")
+
+(defvar disco-room--avatar-round-image-cache (make-hash-table :test #'equal)
+  "Global rounded avatar image cache keyed by file/size/mtime.")
 
 (defvar disco-room--forward-guild-icon-image-cache (make-hash-table :test #'equal)
   "Global forwarded-source guild icon cache keyed by icon cache key.")
@@ -183,6 +187,21 @@ When image rendering is unavailable, room falls back to text placeholders."
 (defcustom disco-room-avatar-image-size 28
   "Pixel size used for inline avatar images in room timeline."
   :type 'integer
+  :group 'disco)
+
+(defcustom disco-room-avatar-round-images t
+  "When non-nil, render room avatars using circular clipping when available."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-avatar-round-size-factor 0.90
+  "Scale factor applied to computed avatar size for round rendering."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-room-avatar-round-inset-ratio 0.08
+  "Inset ratio used when clipping circular avatars."
+  :type 'number
   :group 'disco)
 
 (defcustom disco-room-avatar-cache-directory
@@ -2239,6 +2258,7 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
   (interactive)
   (clrhash disco-room--avatar-image-cache)
   (clrhash disco-room--avatar-fetching)
+  (clrhash disco-room--avatar-round-image-cache)
   (disco-room--rerender-open-rooms)
   (message "disco: avatar cache cleared"))
 
@@ -2247,6 +2267,7 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
   (interactive)
   (clrhash disco-room--avatar-image-cache)
   (clrhash disco-room--avatar-fetching)
+  (clrhash disco-room--avatar-round-image-cache)
   (when (file-directory-p disco-room-avatar-cache-directory)
     (delete-directory disco-room-avatar-cache-directory t))
   (disco-room--rerender-open-rooms)
@@ -2428,22 +2449,86 @@ If needed, schedule async fetch and fall back to text placeholder."
         (concat trimmed (make-string (- target trim-width) ?\s))
       trimmed)))
 
-(defun disco-room--avatar-image-with-text (image fallback pixel-size)
-  "Return IMAGE resized to PIXEL-SIZE with stable two-line fallback text."
+(defun disco-room--avatar-image-with-text (image fallback pixel-size &optional resized)
+  "Return IMAGE at PIXEL-SIZE with stable two-line fallback text.
+
+When RESIZED is non-nil, IMAGE is treated as already resized."
   (when (disco-media-image-object-valid-p image)
-    (let* ((resized (disco-room--avatar-image-resized image pixel-size))
+    (let* ((base-image (if resized
+                           image
+                         (disco-room--avatar-image-resized image pixel-size)))
+           (size-px (and (disco-media-image-object-valid-p base-image)
+                         (ignore-errors (image-size base-image t (selected-frame)))))
+           (width-px (or (and (consp size-px) (car size-px)) pixel-size))
            (char-width (max 1 (frame-char-width)))
            (width-chars (max 1
-                            (ceiling (/ (float pixel-size)
+                            (ceiling (/ (float (max 1 width-px))
                                         (float char-width))))))
-      (when (disco-media-image-object-valid-p resized)
-        (let* ((type (car resized))
-               (props (copy-sequence (cdr resized)))
+      (when (disco-media-image-object-valid-p base-image)
+        (let* ((type (car base-image))
+               (props (copy-sequence (cdr base-image)))
                (top-text (disco-room--avatar-text-fit-width fallback width-chars))
                (bottom-text (make-string width-chars ?\s)))
           (setq props (plist-put props :disco-text (list top-text bottom-text)))
           (setq props (plist-put props :disco-nslices 2))
           (cons type props))))))
+
+(defun disco-room--avatar-image-mime-type (file)
+  "Return MIME type string for avatar FILE extension, or nil."
+  (let ((ext (downcase (or (file-name-extension file) ""))))
+    (pcase ext
+      ("png" "image/png")
+      ((or "jpg" "jpeg") "image/jpeg")
+      ("gif" "image/gif")
+      ("webp" "image/webp")
+      (_ nil))))
+
+(defun disco-room--avatar-rounded-image-from-file (file pixel-size)
+  "Return circular avatar image from FILE at PIXEL-SIZE, or nil."
+  (when (and disco-room-avatar-round-images
+             (fboundp 'svg-create)
+             (fboundp 'svg-clip-path)
+             (fboundp 'svg-circle)
+             (fboundp 'svg-embed)
+             (fboundp 'svg-image)
+             (stringp file)
+             (file-readable-p file)
+             (integerp pixel-size)
+             (> pixel-size 0))
+    (let* ((attrs (file-attributes file))
+           (mtime (and attrs (file-attribute-modification-time attrs)))
+           (cache-key (format "%s:%s:%s:%s:%s"
+                              file
+                              pixel-size
+                              mtime
+                              disco-room-avatar-round-size-factor
+                              disco-room-avatar-round-inset-ratio))
+           (cached (gethash cache-key disco-room--avatar-round-image-cache)))
+      (or (and (disco-media-image-object-valid-p cached) cached)
+          (let* ((mime (disco-room--avatar-image-mime-type file))
+                 (svg (and mime (svg-create pixel-size pixel-size))))
+            (when (and mime svg)
+              (let* ((inset-ratio (max 0.0 (min 0.45 disco-room-avatar-round-inset-ratio)))
+                     (inset (* inset-ratio pixel-size))
+                     (diameter (max 1.0 (- pixel-size (* 2 inset))))
+                     (radius (/ diameter 2.0))
+                     (center (/ (float pixel-size) 2.0))
+                     (clip-id "avatar-clip")
+                     (clip (svg-clip-path svg :id clip-id)))
+                (svg-circle clip center center radius)
+                (svg-embed svg file mime nil
+                           :x inset
+                           :y inset
+                           :width diameter
+                           :height diameter
+                           :clip-path (format "url(#%s)" clip-id))
+                (let ((image (svg-image svg
+                                        :ascent 'center
+                                        :width pixel-size
+                                        :height pixel-size)))
+                  (when (disco-media-image-object-valid-p image)
+                    (puthash cache-key image disco-room--avatar-round-image-cache)
+                    image)))))))))
 
 (defun disco-room--avatar-image-text (image &optional slice-index)
   "Return textual fallback for IMAGE and optional SLICE-INDEX."
@@ -2505,10 +2590,23 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
          (fallback (disco-room--avatar-placeholder msg))
          (fallback-indent (max 1 (1+ (string-width fallback)))))
     (if (disco-media-image-object-valid-p image)
-        (let* ((scaled (disco-room--avatar-image-with-text
-                        image
+        (let* ((base-size (disco-room--avatar-display-size))
+               (pixel-size (if disco-room-avatar-round-images
+                               (max 8 (round (* base-size
+                                                (max 0.1 disco-room-avatar-round-size-factor))))
+                             base-size))
+               (cache-key (disco-room--avatar-cache-key msg))
+               (cache-file (and cache-key
+                                (disco-room--avatar-cache-existing-file cache-key)))
+               (rounded (and cache-file
+                             (disco-room--avatar-rounded-image-from-file cache-file pixel-size)))
+               (base-image (or rounded
+                               (disco-room--avatar-image-resized image pixel-size)))
+               (scaled (disco-room--avatar-image-with-text
+                        base-image
                         fallback
-                        (disco-room--avatar-display-size)))
+                        pixel-size
+                        t))
                (image-indent (1+ (disco-room--avatar-image-char-width scaled)))
                (rest-prefix (make-string image-indent ?\s))
                (top (if (disco-media-image-object-valid-p scaled)
