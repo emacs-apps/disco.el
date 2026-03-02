@@ -12,6 +12,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'disco-state)
+(require 'svg nil t)
 
 (defvar company-mode)
 (defvar company-backends)
@@ -25,14 +26,17 @@
   :group 'disco)
 
 (defcustom disco-company-capf-avatar-size 'auto
-  "Avatar pixel size for CAPF/Corfu completion annotations.
+  "Avatar pixel size for completion annotations.
 
 `auto' keeps avatars slightly below current frame character height so
-completion row height stays stable."
+completion row height stays stable across CAPF/Corfu and company popups."
   :type '(choice
           (const :tag "Auto (fit to row height)" auto)
           integer)
   :group 'disco)
+
+(defvar disco-company--rounded-avatar-cache (make-hash-table :test #'equal)
+  "Cache of rounded completion avatar images keyed by file/size/mtime.")
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--guild-id nil)
@@ -497,9 +501,15 @@ Return non-nil when replacement was applied."
                    "")))
     (upcase (concat first second))))
 
-(defun disco-company--completion-capf-avatar-size ()
-  "Return normalized avatar size for CAPF/Corfu annotations."
-  (let ((auto-size (max 8 (- (frame-char-height) 2))))
+(defun disco-company--completion-avatar-size ()
+  "Return normalized avatar size for completion annotations.
+
+`auto' mode follows current line pixel height, so avatar size tracks text-scale."
+  (let* ((line-height (or (and (fboundp 'line-pixel-height)
+                               (ignore-errors (line-pixel-height)))
+                          (frame-char-height)
+                          16))
+         (auto-size (max 8 (- line-height 2))))
     (pcase disco-company-capf-avatar-size
       ('auto auto-size)
       ((pred integerp) (max 8 disco-company-capf-avatar-size))
@@ -519,6 +529,75 @@ Return non-nil when replacement was applied."
         (cons type props))
     image))
 
+(defun disco-company--completion-avatar-message (candidate)
+  "Build minimal fake room message carrying avatar fields for CANDIDATE."
+  (let ((user-id (plist-get candidate :user-id))
+        (avatar-hash (plist-get candidate :avatar-hash)))
+    (when user-id
+      (let ((author `((id . ,user-id))))
+        (when (disco-company--completion-string-present-p avatar-hash)
+          (setq author (append author `((avatar . ,avatar-hash)))))
+        `((author . ,author))))))
+
+(defun disco-company--completion-avatar-cache-file (avatar-msg)
+  "Return cached avatar file path for AVATAR-MSG, or nil."
+  (when (and avatar-msg
+             (fboundp 'disco-room--avatar-cache-key)
+             (fboundp 'disco-room--avatar-cache-existing-file))
+    (let ((cache-key (ignore-errors
+                       (funcall #'disco-room--avatar-cache-key avatar-msg))))
+      (when cache-key
+        (ignore-errors
+          (funcall #'disco-room--avatar-cache-existing-file cache-key))))))
+
+(defun disco-company--completion-avatar-mime-type (file)
+  "Return MIME type string for avatar FILE extension, or nil."
+  (let ((ext (downcase (or (file-name-extension file) ""))))
+    (pcase ext
+      ("png" "image/png")
+      ((or "jpg" "jpeg") "image/jpeg")
+      ("gif" "image/gif")
+      ("webp" "image/webp")
+      (_ nil))))
+
+(defun disco-company--completion-rounded-avatar-image (file pixel-size)
+  "Return rounded SVG avatar image from FILE at PIXEL-SIZE, or nil."
+  (when (and (stringp file)
+             (file-readable-p file)
+             (integerp pixel-size)
+             (> pixel-size 0)
+             (fboundp 'svg-create)
+             (fboundp 'svg-clip-path)
+             (fboundp 'svg-circle)
+             (fboundp 'svg-embed)
+             (fboundp 'svg-image))
+    (let* ((attrs (file-attributes file))
+           (mtime (and attrs (file-attribute-modification-time attrs)))
+           (cache-key (format "%s:%s:%s" file pixel-size mtime))
+           (cached (gethash cache-key disco-company--rounded-avatar-cache)))
+      (or cached
+          (let* ((mime (disco-company--completion-avatar-mime-type file))
+                 (svg (and mime (svg-create pixel-size pixel-size))))
+            (when (and mime svg)
+              (let* ((radius (/ (float pixel-size) 2.0))
+                     (clip (svg-clip-path svg :id "clip")))
+                (svg-circle clip radius radius radius)
+                (svg-embed svg
+                           file
+                           mime
+                           nil
+                           :x 0
+                           :y 0
+                           :width pixel-size
+                           :height pixel-size
+                           :clip-path "url(#clip)")
+                (let ((image (svg-image svg
+                                        :ascent 'center
+                                        :width pixel-size
+                                        :height pixel-size)))
+                  (puthash cache-key image disco-company--rounded-avatar-cache)
+                  image))))))))
+
 (defun disco-company--completion-user-avatar-image (candidate &optional pixel-size)
   "Return avatar image object for user CANDIDATE when available.
 
@@ -527,29 +606,28 @@ When PIXEL-SIZE is non-nil, resize image to that size."
              (boundp 'disco-room-show-avatar-images)
              disco-room-show-avatar-images
              (fboundp 'disco-room--avatar-image))
-    (let* ((user-id (plist-get candidate :user-id))
-           (avatar-hash (plist-get candidate :avatar-hash))
-           (image
-            (when user-id
-              (let ((author `((id . ,user-id))))
-                (when (disco-company--completion-string-present-p avatar-hash)
-                  (setq author (append author `((avatar . ,avatar-hash)))))
-                (ignore-errors
-                  (funcall #'disco-room--avatar-image
-                           `((author . ,author))))))))
-      (if pixel-size
-          (disco-company--completion-image-with-size image pixel-size)
-        image))))
+    (let* ((avatar-msg (disco-company--completion-avatar-message candidate))
+           ;; Trigger room avatar cache/fetch path first.
+           (raw-image (and avatar-msg
+                           (ignore-errors
+                             (funcall #'disco-room--avatar-image avatar-msg))))
+           (cache-file (disco-company--completion-avatar-cache-file avatar-msg))
+           (rounded-image (and cache-file pixel-size
+                               (disco-company--completion-rounded-avatar-image
+                                cache-file
+                                pixel-size))))
+      (or rounded-image
+          (if pixel-size
+              (disco-company--completion-image-with-size raw-image pixel-size)
+            raw-image)))))
 
-(defun disco-company--completion-user-annotation (candidate &optional capf-p)
-  "Return user annotation string for CANDIDATE.
-
-When CAPF-P is non-nil, use a row-height-safe avatar size." 
+(defun disco-company--completion-user-annotation (candidate)
+  "Return user annotation string for CANDIDATE."
   (let* ((username (plist-get candidate :username))
          (user-id (plist-get candidate :user-id))
          (image (disco-company--completion-user-avatar-image
                  candidate
-                 (and capf-p (disco-company--completion-capf-avatar-size))))
+                 (disco-company--completion-avatar-size)))
          (icon (if image
                    (propertize " " 'display image)
                  (format "[%s]" (disco-company--completion-user-initials candidate)))))
@@ -563,13 +641,13 @@ When CAPF-P is non-nil, use a row-height-safe avatar size."
 (defun disco-company--completion-company-annotation (candidate)
   "Return company annotation string for CANDIDATE plist."
   (if (eq (plist-get candidate :kind) 'user)
-      (disco-company--completion-user-annotation candidate nil)
+      (disco-company--completion-user-annotation candidate)
     (or (plist-get candidate :annotation) "")))
 
 (defun disco-company--completion-capf-annotation (candidate)
   "Return CAPF/Corfu annotation string for CANDIDATE plist."
   (if (eq (plist-get candidate :kind) 'user)
-      (disco-company--completion-user-annotation candidate t)
+      (disco-company--completion-user-annotation candidate)
     (or (plist-get candidate :annotation) "")))
 
 (defun disco-company--completion-company-meta (candidate)
@@ -600,8 +678,8 @@ This function is suitable for `completion-at-point-functions'."
          (lambda (string pred action)
            (if (eq action 'metadata)
                '(metadata (category . unicode-name)
-                          (display-sort-function . identity)
-                          (cycle-sort-function . identity))
+                 (display-sort-function . identity)
+                 (cycle-sort-function . identity))
              (let* ((matches (disco-company--completion-filter-candidates
                               all-candidates
                               string))
