@@ -1424,7 +1424,15 @@ updates, and keep draft cursor stable when point is in the composer."
 (defun disco-room--message-position (message-id)
   "Return buffer position for MESSAGE-ID in current room render, or nil."
   (when (and (stringp message-id) (not (string-empty-p message-id)))
-    (text-property-any (point-min) (point-max) 'disco-message-id message-id)))
+    (let ((pos (point-min))
+          found)
+      (while (and (< pos (point-max)) (not found))
+        (when (equal (get-text-property pos 'disco-message-id) message-id)
+          (setq found pos))
+        (setq pos (or (next-single-property-change
+                       pos 'disco-message-id nil (point-max))
+                      (point-max))))
+      found)))
 
 (defun disco-room--jump-to-visible-message (message-id)
   "Jump to visible MESSAGE-ID in current room buffer and recenter.
