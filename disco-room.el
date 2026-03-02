@@ -1965,24 +1965,31 @@ non-nil. DEFAULT falls back to four spaces."
    "────────  Unread Messages  ────────"
    'disco-room-unread-divider))
 
+(defun disco-room--message-effective-author (msg)
+  "Return effective author object for MSG.
+
+Type-21 thread starter rows should inherit author identity from the referenced
+source message, not the synthetic starter row itself."
+  (let ((author (and (listp msg) (alist-get 'author msg))))
+    (if (= (disco-room--message-type msg) 21)
+        (let* ((thread-source (disco-room--thread-starter-reference-message msg))
+               (source-author (and (listp thread-source)
+                                   (alist-get 'author thread-source))))
+          (if (listp source-author)
+              source-author
+            author))
+      author)))
+
 (defun disco-room--message-author (msg)
   "Extract author name from message MSG alist."
-  (let* ((thread-source (and (= (disco-room--message-type msg) 21)
-                             (disco-room--thread-starter-reference-message msg)))
-         (author (or (and (listp thread-source)
-                          (alist-get 'author thread-source))
-                     (alist-get 'author msg)))
+  (let* ((author (disco-room--message-effective-author msg))
          (global-name (and (listp author) (alist-get 'global_name author)))
          (username (and (listp author) (alist-get 'username author))))
     (or global-name username "unknown")))
 
 (defun disco-room--message-author-id (msg)
   "Extract author ID string from message MSG alist."
-  (let* ((thread-source (and (= (disco-room--message-type msg) 21)
-                             (disco-room--thread-starter-reference-message msg)))
-         (author (or (and (listp thread-source)
-                          (alist-get 'author thread-source))
-                     (alist-get 'author msg))))
+  (let ((author (disco-room--message-effective-author msg)))
     (and (listp author) (alist-get 'id author))))
 
 (defun disco-room--author-face (msg)
@@ -2118,12 +2125,12 @@ non-nil. DEFAULT falls back to four spaces."
 
 (defun disco-room--author-avatar-hash (msg)
   "Extract Discord avatar hash string from MSG author, or nil."
-  (let ((author (alist-get 'author msg)))
+  (let ((author (disco-room--message-effective-author msg)))
     (and (listp author) (alist-get 'avatar author))))
 
 (defun disco-room--author-default-avatar-index (msg)
   "Return Discord default avatar index for MSG author."
-  (let* ((author (alist-get 'author msg))
+  (let* ((author (disco-room--message-effective-author msg))
          (user-id (and (listp author) (alist-get 'id author)))
          (discriminator (and (listp author) (alist-get 'discriminator author))))
     (cond
