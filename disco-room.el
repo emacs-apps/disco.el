@@ -2987,7 +2987,9 @@ When TARGET-PATH is nil, prompt interactively for destination path."
   (let* ((snapshot (disco-room--message-forward-snapshot msg))
          (text (and (listp snapshot) (alist-get 'content snapshot))))
     (when (and (stringp text) (not (string-empty-p text)))
-      (disco-markdown-render text :context 'forward-snapshot))))
+      (disco-markdown-render text
+                             :context 'forward-snapshot
+                             :message snapshot))))
 
 (defun disco-room--message-effective-attachments (msg)
   "Return attachments to render for MSG, including forward snapshots."
@@ -3027,7 +3029,9 @@ When TARGET-PATH is nil, prompt interactively for destination path."
     (let* ((snapshot (disco-room--message-forward-snapshot msg))
            (text (and (listp snapshot) (alist-get 'content snapshot)))
            (display (and (stringp text)
-                         (disco-util-unescape-markdown-punctuation text)))
+                         (disco-markdown-render text
+                                                :context 'forward-summary
+                                                :message snapshot)))
            (trimmed (and (stringp display) (string-trim display))))
       (if (and (stringp trimmed) (not (string-empty-p trimmed)))
           (format "[forwarded] %s" trimmed)
@@ -3132,7 +3136,9 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
   (let* ((raw-content (or (alist-get 'content msg) ""))
-         (content (disco-markdown-render raw-content :context 'room-message))
+         (content (disco-markdown-render raw-content
+                                         :context 'room-message
+                                         :message msg))
          (attachments (disco-room--message-effective-attachments msg))
          (embeds (disco-room--message-effective-embeds msg))
          (poll (disco-room--message-poll msg))
