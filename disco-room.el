@@ -1538,23 +1538,23 @@ Guild channels require both visibility and read-history access."
 
 (defun disco-room--ensure-jump-permissions (channel-id channel)
   "Signal user error when jump target CHANNEL-ID cannot be viewed/read."
-  (unless (listp channel)
-    (user-error
-     "disco: cannot verify jump permissions for unknown channel %s"
-     channel-id))
-  (let ((required (disco-room--jump-required-permissions channel)))
-    (when required
-      (if (disco-room--channel-permissions-known-p channel)
-          (let ((missing (disco-permission-channel-missing channel required nil)))
-            (when missing
-              (user-error
-               "disco: missing permission%s %s for jump target channel %s"
-               (if (> (length missing) 1) "s" "")
-               (mapconcat #'disco-room--permission-display-name missing ", ")
-               channel-id)))
-        (message
-         "disco: target channel %s permissions unavailable in local cache; continuing"
-         channel-id)))))
+  (if (not (and channel (listp channel)))
+      (message
+       "disco: target channel %s missing from local cache; cannot pre-check permissions"
+       channel-id)
+    (let ((required (disco-room--jump-required-permissions channel)))
+      (when required
+        (if (disco-room--channel-permissions-known-p channel)
+            (let ((missing (disco-permission-channel-missing channel required nil)))
+              (when missing
+                (user-error
+                 "disco: missing permission%s %s for jump target channel %s"
+                 (if (> (length missing) 1) "s" "")
+                 (mapconcat #'disco-room--permission-display-name missing ", ")
+                 channel-id)))
+          (message
+           "disco: target channel %s permissions unavailable in local cache; continuing"
+           channel-id))))))
 
 (defun disco-room-jump-to-message (message-id &optional channel-id)
   "Jump to MESSAGE-ID, optionally in CHANNEL-ID.
@@ -2845,13 +2845,13 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 
 (defun disco-room--forward-channel-name (channel)
   "Return display name for CHANNEL independent of badge prefixes."
-  (if (and (listp channel) (memq (alist-get 'type channel) '(1 3)))
+  (if (and channel (listp channel) (memq (alist-get 'type channel) '(1 3)))
       (disco-room--forward-private-channel-display-name channel)
-    (or (and (listp channel) (alist-get 'name channel)) "(no-name)")))
+    (or (and channel (listp channel) (alist-get 'name channel)) "(no-name)")))
 
 (defun disco-room--forward-source-channel-label (channel channel-id)
   "Return human-readable source channel label for CHANNEL/CHANNEL-ID."
-  (if (not (listp channel))
+  (if (not (and channel (listp channel)))
       (if (and (stringp channel-id) (not (string-empty-p channel-id)))
           (format "channel:%s" channel-id)
         "unknown-channel")
@@ -2865,7 +2865,8 @@ When TARGET-PATH is nil, prompt interactively for destination path."
        ((disco-state-channel-thread-p channel)
         (let* ((parent-id (disco-room--normalize-id (alist-get 'parent_id channel)))
                (parent (and parent-id (disco-state-channel parent-id)))
-               (parent-name (and (listp parent)
+               (parent-name (and parent
+                                 (listp parent)
                                  (disco-room--forward-channel-name parent))))
           (if (and (stringp parent-name) (not (string-empty-p parent-name)))
               (format "#%s / #%s (thread)" parent-name name)
@@ -3897,7 +3898,7 @@ When FACE is non-nil, use it for button text."
       (disco-ui-append-face title-start (point) 'disco-room-forward-card-title))
     (let ((source-start (point)))
       (insert "source: ")
-      (when (listp guild)
+      (when (and guild (listp guild))
         (disco-room--insert-forward-guild-icon guild)
         (insert " "))
       (insert guild-label)
@@ -4179,7 +4180,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -5516,6 +5517,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c M-e") #'disco-room-edit-attachment-description)
     (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
+    (define-key map (kbd "C-c C-g") #'disco-room-jump-to-message)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
     (define-key map (kbd "C-c C-t o") #'disco-room-open-thread-from-message-at-point)
     (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
