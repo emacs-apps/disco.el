@@ -15,6 +15,7 @@
 (require 'subr-x)
 (require 'url-util)
 (require 'disco-customize)
+(require 'disco-util)
 (require 'disco-http)
 
 (define-error 'disco-api-error "Disco API error")
@@ -1139,17 +1140,231 @@ When POLL is nil, return nil."
         (push `(layout_type . ,layout-type) payload))
       (nreverse payload))))
 
-(defun disco-api--message-send-payload (content reply-to-message-id attachments poll)
+(defun disco-api--normalize-id-string (value field-name)
+  "Normalize VALUE into non-empty ID string for FIELD-NAME."
+  (let ((normalized
+         (cond
+          ((null value) nil)
+          ((stringp value) (string-trim value))
+          ((numberp value) (format "%.0f" value))
+          (t (string-trim (format "%s" value))))))
+    (unless (and (stringp normalized)
+                 (not (string-empty-p normalized)))
+      (user-error "disco: %s cannot be empty" field-name))
+    normalized))
+
+(defun disco-api--normalize-id-sequence (value field-name)
+  "Normalize VALUE into vector of non-empty ID strings for FIELD-NAME."
+  (let* ((source (cond
+                  ((null value) nil)
+                  ((vectorp value) (append value nil))
+                  ((listp value) value)
+                  (t (list value))))
+         (normalized
+          (mapcar (lambda (item)
+                    (disco-api--normalize-id-string item field-name))
+                  source)))
+    (vconcat normalized)))
+
+(defun disco-api--normalize-allowed-mentions-parse-types (parse)
+  "Normalize PARSE mention-type list/vector into vector."
+  (let* ((source (cond
+                  ((null parse) nil)
+                  ((vectorp parse) (append parse nil))
+                  ((listp parse) parse)
+                  (t (list parse))))
+         (allowed '("users" "roles" "everyone"))
+         (normalized
+          (mapcar
+           (lambda (item)
+             (let ((name (downcase (string-trim (format "%s" item)))))
+               (unless (member name allowed)
+                 (user-error "disco: allowed_mentions.parse entry `%s' is invalid" item))
+               name))
+           source)))
+    (vconcat normalized)))
+
+(defun disco-api--normalize-allowed-mentions (allowed-mentions)
+  "Normalize ALLOWED-MENTIONS payload to Discord structure or nil."
+  (cond
+   ((null allowed-mentions) nil)
+   ((eq allowed-mentions 'none)
+    '((parse . [])))
+   ((eq allowed-mentions 'all)
+    '((parse . ["users" "roles" "everyone"])))
+   ((not (listp allowed-mentions))
+    (user-error "disco: allowed_mentions must be nil, symbol, or alist/plist"))
+   (t
+    (let* ((parse (disco-util-object-get allowed-mentions 'parse))
+           (roles (disco-util-object-get allowed-mentions 'roles))
+           (users (disco-util-object-get allowed-mentions 'users))
+           (replied-user (disco-util-object-get allowed-mentions
+                                                'replied_user
+                                                'replied-user))
+           payload)
+      (when parse
+        (push `(parse . ,(disco-api--normalize-allowed-mentions-parse-types parse)) payload))
+      (when roles
+        (push `(roles . ,(disco-api--normalize-id-sequence
+                          roles
+                          "allowed_mentions.roles"))
+              payload))
+      (when users
+        (push `(users . ,(disco-api--normalize-id-sequence
+                          users
+                          "allowed_mentions.users"))
+              payload))
+      (when (not (null replied-user))
+        (push `(replied_user . ,(if (disco-api--json-true-p replied-user)
+                                    t
+                                  :false))
+              payload))
+      (nreverse payload)))))
+
+(defun disco-api--normalize-message-forward-only (forward-only)
+  "Normalize FORWARD-ONLY payload for message reference forwarding."
+  (when forward-only
+    (unless (listp forward-only)
+      (user-error "disco: message_reference.forward_only must be an alist/plist"))
+    (let* ((embed-indices (disco-util-object-get forward-only
+                                                 'embed_indices
+                                                 'embed-indices))
+           (attachment-ids (disco-util-object-get forward-only
+                                                  'attachment_ids
+                                                  'attachment-ids))
+           payload)
+      (when embed-indices
+        (let* ((source (cond
+                        ((vectorp embed-indices) (append embed-indices nil))
+                        ((listp embed-indices) embed-indices)
+                        (t (list embed-indices))))
+               (normalized
+                (mapcar
+                 (lambda (index)
+                   (unless (integerp index)
+                     (user-error "disco: forward_only.embed_indices values must be integers"))
+                   (when (< index 0)
+                     (user-error "disco: forward_only.embed_indices cannot be negative"))
+                   index)
+                 source)))
+          (push `(embed_indices . ,(vconcat normalized)) payload)))
+      (when attachment-ids
+        (push `(attachment_ids . ,(disco-api--normalize-id-sequence
+                                   attachment-ids
+                                   "message_reference.forward_only.attachment_ids"))
+              payload))
+      (nreverse payload))))
+
+(defun disco-api--normalize-message-reference-type (value)
+  "Normalize message reference type VALUE into integer or nil."
+  (cond
+   ((null value) nil)
+   ((integerp value) value)
+   ((and (stringp value)
+         (string-match-p "\\`[0-9]+\\'" value))
+    (string-to-number value))
+   ((symbolp value)
+    (pcase value
+      ((or 'default 'reply) 0)
+      ('forward 1)
+      (_
+       (user-error "disco: unsupported message_reference.type `%s'" value))))
+   ((stringp value)
+    (pcase (downcase value)
+      ((or "default" "reply") 0)
+      ("forward" 1)
+      (_
+       (user-error "disco: unsupported message_reference.type `%s'" value))))
+   (t
+    (user-error "disco: unsupported message_reference.type `%s'" value))))
+
+(defun disco-api--normalize-message-reference (message-reference reply-to-message-id)
+  "Normalize message reference from MESSAGE-REFERENCE/REPLY-TO-MESSAGE-ID.
+
+REPLY-TO-MESSAGE-ID remains as backwards-compatible shorthand for replies."
+  (when (and message-reference reply-to-message-id)
+    (user-error "disco: use either reply-to-message-id or message-reference, not both"))
+  (cond
+   (reply-to-message-id
+    `((message_id . ,(disco-api--normalize-id-string
+                      reply-to-message-id
+                      "message_reference.message_id"))))
+   ((null message-reference)
+    nil)
+   ((stringp message-reference)
+    `((message_id . ,(disco-api--normalize-id-string
+                      message-reference
+                      "message_reference.message_id"))))
+   ((not (listp message-reference))
+    (user-error "disco: message-reference must be nil, string, or alist/plist"))
+   (t
+    (let* ((type (disco-api--normalize-message-reference-type
+                  (disco-util-object-get message-reference 'type)))
+           (message-id (disco-util-object-get message-reference
+                                              'message_id
+                                              'message-id))
+           (channel-id (disco-util-object-get message-reference
+                                              'channel_id
+                                              'channel-id))
+           (guild-id (disco-util-object-get message-reference
+                                            'guild_id
+                                            'guild-id))
+           (fail-if-not-exists (disco-util-object-get message-reference
+                                                      'fail_if_not_exists
+                                                      'fail-if-not-exists))
+           (forward-only
+            (disco-api--normalize-message-forward-only
+             (disco-util-object-get message-reference
+                                    'forward_only
+                                    'forward-only)))
+           payload)
+      (push `(message_id . ,(disco-api--normalize-id-string
+                             message-id
+                             "message_reference.message_id"))
+            payload)
+      (when (not (null type))
+        (push `(type . ,type) payload))
+      (when channel-id
+        (push `(channel_id . ,(disco-api--normalize-id-string
+                               channel-id
+                               "message_reference.channel_id"))
+              payload))
+      (when guild-id
+        (push `(guild_id . ,(disco-api--normalize-id-string
+                             guild-id
+                             "message_reference.guild_id"))
+              payload))
+      (when (not (null fail-if-not-exists))
+        (push `(fail_if_not_exists . ,(if (disco-api--json-true-p fail-if-not-exists)
+                                          t
+                                        :false))
+              payload))
+      (when forward-only
+        (push `(forward_only . ,forward-only) payload))
+      (when (and (eq type 1)
+                 (not channel-id))
+        (user-error "disco: forward message_reference requires channel_id"))
+      (when (and forward-only
+                 (not (eq type 1)))
+        (user-error "disco: forward_only can only be used with FORWARD references"))
+      (nreverse payload)))))
+
+(defun disco-api--message-send-payload (content reply-to-message-id message-reference attachments poll allowed-mentions)
   "Build message create payload.
 
-CONTENT is optional message text, REPLY-TO-MESSAGE-ID optional reply target,
-ATTACHMENTS is normalized attachment plist list, POLL is optional poll object."
-  (let (payload)
+CONTENT is optional message text. REPLY-TO-MESSAGE-ID and MESSAGE-REFERENCE
+select attribution metadata. ATTACHMENTS is normalized attachment plist list,
+POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing."
+  (let ((normalized-message-reference
+         (disco-api--normalize-message-reference message-reference reply-to-message-id))
+        (normalized-allowed-mentions
+         (disco-api--normalize-allowed-mentions allowed-mentions))
+        payload)
     (when (and (stringp content)
                (not (string-empty-p (string-trim-right content))))
       (push `(content . ,(string-trim-right content)) payload))
-    (when reply-to-message-id
-      (push `(message_reference . ((message_id . ,reply-to-message-id))) payload))
+    (when normalized-message-reference
+      (push `(message_reference . ,normalized-message-reference) payload))
     (when attachments
       (let ((attachment-objects nil))
         (cl-loop for attachment in attachments
@@ -1163,12 +1378,16 @@ ATTACHMENTS is normalized attachment plist list, POLL is optional poll object."
         (push `(attachments . ,(nreverse attachment-objects)) payload)))
     (when poll
       (push `(poll . ,poll) payload))
+    (when normalized-allowed-mentions
+      (push `(allowed_mentions . ,normalized-allowed-mentions) payload))
     (nreverse payload)))
 
-(cl-defun disco-api-create-message (channel-id &key content reply-to-message-id attachments poll)
+(cl-defun disco-api-create-message (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll)
   "Create one message in CHANNEL-ID.
 
-CONTENT is optional text content. REPLY-TO-MESSAGE-ID adds message_reference.
+CONTENT is optional text content. REPLY-TO-MESSAGE-ID is a reply shorthand.
+MESSAGE-REFERENCE can be used for explicit reply/forward references.
+ALLOWED-MENTIONS controls mention parsing for the message.
 ATTACHMENTS is an optional list of upload descriptors.
 POLL is an optional poll create payload."
   (let* ((normalized-attachments
@@ -1177,12 +1396,15 @@ POLL is an optional poll create payload."
          (payload (disco-api--message-send-payload
                    content
                    reply-to-message-id
+                   message-reference
                    normalized-attachments
-                   normalized-poll)))
+                   normalized-poll
+                   allowed-mentions)))
     (unless (or (alist-get 'content payload)
+                (alist-get 'message_reference payload)
                 normalized-attachments
                 normalized-poll)
-      (user-error "disco: message content, poll, and attachments are all empty"))
+      (user-error "disco: message content, poll, attachments, and message_reference are all empty"))
     (if normalized-attachments
         (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
                (boundary (car multipart))
@@ -1203,7 +1425,7 @@ POLL is an optional poll create payload."
        nil
        nil))))
 
-(cl-defun disco-api-create-message-async (channel-id &key content reply-to-message-id attachments poll on-success on-error)
+(cl-defun disco-api-create-message-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll on-success on-error)
   "Asynchronously create one message in CHANNEL-ID.
 
 Keyword arguments are the same as `disco-api-create-message'."
@@ -1213,12 +1435,15 @@ Keyword arguments are the same as `disco-api-create-message'."
          (payload (disco-api--message-send-payload
                    content
                    reply-to-message-id
+                   message-reference
                    normalized-attachments
-                   normalized-poll)))
+                   normalized-poll
+                   allowed-mentions)))
     (unless (or (alist-get 'content payload)
+                (alist-get 'message_reference payload)
                 normalized-attachments
                 normalized-poll)
-      (user-error "disco: message content, poll, and attachments are all empty"))
+      (user-error "disco: message content, poll, attachments, and message_reference are all empty"))
     (if normalized-attachments
         (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
                (boundary (car multipart))
@@ -1238,7 +1463,7 @@ Keyword arguments are the same as `disco-api-create-message'."
        :on-success on-success
        :on-error on-error))))
 
-(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id attachments)
+(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments)
   "Send message to CHANNEL-ID with ATTACHMENTS.
 
 ATTACHMENTS is a list of file path strings or plists containing :path and
@@ -1247,9 +1472,11 @@ optional :description/:filename/:content-type."
    channel-id
    :content content
    :reply-to-message-id reply-to-message-id
+   :message-reference message-reference
+   :allowed-mentions allowed-mentions
    :attachments attachments))
 
-(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id attachments on-success on-error)
+(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments on-success on-error)
   "Asynchronously send message to CHANNEL-ID with ATTACHMENTS.
 
 ATTACHMENTS is a list of file path strings or plists containing :path and
@@ -1258,6 +1485,8 @@ optional :description/:filename/:content-type."
    channel-id
    :content content
    :reply-to-message-id reply-to-message-id
+   :message-reference message-reference
+   :allowed-mentions allowed-mentions
    :attachments attachments
    :on-success on-success
    :on-error on-error))
@@ -1376,49 +1605,109 @@ Vector return type avoids JSON nil/list ambiguity for empty arrays."
    :on-success on-success
    :on-error on-error))
 
-(defun disco-api-send-message (channel-id content &optional reply-to-message-id poll)
+(defun disco-api-send-message (channel-id content
+                                          &optional reply-to-message-id poll
+                                          allowed-mentions)
   "Send CONTENT into CHANNEL-ID.
 
 When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message.
-When POLL is non-nil, include poll create payload."
+When POLL is non-nil, include poll create payload.
+When ALLOWED-MENTIONS is non-nil, send explicit allowed_mentions payload."
   (disco-api-create-message
    channel-id
    :content content
    :reply-to-message-id reply-to-message-id
+   :allowed-mentions allowed-mentions
    :poll poll))
 
 (cl-defun disco-api-send-message-async (channel-id content
                                                    &key reply-to-message-id
+                                                   message-reference
+                                                   allowed-mentions
                                                    poll
                                                    on-success on-error)
   "Send CONTENT into CHANNEL-ID asynchronously.
 
+MESSAGE-REFERENCE may be used for explicit reply/forward references.
 When POLL is non-nil, include poll create payload."
   (disco-api-create-message-async
    channel-id
    :content content
    :reply-to-message-id reply-to-message-id
+   :message-reference message-reference
+   :allowed-mentions allowed-mentions
    :poll poll
    :on-success on-success
    :on-error on-error))
 
-(defun disco-api-edit-message (channel-id message-id content)
-  "Edit MESSAGE-ID in CHANNEL-ID with new CONTENT."
-  (disco-api--request
-   "PATCH"
-   (format "/channels/%s/messages/%s" channel-id message-id)
-   `((content . ,content))
-   nil
-   nil))
+(cl-defun disco-api-forward-message (channel-id source-message-id source-channel-id
+                                                &key content forward-only allowed-mentions)
+  "Forward SOURCE-MESSAGE-ID from SOURCE-CHANNEL-ID into CHANNEL-ID.
 
-(cl-defun disco-api-edit-message-async (channel-id message-id content &key on-success on-error)
+CONTENT is optional text sent alongside the forward.
+FORWARD-ONLY optionally selects attachments/embeds to include.
+ALLOWED-MENTIONS controls mention parsing for optional CONTENT."
+  (let ((message-reference
+         (append
+          (list `(type . 1)
+                `(message_id . ,source-message-id)
+                `(channel_id . ,source-channel-id))
+          (when forward-only
+            (list `(forward_only . ,forward-only))))))
+    (disco-api-create-message
+     channel-id
+     :content content
+     :message-reference message-reference
+     :allowed-mentions allowed-mentions)))
+
+(cl-defun disco-api-forward-message-async (channel-id source-message-id source-channel-id
+                                                      &key content forward-only allowed-mentions
+                                                      on-success on-error)
+  "Asynchronously forward SOURCE-MESSAGE-ID from SOURCE-CHANNEL-ID to CHANNEL-ID."
+  (let ((message-reference
+         (append
+          (list `(type . 1)
+                `(message_id . ,source-message-id)
+                `(channel_id . ,source-channel-id))
+          (when forward-only
+            (list `(forward_only . ,forward-only))))))
+    (disco-api-create-message-async
+     channel-id
+     :content content
+     :message-reference message-reference
+     :allowed-mentions allowed-mentions
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-edit-message (channel-id message-id content &optional allowed-mentions)
+  "Edit MESSAGE-ID in CHANNEL-ID with new CONTENT.
+
+When ALLOWED-MENTIONS is non-nil, include it in the edit payload."
+  (let ((payload `((content . ,content))))
+    (when allowed-mentions
+      (let ((normalized (disco-api--normalize-allowed-mentions allowed-mentions)))
+        (when normalized
+          (setq payload (append payload `((allowed_mentions . ,normalized)))))))
+    (disco-api--request
+     "PATCH"
+     (format "/channels/%s/messages/%s" channel-id message-id)
+     payload
+     nil
+     nil)))
+
+(cl-defun disco-api-edit-message-async (channel-id message-id content &key allowed-mentions on-success on-error)
   "Edit MESSAGE-ID in CHANNEL-ID asynchronously with new CONTENT."
-  (disco-api--request-async
-   "PATCH"
-   (format "/channels/%s/messages/%s" channel-id message-id)
-   :payload `((content . ,content))
-   :on-success on-success
-   :on-error on-error))
+  (let ((payload `((content . ,content))))
+    (when allowed-mentions
+      (let ((normalized (disco-api--normalize-allowed-mentions allowed-mentions)))
+        (when normalized
+          (setq payload (append payload `((allowed_mentions . ,normalized)))))))
+    (disco-api--request-async
+     "PATCH"
+     (format "/channels/%s/messages/%s" channel-id message-id)
+     :payload payload
+     :on-success on-success
+     :on-error on-error)))
 
 (defun disco-api-delete-message (channel-id message-id)
   "Delete MESSAGE-ID from CHANNEL-ID."

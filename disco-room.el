@@ -129,6 +129,24 @@ Each value is a plist carrying :status, :path, :process, :error and
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-allowed-mentions nil
+  "Default allowed mentions payload used when sending or editing messages.
+
+Nil delegates to Discord defaults. `none' suppresses all mention parsing.
+`all' explicitly enables users/roles/everyone parsing. Any alist/plist value is
+forwarded as raw `allowed_mentions' object."
+  :type '(choice
+          (const :tag "Use Discord defaults" nil)
+          (const :tag "Suppress all mentions" none)
+          (const :tag "Allow users/roles/everyone" all)
+          (sexp :tag "Custom allowed_mentions payload"))
+  :group 'disco)
+
+(defcustom disco-room-reply-mention-replied-user nil
+  "When non-nil, include `allowed_mentions.replied_user' for replies."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-room-show-avatar-images t
   "When non-nil, render author avatars as inline images when possible.
 
@@ -614,6 +632,7 @@ value before enabling visual fill."
   (define-key map (kbd "C-c C-p c") #'disco-room-clear-poll-votes)
   (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
   (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+  (define-key map (kbd "C-c C-F") #'disco-room-forward-message)
   (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
   (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
   (define-key map (kbd "C-c M-l") #'disco-room-list-attachments)
@@ -4371,7 +4390,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f/C-F: attach/forward   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -5079,6 +5098,28 @@ send votes to Discord."
            (message "disco: end poll failed: %s"
                     (disco-room--async-error-message err))))))))
 
+(defun disco-room--send-allowed-mentions (&optional replying-p)
+  "Return normalized allowed_mentions payload for outgoing message send/edit.
+
+When REPLYING-P is non-nil and `disco-room-reply-mention-replied-user' is
+enabled, include `replied_user'."
+  (let ((base
+         (pcase disco-room-allowed-mentions
+           ('none '((parse . [])))
+           ('all '((parse . ["users" "roles" "everyone"])))
+           ((pred listp) (copy-tree disco-room-allowed-mentions))
+           (_ nil))))
+    (when (and replying-p disco-room-reply-mention-replied-user)
+      (let ((value t))
+        (if (listp base)
+            (let ((cell (or (assq 'replied_user base)
+                            (assq 'replied-user base))))
+              (if cell
+                  (setcdr cell value)
+                (setq base (append base `((replied_user . ,value))))))
+          (setq base `((replied_user . ,value))))))
+    base))
+
 (defun disco-room-send-poll (question options &optional duration allow-multiselect content)
   "Create and send a poll with QUESTION and OPTIONS in current room.
 
@@ -5132,6 +5173,7 @@ CONTENT is optional extra text sent alongside the poll."
      channel-id
      :content content
      :poll poll
+     :allowed-mentions (disco-room--send-allowed-mentions)
      :on-success
      (lambda (_response)
        (when (disco-room--channel-buffer-p room-buffer channel-id)
@@ -5208,6 +5250,8 @@ When called with prefix argument, force draft edit in minibuffer first."
         (let* ((room-buffer (current-buffer))
                (channel-id disco-room--channel-id)
                (reply-to disco-room--pending-reply-to)
+               (allowed-mentions (disco-room--send-allowed-mentions
+                                  (not (null reply-to))))
                (attachments (copy-tree token-attachments))
                (required-permissions
                 (append
@@ -5229,6 +5273,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                channel-id
                :content (unless (string-empty-p normalized) normalized)
                :reply-to-message-id reply-to
+               :allowed-mentions allowed-mentions
                :attachments attachments
                :on-success
                (lambda (_response)
@@ -5254,6 +5299,7 @@ When called with prefix argument, force draft edit in minibuffer first."
              channel-id
              normalized
              :reply-to-message-id reply-to
+             :allowed-mentions allowed-mentions
              :on-success
              (lambda (_response)
                (when (disco-room--channel-buffer-p room-buffer channel-id)
@@ -5339,6 +5385,75 @@ When called interactively, defaults to message under point."
   (disco-room-render)
   (message "disco: next message will reply to %s" message-id))
 
+(defun disco-room-forward-message (&optional message-id source-channel-id content)
+  "Forward MESSAGE-ID from SOURCE-CHANNEL-ID into current room.
+
+CONTENT is optional text sent alongside the forwarded reference."
+  (interactive
+   (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
+          (fallback-message (or at-point (disco-room--latest-message-id)))
+          (message-raw (read-string
+                        (if fallback-message
+                            (format "Forward message ID (default %s): " fallback-message)
+                          "Forward message ID: ")))
+          (message-id (if (string-empty-p message-raw)
+                          (or fallback-message
+                              (user-error "disco: no message id provided"))
+                        message-raw))
+          (fallback-channel (or disco-room--channel-id ""))
+          (channel-raw (read-string
+                        (if (string-empty-p fallback-channel)
+                            "Source channel ID: "
+                          (format "Source channel ID (default %s): " fallback-channel))))
+          (source-channel-id (if (string-empty-p channel-raw)
+                                 (or fallback-channel
+                                     (user-error "disco: no source channel id provided"))
+                               channel-raw))
+          (content-raw (string-trim (read-string "Optional forward comment: "))))
+     (list message-id
+           source-channel-id
+           (unless (string-empty-p content-raw)
+             content-raw))))
+  (let* ((target-channel-id disco-room--channel-id)
+         (source-channel-id (or source-channel-id disco-room--channel-id))
+         (source-channel (and source-channel-id
+                              (disco-room--resolve-target-channel source-channel-id)))
+         (room-buffer (current-buffer))
+         (allowed-mentions (disco-room--send-allowed-mentions)))
+    (unless (and message-id (not (string-empty-p (format "%s" message-id))))
+      (user-error "disco: message id cannot be empty"))
+    (unless (and source-channel-id
+                 (not (string-empty-p (format "%s" source-channel-id))))
+      (user-error "disco: source channel id cannot be empty"))
+    (disco-room--ensure-channel-permissions
+     (disco-room--required-send-permissions)
+     :action "forwarding messages")
+    (disco-room--ensure-jump-permissions source-channel-id source-channel)
+    (setq disco-room--send-in-flight t)
+    (disco-room-render)
+    (disco-api-forward-message-async
+     target-channel-id
+     message-id
+     source-channel-id
+     :content content
+     :allowed-mentions allowed-mentions
+     :on-success
+     (lambda (_response)
+       (when (disco-room--channel-buffer-p room-buffer target-channel-id)
+         (with-current-buffer room-buffer
+           (setq disco-room--send-in-flight nil)
+           (disco-room-refresh)
+           (message "disco: forwarded message %s from channel %s"
+                    message-id source-channel-id))))
+     :on-error
+     (lambda (err)
+       (when (disco-room--channel-buffer-p room-buffer target-channel-id)
+         (with-current-buffer room-buffer
+           (setq disco-room--send-in-flight nil)
+           (disco-room-render)
+           (message "disco: forward failed: %s"
+                    (disco-room--async-error-message err))))))))
+
 (defun disco-room-cancel-reply ()
   "Cancel pending reply target for next send."
   (interactive)
@@ -5377,6 +5492,7 @@ Otherwise open draft editor."
      channel-id
      message-id
      new-content
+     :allowed-mentions (disco-room--send-allowed-mentions)
      :on-success
      (lambda (_response)
        (when (disco-room--channel-buffer-p room-buffer channel-id)
@@ -5710,6 +5826,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+    (define-key map (kbd "C-c C-F") #'disco-room-forward-message)
     (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
     (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
     (define-key map (kbd "C-c M-l") #'disco-room-list-attachments)
