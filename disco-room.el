@@ -1849,6 +1849,21 @@ When FACE is non-nil, apply FACE to TEXT."
 When FACE is non-nil, apply FACE to each inserted line."
   (disco-ui-insert-prefixed-lines prefix text :face face))
 
+(defun disco-room--insert-prefixed-lines-with-first-prefix (first-prefix rest-prefix text
+                                                                         &optional face)
+  "Insert TEXT with FIRST-PREFIX on first line and REST-PREFIX thereafter."
+  (let ((lines (split-string (or text "") "\n")))
+    (when lines
+      (let ((line-start (point)))
+        (insert (or first-prefix "") (car lines) "\n")
+        (when face
+          (add-text-properties line-start (point) (list 'face face))))
+      (dolist (line (cdr lines))
+        (let ((line-start (point)))
+          (insert (or rest-prefix "") line "\n")
+          (when face
+            (add-text-properties line-start (point) (list 'face face))))))))
+
 (defun disco-room--message-time (msg)
   "Return decoded time for MSG timestamp, or nil when unavailable."
   (let ((raw (alist-get 'timestamp msg)))
@@ -2342,16 +2357,67 @@ If needed, schedule async fetch and fall back to text placeholder."
             nil)
            (t nil))))))))
 
-(defun disco-room--insert-avatar (msg)
-  "Insert avatar presentation for MSG at point."
-  (let ((image (disco-room--avatar-image msg))
-        (fallback (disco-room--avatar-placeholder msg)))
-    (if image
-        (condition-case _
-            (insert-image image fallback)
-          (error
-           (insert fallback)))
-      (insert fallback))))
+(defun disco-room--avatar-display-size ()
+  "Return avatar size in pixels for current room line metrics."
+  (let* ((line-height (max 1
+                           (or (ignore-errors (line-pixel-height))
+                               (frame-char-height)
+                               16)))
+         (base-height (max 1 (frame-char-height)))
+         (scale (/ (float line-height) (float base-height))))
+    (max 8 (round (* disco-room-avatar-image-size scale)))))
+
+(defun disco-room--avatar-image-resized (image pixel-size)
+  "Return IMAGE resized to PIXEL-SIZE, or nil when IMAGE is invalid."
+  (when (disco-media-image-object-valid-p image)
+    (let* ((type (car image))
+           (props (copy-sequence (cdr image))))
+      (setq props (plist-put props :width pixel-size))
+      (setq props (plist-put props :height pixel-size))
+      (setq props (plist-put props :ascent 'center))
+      (cons type props))))
+
+(defun disco-room--avatar-image-slice (image slice-index)
+  "Return IMAGE sliced for two-line avatar at SLICE-INDEX (0 or 1)."
+  (let* ((pixel-size (disco-room--avatar-display-size))
+         (scaled (disco-room--avatar-image-resized image pixel-size)))
+    (when (disco-media-image-object-valid-p scaled)
+      (let* ((top-height (max 1 (/ pixel-size 2)))
+             (bottom-height (max 1 (- pixel-size top-height)))
+             (slice (if (= slice-index 0)
+                        (list 0 0 1.0 top-height)
+                      (list 0 top-height 1.0 bottom-height)))
+             (type (car scaled))
+             (props (copy-sequence (cdr scaled))))
+        (setq props (plist-put props :slice slice))
+        (cons type props)))))
+
+(defun disco-room--avatar-prefixes (msg)
+  "Return avatar-aware prefixes plist for MSG header/body lines."
+  (let* ((image (disco-room--avatar-image msg))
+         (fallback (disco-room--avatar-placeholder msg))
+         (fallback-indent (max 1 (1+ (string-width fallback)))))
+    (if (disco-media-image-object-valid-p image)
+        (let* ((pixel-size (disco-room--avatar-display-size))
+               (image-indent (1+ (max 1
+                                     (ceiling (/ (float pixel-size)
+                                                 (float (max 1 (frame-char-width))))))))
+               (rest-prefix (make-string image-indent ?\s))
+               (top-image (disco-room--avatar-image-slice image 0))
+               (bottom-image (disco-room--avatar-image-slice image 1))
+               (top (if (disco-media-image-object-valid-p top-image)
+                        (propertize " " 'display top-image)
+                      fallback))
+               (bottom (if (disco-media-image-object-valid-p bottom-image)
+                           (propertize " " 'display bottom-image)
+                         (make-string (max 1 (string-width fallback)) ?\s))))
+          (list :header (concat top " ")
+                :first-body (concat bottom " ")
+                :rest-body rest-prefix))
+      (let ((rest-prefix (make-string fallback-indent ?\s)))
+        (list :header (concat fallback " ")
+              :first-body rest-prefix
+              :rest-body rest-prefix)))))
 
 (defun disco-room--attachment-meta-line (attachment)
   "Return compact metadata line for ATTACHMENT object."
@@ -3068,7 +3134,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
      ((and title-text desc-text
            (not (string-empty-p title-text))
            (not (string-empty-p desc-text)))
-      (format "Auto moderation action: %s — %s" title-text desc-text))
+      (format "Auto moderation action: %s - %s" title-text desc-text))
      ((and title-text (not (string-empty-p title-text)))
       (format "Auto moderation action: %s" title-text))
      ((and desc-text (not (string-empty-p desc-text)))
@@ -4011,12 +4077,14 @@ When FACE is non-nil, use it for button text."
                   (format "Open channel %s and jump to message %s" channel-id message-id)
                 (format "Jump to message %s" message-id))))
 
-(defun disco-room--insert-reply-preview-line (msg reply)
-  "Insert one reply preview line for MSG with REPLY content."
+(defun disco-room--insert-reply-preview-line (msg reply &optional prefix)
+  "Insert one reply preview line for MSG with REPLY content.
+
+PREFIX defaults to four spaces for room body alignment."
   (let ((line-start (point))
         (ref-id (disco-room--reply-reference-id msg))
         (ref-channel (disco-room--message-reference-channel-id msg)))
-    (insert "    ↪ " reply)
+    (insert (or prefix "    ") "↪ " reply)
     (when (and (stringp ref-id) (not (string-empty-p ref-id)))
       (insert " ")
       (disco-room--insert-reference-jump-button ref-id ref-channel "[Jump]"))
@@ -4139,25 +4207,32 @@ When FACE is non-nil, use it for button text."
                  (cdr time-span)
                  (list 'help-echo timestamp)))
               (insert "\n"))))
-      (disco-room--insert-avatar msg)
-      (insert " ")
-      (setq author-start (point))
-      (insert author)
-      (add-text-properties author-start (point) (list 'face author-face))
-      (let ((time-span
-             (disco-room--insert-right-aligned-text
-              short-time
-              'disco-room-timestamp)))
-        (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-          (add-text-properties
-           (car time-span)
-           (cdr time-span)
-           (list 'help-echo timestamp))))
-      (insert "\n")
-      (when reply
-        (disco-room--insert-reply-preview-line msg reply))
-      (unless (string-empty-p content)
-        (disco-room--insert-prefixed-lines "    " content)))
+      (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
+             (header-prefix (or (plist-get avatar-prefixes :header) ""))
+             (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
+             (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
+        (insert header-prefix)
+        (setq author-start (point))
+        (insert author)
+        (add-text-properties author-start (point) (list 'face author-face))
+        (let ((time-span
+               (disco-room--insert-right-aligned-text
+                short-time
+                'disco-room-timestamp)))
+          (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+            (add-text-properties
+             (car time-span)
+             (cdr time-span)
+             (list 'help-echo timestamp))))
+        (insert "\n")
+        (when reply
+          (disco-room--insert-reply-preview-line msg reply body-first-prefix)
+          (setq body-first-prefix body-rest-prefix))
+        (unless (string-empty-p content)
+          (disco-room--insert-prefixed-lines-with-first-prefix
+           body-first-prefix
+           body-rest-prefix
+           content))))
     (disco-room--insert-forward-section msg)
     (when (disco-room--message-has-thread-p msg)
       (let* ((message-id (alist-get 'id msg))
