@@ -18,6 +18,7 @@
   column
   anchor-property
   anchor-value
+  anchor-line-offset
   window-start-line)
 
 (cl-defun disco-view-capture-position (&key anchor-property preserve-window-start)
@@ -32,6 +33,18 @@ index for the current buffer window."
                             (or (get-text-property (point) anchor-property)
                                 (get-text-property (line-beginning-position)
                                                    anchor-property))))
+         (anchor-target (and anchor-property
+                             anchor-value
+                             (text-property-any
+                              (point-min)
+                              (point-max)
+                              anchor-property
+                              anchor-value)))
+         (anchor-line-offset (and anchor-target
+                                  (max 0 (- (line-number-at-pos)
+                                            (save-excursion
+                                              (goto-char anchor-target)
+                                              (line-number-at-pos))))))
          (win (and preserve-window-start
                    (get-buffer-window (current-buffer))))
          (window-start-line (and win
@@ -43,7 +56,28 @@ index for the current buffer window."
      :column (current-column)
      :anchor-property anchor-property
      :anchor-value anchor-value
+     :anchor-line-offset anchor-line-offset
      :window-start-line window-start-line)))
+
+(defun disco-view--anchor-value-at (pos property)
+  "Return PROPERTY value at POS, probing previous char when needed."
+  (or (get-text-property pos property)
+      (and (> pos (point-min))
+           (get-text-property (1- pos) property))))
+
+(defun disco-view--move-to-anchor-line-offset (anchor-property anchor-value offset)
+  "Move forward up to OFFSET lines while staying within ANCHOR-VALUE row."
+  (let ((remaining (max 0 (or offset 0))))
+    (while (> remaining 0)
+      (let ((next-pos (save-excursion
+                        (forward-line 1)
+                        (point))))
+        (if (or (= next-pos (point))
+                (not (equal (disco-view--anchor-value-at next-pos anchor-property)
+                            anchor-value)))
+            (setq remaining 0)
+          (goto-char next-pos)
+          (setq remaining (1- remaining)))))))
 
 (defun disco-view-restore-position (snapshot)
   "Restore point/window state from SNAPSHOT.
@@ -52,6 +86,7 @@ If SNAPSHOT carries an anchor property/value and the anchor is still present,
 restore by anchor first. Otherwise restore by line/column fallback."
   (let* ((anchor-property (disco-view--snapshot-anchor-property snapshot))
          (anchor-value (disco-view--snapshot-anchor-value snapshot))
+         (anchor-line-offset (disco-view--snapshot-anchor-line-offset snapshot))
          (line (max 1 (or (disco-view--snapshot-line snapshot) 1)))
          (column (max 0 (or (disco-view--snapshot-column snapshot) 0)))
          (target (and anchor-property
@@ -62,7 +97,12 @@ restore by anchor first. Otherwise restore by line/column fallback."
                        anchor-property
                        anchor-value))))
     (if target
-        (goto-char target)
+        (progn
+          (goto-char target)
+          (disco-view--move-to-anchor-line-offset
+           anchor-property
+           anchor-value
+           anchor-line-offset))
       (goto-char (point-min))
       (forward-line (1- line)))
     (move-to-column column)

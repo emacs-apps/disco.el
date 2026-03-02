@@ -3314,10 +3314,20 @@ Return non-nil when EWOC was updated."
     (when (and message-id disco-room--ewoc disco-room--message-node-table)
       (let ((node (gethash message-id disco-room--message-node-table)))
         (if node
-            (let ((disco-room--rendering t)
-                  (inhibit-read-only t))
+            (let* ((anchor-at-point
+                    (or (get-text-property (point) 'disco-message-id)
+                        (get-text-property (line-beginning-position)
+                                           'disco-message-id)))
+                   (snapshot (and anchor-at-point
+                                  (disco-view-capture-position
+                                   :anchor-property 'disco-message-id
+                                   :preserve-window-start t)))
+                   (disco-room--rendering t)
+                   (inhibit-read-only t))
               (ewoc-set-data node msg)
               (ewoc-invalidate disco-room--ewoc node)
+              (when snapshot
+                (disco-view-restore-position snapshot))
               t)
           (and (disco-room--insert-message-node msg) t))))))
 
