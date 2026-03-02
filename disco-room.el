@@ -2359,9 +2359,9 @@ If needed, schedule async fetch and fall back to text placeholder."
            (t nil))))))))
 
 (defun disco-room--avatar-line-pixel-height ()
-  "Return effective line height in pixels for current room rendering."
+  "Return default line height in pixels for current room rendering."
   (max 1
-       (or (ignore-errors (line-pixel-height))
+       (or (ignore-errors (default-line-height))
            (frame-char-height)
            16)))
 
@@ -2382,13 +2382,26 @@ If needed, schedule async fetch and fall back to text placeholder."
       (setq props (plist-put props :ascent 'center))
       (cons type props))))
 
-(defun disco-room--avatar-image-slice-display (image slice-index)
-  "Return display spec for IMAGE slice at SLICE-INDEX (0 or 1)."
+(defun disco-room--avatar-image-char-width (image)
+  "Return rendered width in columns for IMAGE, defaulting to 1."
+  (let* ((size (and (disco-media-image-object-valid-p image)
+                    (ignore-errors (image-size image nil (selected-frame)))))
+         (width (and (consp size) (car size))))
+    (max 1
+         (if (numberp width)
+             (ceiling width)
+           1))))
+
+(defun disco-room--avatar-image-slice-display (image slice-index &optional resized line-height)
+  "Return display spec for IMAGE slice at SLICE-INDEX (0 or 1).
+
+When RESIZED is non-nil, IMAGE is treated as already resized."
   (when (disco-media-image-object-valid-p image)
     (let* ((pixel-size (disco-room--avatar-display-size))
-           (line-height (disco-room--avatar-line-pixel-height))
-           (slice-height (max 1 line-height))
-           (scaled (disco-room--avatar-image-resized image pixel-size)))
+           (slice-height (max 1 (or line-height (disco-room--avatar-line-pixel-height))))
+           (scaled (if resized
+                       image
+                     (disco-room--avatar-image-resized image pixel-size))))
       (when (disco-media-image-object-valid-p scaled)
         (let* ((window-height (* 2 slice-height))
                (offset (max 0 (/ (- pixel-size window-height) 2)))
@@ -2405,13 +2418,14 @@ If needed, schedule async fetch and fall back to text placeholder."
          (fallback (disco-room--avatar-placeholder msg))
          (fallback-indent (max 1 (1+ (string-width fallback)))))
     (if (disco-media-image-object-valid-p image)
-        (let* ((pixel-size (disco-room--avatar-display-size))
-               (image-indent (1+ (max 1
-                                      (ceiling (/ (float pixel-size)
-                                                  (float (max 1 (frame-char-width))))))))
+        (let* ((line-height (disco-room--avatar-line-pixel-height))
+               (scaled (disco-room--avatar-image-resized
+                        image
+                        (disco-room--avatar-display-size)))
+               (image-indent (1+ (disco-room--avatar-image-char-width scaled)))
                (rest-prefix (make-string image-indent ?\s))
-               (top-display (disco-room--avatar-image-slice-display image 0))
-               (bottom-display (disco-room--avatar-image-slice-display image 1))
+               (top-display (disco-room--avatar-image-slice-display scaled 0 t line-height))
+               (bottom-display (disco-room--avatar-image-slice-display scaled 1 t line-height))
                (top (if top-display
                         (propertize " " 'display top-display)
                       fallback))
