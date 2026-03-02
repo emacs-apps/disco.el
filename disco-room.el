@@ -3403,7 +3403,8 @@ Footer marks the editable input tail using `disco-room-input' property."
   "Insert one message node for MSG at the end of room EWOC."
   (when disco-room--ewoc
     (let ((disco-room--rendering t)
-          (inhibit-read-only t))
+          (inhibit-read-only t)
+          (buffer-undo-list t))
       (let* ((node (ewoc-enter-last disco-room--ewoc msg))
              (message-id (and (listp msg) (alist-get 'id msg))))
         (when (and node message-id disco-room--message-node-table)
@@ -3427,7 +3428,8 @@ Return non-nil when EWOC was updated."
                                    :anchor-property 'disco-message-id
                                    :preserve-window-start t)))
                    (disco-room--rendering t)
-                   (inhibit-read-only t))
+                   (inhibit-read-only t)
+                   (buffer-undo-list t))
               (ewoc-set-data node msg)
               (ewoc-invalidate disco-room--ewoc node)
               (when snapshot
@@ -3444,7 +3446,8 @@ Return non-nil when a node is removed."
                    (gethash message-id disco-room--message-node-table))))
     (when (and node disco-room--ewoc)
       (let ((disco-room--rendering t)
-            (inhibit-read-only t))
+            (inhibit-read-only t)
+            (buffer-undo-list t))
         (ewoc-delete disco-room--ewoc node)
         (remhash message-id disco-room--message-node-table)
         t))))
@@ -3476,6 +3479,9 @@ Return non-nil when handled without full room rerender."
 (defun disco-room-render ()
   "Render timeline for current room buffer."
   (let ((inhibit-read-only t)
+        ;; Timeline redraws can be large (many image previews); do not
+        ;; accumulate undo entries for background rendering.
+        (buffer-undo-list t)
         (messages (disco-state-messages disco-room--channel-id))
         (draft (disco-room--current-draft))
         header-end
