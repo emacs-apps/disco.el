@@ -1536,25 +1536,44 @@ Guild channels require both visibility and read-history access."
              (not (disco-state-private-channel-p channel)))
     '(view-channel read-message-history)))
 
+(defun disco-room--resolve-target-channel (channel-id)
+  "Return channel object for CHANNEL-ID, fetching when not indexed locally."
+  (or (disco-state-channel channel-id)
+      (let ((fetched
+             (condition-case err
+                 (disco-api-channel channel-id)
+               (error
+                (user-error
+                 "disco: cannot fetch jump target channel %s: %s"
+                 channel-id
+                 (disco-room--async-error-message err))))))
+        (when (and fetched (listp fetched))
+          (disco-state-upsert-channel fetched))
+        fetched)))
+
 (defun disco-room--ensure-jump-permissions (channel-id channel)
   "Signal user error when jump target CHANNEL-ID cannot be viewed/read."
-  (if (not (and channel (listp channel)))
-      (message
-       "disco: target channel %s missing from local cache; cannot pre-check permissions"
-       channel-id)
-    (let ((required (disco-room--jump-required-permissions channel)))
-      (when required
-        (if (disco-room--channel-permissions-known-p channel)
-            (let ((missing (disco-permission-channel-missing channel required nil)))
-              (when missing
-                (user-error
-                 "disco: missing permission%s %s for jump target channel %s"
-                 (if (> (length missing) 1) "s" "")
-                 (mapconcat #'disco-room--permission-display-name missing ", ")
-                 channel-id)))
-          (message
-           "disco: target channel %s permissions unavailable in local cache; continuing"
-           channel-id))))))
+  (unless (and channel (listp channel))
+    (user-error "disco: cannot resolve jump target channel %s" channel-id))
+  (let ((required (disco-room--jump-required-permissions channel)))
+    (when required
+      (if (disco-room--channel-permissions-known-p channel)
+          (let ((missing (disco-permission-channel-missing channel required nil)))
+            (when missing
+              (user-error
+               "disco: missing permission%s %s for jump target channel %s"
+               (if (> (length missing) 1) "s" "")
+               (mapconcat #'disco-room--permission-display-name missing ", ")
+               channel-id)))
+        ;; Fallback probe: if computed permissions are missing, a 1-message fetch
+        ;; verifies effective read access before opening the target room.
+        (condition-case err
+            (disco-api-channel-messages channel-id nil 1)
+          (error
+           (user-error
+            "disco: cannot access jump target channel %s: %s"
+            channel-id
+            (disco-room--async-error-message err))))))))
 
 (defun disco-room-jump-to-message (message-id &optional channel-id)
   "Jump to MESSAGE-ID, optionally in CHANNEL-ID.
@@ -1575,7 +1594,7 @@ incrementally until found or history is exhausted."
         (progn
           (setq disco-room--pending-jump-message-id target-id)
           (disco-room--resolve-pending-jump))
-      (let* ((target-chan-obj (disco-state-channel target-channel))
+      (let* ((target-chan-obj (disco-room--resolve-target-channel target-channel))
              (target-name (or (and (listp target-chan-obj)
                                    (alist-get 'name target-chan-obj))
                               target-channel))

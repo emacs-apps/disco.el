@@ -486,6 +486,23 @@ BODY-TYPE is forwarded to transport layer."
    :on-success on-success
    :on-error on-error))
 
+(defun disco-api-channel (channel-id)
+  "Fetch channel object for CHANNEL-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s" channel-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-channel-async (channel-id &key on-success on-error)
+  "Fetch channel object for CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s" channel-id)
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-guild-active-threads (guild-id)
   "Fetch active threads object for GUILD-ID.
 
