@@ -461,6 +461,22 @@
              (disco-embed--url-present-p main-url)
              main-url))))
 
+(defun disco-embed--video-url (msg embed)
+  "Return best video URL for EMBED in MSG, resolving attachment:// links."
+  (let* ((video (disco-util-object-get embed 'video))
+         (proxy-url (and (listp video)
+                         (or (disco-util-object-get video 'proxy_url)
+                             (disco-util-object-get video 'proxyUrl))))
+         (source-url (and (listp video)
+                          (or (disco-util-object-get video 'url)
+                              (disco-util-object-get video 'canonical_url 'canonicalUrl))))
+         (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
+         (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url)))
+    (or (and (disco-embed--url-present-p resolved-proxy)
+             resolved-proxy)
+        (and (disco-embed--url-present-p resolved-source)
+             resolved-source))))
+
 (defun disco-embed--preview-attachment (msg embed embed-index)
   "Build pseudo attachment object used to render EMBED preview from MSG."
   (let* ((media-entry (disco-embed--media-entry embed))
@@ -469,7 +485,7 @@
          (media-url (disco-embed--media-url msg embed))
          (message-id (format "%s" (or (alist-get 'id msg) "unknown")))
          (cache-suffix (md5 (or media-url ""))))
-    (when (and media-url (memq media-kind '(image thumbnail)))
+    (when (and media-url (memq media-kind '(image thumbnail video)))
       `((id . ,(format "embed:%s:%s:%s:%s"
                        message-id
                        embed-index
@@ -478,7 +494,9 @@
         (filename . ,(format "embed-%s-%s"
                              embed-index
                              (symbol-name media-kind)))
-        (content_type . "image/embed")
+        (content_type . ,(if (eq media-kind 'video)
+                             "video/embed"
+                           "image/embed"))
         (url . ,media-url)
         (proxy_url . ,media-url)
         (width . ,(and (listp media) (disco-util-object-get media 'width)))
@@ -615,7 +633,7 @@
       (disco-embed--background-face embed)
       'disco-room-embed-card-meta))))
 
-(defun disco-embed--insert-preview-row (msg embed embed-index media-kind media-url prefix-str)
+(defun disco-embed--insert-preview-row (msg embed embed-index media-kind media-url video-url prefix-str)
   "Insert media preview row for EMBED in MSG."
   (let* ((preview-rendering-available
           (and disco-room-show-embed-image-previews
@@ -669,27 +687,42 @@
                                        (disco-media-attachment-preview-cache-state
                                         preview-cache-key)))
              (content-start (point))
+             (video-preview-p (or (eq media-kind 'video)
+                                  (disco-embed--url-present-p video-url)))
+             (play-video-url (or video-url media-url))
              (apply-meta-face t))
         (cond
-         ((memq media-kind '(image thumbnail))
+         ((memq media-kind '(image thumbnail video))
           (if preview
               (condition-case _
-                  (progn
+                  (let ((slice-start (point)))
                     (setq apply-meta-face nil)
-                    (disco-media-insert-image-slices preview media-url nil "[image]"))
+                    (disco-media-insert-image-slices
+                     preview
+                     (unless video-preview-p media-url)
+                     nil
+                     (if video-preview-p "[video]" "[image]"))
+                    (when (and video-preview-p
+                               (disco-embed--url-present-p play-video-url))
+                      (disco-media-add-play-video-properties
+                       slice-start
+                       (point)
+                       play-video-url)))
                 (error
-                 (insert "[image unavailable]")))
+                 (insert (if video-preview-p
+                             "[video preview unavailable]"
+                           "[image unavailable]"))))
             (cond
              ((not preview-rendering-available)
               (insert "[preview disabled]"))
              ((not (disco-embed--url-present-p media-url))
               (insert "[no preview URL]"))
              ((eq preview-cache-state :missing)
-              (insert "[image unavailable]"))
+              (insert (if video-preview-p
+                          "[video preview unavailable]"
+                        "[image unavailable]")))
              (t
               (insert "[loading preview]")))))
-         ((eq media-kind 'video)
-          (insert "[video embed]"))
          (t
           (insert "[no preview]")))
         (insert "\n")
@@ -703,7 +736,7 @@
               'disco-room-embed-card-meta)
            (disco-embed--background-face embed)))))))
 
-(defun disco-embed--insert-action-row (main-url media-url author-url provider-url
+(defun disco-embed--insert-action-row (main-url media-url video-url author-url provider-url
                                                 author-icon-url embed prefix-str)
   "Insert compact action buttons row for one embed."
   (let ((actions '()))
@@ -717,6 +750,11 @@
                     (kill-new main-url)
                     (message "disco: copied embed URL"))
                   "Copy embed URL")
+            actions))
+    (when (disco-embed--url-present-p video-url)
+      (push (list "[Play]"
+                  (lambda () (disco-media-play-video-url video-url))
+                  "Play embed video")
             actions))
     (when (and (disco-embed--url-present-p media-url)
                (not (equal media-url main-url)))
@@ -794,6 +832,7 @@
          (media-kind (car media-entry))
          (media (cdr media-entry))
          (media-url (disco-embed--media-url msg embed))
+         (video-url (disco-embed--video-url msg embed))
          (media-width (and (listp media) (disco-util-object-get media 'width)))
          (media-height (and (listp media) (disco-util-object-get media 'height)))
          (media-dims (when (and (numberp media-width) (numberp media-height))
@@ -844,7 +883,7 @@
         (disco-embed--append-face desc-start (point) meta-face)))
     (when media-entry
       (disco-embed--insert-preview-row
-       msg embed embed-index media-kind media-url prefix-str))
+       msg embed embed-index media-kind media-url video-url prefix-str))
     (dolist (field fields)
       (disco-embed--insert-field-row field embed prefix-str))
     (when footer-line
@@ -853,7 +892,7 @@
         (disco-embed--apply-line-prefix footer-start (point) prefix-str)
         (disco-embed--append-face footer-start (point) meta-face)))
     (disco-embed--insert-action-row
-     main-url media-url author-url provider-url author-icon-url embed prefix-str)
+     main-url media-url video-url author-url provider-url author-icon-url embed prefix-str)
     (when disco-room-show-embed-urls
       (dolist (raw-url (delete-dups (delq nil (list main-url media-url author-url
                                                     provider-url author-icon-url))))

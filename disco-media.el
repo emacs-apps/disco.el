@@ -19,6 +19,7 @@
 (defvar disco-room-attachment-preview-max-height)
 (defvar disco-room-attachment-preview-fetch-concurrency)
 (defvar disco-room-attachment-cache-directory)
+(defvar disco-room-video-player-command)
 
 (defconst disco-media--cache-extensions
   '("webp" "png" "jpg" "jpeg" "gif" "img")
@@ -72,23 +73,85 @@ Values are image objects or the symbol `:missing'.")
   (and (stringp url)
        (not (string-empty-p url))))
 
+(defun disco-media--split-command-args (command)
+  "Normalize COMMAND into argv list, or nil when unusable."
+  (cond
+   ((and (listp command)
+         command
+         (seq-every-p #'stringp command))
+    command)
+   ((and (stringp command)
+         (not (string-empty-p command)))
+    (split-string-and-unquote command))
+   (t nil)))
+
+(defun disco-media--start-video-player (source)
+  "Start configured video player for SOURCE and return non-nil on success."
+  (let* ((argv (disco-media--split-command-args disco-room-video-player-command))
+         (program (car argv))
+         (args (append (cdr argv) (list source))))
+    (when (and program
+               (executable-find program))
+      (condition-case nil
+          (progn
+            (make-process
+             :name "disco-video-player"
+             :buffer nil
+             :command (cons program args)
+             :noquery t)
+            t)
+        (error nil)))))
+
+(defun disco-media-play-video-url (url)
+  "Play video URL using configured player, falling back to browser."
+  (when (disco-media-url-present-p url)
+    (unless (disco-media--start-video-player url)
+      (browse-url url t))))
+
+(defun disco-media-play-video-file (path)
+  "Play local video file at PATH using configured player or browser fallback."
+  (when (and (stringp path)
+             (file-exists-p path))
+    (unless (disco-media--start-video-player path)
+      (browse-url-of-file path))))
+
+(defun disco-media-add-action-properties (start end callback help-echo)
+  "Attach CALLBACK mouse/key handlers to text between START and END."
+  (when (and (functionp callback)
+             (< start end))
+    (let ((action-map (make-sparse-keymap)))
+      (define-key action-map [mouse-1] callback)
+      (define-key action-map (kbd "RET") callback)
+      (add-text-properties
+       start
+       end
+       (list 'keymap action-map
+             'mouse-face 'highlight
+             'help-echo (or help-echo "Activate"))))))
+
 (defun disco-media-add-open-url-properties (start end url)
   "Attach mouse/key handlers to open URL for text between START and END."
   (when (and (disco-media-url-present-p url)
              (< start end))
-    (let* ((open-callback
-            (lambda (&optional _event)
-              (interactive)
-              (browse-url url t)))
-           (open-map (make-sparse-keymap)))
-      (define-key open-map [mouse-1] open-callback)
-      (define-key open-map (kbd "RET") open-callback)
-      (add-text-properties
-       start
-       end
-       (list 'keymap open-map
-             'mouse-face 'highlight
-             'help-echo (format "Open media: %s" url))))))
+    (disco-media-add-action-properties
+     start
+     end
+     (lambda (&optional _event)
+       (interactive)
+       (browse-url url t))
+     (format "Open media: %s" url))))
+
+(defun disco-media-add-play-video-properties (start end video-url)
+  "Attach mouse/key handlers to play VIDEO-URL for text START..END."
+  (when (and (disco-media-url-present-p video-url)
+             (< start end))
+    (disco-media-add-action-properties
+     start
+     end
+     (lambda (&optional _event)
+       (interactive)
+       (disco-media-play-video-url video-url))
+     (format "Play video: %s" video-url))))
 
 (defun disco-media-image-slice-count (image)
   "Return line count used to render IMAGE as vertical slices."
@@ -416,6 +479,66 @@ VALUE should be nil for uncapped mode or a non-negative integer."
     (or (string-prefix-p "image/" content-type)
         (string-match-p "\\.\\(?:png\\|jpe?g\\|gif\\|webp\\|bmp\\|svg\\)\\'" filename))))
 
+(defun disco-media--attachment-video-p (attachment)
+  "Return non-nil when ATTACHMENT is video-like."
+  (let ((content-type (downcase (or (alist-get 'content_type attachment) "")))
+        (filename (downcase (or (alist-get 'filename attachment) ""))))
+    (or (string-prefix-p "video/" content-type)
+        (string-match-p "\\.\\(?:mp4\\|mov\\|mkv\\|webm\\|avi\\|m4v\\)\\'" filename))))
+
+(defun disco-media--start-video-preview-fetch (cache-key url cache-base)
+  "Start asynchronous video preview extraction for CACHE-KEY from URL."
+  (unless (or (gethash cache-key disco-media--attachment-preview-fetching)
+              (gethash cache-key disco-media--attachment-preview-image-cache)
+              (and (numberp disco-media--attachment-preview-fetch-budget)
+                   (<= disco-media--attachment-preview-fetch-budget 0)))
+    (when (numberp disco-media--attachment-preview-fetch-budget)
+      (cl-decf disco-media--attachment-preview-fetch-budget))
+    (puthash cache-key t disco-media--attachment-preview-fetching)
+    (let ((ffmpeg (executable-find "ffmpeg")))
+      (if (not ffmpeg)
+          (disco-media--attachment-preview-complete-fetch cache-key nil)
+        (let ((target-file (format "%s.jpg" cache-base)))
+          (disco-media--attachment-preview-delete-stale-cache-files cache-base)
+          (make-directory (file-name-directory target-file) t)
+          (condition-case err
+              (make-process
+               :name (format "disco-video-preview-%s" (substring (md5 cache-key) 0 8))
+               :buffer (generate-new-buffer " *disco-video-preview*")
+               :command (list ffmpeg
+                              "-nostdin"
+                              "-y"
+                              "-loglevel"
+                              "error"
+                              "-ss"
+                              "00:00:01"
+                              "-i"
+                              url
+                              "-vf"
+                              "thumbnail,scale=960:-2:force_original_aspect_ratio=decrease"
+                              "-frames:v"
+                              "1"
+                              target-file)
+               :noquery t
+               :sentinel
+               (lambda (proc _event)
+                 (when (memq (process-status proc) '(exit signal))
+                   (unwind-protect
+                       (if (and (= (process-exit-status proc) 0)
+                                (file-exists-p target-file))
+                           (disco-media--attachment-preview-complete-fetch
+                            cache-key
+                            (disco-media--attachment-preview-image-from-file target-file)
+                            target-file)
+                         (disco-media--attachment-preview-complete-fetch cache-key nil target-file))
+                     (when (buffer-live-p (process-buffer proc))
+                       (kill-buffer (process-buffer proc)))))))
+            (error
+             (disco-media--attachment-preview-complete-fetch cache-key nil)
+             (message "disco: video preview enqueue failed for %s: %s"
+                      cache-key
+                      (error-message-string err)))))))))
+
 (defun disco-media--start-attachment-preview-fetch (cache-key url cache-base)
   "Start asynchronous preview fetch for CACHE-KEY from URL into CACHE-BASE."
   (unless (or (gethash cache-key disco-media--attachment-preview-fetching)
@@ -467,11 +590,13 @@ VALUE should be nil for uncapped mode or a non-negative integer."
 
 (defun disco-media-attachment-preview-image (attachment &optional bypass-user-toggle)
   "Return preview image object for ATTACHMENT when available."
-  (let ((rendering-ok (if bypass-user-toggle
-                          (disco-media-inline-image-rendering-available-p)
-                        (disco-media-attachment-preview-rendering-available-p))))
+  (let* ((rendering-ok (if bypass-user-toggle
+                           (disco-media-inline-image-rendering-available-p)
+                         (disco-media-attachment-preview-rendering-available-p)))
+         (image-like (disco-media--attachment-image-p attachment))
+         (video-like (disco-media--attachment-video-p attachment)))
     (when (and rendering-ok
-               (disco-media--attachment-image-p attachment))
+               (or image-like video-like))
       (let* ((cache-key (disco-media-attachment-preview-cache-key attachment))
              (cached (gethash cache-key disco-media--attachment-preview-image-cache)))
         (cond
@@ -495,7 +620,9 @@ VALUE should be nil for uncapped mode or a non-negative integer."
              ((and url cache-base)
               (when (and cache-file (not file-image))
                 (ignore-errors (delete-file cache-file)))
-              (disco-media--start-attachment-preview-fetch cache-key url cache-base)
+              (if image-like
+                  (disco-media--start-attachment-preview-fetch cache-key url cache-base)
+                (disco-media--start-video-preview-fetch cache-key url cache-base))
               nil)
              (t nil)))))))))
 

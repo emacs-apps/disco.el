@@ -172,17 +172,31 @@ Set to nil to disable per-render capping."
   :group 'disco)
 
 (defcustom disco-room-show-attachment-image-previews t
-  "When non-nil, render inline image previews for image attachments."
+  "When non-nil, render inline previews for image/video attachments."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-video-player-command
+  (cond
+   ((executable-find "mpv") "mpv")
+   ((executable-find "vlc") "vlc")
+   ((executable-find "ffplay") "ffplay -autoexit")
+   (t nil))
+  "Command used to play video URLs/files from cards.
+
+When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
+  :type '(choice
+          (const :tag "Use browser" nil)
+          (string :tag "Command line"))
+  :group 'disco)
+
 (defcustom disco-room-attachment-preview-max-width 460
-  "Maximum pixel width used for inline image attachment previews."
+  "Maximum pixel width used for inline attachment previews."
   :type 'integer
   :group 'disco)
 
 (defcustom disco-room-attachment-preview-max-height 360
-  "Maximum pixel height used for inline image attachment previews."
+  "Maximum pixel height used for inline attachment previews."
   :type 'integer
   :group 'disco)
 
@@ -197,7 +211,7 @@ Set to nil to disable per-render capping."
   :group 'disco)
 
 (defcustom disco-room-show-embed-image-previews t
-  "When non-nil, render inline image previews for embed media."
+  "When non-nil, render inline image/video previews for embed media."
   :type 'boolean
   :group 'disco)
 
@@ -2209,6 +2223,19 @@ When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
       (user-error "disco: attachment file is not downloaded yet"))
     (find-file path)))
 
+(defun disco-room--play-attachment-video (attachment)
+  "Play ATTACHMENT video preferring local file when available."
+  (let* ((entry (disco-room--attachment-download-state attachment))
+         (path (plist-get entry :path))
+         (url (disco-media-attachment-download-url attachment)))
+    (cond
+     ((and (stringp path) (file-exists-p path))
+      (disco-media-play-video-file path))
+     ((and (stringp url) (not (string-empty-p url)))
+      (disco-media-play-video-url url))
+     (t
+      (user-error "disco: video attachment has no playable source")))))
+
 (defun disco-room-download-attachment (attachment &optional target-path)
   "Download ATTACHMENT to TARGET-PATH.
 
@@ -2265,17 +2292,20 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 
 (defun disco-room--insert-attachment-card (attachment)
   "Insert one rich attachment card for ATTACHMENT object."
-  (let* ((summary (disco-room--attachment-summary attachment))
+  (let* ((kind (disco-room--attachment-kind attachment))
+         (video-p (equal kind "video"))
+         (summary (disco-room--attachment-summary attachment))
          (meta (disco-room--attachment-meta-line attachment))
          (description (alist-get 'description attachment))
          (url (disco-media-attachment-download-url attachment))
          (preview-url (disco-media-attachment-preview-url attachment))
          (preview-rendering-available (disco-media-attachment-preview-rendering-available-p))
-         (preview-cache-key (and (equal (disco-room--attachment-kind attachment) "img")
+         (preview-cache-key (and (member kind '("img" "video"))
                                  (disco-media-attachment-preview-cache-key attachment)))
          (preview-cache-state (disco-media-attachment-preview-cache-state preview-cache-key))
          (preview-fetching (disco-media-attachment-preview-fetching-p preview-cache-key))
-         (preview (disco-media-attachment-preview-image attachment))
+         (preview (and (member kind '("img" "video"))
+                       (disco-media-attachment-preview-image attachment)))
          (download-state (disco-room--attachment-download-state attachment))
          (download-status (plist-get download-state :status))
          (download-path (plist-get download-state :path))
@@ -2302,6 +2332,13 @@ When TARGET-PATH is nil, prompt interactively for destination path."
     (let ((action-start (point)))
       (if (and (stringp url) (not (string-empty-p url)))
           (progn
+            (when video-p
+              (disco-room--insert-attachment-action-button
+               "[Play]"
+               (lambda ()
+                 (disco-room--play-attachment-video attachment))
+               "Play attachment video")
+              (insert " "))
             (disco-room--insert-attachment-action-button
              "[Open]"
              (lambda () (browse-url url t))
@@ -2329,6 +2366,13 @@ When TARGET-PATH is nil, prompt interactively for destination path."
             (disco-room--cancel-attachment-download attachment))
           "Cancel attachment download"))
         ('downloaded
+         (when video-p
+           (disco-room--insert-attachment-action-button
+            "[Play]"
+            (lambda ()
+              (disco-room--play-attachment-video attachment))
+            "Play downloaded video")
+           (insert " "))
          (disco-room--insert-attachment-action-button
           "[Open Local]"
           (lambda ()
@@ -2343,6 +2387,13 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (when (and (stringp download-path) (file-exists-p download-path))
            (insert (format "  %s" (file-name-nondirectory download-path)))))
         ('error
+         (when (and video-p (stringp url) (not (string-empty-p url)))
+           (disco-room--insert-attachment-action-button
+            "[Play]"
+            (lambda ()
+              (disco-room--play-attachment-video attachment))
+            "Play video URL")
+           (insert " "))
          (when (and (stringp url) (not (string-empty-p url)))
            (disco-room--insert-attachment-action-button
             "[Retry]"
@@ -2361,6 +2412,13 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         (_
          (if (and (stringp url) (not (string-empty-p url)))
              (progn
+               (when video-p
+                 (disco-room--insert-attachment-action-button
+                  "[Play]"
+                  (lambda ()
+                    (disco-room--play-attachment-video attachment))
+                  "Play video URL")
+                 (insert " "))
                (disco-room--insert-attachment-action-button
                 "[Download]"
                 (lambda ()
@@ -2377,32 +2435,46 @@ When TARGET-PATH is nil, prompt interactively for destination path."
       (disco-room--attachment-card-apply-line-prefix transfer-start (point) prefix-str)
       (disco-room--attachment-card-append-face
        transfer-start (point) 'disco-room-attachment-card-meta))
-    (when (equal (disco-room--attachment-kind attachment) "img")
+    (when (member kind '("img" "video"))
       (let ((preview-start (point))
             (preview-open-url (or preview-url url))
-            (apply-meta-face t))
+            (apply-meta-face t)
+            (video-preview-p (equal kind "video")))
         (if preview
             (condition-case _
-                (progn
+                (let ((slice-start (point)))
                   (setq apply-meta-face nil)
                   (disco-media-insert-image-slices
                    preview
-                   preview-open-url
+                   (unless video-preview-p preview-open-url)
                    nil
-                   "[image]"))
+                   (if video-preview-p "[video]" "[image]"))
+                  (when (and video-preview-p
+                             (stringp preview-open-url)
+                             (not (string-empty-p preview-open-url)))
+                    (disco-media-add-play-video-properties
+                     slice-start
+                     (point)
+                     preview-open-url)))
               (error
-               (insert "[image unavailable]")))
+               (insert (if video-preview-p
+                           "[video preview unavailable]"
+                         "[image unavailable]"))))
           (cond
            ((not preview-rendering-available)
             (insert "[preview disabled]"))
            ((not (and (stringp preview-url) (not (string-empty-p preview-url))))
             (insert "[no preview URL]"))
            ((eq preview-cache-state :missing)
-            (insert "[image unavailable]"))
+            (insert (if video-preview-p
+                        "[video preview unavailable]"
+                      "[image unavailable]")))
            ((or preview-fetching preview-cache-key)
             (insert "[loading preview]"))
            (t
-            (insert "[image unavailable]"))))
+            (insert (if video-preview-p
+                        "[video preview unavailable]"
+                      "[image unavailable]")))))
         (insert "\n")
         (disco-room--attachment-card-apply-line-prefix preview-start (point) prefix-str)
         (when apply-meta-face
