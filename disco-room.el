@@ -2923,6 +2923,18 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
       (disco-room--poll-clear-draft-selection message-id))
     applied))
 
+(defun disco-room--poll-card-line-prefix ()
+  "Return visual prefix used for poll card rows."
+  (disco-room--attachment-card-line-prefix nil))
+
+(defun disco-room--poll-card-apply-line-prefix (start end prefix-str)
+  "Apply PREFIX-STR as display prefix to poll row region START..END."
+  (disco-room--attachment-card-apply-line-prefix start end prefix-str))
+
+(defun disco-room--poll-card-append-face (start end face)
+  "Append FACE to poll row region START..END."
+  (disco-room--attachment-card-append-face start end face))
+
 (defun disco-room--insert-message-poll (msg)
   "Insert poll detail block for MSG when present."
   (when disco-room-show-polls
@@ -2938,101 +2950,108 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
            (can-vote (and poll (disco-room--poll-can-vote-p msg)))
            (can-expire (and poll (disco-room--poll-can-expire-p msg))))
       (when poll
-        (let ((title-start (point)))
-          (insert "    [poll] " question "\n")
-          (add-text-properties title-start (point)
-                               `(face ,disco-room-poll-title-face
-                                 disco-message-id ,message-id)))
-        (let ((meta-start (point))
-              (parts (list (format "status=%s" state))))
-          (when (disco-room--poll-multiselect-p poll)
-            (setq parts (append parts '("multi"))))
-          (when (and disco-room-poll-show-total-votes
-                     (disco-room--poll-results poll))
-            (setq parts
-                  (append parts
-                          (list (format "votes=%d"
-                                        (disco-room--poll-total-votes poll))))))
-          (when expiry-label
-            (setq parts (append parts (list (format "ends=%s" expiry-label)))))
-          (insert "    " (mapconcat #'identity parts "   ") "\n")
-          (add-text-properties meta-start (point)
-                               `(face ,disco-room-poll-meta-face
-                                 disco-message-id ,message-id)))
-        (dolist (answer answers)
-          (let* ((answer-id (disco-room--poll-answer-id answer))
-                 (selected (and answer-id
-                                (member answer-id effective-selection)))
-                 (count (and answer-id
-                             (disco-room--poll-answer-count poll answer-id)))
-                 (emoji (disco-room--poll-answer-emoji answer))
-                 (label (disco-room--poll-answer-text answer))
-                 (line-start (point)))
-            (insert "    ")
-            (if (and can-vote answer-id disco-room-poll-auto-toggle-vote)
-                (disco-ui-insert-action-button
-                 (format "%s %s%s"
-                         (if selected "[x]" "[ ]")
-                         (if emoji (concat emoji " ") "")
-                         label)
-                 (lambda ()
-                   (disco-room-toggle-poll-answer answer-id message-id))
-                 :face (if selected
-                           disco-room-poll-voted-face
-                         disco-room-poll-option-face)
-                 :help-echo "Toggle staged selection for this answer")
-              (insert (propertize
-                       (format "%s %s%s"
-                               (if selected "[x]" "[ ]")
-                               (if emoji (concat emoji " ") "")
-                               label)
-                       'face (if selected
-                                 disco-room-poll-voted-face
-                               disco-room-poll-option-face))))
-            (when (and disco-room-poll-show-voter-counts (integerp count))
-              (insert (format "  (%d)" count)))
+        (let ((prefix-str (disco-room--poll-card-line-prefix)))
+          (let ((title-start (point)))
+            (insert "[poll] " question "\n")
+            (disco-room--poll-card-apply-line-prefix title-start (point) prefix-str)
+            (add-text-properties title-start (point)
+                                 `(disco-message-id ,message-id))
+            (disco-room--poll-card-append-face
+             title-start (point) disco-room-poll-title-face))
+          (let ((meta-start (point))
+                (parts (list (format "status=%s" state))))
+            (when (disco-room--poll-multiselect-p poll)
+              (setq parts (append parts '("multi"))))
+            (when (and disco-room-poll-show-total-votes
+                       (disco-room--poll-results poll))
+              (setq parts
+                    (append parts
+                            (list (format "votes=%d"
+                                          (disco-room--poll-total-votes poll))))))
+            (when expiry-label
+              (setq parts (append parts (list (format "ends=%s" expiry-label)))))
+            (insert (mapconcat #'identity parts "   ") "\n")
+            (disco-room--poll-card-apply-line-prefix meta-start (point) prefix-str)
+            (add-text-properties meta-start (point)
+                                 `(disco-message-id ,message-id))
+            (disco-room--poll-card-append-face
+             meta-start (point) disco-room-poll-meta-face))
+          (dolist (answer answers)
+            (let* ((answer-id (disco-room--poll-answer-id answer))
+                   (selected (and answer-id
+                                  (member answer-id effective-selection)))
+                   (count (and answer-id
+                               (disco-room--poll-answer-count poll answer-id)))
+                   (emoji (disco-room--poll-answer-emoji answer))
+                   (label (disco-room--poll-answer-text answer))
+                   (line-start (point)))
+              (if (and can-vote answer-id disco-room-poll-auto-toggle-vote)
+                  (disco-ui-insert-action-button
+                   (format "%s %s%s"
+                           (if selected "[x]" "[ ]")
+                           (if emoji (concat emoji " ") "")
+                           label)
+                   (lambda ()
+                     (disco-room-toggle-poll-answer answer-id message-id))
+                   :face (if selected
+                             disco-room-poll-voted-face
+                           disco-room-poll-option-face)
+                   :help-echo "Toggle staged selection for this answer")
+                (insert (propertize
+                         (format "%s %s%s"
+                                 (if selected "[x]" "[ ]")
+                                 (if emoji (concat emoji " ") "")
+                                 label)
+                         'face (if selected
+                                   disco-room-poll-voted-face
+                                 disco-room-poll-option-face))))
+              (when (and disco-room-poll-show-voter-counts (integerp count))
+                (insert (propertize (format "  (%d)" count)
+                                    'face disco-room-poll-meta-face)))
+              (insert "\n")
+              (disco-room--poll-card-apply-line-prefix line-start (point) prefix-str)
+              (add-text-properties line-start (point)
+                                   `(disco-message-id ,message-id
+                                     disco-poll-answer-id ,answer-id))))
+          (let ((actions-start (point))
+                (inserted nil))
+            (when (and can-vote draft-differs effective-selection)
+              (disco-ui-insert-action-button
+               "[Vote]"
+               (lambda ()
+                 (disco-room-submit-poll-vote message-id))
+               :face disco-room-poll-button-face
+               :help-echo "Submit selected poll answers")
+              (insert " ")
+              (setq inserted t))
+            (when (and can-vote
+                       committed-selection
+                       (or (not draft-differs)
+                           (null effective-selection)))
+              (disco-ui-insert-action-button
+               "[Remove vote]"
+               (lambda ()
+                 (disco-room-clear-poll-votes message-id))
+               :face disco-room-poll-button-face
+               :help-echo "Remove all my poll votes")
+              (insert " ")
+              (setq inserted t))
+            (when can-expire
+              (disco-ui-insert-action-button
+               "[End poll]"
+               (lambda ()
+                 (disco-room-expire-poll message-id))
+               :face disco-room-poll-button-face
+               :help-echo "End this poll now")
+              (setq inserted t))
+            (unless inserted
+              (insert (propertize "[no poll actions available]" 'face 'shadow)))
             (insert "\n")
-            (add-text-properties line-start (point)
-                                 `(disco-message-id ,message-id
-                                   disco-poll-answer-id ,answer-id))))
-        (let ((actions-start (point))
-              (inserted nil))
-          (insert "    ")
-          (when (and can-vote draft-differs effective-selection)
-            (disco-ui-insert-action-button
-             "[Vote]"
-             (lambda ()
-               (disco-room-submit-poll-vote message-id))
-             :face disco-room-poll-button-face
-             :help-echo "Submit selected poll answers")
-            (insert " ")
-            (setq inserted t))
-          (when (and can-vote
-                     committed-selection
-                     (or (not draft-differs)
-                         (null effective-selection)))
-            (disco-ui-insert-action-button
-             "[Remove vote]"
-             (lambda ()
-               (disco-room-clear-poll-votes message-id))
-             :face disco-room-poll-button-face
-             :help-echo "Remove all my poll votes")
-            (insert " ")
-            (setq inserted t))
-          (when can-expire
-            (disco-ui-insert-action-button
-             "[End poll]"
-             (lambda ()
-               (disco-room-expire-poll message-id))
-             :face disco-room-poll-button-face
-             :help-echo "End this poll now")
-            (setq inserted t))
-          (unless inserted
-            (insert (propertize "[no poll actions available]" 'face 'shadow)))
-          (insert "\n")
-          (add-text-properties actions-start (point)
-                               `(face ,disco-room-poll-meta-face
-                                 disco-message-id ,message-id)))))))
+            (disco-room--poll-card-apply-line-prefix actions-start (point) prefix-str)
+            (add-text-properties actions-start (point)
+                                 `(disco-message-id ,message-id))
+            (disco-room--poll-card-append-face
+             actions-start (point) disco-room-poll-meta-face)))))))
 
 (defun disco-room--reaction-emoji (reaction)
   "Extract display emoji string from REACTION object."
