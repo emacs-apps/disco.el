@@ -36,6 +36,7 @@
 (defvar-local disco-room--newest-message-id nil)
 (defvar-local disco-room--history-exhausted nil)
 (defvar-local disco-room--pending-reply-to nil)
+(defvar-local disco-room--pending-jump-message-id nil)
 (defvar-local disco-room--gateway-handler nil)
 (defvar-local disco-room--refresh-generation 0)
 (defvar-local disco-room--refresh-in-flight nil)
@@ -1402,6 +1403,87 @@ updates, and keep draft cursor stable when point is in the composer."
   (seq-find (lambda (msg)
               (equal (alist-get 'id msg) message-id))
             (or (disco-state-messages disco-room--channel-id) '())))
+
+(defun disco-room--normalize-id (value)
+  "Return VALUE coerced to string identifier, or nil."
+  (when value
+    (format "%s" value)))
+
+(defun disco-room--message-reference-id (msg)
+  "Return generic referenced message ID for MSG, or nil."
+  (let ((reference (and (listp msg) (alist-get 'message_reference msg))))
+    (disco-room--normalize-id
+     (and (listp reference) (alist-get 'message_id reference)))))
+
+(defun disco-room--message-reference-channel-id (msg)
+  "Return generic referenced channel ID for MSG, or nil."
+  (let ((reference (and (listp msg) (alist-get 'message_reference msg))))
+    (disco-room--normalize-id
+     (and (listp reference) (alist-get 'channel_id reference)))))
+
+(defun disco-room--message-position (message-id)
+  "Return buffer position for MESSAGE-ID in current room render, or nil."
+  (when (and (stringp message-id) (not (string-empty-p message-id)))
+    (text-property-any (point-min) (point-max) 'disco-message-id message-id)))
+
+(defun disco-room--jump-to-visible-message (message-id)
+  "Jump to visible MESSAGE-ID in current room buffer and recenter.
+
+Return non-nil when jump succeeds without fetching older history."
+  (let ((pos (disco-room--message-position message-id)))
+    (when (number-or-marker-p pos)
+      (goto-char pos)
+      (when-let* ((win (get-buffer-window (current-buffer) t)))
+        (set-window-point win pos)
+        (with-selected-window win
+          (goto-char pos)
+          (recenter)))
+      t)))
+
+(defun disco-room--resolve-pending-jump ()
+  "Resolve `disco-room--pending-jump-message-id' in current room buffer."
+  (when (and (stringp disco-room--pending-jump-message-id)
+             (not (string-empty-p disco-room--pending-jump-message-id)))
+    (if (disco-room--jump-to-visible-message disco-room--pending-jump-message-id)
+        (let ((target disco-room--pending-jump-message-id))
+          (setq disco-room--pending-jump-message-id nil)
+          (message "disco: jumped to message %s" target))
+      (if disco-room--history-exhausted
+          (let ((target disco-room--pending-jump-message-id))
+            (setq disco-room--pending-jump-message-id nil)
+            (message "disco: message %s not found in channel history" target))
+        (unless disco-room--older-in-flight
+          (disco-room-load-older-messages))))))
+
+(defun disco-room-jump-to-message (message-id &optional channel-id)
+  "Jump to MESSAGE-ID, optionally in CHANNEL-ID.
+
+When MESSAGE-ID is not currently loaded in room history, fetch older pages
+incrementally until found or history is exhausted."
+  (interactive
+   (list (read-string "Jump to message ID: "
+                      (or (ignore-errors (disco-room--message-id-at-point))
+                          ""))
+         nil))
+  (let* ((target-id (disco-room--normalize-id message-id))
+         (target-channel (disco-room--normalize-id (or channel-id disco-room--channel-id)))
+         (current-channel (disco-room--normalize-id disco-room--channel-id)))
+    (unless (and (stringp target-id) (not (string-empty-p target-id)))
+      (user-error "disco: message id is empty"))
+    (if (or (null target-channel) (equal target-channel current-channel))
+        (progn
+          (setq disco-room--pending-jump-message-id target-id)
+          (disco-room--resolve-pending-jump))
+      (let* ((target-chan-obj (disco-state-channel target-channel))
+             (target-name (or (and (listp target-chan-obj)
+                                   (alist-get 'name target-chan-obj))
+                              target-channel))
+             (target-buffer-name (disco-room--buffer-name target-name target-channel)))
+        (disco-room-open target-channel target-name)
+        (when-let* ((target-buffer (get-buffer target-buffer-name)))
+          (with-current-buffer target-buffer
+            (setq disco-room--pending-jump-message-id target-id)
+            (disco-room--resolve-pending-jump)))))))
 
 (defun disco-room--message-flags (msg)
   "Return normalized integer flags value from message MSG."
@@ -3429,8 +3511,7 @@ Return non-nil when a local message update was applied."
   (when (disco-room--message-reply-type-p msg)
     (or (and (listp (alist-get 'referenced_message msg))
              (alist-get 'id (alist-get 'referenced_message msg)))
-        (and (listp (alist-get 'message_reference msg))
-             (alist-get 'message_id (alist-get 'message_reference msg))))))
+        (disco-room--message-reference-id msg))))
 
 (defun disco-room--reply-preview (msg)
   "Return one-line preview string of MSG reply target, or nil."
@@ -3446,6 +3527,45 @@ Return non-nil when a local message update was applied."
                    (content (disco-room--message-display-content resolved)))
               (format "%s: %s" author (truncate-string-to-width content 72 nil nil t)))
           (format "Original message unavailable (%s)" ref-id))))))
+
+(defun disco-room--insert-reference-jump-button (message-id channel-id label)
+  "Insert jump button for MESSAGE-ID in CHANNEL-ID with LABEL."
+  (disco-ui-insert-action-button
+   label
+   (lambda ()
+     (disco-room-jump-to-message message-id channel-id))
+   :face 'shadow
+   :help-echo (if (and (stringp channel-id)
+                       (not (string-empty-p channel-id))
+                       (not (equal (disco-room--normalize-id channel-id)
+                                   (disco-room--normalize-id disco-room--channel-id))))
+                  (format "Open channel %s and jump to message %s" channel-id message-id)
+                (format "Jump to message %s" message-id))))
+
+(defun disco-room--insert-reply-preview-line (msg reply)
+  "Insert one reply preview line for MSG with REPLY content."
+  (let ((line-start (point))
+        (ref-id (disco-room--reply-reference-id msg))
+        (ref-channel (disco-room--message-reference-channel-id msg)))
+    (insert "    ↪ " reply)
+    (when (and (stringp ref-id) (not (string-empty-p ref-id)))
+      (insert " ")
+      (disco-room--insert-reference-jump-button ref-id ref-channel "[Jump]"))
+    (insert "\n")
+    (add-text-properties line-start (point) '(face shadow))))
+
+(defun disco-room--insert-forward-reference-line (msg)
+  "Insert one forward-source jump line for MSG when applicable."
+  (when (disco-room--message-forwarded-p msg)
+    (let ((ref-id (disco-room--message-reference-id msg))
+          (ref-channel (disco-room--message-reference-channel-id msg)))
+      (when (and (stringp ref-id) (not (string-empty-p ref-id)))
+        (let ((line-start (point)))
+          (insert "    ↪ ")
+          (disco-room--insert-reference-jump-button
+           ref-id ref-channel "[Jump to source]")
+          (insert "\n")
+          (add-text-properties line-start (point) '(face shadow)))))))
 
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
@@ -3471,7 +3591,7 @@ Return non-nil when a local message update was applied."
     (if compact
         (progn
           (when reply
-            (disco-room--insert-prefixed-lines "    ↪ " reply 'shadow))
+            (disco-room--insert-reply-preview-line msg reply))
           (if (string-empty-p content)
               (let ((time-span nil))
                 (insert "    ")
@@ -3515,9 +3635,10 @@ Return non-nil when a local message update was applied."
            (list 'help-echo timestamp))))
       (insert "\n")
       (when reply
-        (disco-room--insert-prefixed-lines "    ↪ " reply 'shadow))
+        (disco-room--insert-reply-preview-line msg reply))
       (unless (string-empty-p content)
         (disco-room--insert-prefixed-lines "    " content)))
+    (disco-room--insert-forward-reference-line msg)
     (when (disco-room--message-has-thread-p msg)
       (let* ((message-id (alist-get 'id msg))
              (thread (disco-room--thread-from-message msg))
@@ -3791,6 +3912,7 @@ Return non-nil when handled without full room rerender."
            (if (disco-room--at-message-bottom-p)
                (disco-room-render)
              (disco-room--render-preserving-point))
+           (disco-room--resolve-pending-jump)
            (message "disco: loaded %d messages" (length messages)))))
      :on-error
      (lambda (err)
@@ -4626,11 +4748,13 @@ When called with prefix argument, force draft edit in minibuffer first."
                        (progn
                          (setq disco-room--history-exhausted t)
                          (disco-room--render-preserving-point)
+                         (disco-room--resolve-pending-jump)
                          (message "disco: reached beginning of history"))
                      (let ((merged (disco-room--merge-message-pages existing older)))
                        (disco-state-put-messages channel-id merged)
                        (disco-room--update-message-window-state merged)
                        (disco-room--render-preserving-point)
+                       (disco-room--resolve-pending-jump)
                        (message "disco: loaded %d older messages" (length older))))))))))
        :on-error
        (lambda (err)
@@ -5062,6 +5186,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--input-index nil)
   (setq-local disco-room--input-pending nil)
   (setq-local disco-room--send-in-flight nil)
+  (setq-local disco-room--pending-jump-message-id nil)
   (setq-local disco-room--last-search-query nil)
   (setq-local disco-room--input-marker nil)
   (setq-local disco-room--input-prompt-marker nil)
