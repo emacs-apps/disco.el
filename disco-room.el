@@ -5156,7 +5156,10 @@ CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
                     (format "%s (RET to skip)" prompt)
                     labels
                     nil
-                    nil))
+                    t
+                    nil
+                    nil
+                    ""))
            (normalized
             (delq nil
                   (mapcar (lambda (label)
