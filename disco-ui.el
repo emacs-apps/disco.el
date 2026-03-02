@@ -62,6 +62,35 @@ FACE and PROPERTIES are applied to each inserted line span. PREFIX is set via
                (list 'line-prefix prefix
                      'wrap-prefix prefix))))))
 
+(defun disco-ui-combine-faces (&rest faces)
+  "Return one face value from FACES, dropping nil entries."
+  (let ((values (delq nil faces)))
+    (cond
+     ((null values) nil)
+     ((null (cdr values)) (car values))
+     (t values))))
+
+(cl-defun disco-ui-card-line-prefix (&key face (indent "    ") (marker "▏"))
+  "Return a display-only card prefix string.
+
+FACE is applied to MARKER while INDENT is kept plain."
+  (concat indent
+          (if face
+              (propertize marker 'face face)
+            marker)))
+
+(defun disco-ui-apply-line-prefix (start end prefix-str)
+  "Apply PREFIX-STR as display prefix for region START..END."
+  (when (< start end)
+    (add-text-properties start end
+                         (list 'line-prefix prefix-str
+                               'wrap-prefix prefix-str))))
+
+(defun disco-ui-append-face (start end face)
+  "Append FACE to region START..END."
+  (when (and face (< start end))
+    (add-face-text-property start end face 'append)))
+
 (cl-defun disco-ui-render-list-view (&key title key-hints summary loading-note
                                           items item-inserter empty-text
                                           footer-lines)

@@ -129,27 +129,7 @@
 
 (defun disco-embed--line-prefix (embed)
   "Return colored visual line prefix string for EMBED card rows."
-  (propertize "    ▏" 'face (disco-embed--accent-face embed)))
-
-(defun disco-embed--combine-faces (&rest faces)
-  "Return one face value from FACES, dropping nil entries."
-  (let ((values (delq nil faces)))
-    (cond
-     ((null values) nil)
-     ((null (cdr values)) (car values))
-     (t values))))
-
-(defun disco-embed--apply-line-prefix (start end prefix-str)
-  "Apply PREFIX-STR as line/wrap prefix for region START..END."
-  (when (< start end)
-    (add-text-properties start end
-                         (list 'line-prefix prefix-str
-                               'wrap-prefix prefix-str))))
-
-(defun disco-embed--append-face (start end face)
-  "Append FACE to region START..END."
-  (when (and face (< start end))
-    (add-face-text-property start end face 'append)))
+  (disco-ui-card-line-prefix :face (disco-embed--accent-face embed)))
 
 (defun disco-embed--meta-line (embed)
   "Return compact metadata line for EMBED object."
@@ -552,11 +532,11 @@
           (insert ": ")
           (insert value))
         (insert "\n")
-        (disco-embed--apply-line-prefix content-start (point) prefix-str)
-        (disco-embed--append-face
+        (disco-ui-apply-line-prefix content-start (point) prefix-str)
+        (disco-ui-append-face
          content-start
          (point)
-         (disco-embed--combine-faces
+         (disco-ui-combine-faces
           (disco-embed--background-face embed)
           'disco-room-embed-card-meta))))))
 
@@ -625,11 +605,11 @@
             (insert "\n")
           (insert " "))))
     (insert "\n")
-    (disco-embed--apply-line-prefix content-start (point) prefix-str)
-    (disco-embed--append-face
+    (disco-ui-apply-line-prefix content-start (point) prefix-str)
+    (disco-ui-append-face
      content-start
      (point)
-     (disco-embed--combine-faces
+     (disco-ui-combine-faces
       (disco-embed--background-face embed)
       'disco-room-embed-card-meta))))
 
@@ -726,12 +706,12 @@
          (t
           (insert "[no preview]")))
         (insert "\n")
-        (disco-embed--apply-line-prefix content-start (point) prefix-str)
-        (disco-embed--append-face
+        (disco-ui-apply-line-prefix content-start (point) prefix-str)
+        (disco-ui-append-face
          content-start
          (point)
          (if apply-meta-face
-             (disco-embed--combine-faces
+             (disco-ui-combine-faces
               (disco-embed--background-face embed)
               'disco-room-embed-card-meta)
            (disco-embed--background-face embed)))))))
@@ -793,8 +773,8 @@
            (nth 1 action)
            (nth 2 action)))
         (insert "\n")
-        (disco-embed--apply-line-prefix content-start (point) prefix-str)
-        (disco-embed--append-face
+        (disco-ui-apply-line-prefix content-start (point) prefix-str)
+        (disco-ui-append-face
          content-start
          (point)
          (disco-embed--background-face embed))))))
@@ -846,21 +826,21 @@
          (prefix-str (disco-embed--line-prefix embed))
          (accent-color (disco-embed--color-hex embed))
          (card-bg-face (disco-embed--background-face embed))
-         (title-face (disco-embed--combine-faces
+         (title-face (disco-ui-combine-faces
                       card-bg-face
                       (and accent-color `(:foreground ,accent-color))
                       'disco-room-embed-card-title))
-         (meta-face (disco-embed--combine-faces
+         (meta-face (disco-ui-combine-faces
                      card-bg-face
                      'disco-room-embed-card-meta))
-         (shadow-face (disco-embed--combine-faces card-bg-face 'shadow)))
+         (shadow-face (disco-ui-combine-faces card-bg-face 'shadow)))
     (let ((title-start (point)))
       (insert summary)
       (when (disco-embed--url-present-p main-url)
         (disco-media-add-open-url-properties title-start (point) main-url))
       (insert "\n")
-      (disco-embed--apply-line-prefix title-start (point) prefix-str)
-      (disco-embed--append-face title-start (point) title-face))
+      (disco-ui-apply-line-prefix title-start (point) prefix-str)
+      (disco-ui-append-face title-start (point) title-face))
     (let ((meta-start (point)))
       (when author-icon-image
         (condition-case _
@@ -874,13 +854,13 @@
       (when media-dims
         (insert "  [" media-dims "]"))
       (insert "\n")
-      (disco-embed--apply-line-prefix meta-start (point) prefix-str)
-      (disco-embed--append-face meta-start (point) meta-face))
+      (disco-ui-apply-line-prefix meta-start (point) prefix-str)
+      (disco-ui-append-face meta-start (point) meta-face))
     (when description
       (let ((desc-start (point)))
         (insert description "\n")
-        (disco-embed--apply-line-prefix desc-start (point) prefix-str)
-        (disco-embed--append-face desc-start (point) meta-face)))
+        (disco-ui-apply-line-prefix desc-start (point) prefix-str)
+        (disco-ui-append-face desc-start (point) meta-face)))
     (when media-entry
       (disco-embed--insert-preview-row
        msg embed embed-index media-kind media-url video-url prefix-str))
@@ -889,8 +869,8 @@
     (when footer-line
       (let ((footer-start (point)))
         (insert footer-line "\n")
-        (disco-embed--apply-line-prefix footer-start (point) prefix-str)
-        (disco-embed--append-face footer-start (point) meta-face)))
+        (disco-ui-apply-line-prefix footer-start (point) prefix-str)
+        (disco-ui-append-face footer-start (point) meta-face)))
     (disco-embed--insert-action-row
      main-url media-url video-url author-url provider-url author-icon-url embed prefix-str)
     (when disco-room-show-embed-urls
@@ -900,8 +880,8 @@
           (let ((url-start (point)))
             (insert raw-url "\n")
             (disco-media-add-open-url-properties url-start (1- (point)) raw-url)
-            (disco-embed--apply-line-prefix url-start (point) prefix-str)
-            (disco-embed--append-face url-start (point) shadow-face)))))))
+            (disco-ui-apply-line-prefix url-start (point) prefix-str)
+            (disco-ui-append-face url-start (point) shadow-face)))))))
 
 (defun disco-embed-insert-message-embeds (msg)
   "Insert embed detail lines for MSG."

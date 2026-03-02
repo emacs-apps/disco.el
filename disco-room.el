@@ -2274,22 +2274,6 @@ When TARGET-PATH is nil, prompt interactively for destination path."
    :face 'disco-room-attachment-card-action
    :help-echo help-echo))
 
-(defun disco-room--attachment-card-line-prefix (_attachment)
-  "Return visual prefix used for rich attachment card rows."
-  (propertize "    ▏" 'face 'disco-room-attachment-card-border))
-
-(defun disco-room--attachment-card-apply-line-prefix (start end prefix-str)
-  "Apply PREFIX-STR as display prefix for region START..END."
-  (when (< start end)
-    (add-text-properties start end
-                         (list 'line-prefix prefix-str
-                               'wrap-prefix prefix-str))))
-
-(defun disco-room--attachment-card-append-face (start end face)
-  "Append FACE to region START..END."
-  (when (and face (< start end))
-    (add-face-text-property start end face 'append)))
-
 (defun disco-room--insert-attachment-card (attachment)
   "Insert one rich attachment card for ATTACHMENT object."
   (let* ((kind (disco-room--attachment-kind attachment))
@@ -2310,24 +2294,24 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (download-status (plist-get download-state :status))
          (download-path (plist-get download-state :path))
          (download-error (plist-get download-state :error))
-         (prefix-str (disco-room--attachment-card-line-prefix attachment)))
+         (prefix-str (disco-ui-card-line-prefix :face 'disco-room-attachment-card-border)))
     (let ((title-start (point)))
       (insert summary "\n")
       (when (and (stringp url) (not (string-empty-p url)))
         (disco-media-add-open-url-properties title-start (1- (point)) url))
-      (disco-room--attachment-card-apply-line-prefix title-start (point) prefix-str)
-      (disco-room--attachment-card-append-face
+      (disco-ui-apply-line-prefix title-start (point) prefix-str)
+      (disco-ui-append-face
        title-start (point) 'disco-room-attachment-card-title))
     (let ((meta-start (point)))
       (insert meta "\n")
-      (disco-room--attachment-card-apply-line-prefix meta-start (point) prefix-str)
-      (disco-room--attachment-card-append-face
+      (disco-ui-apply-line-prefix meta-start (point) prefix-str)
+      (disco-ui-append-face
        meta-start (point) 'disco-room-attachment-card-meta))
     (when (and (stringp description) (not (string-empty-p description)))
       (let ((desc-start (point)))
         (insert "caption: " description "\n")
-        (disco-room--attachment-card-apply-line-prefix desc-start (point) prefix-str)
-        (disco-room--attachment-card-append-face
+        (disco-ui-apply-line-prefix desc-start (point) prefix-str)
+        (disco-ui-append-face
          desc-start (point) 'disco-room-attachment-card-meta)))
     (let ((action-start (point)))
       (if (and (stringp url) (not (string-empty-p url)))
@@ -2352,8 +2336,8 @@ When TARGET-PATH is nil, prompt interactively for destination path."
              "Copy attachment URL"))
         (insert "[No URL]"))
       (insert "\n")
-      (disco-room--attachment-card-apply-line-prefix action-start (point) prefix-str)
-      (disco-room--attachment-card-append-face
+      (disco-ui-apply-line-prefix action-start (point) prefix-str)
+      (disco-ui-append-face
        action-start (point) 'disco-room-attachment-card-meta))
     (let ((transfer-start (point)))
       (insert "transfer: ")
@@ -2432,8 +2416,8 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                 "Download attachment to chosen path"))
            (insert "[No URL]"))))
       (insert "\n")
-      (disco-room--attachment-card-apply-line-prefix transfer-start (point) prefix-str)
-      (disco-room--attachment-card-append-face
+      (disco-ui-apply-line-prefix transfer-start (point) prefix-str)
+      (disco-ui-append-face
        transfer-start (point) 'disco-room-attachment-card-meta))
     (when (member kind '("img" "video"))
       (let ((preview-start (point))
@@ -2476,9 +2460,9 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                         "[video preview unavailable]"
                       "[image unavailable]")))))
         (insert "\n")
-        (disco-room--attachment-card-apply-line-prefix preview-start (point) prefix-str)
+        (disco-ui-apply-line-prefix preview-start (point) prefix-str)
         (when apply-meta-face
-          (disco-room--attachment-card-append-face
+          (disco-ui-append-face
            preview-start (point) 'disco-room-attachment-card-meta))))
     (when (and disco-room-show-attachment-urls
                (stringp url)
@@ -2486,8 +2470,8 @@ When TARGET-PATH is nil, prompt interactively for destination path."
       (let ((url-start (point)))
         (insert url "\n")
         (disco-media-add-open-url-properties url-start (1- (point)) url)
-        (disco-room--attachment-card-apply-line-prefix url-start (point) prefix-str)
-        (disco-room--attachment-card-append-face url-start (point) 'shadow)))))
+        (disco-ui-apply-line-prefix url-start (point) prefix-str)
+        (disco-ui-append-face url-start (point) 'shadow)))))
 
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
@@ -2923,18 +2907,6 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
       (disco-room--poll-clear-draft-selection message-id))
     applied))
 
-(defun disco-room--poll-card-line-prefix ()
-  "Return visual prefix used for poll card rows."
-  (disco-room--attachment-card-line-prefix nil))
-
-(defun disco-room--poll-card-apply-line-prefix (start end prefix-str)
-  "Apply PREFIX-STR as display prefix to poll row region START..END."
-  (disco-room--attachment-card-apply-line-prefix start end prefix-str))
-
-(defun disco-room--poll-card-append-face (start end face)
-  "Append FACE to poll row region START..END."
-  (disco-room--attachment-card-append-face start end face))
-
 (defun disco-room--insert-message-poll (msg)
   "Insert poll detail block for MSG when present."
   (when disco-room-show-polls
@@ -2950,13 +2922,13 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
            (can-vote (and poll (disco-room--poll-can-vote-p msg)))
            (can-expire (and poll (disco-room--poll-can-expire-p msg))))
       (when poll
-        (let ((prefix-str (disco-room--poll-card-line-prefix)))
+        (let ((prefix-str (disco-ui-card-line-prefix :face 'disco-room-attachment-card-border)))
           (let ((title-start (point)))
             (insert "[poll] " question "\n")
-            (disco-room--poll-card-apply-line-prefix title-start (point) prefix-str)
+            (disco-ui-apply-line-prefix title-start (point) prefix-str)
             (add-text-properties title-start (point)
                                  `(disco-message-id ,message-id))
-            (disco-room--poll-card-append-face
+            (disco-ui-append-face
              title-start (point) disco-room-poll-title-face))
           (let ((meta-start (point))
                 (parts (list (format "status=%s" state))))
@@ -2971,10 +2943,10 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (when expiry-label
               (setq parts (append parts (list (format "ends=%s" expiry-label)))))
             (insert (mapconcat #'identity parts "   ") "\n")
-            (disco-room--poll-card-apply-line-prefix meta-start (point) prefix-str)
+            (disco-ui-apply-line-prefix meta-start (point) prefix-str)
             (add-text-properties meta-start (point)
                                  `(disco-message-id ,message-id))
-            (disco-room--poll-card-append-face
+            (disco-ui-append-face
              meta-start (point) disco-room-poll-meta-face))
           (dolist (answer answers)
             (let* ((answer-id (disco-room--poll-answer-id answer))
@@ -3009,7 +2981,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                 (insert (propertize (format "  (%d)" count)
                                     'face disco-room-poll-meta-face)))
               (insert "\n")
-              (disco-room--poll-card-apply-line-prefix line-start (point) prefix-str)
+              (disco-ui-apply-line-prefix line-start (point) prefix-str)
               (add-text-properties line-start (point)
                                    `(disco-message-id ,message-id
                                      disco-poll-answer-id ,answer-id))))
@@ -3047,10 +3019,10 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (unless inserted
               (insert (propertize "[no poll actions available]" 'face 'shadow)))
             (insert "\n")
-            (disco-room--poll-card-apply-line-prefix actions-start (point) prefix-str)
+            (disco-ui-apply-line-prefix actions-start (point) prefix-str)
             (add-text-properties actions-start (point)
                                  `(disco-message-id ,message-id))
-            (disco-room--poll-card-append-face
+            (disco-ui-append-face
              actions-start (point) disco-room-poll-meta-face)))))))
 
 (defun disco-room--reaction-emoji (reaction)
