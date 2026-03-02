@@ -22,11 +22,6 @@
 (require 'disco-util)
 (require 'disco-media)
 (require 'disco-embed)
-
-(declare-function disco-media-clear-preview-memory-cache "disco-media" ())
-(declare-function disco-api-create-message-async "disco-api" (&rest args))
-(declare-function disco-api-create-poll-vote-async "disco-api" (&rest args))
-(declare-function disco-api-expire-poll-async "disco-api" (&rest args))
 (require 'disco-view)
 (require 'disco-api)
 (require 'disco-gateway)
