@@ -1438,6 +1438,17 @@ updates, and keep draft cursor stable when point is in the composer."
               (equal (alist-get 'id msg) message-id))
             (or (disco-state-messages disco-room--channel-id) '())))
 
+(defun disco-room--channel-message-by-id (channel-id message-id)
+  "Return cached MESSAGE-ID from CHANNEL-ID, or nil."
+  (let ((normalized-channel-id (disco-room--normalize-id channel-id))
+        (normalized-message-id (disco-room--normalize-id message-id)))
+    (when (and normalized-channel-id normalized-message-id)
+      (seq-find
+       (lambda (msg)
+         (equal (disco-room--normalize-id (alist-get 'id msg))
+                normalized-message-id))
+       (or (disco-state-messages normalized-channel-id) '())))))
+
 (defun disco-room--normalize-id (value)
   "Return normalized snowflake-like ID string from VALUE, or nil.
 
@@ -1956,14 +1967,22 @@ non-nil. DEFAULT falls back to four spaces."
 
 (defun disco-room--message-author (msg)
   "Extract author name from message MSG alist."
-  (let* ((author (alist-get 'author msg))
+  (let* ((thread-source (and (= (disco-room--message-type msg) 21)
+                             (disco-room--thread-starter-reference-message msg)))
+         (author (or (and (listp thread-source)
+                          (alist-get 'author thread-source))
+                     (alist-get 'author msg)))
          (global-name (and (listp author) (alist-get 'global_name author)))
          (username (and (listp author) (alist-get 'username author))))
     (or global-name username "unknown")))
 
 (defun disco-room--message-author-id (msg)
   "Extract author ID string from message MSG alist."
-  (let ((author (alist-get 'author msg)))
+  (let* ((thread-source (and (= (disco-room--message-type msg) 21)
+                             (disco-room--thread-starter-reference-message msg)))
+         (author (or (and (listp thread-source)
+                          (alist-get 'author thread-source))
+                     (alist-get 'author msg))))
     (and (listp author) (alist-get 'id author))))
 
 (defun disco-room--author-face (msg)
@@ -3127,14 +3146,32 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                      "%s joined.")))
     (format template author)))
 
+(defun disco-room--thread-starter-reference-message (msg)
+  "Resolve referenced source message object for thread starter MSG."
+  (let* ((inline (and (listp msg) (alist-get 'referenced_message msg)))
+         (ref-id (disco-room--message-reference-id msg))
+         (ref-channel-id (or (disco-room--message-reference-channel-id msg)
+                             disco-room--channel-id))
+         (self-id (disco-room--normalize-id (alist-get 'id msg))))
+    (cond
+     ((listp inline)
+      inline)
+     ((not ref-id)
+      nil)
+     (t
+      (or (disco-room--channel-message-by-id ref-channel-id ref-id)
+          (let ((fallback (disco-room--channel-message-by-id
+                           disco-room--channel-id
+                           ref-id)))
+            ;; Avoid treating the synthetic type-21 row as its own reference.
+            (unless (and (listp fallback)
+                         (equal (disco-room--normalize-id (alist-get 'id fallback))
+                                self-id))
+              fallback)))))))
+
 (defun disco-room--thread-starter-reference-content (msg)
   "Return referenced message content for thread starter MSG, or nil."
-  (let* ((ref (alist-get 'referenced_message msg))
-         (ref-id (or (and (listp ref) (alist-get 'id ref))
-                     (and (listp (alist-get 'message_reference msg))
-                          (alist-get 'message_id (alist-get 'message_reference msg)))))
-         (resolved (or (and (listp ref) ref)
-                       (and ref-id (disco-room--message-by-id ref-id))))
+  (let* ((resolved (disco-room--thread-starter-reference-message msg))
          (text (and (listp resolved) (alist-get 'content resolved)))
          (display (and (stringp text)
                        (disco-util-unescape-markdown-punctuation text))))
