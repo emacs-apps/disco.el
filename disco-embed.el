@@ -31,8 +31,12 @@
   (and (stringp url) (not (string-empty-p url))))
 
 (defun disco-embed--stringify (value)
-  "Return VALUE as string, or nil when VALUE is nil."
-  (and value (format "%s" value)))
+  "Return VALUE as display string, or nil when VALUE is nil.
+
+Keeps original line breaks and unescapes Markdown punctuation escapes."
+  (and value
+       (disco-util-unescape-markdown-punctuation
+        (format "%s" value))))
 
 (defun disco-embed--truncate-text (text limit)
   "Truncate TEXT to LIMIT characters with ellipsis when needed."
@@ -131,8 +135,12 @@
   "Return compact metadata line for EMBED object."
   (let* ((provider (disco-util-object-get embed 'provider))
          (author (disco-util-object-get embed 'author))
-         (provider-name (and (listp provider) (disco-util-object-get provider 'name)))
-         (author-name (and (listp author) (disco-util-object-get author 'name)))
+         (provider-name (and (listp provider)
+                             (disco-embed--stringify
+                              (disco-util-object-get provider 'name))))
+         (author-name (and (listp author)
+                           (disco-embed--stringify
+                            (disco-util-object-get author 'name))))
          (timestamp (disco-util-object-get embed 'timestamp))
          (timestamp-text (and (stringp timestamp)
                               (not (string-empty-p timestamp))

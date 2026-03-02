@@ -3017,15 +3017,18 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                           (alist-get 'message_id (alist-get 'message_reference msg)))))
          (resolved (or (and (listp ref) ref)
                        (and ref-id (disco-room--message-by-id ref-id))))
-         (text (and (listp resolved) (alist-get 'content resolved))))
-    (when (and (stringp text) (not (string-empty-p (string-trim text))))
-      (string-trim text))))
+         (text (and (listp resolved) (alist-get 'content resolved)))
+         (display (and (stringp text)
+                       (disco-util-unescape-markdown-punctuation text))))
+    (when (and (stringp display) (not (string-empty-p (string-trim display))))
+      (string-trim display))))
 
 (defun disco-room--message-system-content (msg)
   "Return rendered system content for MSG type, or nil if not handled."
   (let* ((type (disco-room--message-type msg))
          (author (disco-room--message-author msg))
-         (content (string-trim (or (alist-get 'content msg) "")))
+         (content (string-trim (disco-util-unescape-markdown-punctuation
+                                (or (alist-get 'content msg) ""))))
          (boost-times (and (not (string-empty-p content)) content)))
     (pcase type
       (6
