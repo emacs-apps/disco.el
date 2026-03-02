@@ -34,7 +34,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
 - Room can render inline Discord avatar images (async, cached) with automatic placeholder fallback.
-- Draft input supports dynamic `TAB` completion for `@`/`#` tokens (users, roles, `@everyone`/`@here`, and guild channels) and inserts Discord mention syntax.
+- Draft input supports dynamic `TAB` completion for `@`/`#` tokens (users, roles, `@everyone`/`@here`, and guild channels) and inserts Discord mention syntax; company/Corfu rows can show username/id/avatar metadata.
 - Room provides `C-c C-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
@@ -102,7 +102,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room transient (`?`): includes attachment/forward and reaction/poll actions (`f`, `F`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
 - Mention send policy can be tuned via `disco-room-allowed-mentions` and `disco-room-reply-mention-replied-user`.
-- `disco-room-enable-company-backend` controls optional company integration for composer completion (`disco-room-company-completion`).
+- `disco-room-enable-company-backend` controls optional company integration for composer completion (`disco-room-company-completion`); `disco-company-show-user-avatars` toggles avatar rendering in company annotations.
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration
