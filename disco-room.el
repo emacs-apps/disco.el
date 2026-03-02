@@ -266,7 +266,7 @@ When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
   :type 'integer
   :group 'disco)
 
-(defcustom disco-room-embed-description-limit 280
+(defcustom disco-room-embed-description-limit nil
   "Maximum description length rendered in embed cards.
 
 Set to 0 to disable embed description rendering, or nil for no limit."
@@ -2928,15 +2928,18 @@ When TARGET-PATH is nil, prompt interactively for destination path."
     (when (and (stringp timestamp) (not (string-empty-p timestamp)))
       (disco-util-format-time timestamp))))
 
-(defun disco-room--forward-snapshot-preview (msg)
-  "Return one-line snapshot content preview for forwarded MSG, or nil."
+(defun disco-room--forward-snapshot-content (msg)
+  "Return forwarded snapshot content for MSG without line folding/truncation."
   (let* ((snapshot (disco-room--message-forward-snapshot msg))
-         (text (and (listp snapshot) (alist-get 'content snapshot)))
-         (trimmed (and (stringp text)
-                       (string-trim
-                        (replace-regexp-in-string "[\n\r]+" " " text)))))
-    (when (and (stringp trimmed) (not (string-empty-p trimmed)))
-      (truncate-string-to-width trimmed 120 nil nil t))))
+         (text (and (listp snapshot) (alist-get 'content snapshot))))
+    (when (and (stringp text) (not (string-empty-p text)))
+      (replace-regexp-in-string
+       "\\\\[[:punct:]]"
+       (lambda (matched)
+         (substring matched 1))
+       text
+       t
+       t))))
 
 (defun disco-room--message-effective-attachments (msg)
   "Return attachments to render for MSG, including forward snapshots."
@@ -3909,7 +3912,7 @@ When FACE is non-nil, use it for button text."
          (guild-label (or (plist-get source :guild-label) "direct message"))
          (channel-label (or (plist-get source :channel-label) "unknown-channel"))
          (sent-at (disco-room--forward-snapshot-time-label msg))
-         (preview (disco-room--forward-snapshot-preview msg))
+         (content (disco-room--forward-snapshot-content msg))
          (prefix-str (disco-ui-card-line-prefix :face 'disco-room-forward-card-border)))
     (let ((title-start (point)))
       (insert "[forwarded message]" "\n")
@@ -3930,11 +3933,12 @@ When FACE is non-nil, use it for button text."
         (insert "sent: " sent-at "\n")
         (disco-ui-apply-line-prefix time-start (point) prefix-str)
         (disco-ui-append-face time-start (point) 'disco-room-forward-card-meta)))
-    (when (and (stringp preview) (not (string-empty-p preview)))
-      (let ((preview-start (point)))
-        (insert "preview: " preview "\n")
-        (disco-ui-apply-line-prefix preview-start (point) prefix-str)
-        (disco-ui-append-face preview-start (point) 'disco-room-forward-card-meta)))
+    (when (and (stringp content) (not (string-empty-p content)))
+      (let ((content-start (point)))
+        (insert content)
+        (unless (string-suffix-p "\n" content)
+          (insert "\n"))
+        (disco-ui-apply-line-prefix content-start (point) prefix-str)))
     (when (and (stringp ref-id) (not (string-empty-p ref-id)))
       (let ((action-start (point)))
         (disco-room--insert-reference-jump-button

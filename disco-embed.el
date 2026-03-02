@@ -30,11 +30,9 @@
   "Return non-nil when URL is a non-empty string."
   (and (stringp url) (not (string-empty-p url))))
 
-(defun disco-embed--normalize-text (value)
-  "Normalize VALUE into trimmed non-empty string, or nil."
-  (let ((text (and value (string-trim (format "%s" value)))))
-    (when (and (stringp text) (not (string-empty-p text)))
-      text)))
+(defun disco-embed--stringify (value)
+  "Return VALUE as string, or nil when VALUE is nil."
+  (and value (format "%s" value)))
 
 (defun disco-embed--truncate-text (text limit)
   "Truncate TEXT to LIMIT characters with ellipsis when needed."
@@ -57,7 +55,7 @@
       "rich")))
 
 (defun disco-embed--summary (embed)
-  "Return one-line embed summary string for EMBED object."
+  "Return embed summary string for EMBED object."
   (let* ((author (disco-util-object-get embed 'author))
          (provider (disco-util-object-get embed 'provider))
          (title (or (disco-util-object-get embed 'title)
@@ -66,12 +64,10 @@
                     (disco-util-object-get embed 'description)
                     (disco-util-object-get embed 'url)
                     "embed"))
-         (headline (string-trim
-                    (replace-regexp-in-string "[\n\r\t]+" " "
-                                              (format "%s" title)))))
+         (headline (or (disco-embed--stringify title) "embed")))
     (format "[%s] %s"
             (disco-embed--type embed)
-            (truncate-string-to-width headline 92 nil nil t))))
+            headline)))
 
 (defun disco-embed--color-hex (embed)
   "Return hexadecimal color string for EMBED, or nil."
@@ -350,16 +346,19 @@
 
 (defun disco-embed--trailing-image-embed-p (embed url-key)
   "Return non-nil when EMBED is a mergeable trailing image-only embed."
-  (let ((description (disco-embed--normalize-text
-                      (disco-util-object-get embed 'description)))
-        (fields (disco-util-object-get embed 'fields))
-        (images (disco-embed--embed-image-objects embed)))
+  (let* ((description (disco-util-object-get embed 'description))
+         (description-present
+          (and description
+               (not (and (stringp description)
+                         (string-empty-p description)))))
+         (fields (disco-util-object-get embed 'fields))
+         (images (disco-embed--embed-image-objects embed)))
     (and (disco-embed--url-present-p url-key)
          (equal (disco-embed--embed-url-key embed) url-key)
          (null (disco-util-object-get embed 'timestamp))
          (null (disco-util-object-get embed 'author))
          (null (disco-util-object-get embed 'color))
-         (null description)
+         (not description-present)
          (disco-embed--seq-empty-p fields)
          (null (disco-util-object-get embed 'thumbnail))
          (null (disco-util-object-get embed 'video))
@@ -500,12 +499,9 @@
         (height . ,(and (listp image) (disco-util-object-get image 'height)))))))
 
 (defun disco-embed--description-line (embed)
-  "Return one-line embed description for EMBED, respecting user limit."
+  "Return embed description for EMBED, preserving original formatting."
   (let* ((raw (disco-util-object-get embed 'description))
-         (flat (and raw
-                    (replace-regexp-in-string "[\n\r\t]+" " "
-                                              (format "%s" raw))))
-         (text (disco-embed--normalize-text flat)))
+         (text (and raw (format "%s" raw))))
     (disco-embed--truncate-text text disco-room-embed-description-limit)))
 
 (defun disco-embed--insert-action-button (label callback help-echo)
@@ -518,10 +514,10 @@
 
 (defun disco-embed--insert-field-row (field embed prefix-str)
   "Insert one field row for FIELD object."
-  (let* ((name (disco-embed--normalize-text
-                (disco-util-object-get field 'name)))
+  (let* ((raw-name (disco-util-object-get field 'name))
          (raw-value (disco-util-object-get field 'value))
-         (value (disco-embed--normalize-text raw-value))
+         (name (and raw-name (format "%s" raw-name)))
+         (value (and raw-value (format "%s" raw-value)))
          (inline (disco-util-json-true-p (disco-util-object-get field 'inline))))
     (when (or name value)
       (let ((content-start (point)))
@@ -787,14 +783,14 @@
          (fields (or (disco-util-object-get embed 'fields) '()))
          (author (disco-embed--author-object embed))
          (author-name (and (listp author)
-                           (disco-embed--normalize-text
+                           (disco-embed--stringify
                             (disco-util-object-get author 'name))))
          (author-url (disco-embed--author-url msg embed))
          (author-icon-url (disco-embed--author-icon-url msg embed))
          (author-icon-image (disco-embed--author-icon-image msg embed embed-index))
          (provider (disco-embed--provider-object embed))
          (provider-name (and (listp provider)
-                             (disco-embed--normalize-text
+                             (disco-embed--stringify
                               (disco-util-object-get provider 'name))))
          (provider-url (disco-embed--provider-url msg embed))
          (main-url (disco-embed--main-url msg embed))
@@ -804,7 +800,7 @@
                               (disco-util-format-time timestamp)))
          (footer (disco-util-object-get embed 'footer))
          (footer-text (and (listp footer)
-                           (disco-embed--normalize-text
+                           (disco-embed--stringify
                             (disco-util-object-get footer 'text))))
          (footer-line (let ((parts (delq nil (list footer-text timestamp-text))))
                         (and parts (string-join parts "  -  "))))
