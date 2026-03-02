@@ -91,7 +91,7 @@ This repository currently contains an MVP scaffold designed with these reference
 ## Message Commands
 
 - Room buffer: `r` set reply target from message-at-point, `C-c C-k` clears pending reply.
-- Room buffer: `C-c C-F` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`) chosen from source message entries when available (manual fallback still supported).
+- Room buffer: `C-c C-F` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`) chosen from source message entries when available (manual fallback still supported). In picker prompts, press `RET` on empty input to skip one side.
 - If API rejects forward comments in your session, `disco-room-forward-comment-rejection-action` controls fallback (`split` sends comment + forward as two messages).
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.

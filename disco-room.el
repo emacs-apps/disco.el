@@ -5148,20 +5148,29 @@ send votes to Discord."
 (defun disco-room--forward-only-select-values (prompt choices)
   "Read one or more values from CHOICES with PROMPT.
 
-CHOICES is an alist of (LABEL . VALUE)."
+CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
   (if (null choices)
       nil
     (let* ((labels (mapcar #'car choices))
            (picked (completing-read-multiple
-                    prompt
+                    (format "%s (RET to skip)" prompt)
                     labels
                     nil
-                    t)))
-      (delete-dups
-       (delq nil
-             (mapcar (lambda (label)
-                       (cdr (assoc label choices)))
-                     picked))))))
+                    nil))
+           (normalized
+            (delq nil
+                  (mapcar (lambda (label)
+                            (let ((text (string-trim (or label ""))))
+                              (unless (string-empty-p text)
+                                text)))
+                          picked)))
+           values)
+      (dolist (label normalized)
+        (let ((entry (assoc label choices)))
+          (unless entry
+            (user-error "disco: invalid forward-only selection `%s'" label))
+          (push (cdr entry) values)))
+      (delete-dups (nreverse values)))))
 
 (defun disco-room--read-forward-only-manual ()
   "Read `forward_only' payload by manual embed-index/attachment-id input."
@@ -5211,11 +5220,11 @@ CHOICES is an alist of (LABEL . VALUE)."
       (user-error "disco: source message has no embeds or attachments to subset"))
     (let ((picked-embed-indices
            (disco-room--forward-only-select-values
-            "Pick embeds to forward (comma list, empty for none): "
+            "Pick embeds to forward (comma list): "
             embed-choices))
           (picked-attachment-ids
            (disco-room--forward-only-select-values
-            "Pick attachments to forward (comma list, empty for none): "
+            "Pick attachments to forward (comma list): "
             attachment-choices)))
       (when picked-embed-indices
         (push `(embed_indices . ,(vconcat picked-embed-indices)) payload))
