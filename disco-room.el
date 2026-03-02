@@ -5132,24 +5132,115 @@ send votes to Discord."
     (when tokens
       (vconcat tokens))))
 
-(defun disco-room--read-forward-only ()
+(defun disco-room--forward-source-message (source-channel-id message-id)
+  "Resolve SOURCE-CHANNEL-ID/MESSAGE-ID to a message object, or nil."
+  (let ((channel-id (disco-room--normalize-id source-channel-id))
+        (target-id (disco-room--normalize-id message-id)))
+    (when (and channel-id target-id)
+      (or (seq-find (lambda (msg)
+                      (equal (disco-room--normalize-id (alist-get 'id msg))
+                             target-id))
+                    (or (disco-state-messages channel-id) '()))
+          (condition-case _
+              (disco-api-channel-message channel-id target-id)
+            (error nil))))))
+
+(defun disco-room--forward-only-select-values (prompt choices)
+  "Read one or more values from CHOICES with PROMPT.
+
+CHOICES is an alist of (LABEL . VALUE)."
+  (if (null choices)
+      nil
+    (let* ((labels (mapcar #'car choices))
+           (picked (completing-read-multiple
+                    prompt
+                    labels
+                    nil
+                    t)))
+      (delete-dups
+       (delq nil
+             (mapcar (lambda (label)
+                       (cdr (assoc label choices)))
+                     picked))))))
+
+(defun disco-room--read-forward-only-manual ()
+  "Read `forward_only' payload by manual embed-index/attachment-id input."
+  (let* ((embed-input
+          (read-string "Embed indices (comma-separated, empty for none): "))
+         (attachment-input
+          (read-string "Attachment IDs (comma-separated, empty for none): "))
+         (embed-indices (disco-room--parse-forward-embed-indices embed-input))
+         (attachment-ids (disco-room--parse-forward-attachment-ids
+                          attachment-input))
+         payload)
+    (when embed-indices
+      (push `(embed_indices . ,embed-indices) payload))
+    (when attachment-ids
+      (push `(attachment_ids . ,attachment-ids) payload))
+    (unless payload
+      (user-error "disco: forward-only selection requires embed indices or attachment ids"))
+    (nreverse payload)))
+
+(defun disco-room--read-forward-only-from-message (source-message)
+  "Read `forward_only' payload by selecting embeds/attachments from SOURCE-MESSAGE."
+  (let* ((embeds (or (alist-get 'embeds source-message) '()))
+         (attachments (or (alist-get 'attachments source-message) '()))
+         (embed-choices nil)
+         (attachment-choices nil)
+         (idx 0)
+         payload)
+    (dolist (embed embeds)
+      (let* ((kind (or (alist-get 'type embed) "embed"))
+             (title (string-trim (or (alist-get 'title embed)
+                                     (alist-get 'description embed)
+                                     (alist-get 'url embed)
+                                     "(no title)")))
+             (label (format "#%d [%s] %s" idx kind title)))
+        (push (cons label idx) embed-choices)
+        (setq idx (1+ idx))))
+    (setq embed-choices (nreverse embed-choices))
+    (dolist (attachment attachments)
+      (let* ((attachment-id (disco-room--normalize-id (alist-get 'id attachment)))
+             (filename (or (alist-get 'filename attachment) "(unnamed)"))
+             (label (and attachment-id
+                         (format "%s %s" attachment-id filename))))
+        (when (and label attachment-id)
+          (push (cons label attachment-id) attachment-choices))))
+    (setq attachment-choices (nreverse attachment-choices))
+    (unless (or embed-choices attachment-choices)
+      (user-error "disco: source message has no embeds or attachments to subset"))
+    (let ((picked-embed-indices
+           (disco-room--forward-only-select-values
+            "Pick embeds to forward (comma list, empty for none): "
+            embed-choices))
+          (picked-attachment-ids
+           (disco-room--forward-only-select-values
+            "Pick attachments to forward (comma list, empty for none): "
+            attachment-choices)))
+      (when picked-embed-indices
+        (push `(embed_indices . ,(vconcat picked-embed-indices)) payload))
+      (when picked-attachment-ids
+        (push `(attachment_ids . ,(vconcat picked-attachment-ids)) payload))
+      (unless payload
+        (user-error "disco: forward-only selection is empty"))
+      (nreverse payload))))
+
+(defun disco-room--read-forward-only (&optional source-channel-id message-id)
   "Read optional forward_only selection from minibuffer prompts."
   (when (y-or-n-p "Forward only selected embeds/attachments? ")
-    (let* ((embed-input
-            (read-string "Embed indices (comma-separated, empty for none): "))
-           (attachment-input
-            (read-string "Attachment IDs (comma-separated, empty for none): "))
-           (embed-indices (disco-room--parse-forward-embed-indices embed-input))
-           (attachment-ids (disco-room--parse-forward-attachment-ids
-                            attachment-input))
-           payload)
-      (when embed-indices
-        (push `(embed_indices . ,embed-indices) payload))
-      (when attachment-ids
-        (push `(attachment_ids . ,attachment-ids) payload))
-      (unless payload
-        (user-error "disco: forward-only selection requires embed indices or attachment ids"))
-      (nreverse payload))))
+    (let ((source-message (disco-room--forward-source-message
+                           source-channel-id
+                           message-id)))
+      (if source-message
+          (condition-case err
+              (disco-room--read-forward-only-from-message source-message)
+            (error
+             (message "disco: source-based selection failed (%s); using manual entry"
+                      (error-message-string err))
+             (disco-room--read-forward-only-manual)))
+        (progn
+          (message "disco: source message unavailable; using manual forward-only entry")
+          (disco-room--read-forward-only-manual))))))
 
 (defun disco-room--send-allowed-mentions (&optional replying-p)
   "Return normalized allowed_mentions payload for outgoing message send/edit.
@@ -5471,7 +5562,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
                                      (user-error "disco: no source channel id provided"))
                                channel-raw))
           (content-raw (string-trim (read-string "Optional forward comment: ")))
-          (forward-only (disco-room--read-forward-only)))
+          (forward-only (disco-room--read-forward-only source-channel-id message-id)))
      (list message-id
            source-channel-id
            (unless (string-empty-p content-raw)

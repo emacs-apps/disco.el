@@ -897,6 +897,23 @@ LIMIT defaults to `disco-message-fetch-limit'."
      :on-success on-success
      :on-error on-error)))
 
+(defun disco-api-channel-message (channel-id message-id)
+  "Fetch one MESSAGE-ID from CHANNEL-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-channel-message-async (channel-id message-id &key on-success on-error)
+  "Fetch one MESSAGE-ID from CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-ack-message (channel-id message-id
                                          &optional token manual mention-count
                                          flags last-viewed)
