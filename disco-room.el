@@ -5247,12 +5247,14 @@ CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
           (condition-case err
               (disco-room--read-forward-only-from-message source-message)
             (error
-             (message "disco: source-based selection failed (%s); using manual entry"
-                      (error-message-string err))
-             (disco-room--read-forward-only-manual)))
-        (progn
-          (message "disco: source message unavailable; using manual forward-only entry")
-          (disco-room--read-forward-only-manual))))))
+             (if (y-or-n-p (format
+                            "Source-based forward-only selection failed (%s). Enter manually? "
+                            (error-message-string err)))
+                 (disco-room--read-forward-only-manual)
+               (user-error "disco: forward-only selection canceled"))))
+        (if (y-or-n-p "Source message unavailable. Enter forward-only manually? ")
+            (disco-room--read-forward-only-manual)
+          (user-error "disco: forward-only selection canceled"))))))
 
 (defun disco-room--send-allowed-mentions (&optional replying-p)
   "Return normalized allowed_mentions payload for outgoing message send/edit.
