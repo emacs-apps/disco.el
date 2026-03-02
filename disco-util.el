@@ -82,6 +82,20 @@
       (format-time-string "%H:%M" (date-to-time iso8601))
     (error "--:--")))
 
+(defun disco-util-unescape-markdown-punctuation (text)
+  "Return TEXT with Markdown punctuation escapes removed.
+
+For example, `\\.' becomes `.' and `\\-' becomes `-'."
+  (if (stringp text)
+      (replace-regexp-in-string
+       "\\\\[[:punct:]]"
+       (lambda (matched)
+         (substring matched 1))
+       text
+       t
+       t)
+    text))
+
 (provide 'disco-util)
 
 ;;; disco-util.el ends here

@@ -500,8 +500,8 @@
 
 (defun disco-embed--description-line (embed)
   "Return embed description for EMBED, preserving original formatting."
-  (let* ((raw (disco-util-object-get embed 'description))
-         (text (and raw (format "%s" raw))))
+  (let ((text (disco-embed--stringify
+               (disco-util-object-get embed 'description))))
     (disco-embed--truncate-text text disco-room-embed-description-limit)))
 
 (defun disco-embed--insert-action-button (label callback help-echo)
@@ -514,10 +514,10 @@
 
 (defun disco-embed--insert-field-row (field embed prefix-str)
   "Insert one field row for FIELD object."
-  (let* ((raw-name (disco-util-object-get field 'name))
-         (raw-value (disco-util-object-get field 'value))
-         (name (and raw-name (format "%s" raw-name)))
-         (value (and raw-value (format "%s" raw-value)))
+  (let* ((name (disco-embed--stringify
+                (disco-util-object-get field 'name)))
+         (value (disco-embed--stringify
+                 (disco-util-object-get field 'value)))
          (inline (disco-util-json-true-p (disco-util-object-get field 'inline))))
     (when (or name value)
       (let ((content-start (point)))
