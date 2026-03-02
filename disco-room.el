@@ -147,6 +147,16 @@ forwarded as raw `allowed_mentions' object."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-forward-comment-rejection-action 'split
+  "How to handle sessions that reject forward comments with HTTP 400.
+
+`split' retries as two messages: comment first, then pure forward.
+`error' surfaces the API error without retrying."
+  :type '(choice
+          (const :tag "Retry as comment + forward" split)
+          (const :tag "Show API error" error))
+  :group 'disco)
+
 (defcustom disco-room-show-avatar-images t
   "When non-nil, render author avatars as inline images when possible.
 
@@ -5428,6 +5438,13 @@ When called interactively, defaults to message under point."
   (disco-room-render)
   (message "disco: next message will reply to %s" message-id))
 
+(defun disco-room--forward-comment-rejected-p (status message)
+  "Return non-nil when STATUS/MESSAGE indicate forward comment rejection."
+  (and (numberp status)
+       (= status 400)
+       (stringp message)
+       (string-match-p "Forward messages cannot have additional content" message)))
+
 (defun disco-room-forward-message (&optional message-id source-channel-id content forward-only)
   "Forward MESSAGE-ID from SOURCE-CHANNEL-ID into current room.
 
@@ -5464,8 +5481,14 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
          (source-channel-id (or source-channel-id disco-room--channel-id))
          (source-channel (and source-channel-id
                               (disco-room--resolve-target-channel source-channel-id)))
+         (normalized-content
+          (and (stringp content)
+               (let ((trimmed (string-trim content)))
+                 (unless (string-empty-p trimmed)
+                   trimmed))))
          (room-buffer (current-buffer))
-         (allowed-mentions (and content (disco-room--send-allowed-mentions))))
+         (allowed-mentions (and normalized-content
+                                (disco-room--send-allowed-mentions))))
     (unless (and message-id (not (string-empty-p (format "%s" message-id))))
       (user-error "disco: message id cannot be empty"))
     (unless (and source-channel-id
@@ -5477,35 +5500,63 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
     (disco-room--ensure-jump-permissions source-channel-id source-channel)
     (setq disco-room--send-in-flight t)
     (disco-room-render)
-    (disco-api-forward-message-async
-     target-channel-id
-     message-id
-     source-channel-id
-     :content content
-     :forward-only forward-only
-     :allowed-mentions allowed-mentions
-     :on-success
-     (lambda (_response)
-       (when (disco-room--channel-buffer-p room-buffer target-channel-id)
-         (with-current-buffer room-buffer
-           (setq disco-room--send-in-flight nil)
-           (disco-room-refresh)
-           (message "disco: forwarded message %s from channel %s"
-                    message-id source-channel-id))))
-     :on-error
-     (lambda (err)
-       (when (disco-room--channel-buffer-p room-buffer target-channel-id)
-         (with-current-buffer room-buffer
-           (setq disco-room--send-in-flight nil)
-           (disco-room-render)
-           (let* ((msg (disco-room--async-error-message err))
-                  (status (and (listp err) (plist-get err :status))))
-             (if (and (stringp msg)
-                      (numberp status)
-                      (= status 400)
-                      (string-match-p "Forward messages cannot have additional content" msg))
-                 (message "disco: forward comment was rejected by API in this session: %s" msg)
-               (message "disco: forward failed: %s" msg)))))))))
+    (cl-labels
+        ((room-active-p ()
+           (disco-room--channel-buffer-p room-buffer target-channel-id))
+         (finish-success (split-p)
+           (when (room-active-p)
+             (with-current-buffer room-buffer
+               (setq disco-room--send-in-flight nil)
+               (disco-room-refresh)
+               (message (if split-p
+                            "disco: sent comment + forward for %s from channel %s"
+                          "disco: forwarded message %s from channel %s")
+                        message-id source-channel-id))))
+         (finish-error (text)
+           (when (room-active-p)
+             (with-current-buffer room-buffer
+               (setq disco-room--send-in-flight nil)
+               (disco-room-render)
+               (message "%s" text))))
+         (send-comment-then-forward ()
+           (when (room-active-p)
+             (message "disco: forward comment rejected by API; retrying as comment + forward")
+             (disco-api-send-message-async
+              target-channel-id
+              normalized-content
+              :allowed-mentions allowed-mentions
+              :on-success
+              (lambda (_response)
+                (when (room-active-p)
+                  (send-forward nil t)))
+              :on-error
+              (lambda (err)
+                (when (room-active-p)
+                  (finish-error
+                   (format "disco: forward comment send failed: %s"
+                           (disco-room--async-error-message err))))))))
+         (send-forward (forward-content split-p)
+           (when (room-active-p)
+             (disco-api-forward-message-async
+              target-channel-id
+              message-id
+              source-channel-id
+              :content forward-content
+              :forward-only forward-only
+              :allowed-mentions (and forward-content allowed-mentions)
+              :on-success
+              (lambda (_response)
+                (finish-success split-p))
+              :on-error
+              (lambda (err)
+                (let* ((msg (disco-room--async-error-message err))
+                       (status (and (listp err) (plist-get err :status))))
+                  (if (and forward-content
+                           (eq disco-room-forward-comment-rejection-action 'split)
+                           (disco-room--forward-comment-rejected-p status msg))
+                      (send-comment-then-forward)
+                    (finish-error (format "disco: forward failed: %s" msg)))))))))
+      (send-forward normalized-content nil))))
 
 (defun disco-room-cancel-reply ()
   "Cancel pending reply target for next send."
