@@ -102,7 +102,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room transient (`?`): includes attachment/forward and reaction/poll actions (`f`, `F`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
 - Mention send policy can be tuned via `disco-room-allowed-mentions` and `disco-room-reply-mention-replied-user`.
-- `disco-room-enable-company-backend` controls optional company integration for composer completion (`disco-room-company-completion`); `disco-company-show-user-avatars` toggles avatar rendering in company annotations.
+- `disco-room-enable-company-backend` controls optional company integration for composer completion (`disco-room-company-completion`); `disco-company-show-user-avatars` toggles avatar rendering, and `disco-company-capf-avatar-size` keeps Corfu/CAPF row height stable.
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 
 ## Gateway Configuration

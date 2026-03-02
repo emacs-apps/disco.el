@@ -24,6 +24,16 @@
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-company-capf-avatar-size 'auto
+  "Avatar pixel size for CAPF/Corfu completion annotations.
+
+`auto' keeps avatars slightly below current frame character height so
+completion row height stays stable."
+  :type '(choice
+          (const :tag "Auto (fit to row height)" auto)
+          integer)
+  :group 'disco)
+
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--typing-users nil)
@@ -487,27 +497,59 @@ Return non-nil when replacement was applied."
                    "")))
     (upcase (concat first second))))
 
-(defun disco-company--completion-user-avatar-image (candidate)
-  "Return avatar image object for user CANDIDATE when available."
+(defun disco-company--completion-capf-avatar-size ()
+  "Return normalized avatar size for CAPF/Corfu annotations."
+  (let ((auto-size (max 8 (- (frame-char-height) 2))))
+    (pcase disco-company-capf-avatar-size
+      ('auto auto-size)
+      ((pred integerp) (max 8 disco-company-capf-avatar-size))
+      (_ auto-size))))
+
+(defun disco-company--completion-image-with-size (image pixel-size)
+  "Return IMAGE spec resized to PIXEL-SIZE, or IMAGE when not applicable."
+  (if (and (consp image)
+           (eq (car image) 'image)
+           (integerp pixel-size)
+           (> pixel-size 0))
+      (let* ((type (car image))
+             (props (copy-sequence (cdr image))))
+        (setq props (plist-put props :width pixel-size))
+        (setq props (plist-put props :height pixel-size))
+        (setq props (plist-put props :ascent 'center))
+        (cons type props))
+    image))
+
+(defun disco-company--completion-user-avatar-image (candidate &optional pixel-size)
+  "Return avatar image object for user CANDIDATE when available.
+
+When PIXEL-SIZE is non-nil, resize image to that size."
   (when (and disco-company-show-user-avatars
              (boundp 'disco-room-show-avatar-images)
              disco-room-show-avatar-images
              (fboundp 'disco-room--avatar-image))
     (let* ((user-id (plist-get candidate :user-id))
-           (avatar-hash (plist-get candidate :avatar-hash)))
-      (when user-id
-        (let ((author `((id . ,user-id))))
-          (when (disco-company--completion-string-present-p avatar-hash)
-            (setq author (append author `((avatar . ,avatar-hash)))))
-          (ignore-errors
-            (funcall #'disco-room--avatar-image
-                     `((author . ,author)))))))))
+           (avatar-hash (plist-get candidate :avatar-hash))
+           (image
+            (when user-id
+              (let ((author `((id . ,user-id))))
+                (when (disco-company--completion-string-present-p avatar-hash)
+                  (setq author (append author `((avatar . ,avatar-hash)))))
+                (ignore-errors
+                  (funcall #'disco-room--avatar-image
+                           `((author . ,author))))))))
+      (if pixel-size
+          (disco-company--completion-image-with-size image pixel-size)
+        image))))
 
-(defun disco-company--completion-company-user-annotation (candidate)
-  "Return company annotation string for user CANDIDATE."
+(defun disco-company--completion-user-annotation (candidate &optional capf-p)
+  "Return user annotation string for CANDIDATE.
+
+When CAPF-P is non-nil, use a row-height-safe avatar size." 
   (let* ((username (plist-get candidate :username))
          (user-id (plist-get candidate :user-id))
-         (image (disco-company--completion-user-avatar-image candidate))
+         (image (disco-company--completion-user-avatar-image
+                 candidate
+                 (and capf-p (disco-company--completion-capf-avatar-size))))
          (icon (if image
                    (propertize " " 'display image)
                  (format "[%s]" (disco-company--completion-user-initials candidate)))))
@@ -521,7 +563,13 @@ Return non-nil when replacement was applied."
 (defun disco-company--completion-company-annotation (candidate)
   "Return company annotation string for CANDIDATE plist."
   (if (eq (plist-get candidate :kind) 'user)
-      (disco-company--completion-company-user-annotation candidate)
+      (disco-company--completion-user-annotation candidate nil)
+    (or (plist-get candidate :annotation) "")))
+
+(defun disco-company--completion-capf-annotation (candidate)
+  "Return CAPF/Corfu annotation string for CANDIDATE plist."
+  (if (eq (plist-get candidate :kind) 'user)
+      (disco-company--completion-user-annotation candidate t)
     (or (plist-get candidate :annotation) "")))
 
 (defun disco-company--completion-company-meta (candidate)
@@ -571,7 +619,7 @@ This function is suitable for `completion-at-point-functions'."
                                      (gethash key candidate-table))))
                 (list label ""
                       (if candidate
-                          (disco-company--completion-company-annotation candidate)
+                          (disco-company--completion-capf-annotation candidate)
                         ""))))
             labels))
          :annotation-function
@@ -581,7 +629,7 @@ This function is suitable for `completion-at-point-functions'."
                   (candidate (and key
                                   (gethash key candidate-table))))
              (if candidate
-                 (disco-company--completion-company-annotation candidate)
+                 (disco-company--completion-capf-annotation candidate)
                "")))
          :exit-function
          (lambda (label status)
