@@ -390,6 +390,31 @@ Grouping applies when sender stays the same and timestamps are within
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-room-wrap-long-lines t
+  "When non-nil, visually wrap long timeline lines in room buffers.
+
+This mirrors telega chat buffers by enabling `visual-line-mode' and disabling
+`truncate-lines'."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-use-visual-fill-column nil
+  "When non-nil, enable `visual-fill-column-mode' in room buffers when available.
+
+This is optional and requires the external `visual-fill-column' package."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-fill-column nil
+  "Preferred fill column for room buffers.
+
+When non-nil and visual fill mode is active, set local `fill-column' to this
+value before enabling visual fill."
+  :type '(choice
+          (const :tag "Use current fill-column" nil)
+          integer)
+  :group 'disco)
+
 (defcustom disco-room-show-attachment-urls nil
   "When non-nil, include raw attachment URLs in message rendering."
   :type 'boolean
@@ -2240,6 +2265,34 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
                             '(line-prefix nil wrap-prefix nil)
                             text)
     text))
+
+(defun disco-room--apply-breakline-settings ()
+  "Apply telega-style line wrapping behavior to current room buffer."
+  (let* ((visual-fill-feature-loaded
+          (or (featurep 'visual-fill-column)
+              (and disco-room-use-visual-fill-column
+                   (require 'visual-fill-column nil t))))
+         (visual-fill-mode-fn
+          (and visual-fill-feature-loaded
+               (fboundp 'visual-fill-column-mode)
+               (symbol-function 'visual-fill-column-mode))))
+    (if disco-room-wrap-long-lines
+        (progn
+          (setq-local truncate-lines nil)
+          (setq-local word-wrap t)
+          (visual-line-mode 1)
+          (if (and disco-room-use-visual-fill-column visual-fill-mode-fn)
+              (progn
+                (when disco-room-fill-column
+                  (setq-local fill-column disco-room-fill-column))
+                (funcall visual-fill-mode-fn 1))
+            (when visual-fill-mode-fn
+              (funcall visual-fill-mode-fn -1))))
+      (visual-line-mode -1)
+      (setq-local truncate-lines t)
+      (setq-local word-wrap nil)
+      (when visual-fill-mode-fn
+        (funcall visual-fill-mode-fn -1)))))
 
 (setq disco-media-preview-rerender-function #'disco-room--rerender-open-rooms)
 
@@ -4203,7 +4256,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f: attach file   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @mention   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -5188,6 +5241,14 @@ Otherwise open draft editor."
       (disco-room-send-message)
     (disco-room-edit-draft)))
 
+(defun disco-room-toggle-breakline ()
+  "Toggle visual breakline wrapping in the current room buffer."
+  (interactive)
+  (setq-local disco-room-wrap-long-lines (not disco-room-wrap-long-lines))
+  (disco-room--apply-breakline-settings)
+  (message "disco: breakline wrapping %s"
+           (if disco-room-wrap-long-lines "enabled" "disabled")))
+
 (defun disco-room-edit-message ()
   "Edit message at point in current room."
   (interactive)
@@ -5541,6 +5602,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
     (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
     (define-key map (kbd "C-c C-g") #'disco-room-jump-to-message)
+    (define-key map (kbd "C-c C-w") #'disco-room-toggle-breakline)
     (define-key map (kbd "C-c C-t m") #'disco-room-create-thread-from-message)
     (define-key map (kbd "C-c C-t o") #'disco-room-open-thread-from-message-at-point)
     (define-key map (kbd "C-c C-t c") #'disco-room-create-thread)
@@ -5562,7 +5624,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
 (define-derived-mode disco-room-mode special-mode "Disco-Room"
   "Major mode for disco.el room buffers."
   (setq buffer-read-only nil)
-  (setq truncate-lines t)
+  (disco-room--apply-breakline-settings)
   ;; Avoid visible seams between vertically sliced inline images.
   (setq-local line-spacing 0)
   ;; Strip visual-only line prefixes from copied text.
