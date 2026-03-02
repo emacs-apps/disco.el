@@ -157,6 +157,11 @@ forwarded as raw `allowed_mentions' object."
           (const :tag "Show API error" error))
   :group 'disco)
 
+(defcustom disco-room-forward-only-manual-fallback nil
+  "When non-nil, allow manual forward_only entry if source fetch fails."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-room-show-avatar-images t
   "When non-nil, render author avatars as inline images when possible.
 
@@ -5247,14 +5252,18 @@ CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
           (condition-case err
               (disco-room--read-forward-only-from-message source-message)
             (error
-             (if (y-or-n-p (format
-                            "Source-based forward-only selection failed (%s). Enter manually? "
-                            (error-message-string err)))
-                 (disco-room--read-forward-only-manual)
-               (user-error "disco: forward-only selection canceled"))))
-        (if (y-or-n-p "Source message unavailable. Enter forward-only manually? ")
-            (disco-room--read-forward-only-manual)
-          (user-error "disco: forward-only selection canceled"))))))
+             (if disco-room-forward-only-manual-fallback
+                 (progn
+                   (message "disco: source-based forward-only failed (%s); using manual entry"
+                            (error-message-string err))
+                   (disco-room--read-forward-only-manual))
+               (user-error "disco: source-based forward-only failed: %s"
+                           (error-message-string err)))))
+        (if disco-room-forward-only-manual-fallback
+            (progn
+              (message "disco: source message unavailable; using manual forward-only entry")
+              (disco-room--read-forward-only-manual))
+          (user-error "disco: source message unavailable for forward-only"))))))
 
 (defun disco-room--send-allowed-mentions (&optional replying-p)
   "Return normalized allowed_mentions payload for outgoing message send/edit.
