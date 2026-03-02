@@ -2247,6 +2247,22 @@ When TARGET-PATH is nil, prompt interactively for destination path."
    :face 'disco-room-attachment-card-action
    :help-echo help-echo))
 
+(defun disco-room--attachment-card-line-prefix (_attachment)
+  "Return visual prefix used for rich attachment card rows."
+  (propertize "    ▏" 'face 'disco-room-attachment-card-border))
+
+(defun disco-room--attachment-card-apply-line-prefix (start end prefix-str)
+  "Apply PREFIX-STR as display prefix for region START..END."
+  (when (< start end)
+    (add-text-properties start end
+                         (list 'line-prefix prefix-str
+                               'wrap-prefix prefix-str))))
+
+(defun disco-room--attachment-card-append-face (start end face)
+  "Append FACE to region START..END."
+  (when (and face (< start end))
+    (add-face-text-property start end face 'append)))
+
 (defun disco-room--insert-attachment-card (attachment)
   "Insert one rich attachment card for ATTACHMENT object."
   (let* ((summary (disco-room--attachment-summary attachment))
@@ -2263,47 +2279,47 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (download-state (disco-room--attachment-download-state attachment))
          (download-status (plist-get download-state :status))
          (download-path (plist-get download-state :path))
-         (download-error (plist-get download-state :error)))
-    (let ((top-start (point)))
-      (insert "    +-- ")
-      (insert summary)
-      (insert "\n")
-      (add-text-properties top-start (point)
-                           '(face disco-room-attachment-card-title)))
+         (download-error (plist-get download-state :error))
+         (prefix-str (disco-room--attachment-card-line-prefix attachment)))
+    (let ((title-start (point)))
+      (insert summary "\n")
+      (when (and (stringp url) (not (string-empty-p url)))
+        (disco-media-add-open-url-properties title-start (1- (point)) url))
+      (disco-room--attachment-card-apply-line-prefix title-start (point) prefix-str)
+      (disco-room--attachment-card-append-face
+       title-start (point) 'disco-room-attachment-card-title))
     (let ((meta-start (point)))
-      (insert "    | ")
-      (insert meta)
-      (insert "\n")
-      (add-text-properties meta-start (point)
-                           '(face disco-room-attachment-card-meta)))
+      (insert meta "\n")
+      (disco-room--attachment-card-apply-line-prefix meta-start (point) prefix-str)
+      (disco-room--attachment-card-append-face
+       meta-start (point) 'disco-room-attachment-card-meta))
     (when (and (stringp description) (not (string-empty-p description)))
       (let ((desc-start (point)))
-        (insert "    | caption: ")
-        (insert description)
-        (insert "\n")
-        (add-text-properties desc-start (point)
-                             '(face disco-room-attachment-card-meta))))
+        (insert "caption: " description "\n")
+        (disco-room--attachment-card-apply-line-prefix desc-start (point) prefix-str)
+        (disco-room--attachment-card-append-face
+         desc-start (point) 'disco-room-attachment-card-meta)))
     (let ((action-start (point)))
-      (insert "    | link: ")
       (if (and (stringp url) (not (string-empty-p url)))
           (progn
             (disco-room--insert-attachment-action-button
-             "[Open URL]"
+             "[Open]"
              (lambda () (browse-url url t))
              "Open attachment URL")
             (insert " ")
             (disco-room--insert-attachment-action-button
-             "[Copy URL]"
+             "[Copy]"
              (lambda ()
                (kill-new url)
                (message "disco: copied attachment URL"))
              "Copy attachment URL"))
         (insert "[No URL]"))
       (insert "\n")
-      (add-text-properties action-start (point)
-                           '(face disco-room-attachment-card-meta)))
+      (disco-room--attachment-card-apply-line-prefix action-start (point) prefix-str)
+      (disco-room--attachment-card-append-face
+       action-start (point) 'disco-room-attachment-card-meta))
     (let ((transfer-start (point)))
-      (insert "    | transfer: ")
+      (insert "transfer: ")
       (pcase download-status
         ('downloading
          (insert "[Downloading...] ")
@@ -2358,19 +2374,22 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                 "Download attachment to chosen path"))
            (insert "[No URL]"))))
       (insert "\n")
-      (add-text-properties transfer-start (point)
-                           '(face disco-room-attachment-card-meta)))
+      (disco-room--attachment-card-apply-line-prefix transfer-start (point) prefix-str)
+      (disco-room--attachment-card-append-face
+       transfer-start (point) 'disco-room-attachment-card-meta))
     (when (equal (disco-room--attachment-kind attachment) "img")
       (let ((preview-start (point))
-            (preview-open-url (or preview-url url)))
-        (insert "    | ")
+            (preview-open-url (or preview-url url))
+            (apply-meta-face t))
         (if preview
             (condition-case _
-                (disco-media-insert-image-slices
-                 preview
-                 preview-open-url
-                 "    | "
-                 "[image]")
+                (progn
+                  (setq apply-meta-face nil)
+                  (disco-media-insert-image-slices
+                   preview
+                   preview-open-url
+                   nil
+                   "[image]"))
               (error
                (insert "[image unavailable]")))
           (cond
@@ -2385,18 +2404,18 @@ When TARGET-PATH is nil, prompt interactively for destination path."
            (t
             (insert "[image unavailable]"))))
         (insert "\n")
-        (add-text-properties preview-start (point)
-                             '(face disco-room-attachment-card-meta))))
-    (let ((bottom-start (point)))
-      (insert "    +--\n")
-      (add-text-properties bottom-start (point)
-                           '(face disco-room-attachment-card-border)))
+        (disco-room--attachment-card-apply-line-prefix preview-start (point) prefix-str)
+        (when apply-meta-face
+          (disco-room--attachment-card-append-face
+           preview-start (point) 'disco-room-attachment-card-meta))))
     (when (and disco-room-show-attachment-urls
                (stringp url)
                (not (string-empty-p url)))
       (let ((url-start (point)))
-        (insert (format "      %s\n" url))
-        (add-text-properties url-start (point) '(face shadow))))))
+        (insert url "\n")
+        (disco-media-add-open-url-properties url-start (1- (point)) url)
+        (disco-room--attachment-card-apply-line-prefix url-start (point) prefix-str)
+        (disco-room--attachment-card-append-face url-start (point) 'shadow)))))
 
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
@@ -2454,15 +2473,16 @@ When TARGET-PATH is nil, prompt interactively for destination path."
          (size-text (when (numberp size)
                       (file-size-human-readable size)))
          (dims-text (when (and (numberp width) (numberp height))
-                      (format "%dx%d" width height))))
-    (string-trim
-     (format "[%s] %s%s%s"
-             kind
-             filename
-             (if size-text (format " (%s" size-text) "")
-             (if dims-text
-                 (format "%s%s" (if size-text ", " " (") dims-text)
-               (if size-text ")" ""))))))
+                      (format "%dx%d" width height)))
+         (detail (cond
+                  ((and size-text dims-text)
+                   (format " (%s, %s)" size-text dims-text))
+                  (size-text
+                   (format " (%s)" size-text))
+                  (dims-text
+                   (format " (%s)" dims-text))
+                  (t ""))))
+    (format "[%s] %s%s" kind filename detail)))
 
 (defun disco-room--insert-message-attachments (msg)
   "Insert attachment detail lines for MSG."
