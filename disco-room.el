@@ -2392,19 +2392,9 @@ If needed, schedule async fetch and fall back to text placeholder."
             nil)
            (t nil))))))))
 
-(defun disco-room--avatar-line-pixel-height ()
-  "Return default line height in pixels for current room rendering."
-  (max 1
-       (or (ignore-errors (default-line-height))
-           (frame-char-height)
-           16)))
-
 (defun disco-room--avatar-display-size ()
-  "Return avatar size in pixels tuned for two-line avatar rendering."
-  (let* ((line-height (disco-room--avatar-line-pixel-height))
-         (configured (max 8 disco-room-avatar-image-size))
-         (target (* 2 line-height)))
-    (max configured target)))
+  "Return full avatar size in pixels for two-line avatar rendering."
+  (max 8 disco-room-avatar-image-size))
 
 (defun disco-room--avatar-image-resized (image pixel-size)
   "Return IMAGE resized to PIXEL-SIZE, or nil when IMAGE is invalid."
@@ -2426,24 +2416,21 @@ If needed, schedule async fetch and fall back to text placeholder."
              (ceiling width)
            1))))
 
-(defun disco-room--avatar-image-slice-display (image slice-index &optional resized line-height)
+(defun disco-room--avatar-image-slice-display (image slice-index &optional resized)
   "Return display spec for IMAGE slice at SLICE-INDEX (0 or 1).
 
 When RESIZED is non-nil, IMAGE is treated as already resized."
   (when (disco-media-image-object-valid-p image)
     (let* ((pixel-size (disco-room--avatar-display-size))
-           (slice-height (max 1 (or line-height (disco-room--avatar-line-pixel-height))))
            (scaled (if resized
                        image
                      (disco-room--avatar-image-resized image pixel-size))))
       (when (disco-media-image-object-valid-p scaled)
-        (let* ((window-height (* 2 slice-height))
-               (offset (max 0 (/ (- pixel-size window-height) 2)))
-               (max-y (max 0 (- pixel-size slice-height)))
-               (slice-y (if (= slice-index 0)
-                            offset
-                          (+ offset slice-height)))
-               (slice (list 'slice 0 (min max-y slice-y) 1.0 slice-height)))
+        (let* ((top-height (max 1 (/ pixel-size 2)))
+               (bottom-height (max 1 (- pixel-size top-height)))
+               (slice (if (= slice-index 0)
+                          (list 'slice 0 0 1.0 top-height)
+                        (list 'slice 0 top-height 1.0 bottom-height))))
           (list slice scaled))))))
 
 (defun disco-room--avatar-prefixes (msg)
@@ -2452,14 +2439,13 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
          (fallback (disco-room--avatar-placeholder msg))
          (fallback-indent (max 1 (1+ (string-width fallback)))))
     (if (disco-media-image-object-valid-p image)
-        (let* ((line-height (disco-room--avatar-line-pixel-height))
-               (scaled (disco-room--avatar-image-resized
+        (let* ((scaled (disco-room--avatar-image-resized
                         image
                         (disco-room--avatar-display-size)))
                (image-indent (1+ (disco-room--avatar-image-char-width scaled)))
                (rest-prefix (make-string image-indent ?\s))
-               (top-display (disco-room--avatar-image-slice-display scaled 0 t line-height))
-               (bottom-display (disco-room--avatar-image-slice-display scaled 1 t line-height))
+               (top-display (disco-room--avatar-image-slice-display scaled 0 t))
+               (bottom-display (disco-room--avatar-image-slice-display scaled 1 t))
                (top (if top-display
                         (propertize " " 'display top-display)
                       fallback))
