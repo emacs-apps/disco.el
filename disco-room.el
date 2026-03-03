@@ -58,6 +58,7 @@
 (defvar-local disco-room--ewoc nil)
 (defvar-local disco-room--message-node-table nil)
 (defvar-local disco-room--render-context-by-message-id nil)
+(defvar-local disco-room--chat-fill-column nil)
 (defvar-local disco-room--pending-attachments nil)
 (defvar-local disco-room--attachment-token-table nil)
 (defvar-local disco-room--attachment-token-seq 0)
@@ -1895,18 +1896,21 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Return pixel width for one default-face character."
   (if (not (display-graphic-p))
       1
-    (let* ((frame (selected-frame))
-           (font (and frame
-                      (or (frame-parameter frame 'font)
-                          (face-font 'default frame))))
-           (info (and font (font-info font frame)))
-           (avg-width (and info (aref info 11)))
-           (fallback-width (and info (aref info 10))))
-      (max 1
-           (cond
-            ((and (numberp avg-width) (> avg-width 0)) avg-width)
-            ((and (numberp fallback-width) (> fallback-width 0)) fallback-width)
-            (t (frame-char-width)))))))
+    (max 1
+         (or (and (fboundp 'string-pixel-width)
+                  (ignore-errors
+                    (string-pixel-width (propertize "0" 'face 'default)
+                                        (current-buffer))))
+             (let* ((frame (selected-frame))
+                    (font (and frame (face-font 'default frame)))
+                    (info (and font (font-info font frame)))
+                    (avg-width (and info (aref info 11)))
+                    (fallback-width (and info (aref info 10))))
+               (cond
+                ((and (numberp avg-width) (> avg-width 0)) avg-width)
+                ((and (numberp fallback-width) (> fallback-width 0)) fallback-width)
+                (t nil)))
+             (frame-char-width)))))
 
 (defun disco-room--align-columns-to-pixels (columns)
   "Convert COLUMNS to pixels using default-face geometry."
@@ -1944,21 +1948,58 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
              (string-width lwprefix)
            0)))))
 
+(defun disco-room--render-window ()
+  "Return best live window currently displaying this room buffer."
+  (let ((best nil)
+        (best-width -1))
+    (dolist (win (get-buffer-window-list (current-buffer) nil t) best)
+      (let ((width (if (window-live-p win)
+                       (window-width win 'remap)
+                     -1)))
+        (when (> width best-width)
+          (setq best win)
+          (setq best-width width))))))
+
 (defun disco-room--line-fill-column ()
   "Return target fill column for current message line.
 
-This follows telega-like behavior: prefer configured fill column so time-tail
-alignment stays stable across text scaling."
-  (or (and (integerp disco-room-fill-column)
+Match telega-style auto-fill behavior: when no explicit fill is configured,
+use the room window width in remapped columns and cache it for hidden renders."
+  (or (and (bound-and-true-p visual-fill-column-mode)
+           (integerp disco-room-fill-column)
            (> disco-room-fill-column 0)
            disco-room-fill-column)
-      (and (integerp fill-column)
+      (and (bound-and-true-p visual-fill-column-mode)
+           (integerp fill-column)
            (> fill-column 0)
            fill-column)
-      (let ((win (get-buffer-window (current-buffer) t)))
-        (max 1 (if (window-live-p win)
-                   (window-body-width win)
-                 (window-body-width))))))
+      (and (integerp disco-room--chat-fill-column)
+           (> disco-room--chat-fill-column 0)
+           disco-room--chat-fill-column)
+      (let* ((win (disco-room--render-window))
+             (computed
+              (and (window-live-p win)
+                   (let* ((base-cols (max 1 (window-width win 'remap)))
+                          (margins (window-margins win))
+                          (margin-cols (+ (or (car margins) 0)
+                                          (or (cdr margins) 0)))
+                          (char-px (max 1 (disco-room--align-char-width)))
+                          (line-numbers-p
+                           (with-current-buffer (window-buffer win)
+                             (bound-and-true-p display-line-numbers-mode)))
+                          (ln-px (if line-numbers-p
+                                     (with-selected-window win
+                                       (line-number-display-width 'pixels))
+                                   0))
+                          (ln-cols (if (and (numberp ln-px) (> ln-px 0))
+                                       (ceiling (/ ln-px (float char-px)))
+                                     0)))
+                     (max 1 (- (+ base-cols margin-cols) ln-cols))))))
+        (if computed
+            (progn
+              (setq-local disco-room--chat-fill-column computed)
+              computed)
+          80))))
 
 (defun disco-room--move-to-column (column)
   "Insert alignment space moving point to COLUMN."
@@ -6551,6 +6592,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--rendering nil)
   (setq-local disco-room--ewoc nil)
   (setq-local disco-room--render-context-by-message-id (make-hash-table :test #'equal))
+  (setq-local disco-room--chat-fill-column nil)
   (setq-local disco-room--pending-attachments nil)
   (setq-local disco-room--attachment-token-table (make-hash-table :test #'equal))
   (setq-local disco-room--attachment-token-seq 0)
