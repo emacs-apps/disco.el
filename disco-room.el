@@ -2471,49 +2471,6 @@ If needed, schedule async fetch and fall back to text placeholder."
     (cons (if (numberp circle) circle 0.8)
           (if (numberp margin) margin 0.1))))
 
-(defun disco-room--avatar-round-metrics (&optional cheight)
-  "Return rounded avatar geometry plist for CHEIGHT lines."
-  (let* ((cheight (max 1 (or cheight 2)))
-         (line-height (disco-room--avatar-line-pixel-height))
-         (char-width (max 1 (frame-char-width)))
-         (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0))
-         (round-scale (max 0.1 disco-room-avatar-round-size-factor))
-         (xh (* cheight line-height size-factor round-scale))
-         (factors (disco-room--avatar-factors cheight))
-         (circle-factor (car factors))
-         (margin-factor (cdr factors))
-         (circle-size (max 1.0 (* circle-factor xh)))
-         (margin (max 0.0 (* margin-factor xh)))
-         (cfull (max 1 (floor (+ circle-size margin))))
-         (slice-height (max 1 (round (* line-height size-factor))))
-         ;; Telega reserves one extra line for 2-line avatars to avoid seam gaps.
-         (canvas-height (if (and (= cheight 2) disco-room-avatar-extra-bottom-line)
-                            (+ cfull slice-height)
-                          (max cfull (* cheight slice-height))))
-         (inset-ratio (max 0.0 (min 0.45 disco-room-avatar-round-inset-ratio)))
-         (effective-size (max 1.0
-                              (* circle-size
-                                 (- 1.0 (* 2 inset-ratio)))))
-         (width-chars (max 1 (ceiling (/ effective-size (float char-width)))))
-         (width-px (* width-chars char-width))
-         (draw-size (max 1.0 (min (float width-px) effective-size)))
-         (radius (/ draw-size 2.0))
-         (center-x (/ (float width-px) 2.0))
-         (center-y (/ (float cfull) 2.0))
-         (draw-x (max 0.0 (- center-x radius)))
-         (draw-y (max 0.0 (- center-y radius))))
-    (list :cheight cheight
-          :slice-height slice-height
-          :canvas-height canvas-height
-          :width-px width-px
-          :width-chars width-chars
-          :draw-size draw-size
-          :radius radius
-          :center-x center-x
-          :center-y center-y
-          :draw-x draw-x
-          :draw-y draw-y)))
-
 (defun disco-room--avatar-image-resized (image pixel-size)
   "Return IMAGE resized to PIXEL-SIZE, or nil when IMAGE is invalid."
   (when (disco-media-image-object-valid-p image)
@@ -2522,17 +2479,6 @@ If needed, schedule async fetch and fall back to text placeholder."
       (setq props (plist-put props :width pixel-size))
       (setq props (plist-put props :height pixel-size))
       (setq props (plist-put props :ascent 'center))
-      (cons type props))))
-
-(defun disco-room--avatar-image-lock-char-width (image width-chars)
-  "Return IMAGE with logical width locked to WIDTH-CHARS columns."
-  (when (and (disco-media-image-object-valid-p image)
-             (numberp width-chars))
-    (let* ((type (car image))
-           (props (copy-sequence (cdr image)))
-           (cols (max 1 (truncate width-chars))))
-      (setq props (plist-put props :disco-char-width cols))
-      (setq props (plist-put props :width (disco-room--avatar-cw-width cols)))
       (cons type props))))
 
 (defun disco-room--avatar-text-fit-width (text width)
@@ -2609,12 +2555,19 @@ CHEIGHT is avatar height in lines (chars), typically 2."
              (fboundp 'svg-print)
              (integerp cheight)
              (> cheight 0))
-    (let* ((factors (disco-room--avatar-factors cheight))
+    (let* ((attrs (file-attributes file))
+           (mtime (and attrs (file-attribute-modification-time attrs)))
+           (line-height (disco-room--avatar-line-pixel-height))
+           (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0))
+           (round-scale (max 0.1 disco-room-avatar-round-size-factor))
+           (factors (disco-room--avatar-factors cheight))
            (cfactor (or (car factors) 0.8))
            (mfactor (or (cdr factors) 0.1))
-           (xh (* cheight (disco-room--avatar-line-pixel-height)))
+           (xh (* cheight line-height size-factor round-scale))
            (margin (* mfactor xh))
-           (ch (* cfactor xh))
+           (inset-ratio (max 0.0 (min 0.45 disco-room-avatar-round-inset-ratio)))
+           (ch-raw (* cfactor xh))
+           (ch (max 1.0 (* ch-raw (- 1.0 (* 2 inset-ratio)))))
            (cfull (floor (+ ch margin)))
            (char-width (max 1 (frame-char-width)))
            (aw-chars (max 1 (ceiling (/ ch (float char-width)))))
@@ -2622,8 +2575,16 @@ CHEIGHT is avatar height in lines (chars), typically 2."
            ;; Telega uses +1 line for cheight==2 as a gaps workaround.
            (svg-xh (cond ((= cheight 1) cfull)
                          ((and (= cheight 2) disco-room-avatar-extra-bottom-line)
-                          (+ cfull (disco-room--avatar-line-pixel-height)))
+                          (+ cfull line-height))
                          (t xh)))
+           (cache-key (format "%s:%s:%s:%s:%s:%s:%s:%s:%s:%s"
+                              file mtime cheight aw-chars line-height
+                              disco-room-avatar-image-size
+                              disco-room-avatar-round-size-factor
+                              disco-room-avatar-round-inset-ratio
+                              disco-room-avatar-extra-bottom-line
+                              fallback))
+           (cached (gethash cache-key disco-room--avatar-round-image-cache))
            (mime (disco-room--avatar-image-mime-type file))
            (svg (and mime (svg-create svg-xw svg-xh)))
            (clip (and svg (svg-clip-path svg :id "clip")))
@@ -2632,36 +2593,31 @@ CHEIGHT is avatar height in lines (chars), typically 2."
            (radius (/ ch 2.0))
            (x (/ (- svg-xw ch) 2.0))
            (y (/ margin 2.0)))
-      (when (and svg clip)
-        (svg-circle clip cx cy radius)
-        (svg-embed svg file mime nil
-                   :x x :y y :width ch :height ch
-                   :clip-path "url(#clip)")
-        (let* ((image (disco-room--avatar-svg-image
-                       svg
-                       :scale 1.0
-                       :width (cons aw-chars 'cw)
-                       :ascent 'center
-                       :mask 'heuristic))
-               (ttop (disco-room--avatar-text-fit-width fallback aw-chars))
-               (tpad (make-string aw-chars ?\u00A0))
-               (text (cons ttop (make-list (1- cheight) tpad))))
-          ;; In batch/TTY, `image-size' can error even though the image is fine;
-          ;; keep the object and let display code decide.
-          (when image
-            (let* ((type (car image))
-                   (props (copy-sequence (cdr image))))
-              (setq props (plist-put props :disco-char-width aw-chars))
-              (setq props (plist-put props :disco-slice-height (disco-room--avatar-line-pixel-height)))
-              (setq props (plist-put props :disco-text text))
-              (setq props (plist-put props :disco-nslices cheight))
-              (cons type props))))))))
-
-(defun disco-room--avatar-rounded-image-from-file (file metrics)
-  "Return circular avatar image from FILE using METRICS plist, or nil."
-  ;; Deprecated: kept as thin wrapper while migrating to telega-style SVG.
-  (ignore metrics)
-  (disco-room--avatar--create-svg file "[]" 2))
+      (or cached
+          (when (and svg clip)
+            (svg-circle clip cx cy radius)
+            (svg-embed svg file mime nil
+                       :x x :y y :width ch :height ch
+                       :clip-path "url(#clip)")
+            (let* ((image (disco-room--avatar-svg-image
+                           svg
+                           :scale 1.0
+                           :width (disco-room--avatar-cw-width aw-chars)
+                           :ascent 'center
+                           :mask 'heuristic))
+                   (ttop (disco-room--avatar-text-fit-width fallback aw-chars))
+                   (tpad (make-string aw-chars ?\u00A0))
+                   (text (cons ttop (make-list (1- cheight) tpad))))
+              (when image
+                (let* ((type (car image))
+                       (props (copy-sequence (cdr image))))
+                  (setq props (plist-put props :disco-char-width aw-chars))
+                  (setq props (plist-put props :disco-slice-height line-height))
+                  (setq props (plist-put props :disco-text text))
+                  (setq props (plist-put props :disco-nslices cheight))
+                  (setq image (cons type props))
+                  (puthash cache-key image disco-room--avatar-round-image-cache)
+                  image))))))))
 
 (defun disco-room--avatar-image-text (image &optional slice-index)
   "Return textual fallback for IMAGE and optional SLICE-INDEX."
@@ -4604,21 +4560,20 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
              (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
         (setq section-prefix-state
               (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
-        (progn
-          (insert header-prefix)
-          (setq author-start (point))
-          (insert author)
-          (add-text-properties author-start (point) (list 'face author-face))
-          (let ((time-span
-                 (disco-room--insert-right-aligned-text
-                  short-time
-                  'disco-room-timestamp)))
-            (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-              (add-text-properties
-               (car time-span)
-               (cdr time-span)
-               (list 'help-echo timestamp))))
-          (insert "\n"))
+        (insert header-prefix)
+        (setq author-start (point))
+        (insert author)
+        (add-text-properties author-start (point) (list 'face author-face))
+        (let ((time-span
+               (disco-room--insert-right-aligned-text
+                short-time
+                'disco-room-timestamp)))
+          (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+            (add-text-properties
+             (car time-span)
+             (cdr time-span)
+             (list 'help-echo timestamp))))
+        (insert "\n")
         (when reply
           (disco-room--insert-reply-preview-line msg reply section-prefix-state))
         (unless (string-empty-p content)
