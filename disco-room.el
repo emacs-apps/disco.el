@@ -2563,13 +2563,17 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
 
 When RESIZED is non-nil, IMAGE is treated as already resized."
   (when (disco-media-image-object-valid-p image)
-    (let* ((pixel-size (disco-room--avatar-display-size))
+    (let* ((display-size (disco-room--avatar-display-size))
            (scaled (if resized
                        image
-                     (disco-room--avatar-image-resized image pixel-size))))
+                     (disco-room--avatar-image-resized image display-size))))
       (when (disco-media-image-object-valid-p scaled)
-        (let* ((top-height (max 1 (/ pixel-size 2)))
-               (bottom-height (max 1 (- pixel-size top-height)))
+        (let* ((size-px (ignore-errors (image-size scaled t (selected-frame))))
+               (height-px (if (and (consp size-px) (numberp (cdr size-px)))
+                              (cdr size-px)
+                            display-size))
+               (top-height (max 1 (/ height-px 2)))
+               (bottom-height (max 1 (- height-px top-height)))
                (slice (if (= slice-index 0)
                           (list 'slice 0 0 1.0 top-height)
                         (list 'slice 0 top-height 1.0 bottom-height))))
