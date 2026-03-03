@@ -2140,15 +2140,26 @@ non-nil. DEFAULT falls back to four spaces."
 (defun disco-room--insert-system-divider-message (msg)
   "Insert MSG as a centered system divider line (telega-style).
 
-The message content is rendered as ────(content)──── with horizontal
-bars filling both sides to center it across the fill column."
+The message content is rendered as ────(avatar author action)──── with
+horizontal bars filling both sides to span the full line width.
+The author name is propertized with its colour face and an inline
+avatar image is prepended when available."
   (let* ((context (or (disco-room--message-render-context msg) '()))
          (insert-date (plist-get context :insert-date))
          (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
          (message-id (alist-get 'id msg))
          (content (disco-room--message-display-content msg))
-         (inner-text (format "(%s)" content))
-         (inner-width (string-width inner-text))
+         (author (disco-room--message-author msg))
+         (author-face (disco-room--author-face msg))
+         (avatar-str (disco-room--avatar-one-line-string msg))
+         (inner-body (concat avatar-str content))
+         (open-paren "(")
+         (close-paren ")")
+         ;; String-width counts display columns; avatar images occupy
+         ;; their :disco-char-width columns via display property.
+         (inner-width (+ (string-width open-paren)
+                         (string-width inner-body)
+                         (string-width close-paren)))
          (fill-col (disco-room--line-fill-column))
          (total-bar-width (max 4 (- fill-col inner-width)))
          (left-bars (/ total-bar-width 2))
@@ -2159,14 +2170,22 @@ bars filling both sides to center it across the fill column."
     (when insert-unread
       (disco-room--insert-unread-divider-row))
     (setq line-start (point))
-    (insert (make-string left-bars ?─))
-    (insert inner-text)
-    (insert (make-string right-bars ?─))
-    (insert "\n")
+    (insert (make-string left-bars ?─)
+            open-paren inner-body close-paren
+            (make-string right-bars ?─)
+            "\n")
+    ;; Base face for the entire divider line (bars, parens, action text).
+    (add-face-text-property line-start (point) 'disco-room-system-divider t)
+    ;; Overlay author colour on top so the name stands out.
+    (when (and (stringp author) (not (string-empty-p author)) author-face)
+      (save-excursion
+        (goto-char line-start)
+        (when (search-forward author (line-end-position) t)
+          (add-face-text-property (match-beginning 0) (match-end 0)
+                                  author-face nil))))
     (add-text-properties
      line-start (point)
-     (list 'face 'disco-room-system-divider
-           'read-only t
+     (list 'read-only t
            'front-sticky '(read-only)
            'rear-nonsticky '(read-only)
            'disco-message-id message-id))))
@@ -2477,6 +2496,32 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
     ;; Recreate image objects from cache files so resized previews track text scale.
     (disco-media-clear-preview-memory-cache)
     (disco-room--rerender-open-rooms)))
+
+(defun disco-room--on-window-size-change (frame)
+  "Rerender room buffers displayed on FRAME after window size changes.
+
+Clears the cached fill column so that divider lines and right-aligned
+timestamps adapt to the new window width."
+  (dolist (win (window-list frame 'no-mini))
+    (let ((buf (window-buffer win)))
+      (when (and (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (eq major-mode 'disco-room-mode)))
+        (with-current-buffer buf
+          ;; Invalidate cached width so next render recomputes from window.
+          (setq-local disco-room--chat-fill-column nil)
+          (disco-view-render-preserving-position
+           #'disco-room-render
+           :anchor-property 'disco-message-id
+           :preserve-window-start t)))))
+  ;; Remove ourselves when no room buffers remain.
+  (unless (seq-some (lambda (buf)
+                      (and (buffer-live-p buf)
+                           (eq (buffer-local-value 'major-mode buf)
+                               'disco-room-mode)))
+                    (buffer-list))
+    (remove-hook 'window-size-change-functions
+                 #'disco-room--on-window-size-change)))
 
 (defun disco-room--buffer-substring-filter (beg end delete)
   "Copy region BEG..END while stripping display-only prefix properties."
@@ -2871,6 +2916,34 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
     (if (< current target)
         (concat text (make-string (- target current) ?\s))
       text)))
+
+(defun disco-room--avatar-one-line-image (msg)
+  "Return avatar image sized for one text line for MSG, or nil."
+  (when (disco-room--image-rendering-available-p)
+    (let* ((cache-key (disco-room--avatar-cache-key msg))
+           (cache-file (and cache-key
+                            (disco-room--avatar-cache-existing-file cache-key)))
+           (fallback (disco-room--avatar-placeholder msg))
+           (svg-avatar (and disco-room-avatar-round-images
+                            cache-file
+                            (disco-room--avatar--create-svg
+                             cache-file fallback 1))))
+      (if (disco-media-image-object-valid-p svg-avatar)
+          svg-avatar
+        (let ((raw-image (disco-room--avatar-image msg)))
+          (when (disco-media-image-object-valid-p raw-image)
+            (let ((line-height (disco-room--avatar-line-pixel-height)))
+              (disco-room--avatar-image-resized raw-image line-height))))))))
+
+(defun disco-room--avatar-one-line-string (msg)
+  "Return propertized string showing one-line inline avatar for MSG.
+Returns empty string when no avatar is available."
+  (let ((image (disco-room--avatar-one-line-image msg)))
+    (if (disco-media-image-object-valid-p image)
+        (let* ((char-width (disco-room--avatar-image-char-width image))
+               (text (make-string (max 1 char-width) ?\s)))
+          (propertize text 'display image 'rear-nonsticky '(display)))
+      "")))
 
 (defun disco-room--avatar-prefixes (msg)
   "Return avatar-aware prefixes plist for MSG header/body lines."
@@ -6656,6 +6729,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (cursor-intangible-mode 1))
   (funcall #'disco-company-setup-room-buffer)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
+  (add-hook 'window-size-change-functions #'disco-room--on-window-size-change)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command nil t))
 
