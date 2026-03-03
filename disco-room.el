@@ -633,6 +633,11 @@ value before enabling visual fill."
   "Face used for room unread divider row."
   :group 'disco)
 
+(defface disco-room-system-divider
+  '((t :inherit font-lock-comment-face))
+  "Face used for system event divider lines (e.g. user join)."
+  :group 'disco)
+
 (defface disco-room-author-color-1
   '((t :foreground "LightSkyBlue"))
   "Face palette entry 1 for room author names."
@@ -2088,6 +2093,9 @@ non-nil. DEFAULT falls back to four spaces."
   (and disco-room-group-messages
        (listp previous)
        (listp current)
+       ;; System divider messages break compact groups.
+       (not (disco-room--message-system-divider-p previous))
+       (not (disco-room--message-system-divider-p current))
        (disco-room--same-sender-p previous current)
        (let ((previous-time (disco-room--message-time-epoch previous))
              (current-time (disco-room--message-time-epoch current)))
@@ -2128,6 +2136,40 @@ non-nil. DEFAULT falls back to four spaces."
   (disco-room--insert-divider-row
    "────────  Unread Messages  ────────"
    'disco-room-unread-divider))
+
+(defun disco-room--insert-system-divider-message (msg)
+  "Insert MSG as a centered system divider line (telega-style).
+
+The message content is rendered as ────(content)──── with horizontal
+bars filling both sides to center it across the fill column."
+  (let* ((context (or (disco-room--message-render-context msg) '()))
+         (insert-date (plist-get context :insert-date))
+         (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
+         (message-id (alist-get 'id msg))
+         (content (disco-room--message-display-content msg))
+         (inner-text (format "(%s)" content))
+         (inner-width (string-width inner-text))
+         (fill-col (disco-room--line-fill-column))
+         (total-bar-width (max 4 (- fill-col inner-width)))
+         (left-bars (/ total-bar-width 2))
+         (right-bars (- total-bar-width left-bars))
+         line-start)
+    (when (and (stringp insert-date) (not (string-empty-p insert-date)))
+      (disco-room--insert-date-separator-row insert-date))
+    (when insert-unread
+      (disco-room--insert-unread-divider-row))
+    (setq line-start (point))
+    (insert (make-string left-bars ?─))
+    (insert inner-text)
+    (insert (make-string right-bars ?─))
+    (insert "\n")
+    (add-text-properties
+     line-start (point)
+     (list 'face 'disco-room-system-divider
+           'read-only t
+           'front-sticky '(read-only)
+           'rear-nonsticky '(read-only)
+           'disco-message-id message-id))))
 
 (defun disco-room--message-effective-author (msg)
   "Return effective author object for MSG.
@@ -3543,6 +3585,14 @@ When TARGET-PATH is nil, prompt interactively for destination path."
   "Return non-nil when MSG is a standard reply message."
   (= (disco-room--message-type msg) 19))
 
+(defun disco-room--message-system-divider-p (msg)
+  "Return non-nil when MSG should be rendered as a system divider line.
+
+Types 0 (DEFAULT), 19 (REPLY), 20 (CHAT_INPUT_COMMAND), 21
+(THREAD_STARTER_MESSAGE) and 23 (CONTEXT_MENU_COMMAND) are regular
+messages; everything else is a system event shown as a centered divider."
+  (not (memq (disco-room--message-type msg) '(0 19 20 21 23))))
+
 (defun disco-room--user-join-message (msg author)
   "Return rendered USER_JOIN (type 7) message for MSG and AUTHOR."
   (let* ((raw-ts (alist-get 'timestamp msg))
@@ -4648,116 +4698,118 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--insert-message (msg)
   "Insert one message MSG in current buffer."
-  (let* ((context (or (disco-room--message-render-context msg) '()))
-         (compact (disco-util-json-true-p (plist-get context :compact)))
-         (insert-date (plist-get context :insert-date))
-         (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
-         (timestamp (disco-util-format-time (or (alist-get 'timestamp msg) "")))
-         (short-time (disco-util-format-time-short (or (alist-get 'timestamp msg) "")))
-         (author (disco-room--message-author msg))
-         (author-face (disco-room--author-face msg))
-         (content (disco-room--message-display-content msg))
-         (reply (disco-room--reply-preview msg))
-         (message-id (alist-get 'id msg))
-         line-start
-         author-start
-         section-prefix-state)
-    (when (and (stringp insert-date)
-               (not (string-empty-p insert-date)))
-      (disco-room--insert-date-separator-row insert-date))
-    (when insert-unread
-      (disco-room--insert-unread-divider-row))
-    (setq line-start (point))
-    (if compact
+  (if (disco-room--message-system-divider-p msg)
+      (disco-room--insert-system-divider-message msg)
+    (let* ((context (or (disco-room--message-render-context msg) '()))
+           (compact (disco-util-json-true-p (plist-get context :compact)))
+           (insert-date (plist-get context :insert-date))
+           (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
+           (timestamp (disco-util-format-time (or (alist-get 'timestamp msg) "")))
+           (short-time (disco-util-format-time-short (or (alist-get 'timestamp msg) "")))
+           (author (disco-room--message-author msg))
+           (author-face (disco-room--author-face msg))
+           (content (disco-room--message-display-content msg))
+           (reply (disco-room--reply-preview msg))
+           (message-id (alist-get 'id msg))
+           line-start
+           author-start
+           section-prefix-state)
+      (when (and (stringp insert-date)
+                 (not (string-empty-p insert-date)))
+        (disco-room--insert-date-separator-row insert-date))
+      (when insert-unread
+        (disco-room--insert-unread-divider-row))
+      (setq line-start (point))
+      (if compact
+          (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
+                 (compact-prefix (or (plist-get avatar-prefixes :rest-body) "    "))
+                 (compact-prefix-width (max 0 (string-width compact-prefix))))
+            (setq section-prefix-state
+                  (disco-ui-make-prefix-state compact-prefix compact-prefix))
+            (when reply
+              (disco-room--insert-reply-preview-line msg reply section-prefix-state))
+            (let ((content-start (point))
+                  (time-span nil))
+              (unless (string-empty-p content)
+                (insert content))
+              (setq time-span
+                    (disco-room--insert-right-aligned-text
+                     short-time
+                     'disco-room-timestamp
+                     compact-prefix-width))
+              (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+                (add-text-properties
+                 (car time-span)
+                 (cdr time-span)
+                 (list 'help-echo timestamp)))
+              (insert "\n")
+              (disco-ui-apply-line-prefix content-start (point) section-prefix-state)))
         (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
-               (compact-prefix (or (plist-get avatar-prefixes :rest-body) "    "))
-               (compact-prefix-width (max 0 (string-width compact-prefix))))
+               (header-prefix (or (plist-get avatar-prefixes :header) ""))
+               (header-prefix-width (max 0 (string-width header-prefix)))
+               (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
+               (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
           (setq section-prefix-state
-                (disco-ui-make-prefix-state compact-prefix compact-prefix))
-          (when reply
-            (disco-room--insert-reply-preview-line msg reply section-prefix-state))
-          (let ((content-start (point))
-                (time-span nil))
-            (unless (string-empty-p content)
-              (insert content))
-            (setq time-span
-                  (disco-room--insert-right-aligned-text
-                   short-time
-                   'disco-room-timestamp
-                   compact-prefix-width))
-            (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-              (add-text-properties
-               (car time-span)
-               (cdr time-span)
-               (list 'help-echo timestamp)))
-            (insert "\n")
-            (disco-ui-apply-line-prefix content-start (point) section-prefix-state)))
-      (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
-             (header-prefix (or (plist-get avatar-prefixes :header) ""))
-             (header-prefix-width (max 0 (string-width header-prefix)))
-             (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
-             (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
-        (setq section-prefix-state
-              (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
-        (let ((header-start (point)))
-          (setq author-start (point))
-          (insert author)
-          (add-text-properties author-start (point) (list 'face author-face))
-          (let ((time-span
-                 (disco-room--insert-right-aligned-text
-                  short-time
-                  'disco-room-timestamp
-                  header-prefix-width)))
-            (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-              (add-text-properties
-               (car time-span)
-               (cdr time-span)
-               (list 'help-echo timestamp))))
-          (insert "\n")
-          (disco-ui-apply-line-prefix
-           header-start (point)
-           (disco-ui-make-prefix-state header-prefix body-rest-prefix)))
-        (when reply
-          (disco-room--insert-reply-preview-line msg reply section-prefix-state))
-        (unless (string-empty-p content)
-          (disco-room--insert-prefixed-lines section-prefix-state content))))
-    (let ((disco-ui-card-indent-prefix-state section-prefix-state)
-          (disco-ui-card-indent-prefix
-           (disco-room--line-prefix-string section-prefix-state nil "    ")))
-      (disco-room--insert-forward-section msg section-prefix-state)
-      (when (disco-room--message-has-thread-p msg)
-        (let* ((message-id (alist-get 'id msg))
-               (thread (disco-room--thread-from-message msg))
-               (target-thread-id (or (and (listp thread) (alist-get 'id thread))
-                                     (and (stringp message-id) message-id)))
-               (target-thread-name (or (and (listp thread) (alist-get 'name thread))
-                                       (and (stringp message-id)
-                                            (format "thread:%s" message-id)))))
-          (let ((thread-start (point)))
-            (if target-thread-id
-                (disco-ui-insert-action-button
-                 "[Open thread]"
-                 (lambda ()
-                   (disco-room-open
-                    target-thread-id
-                    (or target-thread-name target-thread-id)))
-                 :face 'disco-room-message-meta
-                 :help-echo "Open starter thread for this message")
-              (insert (propertize "[Thread id unavailable]"
-                                  'face 'shadow)))
+                (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
+          (let ((header-start (point)))
+            (setq author-start (point))
+            (insert author)
+            (add-text-properties author-start (point) (list 'face author-face))
+            (let ((time-span
+                   (disco-room--insert-right-aligned-text
+                    short-time
+                    'disco-room-timestamp
+                    header-prefix-width)))
+              (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+                (add-text-properties
+                 (car time-span)
+                 (cdr time-span)
+                 (list 'help-echo timestamp))))
             (insert "\n")
             (disco-ui-apply-line-prefix
-             thread-start (point) section-prefix-state))))
-      (disco-room--insert-message-attachments msg section-prefix-state)
-      (disco-room--insert-message-embeds msg)
-      (disco-room--insert-message-poll msg))
-    (disco-room--insert-message-reactions msg section-prefix-state)
-    (add-text-properties
-     line-start
-     (point)
-     (list 'read-only t
-           'front-sticky '(read-only)
-           'disco-message-id message-id))))
+             header-start (point)
+             (disco-ui-make-prefix-state header-prefix body-rest-prefix)))
+          (when reply
+            (disco-room--insert-reply-preview-line msg reply section-prefix-state))
+          (unless (string-empty-p content)
+            (disco-room--insert-prefixed-lines section-prefix-state content))))
+      (let ((disco-ui-card-indent-prefix-state section-prefix-state)
+            (disco-ui-card-indent-prefix
+             (disco-room--line-prefix-string section-prefix-state nil "    ")))
+        (disco-room--insert-forward-section msg section-prefix-state)
+        (when (disco-room--message-has-thread-p msg)
+          (let* ((message-id (alist-get 'id msg))
+                 (thread (disco-room--thread-from-message msg))
+                 (target-thread-id (or (and (listp thread) (alist-get 'id thread))
+                                       (and (stringp message-id) message-id)))
+                 (target-thread-name (or (and (listp thread) (alist-get 'name thread))
+                                         (and (stringp message-id)
+                                              (format "thread:%s" message-id)))))
+            (let ((thread-start (point)))
+              (if target-thread-id
+                  (disco-ui-insert-action-button
+                   "[Open thread]"
+                   (lambda ()
+                     (disco-room-open
+                      target-thread-id
+                      (or target-thread-name target-thread-id)))
+                   :face 'disco-room-message-meta
+                   :help-echo "Open starter thread for this message")
+                (insert (propertize "[Thread id unavailable]"
+                                    'face 'shadow)))
+              (insert "\n")
+              (disco-ui-apply-line-prefix
+               thread-start (point) section-prefix-state))))
+        (disco-room--insert-message-attachments msg section-prefix-state)
+        (disco-room--insert-message-embeds msg)
+        (disco-room--insert-message-poll msg))
+      (disco-room--insert-message-reactions msg section-prefix-state)
+      (add-text-properties
+       line-start
+       (point)
+       (list 'read-only t
+             'front-sticky '(read-only)
+             'disco-message-id message-id)))))
 
 (defun disco-room--ewoc-printer (msg)
   "EWOC pretty-printer for one room message MSG."
