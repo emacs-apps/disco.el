@@ -2439,14 +2439,27 @@ If needed, schedule async fetch and fall back to text placeholder."
 
 (defun disco-room--avatar-line-pixel-height ()
   "Return line height in pixels for current room text scale."
-  (let ((line-height (ignore-errors (line-pixel-height)))
-        (default-height (ignore-errors (default-line-height)))
-        (frame-height (frame-char-height)))
-    (max 1
-         (if (numberp line-height) line-height 0)
-         (if (numberp default-height) default-height 0)
-         (if (numberp frame-height) frame-height 0)
-         16)))
+  (let* ((line-height (ignore-errors (line-pixel-height)))
+         (base-height (or (ignore-errors (default-line-height))
+                          (frame-char-height)
+                          16))
+         (scale-step (if (and (boundp 'text-scale-mode-step)
+                              (numberp text-scale-mode-step)
+                              (> text-scale-mode-step 0))
+                         text-scale-mode-step
+                       1.2))
+         (scale-amount (if (and (boundp 'text-scale-mode-amount)
+                                (numberp text-scale-mode-amount))
+                           text-scale-mode-amount
+                         0))
+         (scale (if (zerop scale-amount)
+                    1.0
+                  (expt scale-step scale-amount)))
+         (scaled-base (round (* (float base-height) scale)))
+         (use-line-height (and (numberp line-height)
+                               (> line-height 2)
+                               (>= line-height (floor (* 0.5 base-height))))))
+    (max 1 (if use-line-height line-height scaled-base))))
 
 (defun disco-room--avatar-display-size ()
   "Return full avatar size in pixels for two-line avatar rendering.
