@@ -2142,31 +2142,52 @@ non-nil. DEFAULT falls back to four spaces."
          disco-room--render-context-by-message-id
          (gethash message-id disco-room--render-context-by-message-id))))
 
+(defun disco-room--insert-full-width-divider (label face &optional properties)
+  "Insert a full-width centered divider line: ────( LABEL )────.
+
+FACE is applied to the entire line (bars, parens, label).
+PROPERTIES is an optional plist of extra text properties."
+  (let* ((open "( ")
+         (close " )")
+         (inner-width (+ (string-width open)
+                         (string-width label)
+                         (string-width close)))
+         (fill-col (disco-room--line-fill-column))
+         (total-bar (max 4 (- fill-col inner-width)))
+         (left-bars (/ total-bar 2))
+         (right-bars (- total-bar left-bars))
+         (start (point)))
+    (insert (make-string left-bars ?─)
+            open label close
+            (make-string right-bars ?─)
+            "\n")
+    (add-face-text-property start (point) face t)
+    (when properties
+      (add-text-properties start (point) properties))
+    (cons start (point))))
+
 (defun disco-room--insert-divider-row (text face)
-  "Insert read-only divider row TEXT with FACE."
-  (disco-ui-insert-styled-line
-   text
-   :face face
-   :properties '(read-only t
-                 front-sticky (read-only)
-                 rear-nonsticky (read-only))))
+  "Insert read-only divider row TEXT with FACE, spanning full window width."
+  (disco-room--insert-full-width-divider
+   text face
+   '(read-only t front-sticky (read-only) rear-nonsticky (read-only))))
 
 (defun disco-room--insert-date-separator-row (day-key)
   "Insert date separator row for DAY-KEY."
   (disco-room--insert-divider-row
-   (format "────────  %s  ────────" (disco-room--message-day-label day-key))
+   (disco-room--message-day-label day-key)
    'disco-room-date-separator))
 
 (defun disco-room--insert-unread-divider-row ()
   "Insert unread separator row."
   (disco-room--insert-divider-row
-   "────────  Unread Messages  ────────"
+   "Unread Messages"
    'disco-room-unread-divider))
 
 (defun disco-room--insert-system-divider-message (msg)
   "Insert MSG as a centered system divider line (telega-style).
 
-The message content is rendered as ────(avatar author action)──── with
+The message content is rendered as ────( avatar content )──── with
 horizontal bars filling both sides to span the full line width.
 The author name is propertized with its colour face and an inline
 avatar image is prepended when available."
@@ -2178,43 +2199,24 @@ avatar image is prepended when available."
          (author (disco-room--message-author msg))
          (author-face (disco-room--author-face msg))
          (avatar-str (disco-room--avatar-one-line-string msg))
-         (inner-body (concat avatar-str content))
-         (open-paren "(")
-         (close-paren ")")
-         ;; String-width counts display columns; avatar images occupy
-         ;; their :disco-char-width columns via display property.
-         (inner-width (+ (string-width open-paren)
-                         (string-width inner-body)
-                         (string-width close-paren)))
-         (fill-col (disco-room--line-fill-column))
-         (total-bar-width (max 4 (- fill-col inner-width)))
-         (left-bars (/ total-bar-width 2))
-         (right-bars (- total-bar-width left-bars))
-         line-start)
+         (label (concat avatar-str content)))
     (when (and (stringp insert-date) (not (string-empty-p insert-date)))
       (disco-room--insert-date-separator-row insert-date))
     (when insert-unread
       (disco-room--insert-unread-divider-row))
-    (setq line-start (point))
-    (insert (make-string left-bars ?─)
-            open-paren inner-body close-paren
-            (make-string right-bars ?─)
-            "\n")
-    ;; Base face for the entire divider line (bars, parens, action text).
-    (add-face-text-property line-start (point) 'disco-room-system-divider t)
-    ;; Overlay author colour on top so the name stands out.
-    (when (and (stringp author) (not (string-empty-p author)) author-face)
-      (save-excursion
-        (goto-char line-start)
-        (when (search-forward author (line-end-position) t)
-          (add-face-text-property (match-beginning 0) (match-end 0)
-                                  author-face nil))))
-    (add-text-properties
-     line-start (point)
-     (list 'read-only t
-           'front-sticky '(read-only)
-           'rear-nonsticky '(read-only)
-           'disco-message-id message-id))))
+    (let ((span (disco-room--insert-full-width-divider
+                 label 'disco-room-system-divider
+                 (list 'read-only t
+                       'front-sticky '(read-only)
+                       'rear-nonsticky '(read-only)
+                       'disco-message-id message-id))))
+      ;; Overlay author colour on top so the name stands out.
+      (when (and (stringp author) (not (string-empty-p author)) author-face)
+        (save-excursion
+          (goto-char (car span))
+          (when (search-forward author (line-end-position) t)
+            (add-face-text-property (match-beginning 0) (match-end 0)
+                                    author-face nil)))))))
 
 (defun disco-room--message-effective-author (msg)
   "Return effective author object for MSG.
