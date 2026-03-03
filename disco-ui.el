@@ -134,14 +134,16 @@ prefix for subsequent card rows."
      (disco-ui-card-line-prefix :face face :indent first-indent :marker marker)
      (disco-ui-card-line-prefix :face face :indent rest-indent :marker marker))))
 
-(defun disco-ui--apply-line-prefix-span (start end prefix-str)
-  "Apply PREFIX-STR to START..END span as line/wrap prefix.
+(defun disco-ui--apply-line-prefix-span (start end line-prefix-str &optional wrap-prefix-str)
+  "Apply line/wrap prefix strings to START..END span.
 
-Note: we keep the indent copy-safe by using `line-prefix'/'wrap-prefix'."
+LINE-PREFIX-STR is used for `line-prefix'. WRAP-PREFIX-STR defaults to
+LINE-PREFIX-STR when omitted."
   (when (< start end)
-    (add-text-properties start end
-                         (list 'line-prefix prefix-str
-                               'wrap-prefix prefix-str))))
+    (add-text-properties
+     start end
+     (list 'line-prefix line-prefix-str
+           'wrap-prefix (or wrap-prefix-str line-prefix-str)))))
 
 (defun disco-ui-apply-line-prefix (start end prefix)
   "Apply PREFIX as display prefix for region START..END.
@@ -150,9 +152,11 @@ PREFIX can be a string or a mutable prefix-state created by
 `disco-ui-make-prefix-state'."
   (when (< start end)
     (if (disco-ui-prefix-state-p prefix)
-        (let ((pos start)
-              (line-prefix (disco-ui-prefix-state-consume prefix))
-              (rest-prefix (disco-ui-prefix-state-rest prefix)))
+        (let* ((pos start)
+               (first-prefix (disco-ui-prefix-state-consume prefix))
+               (rest-prefix (or (disco-ui-prefix-state-rest prefix)
+                                first-prefix))
+               (line-prefix first-prefix))
           (save-excursion
             (goto-char start)
             (while (< pos end)
@@ -161,7 +165,9 @@ PREFIX can be a string or a mutable prefix-state created by
                      (next-pos (if (< line-end end)
                                    (1+ line-end)
                                  end)))
-                (disco-ui--apply-line-prefix-span pos next-pos line-prefix)
+                ;; Telega-like behavior: wrapped continuations use rest-prefix,
+                ;; so avatar/image prefix is not repeated on visual wraps.
+                (disco-ui--apply-line-prefix-span pos next-pos line-prefix rest-prefix)
                 (setq line-prefix rest-prefix)
                 (setq pos next-pos)))))
       (disco-ui--apply-line-prefix-span

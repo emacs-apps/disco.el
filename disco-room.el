@@ -4578,7 +4578,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                (cdr time-span)
                (list 'help-echo timestamp))))
           (insert "\n")
-          (disco-ui-apply-line-prefix header-start (point) header-prefix))
+          (disco-ui-apply-line-prefix
+           header-start (point)
+           (disco-ui-make-prefix-state header-prefix body-rest-prefix)))
         (when reply
           (disco-room--insert-reply-preview-line msg reply section-prefix-state))
         (unless (string-empty-p content)
