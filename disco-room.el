@@ -508,6 +508,14 @@ value before enabling visual fill."
           integer)
   :group 'disco)
 
+(defcustom disco-room-auto-fill-margin-columns 1
+  "Additional right margin columns used for timestamp alignment.
+
+This mirrors telega auto-fill behavior and helps avoid edge clipping."
+  :type '(choice (const :tag "No additional margin" nil)
+          (integer :tag "Additional margin columns"))
+  :group 'disco)
+
 (defcustom disco-room-show-attachment-urls nil
   "When non-nil, include raw attachment URLs in message rendering."
   :type 'boolean
@@ -1965,11 +1973,51 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
           (setq best win)
           (setq best-width width))))))
 
-(defun disco-room--line-fill-column ()
-  "Return target fill column for current message line.
+(defun disco-room--compute-chat-fill-column (&optional win)
+  "Compute telega-like chat fill column for WIN.
 
-Match telega-style auto-fill behavior: when no explicit fill is configured,
-use the room window width in remapped columns and cache it for hidden renders."
+When WIN is nil, use best room window from `disco-room--render-window'."
+  (let* ((target-win (or win (disco-room--render-window)))
+         (margin (max 0 (or disco-room-auto-fill-margin-columns 0))))
+    (when (window-live-p target-win)
+      (let* ((win-margins (window-margins target-win))
+             (new-fill-column (+ (window-width target-win 'remap)
+                                 (or (car win-margins) 0)
+                                 (or (cdr win-margins) 0)))
+             (char-px (max 1 (disco-room--align-char-width)))
+             (line-numbers-p
+              (with-current-buffer (window-buffer target-win)
+                (bound-and-true-p display-line-numbers-mode)))
+             (ln-px (if line-numbers-p
+                        (with-selected-window target-win
+                          (line-number-display-width 'pixels))
+                      0))
+             (ln-cols (if (and (numberp ln-px) (> ln-px 0))
+                          (ceiling (/ ln-px (float char-px)))
+                        0)))
+        (max 1 (- new-fill-column margin ln-cols))))))
+
+(defun disco-room--update-chat-fill-column (&optional win)
+  "Refresh cached chat fill column from WIN or current room window."
+  (let ((next (disco-room--compute-chat-fill-column win)))
+    (when (numberp next)
+      (setq-local disco-room--chat-fill-column next))
+    next))
+
+(defun disco-room--on-window-size-change (&optional _frame)
+  "Recompute chat fill column and rerender on room window size changes."
+  (when (eq major-mode 'disco-room-mode)
+    (let ((old disco-room--chat-fill-column)
+          (next (disco-room--update-chat-fill-column)))
+      (when (and (numberp next)
+                 (not (equal old next)))
+        (disco-view-render-preserving-position
+         #'disco-room-render
+         :anchor-property 'disco-message-id
+         :preserve-window-start t)))))
+
+(defun disco-room--line-fill-column ()
+  "Return target fill column for current message line."
   (or (and (bound-and-true-p visual-fill-column-mode)
            (integerp disco-room-fill-column)
            (> disco-room-fill-column 0)
@@ -1978,33 +2026,11 @@ use the room window width in remapped columns and cache it for hidden renders."
            (integerp fill-column)
            (> fill-column 0)
            fill-column)
+      (disco-room--update-chat-fill-column)
       (and (integerp disco-room--chat-fill-column)
            (> disco-room--chat-fill-column 0)
            disco-room--chat-fill-column)
-      (let* ((win (disco-room--render-window))
-             (computed
-              (and (window-live-p win)
-                   (let* ((base-cols (max 1 (window-width win 'remap)))
-                          (margins (window-margins win))
-                          (margin-cols (+ (or (car margins) 0)
-                                          (or (cdr margins) 0)))
-                          (char-px (max 1 (disco-room--align-char-width)))
-                          (line-numbers-p
-                           (with-current-buffer (window-buffer win)
-                             (bound-and-true-p display-line-numbers-mode)))
-                          (ln-px (if line-numbers-p
-                                     (with-selected-window win
-                                       (line-number-display-width 'pixels))
-                                   0))
-                          (ln-cols (if (and (numberp ln-px) (> ln-px 0))
-                                       (ceiling (/ ln-px (float char-px)))
-                                     0)))
-                     (max 1 (- (+ base-cols margin-cols) ln-cols))))))
-        (if computed
-            (progn
-              (setq-local disco-room--chat-fill-column computed)
-              computed)
-          80))))
+      80))
 
 (defun disco-room--move-to-column (column)
   "Insert alignment space moving point to COLUMN."
@@ -6728,6 +6754,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (when (fboundp 'cursor-intangible-mode)
     (cursor-intangible-mode 1))
   (funcall #'disco-company-setup-room-buffer)
+  (add-hook 'window-size-change-functions #'disco-room--on-window-size-change nil t)
+  (add-hook 'display-line-numbers-mode-hook #'disco-room--on-window-size-change nil t)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'window-size-change-functions #'disco-room--on-window-size-change)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
@@ -6744,7 +6772,9 @@ When called interactively, empty input clears slowmode (sets to 0)."
         (setq disco-room--guild-id (and channel (alist-get 'guild_id channel))))
       (disco-room--attach-live-updates)
       (disco-room-refresh))
-    (pop-to-buffer buf)))
+    (pop-to-buffer buf)
+    (with-current-buffer buf
+      (disco-room--on-window-size-change))))
 
 (provide 'disco-room)
 
