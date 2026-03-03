@@ -109,11 +109,16 @@ DEFAULT is used when PREFIX yields nil."
                                           (marker "▏"))
   "Return a display-only card prefix string.
 
-FACE is applied to MARKER while INDENT is kept plain."
-  (concat (or indent "")
-          (if face
-              (propertize marker 'face face)
-            marker)))
+FACE is applied to MARKER while INDENT is kept plain. MARKER replaces
+INDENT's last column so card content stays column-aligned with normal lines."
+  (let* ((base (or indent ""))
+         (mark (if face
+                   (propertize marker 'face face)
+                 marker))
+         (base-len (length base)))
+    (if (> base-len 0)
+        (concat (substring base 0 (1- base-len)) mark)
+      mark)))
 
 (cl-defun disco-ui-card-prefix-state (&key face (marker "▏") indent)
   "Return card line-prefix state for current insertion scope.
