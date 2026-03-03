@@ -2026,10 +2026,10 @@ When WIN is nil, use best room window from `disco-room--render-window'."
            (integerp fill-column)
            (> fill-column 0)
            fill-column)
-      (disco-room--update-chat-fill-column)
       (and (integerp disco-room--chat-fill-column)
            (> disco-room--chat-fill-column 0)
            disco-room--chat-fill-column)
+      (disco-room--update-chat-fill-column)
       80))
 
 (defun disco-room--move-to-column (column)
@@ -2519,35 +2519,11 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
 (defun disco-room--on-text-scale-change ()
   "Rerender room buffers after `text-scale-mode' changes."
   (when (eq major-mode 'disco-room-mode)
+    ;; Text scale affects remapped widths; invalidate cached fill column.
+    (setq-local disco-room--chat-fill-column nil)
     ;; Recreate image objects from cache files so resized previews track text scale.
     (disco-media-clear-preview-memory-cache)
     (disco-room--rerender-open-rooms)))
-
-(defun disco-room--on-window-size-change (frame)
-  "Rerender room buffers displayed on FRAME after window size changes.
-
-Clears the cached fill column so that divider lines and right-aligned
-timestamps adapt to the new window width."
-  (dolist (win (window-list frame 'no-mini))
-    (let ((buf (window-buffer win)))
-      (when (and (buffer-live-p buf)
-                 (with-current-buffer buf
-                   (eq major-mode 'disco-room-mode)))
-        (with-current-buffer buf
-          ;; Invalidate cached width so next render recomputes from window.
-          (setq-local disco-room--chat-fill-column nil)
-          (disco-view-render-preserving-position
-           #'disco-room-render
-           :anchor-property 'disco-message-id
-           :preserve-window-start t)))))
-  ;; Remove ourselves when no room buffers remain.
-  (unless (seq-some (lambda (buf)
-                      (and (buffer-live-p buf)
-                           (eq (buffer-local-value 'major-mode buf)
-                               'disco-room-mode)))
-                    (buffer-list))
-    (remove-hook 'window-size-change-functions
-                 #'disco-room--on-window-size-change)))
 
 (defun disco-room--buffer-substring-filter (beg end delete)
   "Copy region BEG..END while stripping display-only prefix properties."
@@ -6757,7 +6733,6 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (add-hook 'window-size-change-functions #'disco-room--on-window-size-change nil t)
   (add-hook 'display-line-numbers-mode-hook #'disco-room--on-window-size-change nil t)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
-  (add-hook 'window-size-change-functions #'disco-room--on-window-size-change)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command nil t))
 
