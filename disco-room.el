@@ -1888,65 +1888,84 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
 
-(defun disco-room--align-char-width ()
-  "Return default character width for current render context."
-  (if (display-graphic-p)
-      (max 1
-           (or (and (fboundp 'string-pixel-width)
-                    ;; BUFFER arg keeps text-scale/face remapping in sync.
-                    (ignore-errors
-                      (string-pixel-width (propertize "0" 'face 'default)
-                                          (current-buffer))))
-               (frame-char-width)))
-    1))
+(defvar disco-room--column-offset 0
+  "Temporary column offset used by room alignment helpers.")
 
-(defun disco-room--string-pixel-width (text)
-  "Return pixel width for TEXT under current buffer face remapping."
-  (and (display-graphic-p)
-       (fboundp 'string-pixel-width)
-       (ignore-errors (string-pixel-width text (current-buffer)))))
+(defun disco-room--align-char-width ()
+  "Return pixel width for one default-face character."
+  (if (not (display-graphic-p))
+      1
+    (let* ((frame (selected-frame))
+           (font (and frame
+                      (or (frame-parameter frame 'font)
+                          (face-font 'default frame))))
+           (info (and font (font-info font frame)))
+           (avg-width (and info (aref info 11)))
+           (fallback-width (and info (aref info 10))))
+      (max 1
+           (cond
+            ((and (numberp avg-width) (> avg-width 0)) avg-width)
+            ((and (numberp fallback-width) (> fallback-width 0)) fallback-width)
+            (t (frame-char-width)))))))
 
 (defun disco-room--align-columns-to-pixels (columns)
-  "Convert COLUMNS to pixels for current buffer face remapping."
-  (let ((cols (max 0 columns)))
-    (if (zerop cols)
-        0
-      (or (disco-room--string-pixel-width (make-string cols ?\s))
-          (* cols (disco-room--align-char-width))))))
+  "Convert COLUMNS to pixels using default-face geometry."
+  (* (max 0 columns) (disco-room--align-char-width)))
 
-(defun disco-room--align-right-offset (columns)
-  "Return `:align-to' right offset value for COLUMNS."
-  (let ((cols (max 0 columns)))
-    (if (display-graphic-p)
-        (list (disco-room--align-columns-to-pixels cols))
-      cols)))
+(defun disco-room--current-column ()
+  "Return current column including line prefixes and align-to displays."
+  (let* ((bol-point (line-beginning-position))
+         (spoint (point))
+         (dpoint spoint)
+         (ccolumn nil)
+         (char-width (max 1 (disco-room--align-char-width))))
+    (while (and (not ccolumn)
+                (> dpoint bol-point)
+                (setq dpoint (previous-single-char-property-change
+                              dpoint 'display nil bol-point)))
+      (let ((disp (get-text-property dpoint 'display)))
+        (when (and (listp disp)
+                   (> (length disp) 2)
+                   (eq (nth 0 disp) 'space)
+                   (eq (nth 1 disp) :align-to))
+          (let ((align-val (nth 2 disp)))
+            (cond
+             ((numberp align-val)
+              (setq ccolumn (+ align-val
+                               (string-width (buffer-substring dpoint spoint)))))
+             ((and (listp align-val) (numberp (car align-val)))
+              (setq ccolumn (+ (/ (float (car align-val)) char-width)
+                               (string-width (buffer-substring dpoint spoint))))))))))
+    (+ (or ccolumn (current-column))
+       disco-room--column-offset
+       (let ((lwprefix (or (get-text-property bol-point 'line-prefix)
+                           (get-text-property bol-point 'wrap-prefix))))
+         (if (stringp lwprefix)
+             (string-width lwprefix)
+           0)))))
 
-(defun disco-room--line-overflow-before-right-tail-p (tail-columns prefix-columns)
-  "Return non-nil when adding right tail would overflow current line.
-
-TAIL-COLUMNS is the width reserved for right tail text, including one
-leading separator space.  PREFIX-COLUMNS is visual prefix width that is
-applied later via `line-prefix'."
+(defun disco-room--line-fill-column ()
+  "Return target fill column for current message line."
   (let* ((win (or (get-buffer-window (current-buffer) t)
                   (selected-window)))
-         (tail-cols (max 0 tail-columns))
-         (prefix-cols (max 0 prefix-columns)))
-    (if (and (display-graphic-p)
-             (window-live-p win)
-             (fboundp 'window-text-pixel-size))
-        (let* ((current-px (+ (car (window-text-pixel-size
-                                    win
-                                    (line-beginning-position)
-                                    (point)))
-                              (disco-room--align-columns-to-pixels prefix-cols)))
-               (tail-px (disco-room--align-columns-to-pixels tail-cols))
-               (line-px (window-body-width win t)))
-          (> current-px (max 0 (- line-px tail-px))))
-      (let* ((line-cols (if (window-live-p win)
-                            (window-body-width win)
-                          (window-body-width)))
-             (current-cols (+ (current-column) prefix-cols)))
-        (> current-cols (max 0 (- line-cols tail-cols)))))))
+         (window-cols (max 1 (if (window-live-p win)
+                                 (window-body-width win)
+                               (window-body-width))))
+         (fill (and (integerp fill-column)
+                    (> fill-column 0)
+                    fill-column)))
+    (if (and (bound-and-true-p visual-fill-column-mode)
+             fill)
+        (min window-cols fill)
+      window-cols)))
+
+(defun disco-room--move-to-column (column)
+  "Insert alignment space moving point to COLUMN."
+  (let* ((target (max 0 column))
+         (align-to (if (display-graphic-p)
+                       (list (disco-room--align-columns-to-pixels target))
+                     target)))
+    (insert (propertize " " 'display `(space :align-to ,align-to)))))
 
 (defun disco-room--insert-right-aligned-text (text &optional face left-prefix-width)
   "Insert TEXT aligned to right edge on current line.
@@ -1954,27 +1973,24 @@ applied later via `line-prefix'."
 When FACE is non-nil, apply FACE to TEXT.  LEFT-PREFIX-WIDTH reserves
 additional columns at line start (for future `line-prefix' application)."
   (let* ((raw (or text ""))
-         (time-width (max 1 (1+ (string-width raw))))
+         (rendered (if face
+                       (propertize raw 'face face)
+                     raw))
          (prefix-width (max 0 (or left-prefix-width 0)))
-         (align-width (+ time-width prefix-width))
          (start (point)))
-    (when (and disco-room-right-align-timestamps
-               (disco-room--line-overflow-before-right-tail-p
-                time-width
-                prefix-width))
-      (insert "\n")
-      (setq start (point)))
     (if disco-room-right-align-timestamps
-        (insert
-         (propertize
-          " "
-          'display `(space :align-to (- right
-                                        ,(disco-room--align-right-offset
-                                          align-width)))))
+        (let* ((tail-width (max 0 (string-width raw)))
+               (target-column (max 0 (- (disco-room--line-fill-column)
+                                        tail-width)))
+               (dsoffset 2)
+               (disco-room--column-offset prefix-width))
+          (when (> (disco-room--current-column)
+                   (max 0 (- target-column dsoffset)))
+            (insert "\n")
+            (setq start (point)))
+          (disco-room--move-to-column target-column))
       (insert " "))
-    (insert (if face
-                (propertize raw 'face face)
-              raw))
+    (insert rendered)
     (cons start (point))))
 
 (defun disco-room--insert-prefixed-lines (prefix text &optional face)

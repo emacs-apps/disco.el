@@ -137,13 +137,17 @@ prefix for subsequent card rows."
 (defun disco-ui--apply-line-prefix-span (start end line-prefix-str &optional wrap-prefix-str)
   "Apply line/wrap prefix strings to START..END span.
 
-LINE-PREFIX-STR is used for `line-prefix'. WRAP-PREFIX-STR defaults to
-LINE-PREFIX-STR when omitted."
+LINE-PREFIX-STR is prepended to existing `line-prefix'. WRAP-PREFIX-STR
+defaults to LINE-PREFIX-STR and is prepended to existing `wrap-prefix'."
   (when (< start end)
-    (add-text-properties
-     start end
-     (list 'line-prefix line-prefix-str
-           'wrap-prefix (or wrap-prefix-str line-prefix-str)))))
+    (let* ((line (or line-prefix-str ""))
+           (wrap (or wrap-prefix-str line))
+           (existing-line (get-text-property start 'line-prefix))
+           (existing-wrap (get-text-property start 'wrap-prefix)))
+      (add-text-properties
+       start end
+       (list 'line-prefix (concat line (if (stringp existing-line) existing-line ""))
+             'wrap-prefix (concat wrap (if (stringp existing-wrap) existing-wrap "")))))))
 
 (defun disco-ui-apply-line-prefix (start end prefix)
   "Apply PREFIX as display prefix for region START..END.
