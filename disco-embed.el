@@ -900,32 +900,25 @@ Keeps original line breaks and applies markdown renderer pipeline."
         (condition-case _
             (if disco-room-use-rich-embed-cards
                 (disco-embed-insert-card msg embed embed-index)
-              (let* ((line-prefix
-                      (disco-ui-prefix-string
-                       disco-ui-card-indent-prefix-state
-                       t
-                       (or disco-ui-card-indent-prefix "    ")))
+              (let* ((prefix-source (or disco-ui-card-indent-prefix-state
+                                        (or disco-ui-card-indent-prefix "    ")))
                      (line-start (point))
                      (url (disco-embed--main-url msg embed)))
-                (insert line-prefix (disco-embed--summary embed) "\n")
+                (insert (disco-embed--summary embed) "\n")
+                (disco-ui-apply-line-prefix line-start (point) prefix-source)
                 (add-text-properties line-start (point) '(face disco-room-message-meta))
                 (when (and disco-room-show-embed-urls
                            (disco-embed--url-present-p url))
                   (let ((url-start (point)))
-                    (insert (disco-ui-prefix-string
-                             disco-ui-card-indent-prefix-state
-                             nil
-                             (or disco-ui-card-indent-prefix "    "))
-                            "  " url "\n")
+                    (insert "  " url "\n")
+                    (disco-ui-apply-line-prefix url-start (point) prefix-source)
                     (add-text-properties url-start (point) '(face shadow))))))
           (error
-           (let* ((line-prefix
-                   (disco-ui-prefix-string
-                    disco-ui-card-indent-prefix-state
-                    t
-                    (or disco-ui-card-indent-prefix "    ")))
+           (let* ((prefix-source (or disco-ui-card-indent-prefix-state
+                                     (or disco-ui-card-indent-prefix "    ")))
                   (line-start (point)))
-             (insert line-prefix "[embed] [render fallback]\n")
+             (insert "[embed] [render fallback]\n")
+             (disco-ui-apply-line-prefix line-start (point) prefix-source)
              (add-text-properties line-start (point) '(face shadow)))))))))
 
 (provide 'disco-embed)

@@ -1912,21 +1912,6 @@ When PREFIX is a mutable prefix-state, consume first-prefix when CONSUME is
 non-nil. DEFAULT falls back to four spaces."
   (disco-ui-prefix-string prefix consume (or default "    ")))
 
-(defun disco-room--insert-prefixed-lines-with-first-prefix (first-prefix rest-prefix text
-                                                                         &optional face)
-  "Insert TEXT with FIRST-PREFIX on first line and REST-PREFIX thereafter."
-  (let ((lines (split-string (or text "") "\n")))
-    (when lines
-      (let ((line-start (point)))
-        (insert (or first-prefix "") (car lines) "\n")
-        (when face
-          (add-text-properties line-start (point) (list 'face face))))
-      (dolist (line (cdr lines))
-        (let ((line-start (point)))
-          (insert (or rest-prefix "") line "\n")
-          (when face
-            (add-text-properties line-start (point) (list 'face face))))))))
-
 (defun disco-room--message-time (msg)
   "Return decoded time for MSG timestamp, or nil when unavailable."
   (let ((raw (alist-get 'timestamp msg)))
