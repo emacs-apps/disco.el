@@ -1893,15 +1893,32 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   (if (display-graphic-p)
       (max 1
            (or (and (fboundp 'string-pixel-width)
-                    (ignore-errors (string-pixel-width (propertize "0" 'face 'default))))
+                    ;; BUFFER arg keeps text-scale/face remapping in sync.
+                    (ignore-errors
+                      (string-pixel-width (propertize "0" 'face 'default)
+                                          (current-buffer))))
                (frame-char-width)))
     1))
+
+(defun disco-room--string-pixel-width (text)
+  "Return pixel width for TEXT under current buffer face remapping."
+  (and (display-graphic-p)
+       (fboundp 'string-pixel-width)
+       (ignore-errors (string-pixel-width text (current-buffer)))))
+
+(defun disco-room--align-columns-to-pixels (columns)
+  "Convert COLUMNS to pixels for current buffer face remapping."
+  (let ((cols (max 0 columns)))
+    (if (zerop cols)
+        0
+      (or (disco-room--string-pixel-width (make-string cols ?\s))
+          (* cols (disco-room--align-char-width))))))
 
 (defun disco-room--align-right-offset (columns)
   "Return `:align-to' right offset value for COLUMNS."
   (let ((cols (max 0 columns)))
     (if (display-graphic-p)
-        (list (* cols (disco-room--align-char-width)))
+        (list (disco-room--align-columns-to-pixels cols))
       cols)))
 
 (defun disco-room--line-overflow-before-right-tail-p (tail-columns prefix-columns)
@@ -1917,13 +1934,12 @@ applied later via `line-prefix'."
     (if (and (display-graphic-p)
              (window-live-p win)
              (fboundp 'window-text-pixel-size))
-        (let* ((char-px (disco-room--align-char-width))
-               (current-px (+ (car (window-text-pixel-size
+        (let* ((current-px (+ (car (window-text-pixel-size
                                     win
                                     (line-beginning-position)
                                     (point)))
-                              (* prefix-cols char-px)))
-               (tail-px (* tail-cols char-px))
+                              (disco-room--align-columns-to-pixels prefix-cols)))
+               (tail-px (disco-room--align-columns-to-pixels tail-cols))
                (line-px (window-body-width win t)))
           (> current-px (max 0 (- line-px tail-px))))
       (let* ((line-cols (if (window-live-p win)
