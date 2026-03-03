@@ -2456,6 +2456,13 @@ If needed, schedule async fetch and fall back to text placeholder."
          (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0)))
     (max 8 (round (* base-target size-factor)))))
 
+(defun disco-room--avatar-cw-width (nchars)
+  "Return image `:width' spec that occupies NCHARS columns."
+  (let ((cols (max 1 nchars)))
+    (if (string-version-lessp emacs-version "30.1")
+        (* cols (max 1 (frame-char-width)))
+      (cons cols 'cw))))
+
 (defun disco-room--avatar-factors (&optional cheight)
   "Return avatar (circle . margin) factors for CHEIGHT lines."
   (let* ((entry (alist-get (or cheight 2) disco-room-avatar-factors-alist))
@@ -2517,6 +2524,17 @@ If needed, schedule async fetch and fall back to text placeholder."
       (setq props (plist-put props :ascent 'center))
       (cons type props))))
 
+(defun disco-room--avatar-image-lock-char-width (image width-chars)
+  "Return IMAGE with logical width locked to WIDTH-CHARS columns."
+  (when (and (disco-media-image-object-valid-p image)
+             (numberp width-chars))
+    (let* ((type (car image))
+           (props (copy-sequence (cdr image)))
+           (cols (max 1 (truncate width-chars))))
+      (setq props (plist-put props :disco-char-width cols))
+      (setq props (plist-put props :width (disco-room--avatar-cw-width cols)))
+      (cons type props))))
+
 (defun disco-room--avatar-text-fit-width (text width)
   "Return TEXT truncated/padded to WIDTH columns."
   (let* ((target (max 1 width))
@@ -2551,6 +2569,7 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
                (top-text (disco-room--avatar-text-fit-width fallback width-chars))
                (bottom-text (make-string width-chars ?\s)))
           (setq props (plist-put props :disco-char-width width-chars))
+          (setq props (plist-put props :width (disco-room--avatar-cw-width width-chars)))
           (setq props (plist-put props :disco-text (list top-text bottom-text)))
           (setq props (plist-put props :disco-nslices 2))
           (cons type props))))))
@@ -2630,7 +2649,9 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
                         (when (and (integerp slice-height) (> slice-height 0))
                           (setq props (plist-put props :disco-slice-height slice-height)))
                         (when (and (integerp width-chars) (> width-chars 0))
-                          (setq props (plist-put props :disco-char-width width-chars)))
+                          (setq props (plist-put props :disco-char-width width-chars))
+                          (setq props (plist-put props :width
+                                                  (disco-room--avatar-cw-width width-chars))))
                         (setq image (cons type props)))
                       (puthash cache-key image disco-room--avatar-round-image-cache)
                       image))))))))))
@@ -2701,6 +2722,15 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
         (propertize text 'display display 'rear-nonsticky '(display))
       text)))
 
+(defun disco-room--pad-prefix-to-width (prefix width)
+  "Right-pad PREFIX with spaces so it occupies WIDTH columns."
+  (let* ((text (or prefix ""))
+         (target (max 0 width))
+         (current (max 0 (string-width text))))
+    (if (< current target)
+        (concat text (make-string (- target current) ?\s))
+      text)))
+
 (defun disco-room--avatar-prefixes (msg)
   "Return avatar-aware prefixes plist for MSG header/body lines."
   (let* ((image (disco-room--avatar-image msg))
@@ -2714,6 +2744,15 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
                              base-size))
                (round-metrics (and disco-room-avatar-round-images
                                    (disco-room--avatar-round-metrics 2)))
+               ;; Keep a stable width contract like telega: avatar slice-1 text
+               ;; determines the logical indentation width.
+               (target-width-chars
+                (max 1
+                     (or (and (listp round-metrics)
+                              (integerp (plist-get round-metrics :width-chars))
+                              (plist-get round-metrics :width-chars))
+                         (ceiling (/ (float pixel-size)
+                                     (float (max 1 (frame-char-width))))))))
                (cache-key (disco-room--avatar-cache-key msg))
                (cache-file (and cache-key
                                 (disco-room--avatar-cache-existing-file cache-key)))
@@ -2724,24 +2763,33 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
                               round-metrics)))
                (base-image (or rounded
                                (disco-room--avatar-image-resized image pixel-size)))
+               (base-image (or (disco-room--avatar-image-lock-char-width
+                                base-image target-width-chars)
+                               base-image))
                (scaled (disco-room--avatar-image-with-text
                         base-image
                         fallback
                         pixel-size
                         t))
-               (image-indent (1+ (disco-room--avatar-image-char-width scaled)))
-               (rest-prefix (make-string image-indent ?\s))
+               (image-indent (1+ target-width-chars))
                (top (if (disco-media-image-object-valid-p scaled)
                         (disco-room--avatar-image-slice-string scaled 0)
                       fallback))
                (bottom (if (disco-media-image-object-valid-p scaled)
                            (disco-room--avatar-image-slice-string scaled 1)
-                         (make-string (max 1 (string-width fallback)) ?\s))))
-          (list :header (concat top " ")
-                :first-body (concat bottom " ")
+                         (make-string (max 1 target-width-chars) ?\s)))
+               (header-prefix (concat top " "))
+               (first-body-prefix (concat bottom " "))
+               (normalized-width (max image-indent
+                                      (string-width header-prefix)
+                                      (string-width first-body-prefix)))
+               (rest-prefix (make-string normalized-width ?\s)))
+          (list :header (disco-room--pad-prefix-to-width header-prefix normalized-width)
+                :first-body (disco-room--pad-prefix-to-width
+                             first-body-prefix normalized-width)
                 :rest-body rest-prefix))
       (let ((rest-prefix (make-string fallback-indent ?\s)))
-        (list :header (concat fallback " ")
+        (list :header (disco-room--pad-prefix-to-width (concat fallback " ") fallback-indent)
               :first-body rest-prefix
               :rest-body rest-prefix)))))
 
