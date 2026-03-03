@@ -1888,15 +1888,18 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
 
-(defun disco-room--insert-right-aligned-text (text &optional face)
+(defun disco-room--insert-right-aligned-text (text &optional face left-prefix-width)
   "Insert TEXT aligned to right edge on current line.
 
-When FACE is non-nil, apply FACE to TEXT."
+When FACE is non-nil, apply FACE to TEXT.  LEFT-PREFIX-WIDTH reserves
+additional columns at line start (for future `line-prefix' application)."
   (let* ((raw (or text ""))
-         (width (max 1 (1+ (string-width raw))))
+         (time-width (max 1 (1+ (string-width raw))))
+         (prefix-width (max 0 (or left-prefix-width 0)))
+         (align-width (+ time-width prefix-width))
          (start (point)))
     (if disco-room-right-align-timestamps
-        (insert (propertize " " 'display `(space :align-to (- right ,width))))
+        (insert (propertize " " 'display `(space :align-to (- right ,align-width))))
       (insert " "))
     (insert (if face
                 (propertize raw 'face face)
@@ -4538,7 +4541,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
     (setq line-start (point))
     (if compact
         (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
-               (compact-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
+               (compact-prefix (or (plist-get avatar-prefixes :rest-body) "    "))
+               (compact-prefix-width (max 0 (string-width compact-prefix))))
           (setq section-prefix-state
                 (disco-ui-make-prefix-state compact-prefix compact-prefix))
           (when reply
@@ -4550,7 +4554,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
             (setq time-span
                   (disco-room--insert-right-aligned-text
                    short-time
-                   'disco-room-timestamp))
+                   'disco-room-timestamp
+                   compact-prefix-width))
             (when (and (stringp timestamp) (not (string-empty-p timestamp)))
               (add-text-properties
                (car time-span)
@@ -4560,6 +4565,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
             (disco-ui-apply-line-prefix content-start (point) section-prefix-state)))
       (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
              (header-prefix (or (plist-get avatar-prefixes :header) ""))
+             (header-prefix-width (max 0 (string-width header-prefix)))
              (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
              (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
         (setq section-prefix-state
@@ -4571,7 +4577,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
           (let ((time-span
                  (disco-room--insert-right-aligned-text
                   short-time
-                  'disco-room-timestamp)))
+                  'disco-room-timestamp
+                  header-prefix-width)))
             (when (and (stringp timestamp) (not (string-empty-p timestamp)))
               (add-text-properties
                (car time-span)
