@@ -194,13 +194,17 @@ When image rendering is unavailable, room falls back to text placeholders."
   :type 'boolean
   :group 'disco)
 
-(defcustom disco-room-avatar-round-size-factor 0.90
-  "Scale factor applied to computed avatar size for round rendering."
+(defcustom disco-room-avatar-round-size-factor 1.0
+  "Scale factor applied to computed avatar size for round rendering.
+
+Set to 1.0 to match telega-like two-line avatar geometry."
   :type 'number
   :group 'disco)
 
-(defcustom disco-room-avatar-round-inset-ratio 0.08
-  "Inset ratio used when clipping circular avatars."
+(defcustom disco-room-avatar-round-inset-ratio 0.0
+  "Inset ratio used when clipping circular avatars.
+
+Set to 0.0 to match telega-like two-line avatar geometry."
   :type 'number
   :group 'disco)
 
