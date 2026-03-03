@@ -12,6 +12,61 @@
 (require 'cl-lib)
 (require 'subr-x)
 
+;;; ── Vertical bar (SVG in GUI, Unicode in terminal) ──────────────────
+
+(defvar disco-ui--vbar-image-cache (make-hash-table :test #'equal)
+  "Cache of SVG vertical-bar images keyed by (COLOR XH CHAR-W).")
+
+(defun disco-ui--face-foreground-color (face)
+  "Extract foreground colour string from FACE.
+FACE may be a symbol, a plist (:foreground ...) or a list of faces."
+  (cond
+   ((and (listp face) (plist-get face :foreground))
+    (plist-get face :foreground))
+   ((symbolp face)
+    (ignore-errors (face-foreground face nil t)))
+   ((and (listp face) (symbolp (car face)))
+    (ignore-errors (face-foreground (car face) nil t)))))
+
+(defun disco-ui--create-vbar-svg (face)
+  "Create an SVG vertical-bar image coloured with FACE.
+The image fills the full line height so consecutive lines join seamlessly.
+Returns nil in terminal frames or when SVG is unavailable."
+  (when (and (display-graphic-p)
+             (image-type-available-p 'svg)
+             (fboundp 'svg-create)
+             (fboundp 'svg-rectangle))
+    (let* ((xh (or (ignore-errors (default-line-height))
+                   (frame-char-height) 16))
+           (char-w (max 1 (frame-char-width)))
+           (bar-w (max 3 (round (* char-w 0.18))))
+           (color (or (disco-ui--face-foreground-color face)
+                      (face-foreground 'default nil t)
+                      "gray"))
+           (key (list color xh char-w)))
+      (or (gethash key disco-ui--vbar-image-cache)
+          (let* ((svg (svg-create char-w xh))
+                 (_ (svg-rectangle svg 0 0 bar-w xh
+                                   :fill-opacity 1 :fill color))
+                 (data (with-temp-buffer (svg-print svg) (buffer-string)))
+                 (image (create-image data 'svg t
+                                      :scale 1.0
+                                      :width char-w :height xh
+                                      :ascent 'center)))
+            (when image
+              (puthash key image disco-ui--vbar-image-cache))
+            image)))))
+
+(defun disco-ui--vbar-string (face)
+  "One-column vertical bar string coloured with FACE.
+GUI frames get an SVG image; terminal frames get a plain ▏ character."
+  (let ((image (disco-ui--create-vbar-svg face)))
+    (if image
+        (propertize " " 'display image 'rear-nonsticky '(display))
+      (if face (propertize "▏" 'face face) "▏"))))
+
+;;; ── Buttons & styled lines ──────────────────────────────────────────
+
 (cl-defun disco-ui-insert-action-button (label action
                                                &key face help-echo properties)
   "Insert clickable button LABEL calling ACTION.
@@ -38,12 +93,12 @@ Return inserted span as (START . END)."
     (insert (or text "") "\n")
     (when (or face properties)
       (add-text-properties
-       start
-       (point)
+       start (point)
        (append properties
-               (when face
-                 (list 'face face)))))
+               (when face (list 'face face)))))
     (cons start (point))))
+
+;;; ── Prefix state machinery ─────────────────────────────────────────
 
 (defconst disco-ui--prefix-state-tag 'disco-ui-prefix-state
   "Internal marker used to identify line-prefix state objects.")
@@ -91,6 +146,8 @@ DEFAULT is used when PREFIX yields nil."
        (t nil))
       (or default "")))
 
+;;; ── Card line-prefix helpers ───────────────────────────────────────
+
 (defun disco-ui-combine-faces (&rest faces)
   "Return one face value from FACES, dropping nil entries."
   (let ((values (delq nil faces)))
@@ -105,22 +162,21 @@ DEFAULT is used when PREFIX yields nil."
 (defvar disco-ui-card-indent-prefix-state nil
   "Dynamic line-prefix state used by card renderers in current insertion scope.")
 
-(cl-defun disco-ui-card-line-prefix (&key face (indent disco-ui-card-indent-prefix)
-                                          (marker "▏"))
+(cl-defun disco-ui-card-line-prefix (&key face (indent disco-ui-card-indent-prefix))
   "Return a display-only card prefix string.
 
-FACE is applied to MARKER while INDENT is kept plain. MARKER replaces
-INDENT's last column so card content stays column-aligned with normal lines."
+FACE colours the vertical bar marker; INDENT is kept plain.  In GUI frames
+the marker is an SVG image that fills the full line height so consecutive
+lines produce a seamless vertical bar.  The marker replaces INDENT's last
+column so card content stays column-aligned with normal lines."
   (let* ((base (or indent ""))
-         (mark (if face
-                   (propertize marker 'face face)
-                 marker))
+         (mark (disco-ui--vbar-string face))
          (base-len (length base)))
     (if (> base-len 0)
         (concat (substring base 0 (1- base-len)) mark)
       mark)))
 
-(cl-defun disco-ui-card-prefix-state (&key face (marker "▏") indent)
+(cl-defun disco-ui-card-prefix-state (&key face indent)
   "Return card line-prefix state for current insertion scope.
 
 When `disco-ui-card-indent-prefix-state' is bound to a prefix-state, this
@@ -131,8 +187,10 @@ prefix for subsequent card rows."
          (first-indent (disco-ui-prefix-string line-state t default-indent))
          (rest-indent (disco-ui-prefix-string line-state nil default-indent)))
     (disco-ui-make-prefix-state
-     (disco-ui-card-line-prefix :face face :indent first-indent :marker marker)
-     (disco-ui-card-line-prefix :face face :indent rest-indent :marker marker))))
+     (disco-ui-card-line-prefix :face face :indent first-indent)
+     (disco-ui-card-line-prefix :face face :indent rest-indent))))
+
+;;; ── Line prefix application ────────────────────────────────────────
 
 (defun disco-ui--apply-line-prefix-span (start end line-prefix-str &optional wrap-prefix-str)
   "Apply line/wrap prefix strings to START..END span.
@@ -176,6 +234,8 @@ PREFIX can be a string or a mutable prefix-state created by
                 (setq pos next-pos)))))
       (disco-ui--apply-line-prefix-span
        start end (disco-ui-prefix-string prefix nil "")))))
+
+;;; ── High-level inserters ───────────────────────────────────────────
 
 (cl-defun disco-ui-insert-prefixed-lines (prefix text &key face properties)
   "Insert TEXT as newline-separated lines using display-only PREFIX.
