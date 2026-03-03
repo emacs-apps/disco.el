@@ -1945,19 +1945,20 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
            0)))))
 
 (defun disco-room--line-fill-column ()
-  "Return target fill column for current message line."
-  (let* ((win (or (get-buffer-window (current-buffer) t)
-                  (selected-window)))
-         (window-cols (max 1 (if (window-live-p win)
-                                 (window-body-width win)
-                               (window-body-width))))
-         (fill (and (integerp fill-column)
-                    (> fill-column 0)
-                    fill-column)))
-    (if (and (bound-and-true-p visual-fill-column-mode)
-             fill)
-        (min window-cols fill)
-      window-cols)))
+  "Return target fill column for current message line.
+
+This follows telega-like behavior: prefer configured fill column so time-tail
+alignment stays stable across text scaling."
+  (or (and (integerp disco-room-fill-column)
+           (> disco-room-fill-column 0)
+           disco-room-fill-column)
+      (and (integerp fill-column)
+           (> fill-column 0)
+           fill-column)
+      (let ((win (get-buffer-window (current-buffer) t)))
+        (max 1 (if (window-live-p win)
+                   (window-body-width win)
+                 (window-body-width))))))
 
 (defun disco-room--move-to-column (column)
   "Insert alignment space moving point to COLUMN."
