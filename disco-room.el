@@ -4560,20 +4560,21 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
              (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
         (setq section-prefix-state
               (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
-        (insert header-prefix)
-        (setq author-start (point))
-        (insert author)
-        (add-text-properties author-start (point) (list 'face author-face))
-        (let ((time-span
-               (disco-room--insert-right-aligned-text
-                short-time
-                'disco-room-timestamp)))
-          (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-            (add-text-properties
-             (car time-span)
-             (cdr time-span)
-             (list 'help-echo timestamp))))
-        (insert "\n")
+        (let ((header-start (point)))
+          (setq author-start (point))
+          (insert author)
+          (add-text-properties author-start (point) (list 'face author-face))
+          (let ((time-span
+                 (disco-room--insert-right-aligned-text
+                  short-time
+                  'disco-room-timestamp)))
+            (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+              (add-text-properties
+               (car time-span)
+               (cdr time-span)
+               (list 'help-echo timestamp))))
+          (insert "\n")
+          (disco-ui-apply-line-prefix header-start (point) header-prefix))
         (when reply
           (disco-room--insert-reply-preview-line msg reply section-prefix-state))
         (unless (string-empty-p content)
