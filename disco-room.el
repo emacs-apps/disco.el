@@ -1888,6 +1888,50 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
 
+(defun disco-room--align-char-width ()
+  "Return default character width for current render context."
+  (if (display-graphic-p)
+      (max 1
+           (or (and (fboundp 'string-pixel-width)
+                    (ignore-errors (string-pixel-width (propertize "0" 'face 'default))))
+               (frame-char-width)))
+    1))
+
+(defun disco-room--align-right-offset (columns)
+  "Return `:align-to' right offset value for COLUMNS."
+  (let ((cols (max 0 columns)))
+    (if (display-graphic-p)
+        (list (* cols (disco-room--align-char-width)))
+      cols)))
+
+(defun disco-room--line-overflow-before-right-tail-p (tail-columns prefix-columns)
+  "Return non-nil when adding right tail would overflow current line.
+
+TAIL-COLUMNS is the width reserved for right tail text, including one
+leading separator space.  PREFIX-COLUMNS is visual prefix width that is
+applied later via `line-prefix'."
+  (let* ((win (or (get-buffer-window (current-buffer) t)
+                  (selected-window)))
+         (tail-cols (max 0 tail-columns))
+         (prefix-cols (max 0 prefix-columns)))
+    (if (and (display-graphic-p)
+             (window-live-p win)
+             (fboundp 'window-text-pixel-size))
+        (let* ((char-px (disco-room--align-char-width))
+               (current-px (+ (car (window-text-pixel-size
+                                    win
+                                    (line-beginning-position)
+                                    (point)))
+                              (* prefix-cols char-px)))
+               (tail-px (* tail-cols char-px))
+               (line-px (window-body-width win t)))
+          (> current-px (max 0 (- line-px tail-px))))
+      (let* ((line-cols (if (window-live-p win)
+                            (window-body-width win)
+                          (window-body-width)))
+             (current-cols (+ (current-column) prefix-cols)))
+        (> current-cols (max 0 (- line-cols tail-cols)))))))
+
 (defun disco-room--insert-right-aligned-text (text &optional face left-prefix-width)
   "Insert TEXT aligned to right edge on current line.
 
@@ -1898,8 +1942,19 @@ additional columns at line start (for future `line-prefix' application)."
          (prefix-width (max 0 (or left-prefix-width 0)))
          (align-width (+ time-width prefix-width))
          (start (point)))
+    (when (and disco-room-right-align-timestamps
+               (disco-room--line-overflow-before-right-tail-p
+                time-width
+                prefix-width))
+      (insert "\n")
+      (setq start (point)))
     (if disco-room-right-align-timestamps
-        (insert (propertize " " 'display `(space :align-to (- right ,align-width))))
+        (insert
+         (propertize
+          " "
+          'display `(space :align-to (- right
+                                        ,(disco-room--align-right-offset
+                                          align-width)))))
       (insert " "))
     (insert (if face
                 (propertize raw 'face face)
