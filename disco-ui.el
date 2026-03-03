@@ -135,7 +135,9 @@ prefix for subsequent card rows."
      (disco-ui-card-line-prefix :face face :indent rest-indent :marker marker))))
 
 (defun disco-ui--apply-line-prefix-span (start end prefix-str)
-  "Apply PREFIX-STR to START..END span as line/wrap prefix."
+  "Apply PREFIX-STR to START..END span as line/wrap prefix.
+
+Note: we keep the indent copy-safe by using `line-prefix'/'wrap-prefix'."
   (when (< start end)
     (add-text-properties start end
                          (list 'line-prefix prefix-str

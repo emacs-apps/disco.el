@@ -2584,77 +2584,84 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
       ("webp" "image/webp")
       (_ nil))))
 
+(defun disco-room--avatar-svg-image (svg &rest props)
+  "Return image object for SVG with properties in PROPS.
+
+This mirrors telega's workaround: prepend XML header so some librsvg versions
+render text correctly."
+  (let ((svg-data (with-temp-buffer
+                    (insert "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    (svg-print svg)
+                    (buffer-string))))
+    (apply #'create-image svg-data 'svg t props)))
+
+(defun disco-room--avatar--create-svg (file fallback cheight)
+  "Create telega-style circular avatar SVG image.
+
+FILE is cached avatar image path, FALLBACK is placeholder text.
+CHEIGHT is avatar height in lines (chars), typically 2."
+  (when (and (stringp file)
+             (file-readable-p file)
+             (fboundp 'svg-create)
+             (fboundp 'svg-clip-path)
+             (fboundp 'svg-circle)
+             (fboundp 'svg-embed)
+             (fboundp 'svg-print)
+             (integerp cheight)
+             (> cheight 0))
+    (let* ((factors (disco-room--avatar-factors cheight))
+           (cfactor (or (car factors) 0.8))
+           (mfactor (or (cdr factors) 0.1))
+           (xh (* cheight (disco-room--avatar-line-pixel-height)))
+           (margin (* mfactor xh))
+           (ch (* cfactor xh))
+           (cfull (floor (+ ch margin)))
+           (char-width (max 1 (frame-char-width)))
+           (aw-chars (max 1 (ceiling (/ ch (float char-width)))))
+           (svg-xw (* aw-chars char-width))
+           ;; Telega uses +1 line for cheight==2 as a gaps workaround.
+           (svg-xh (cond ((= cheight 1) cfull)
+                         ((and (= cheight 2) disco-room-avatar-extra-bottom-line)
+                          (+ cfull (disco-room--avatar-line-pixel-height)))
+                         (t xh)))
+           (mime (disco-room--avatar-image-mime-type file))
+           (svg (and mime (svg-create svg-xw svg-xh)))
+           (clip (and svg (svg-clip-path svg :id "clip")))
+           (cx (/ svg-xw 2.0))
+           (cy (/ cfull 2.0))
+           (radius (/ ch 2.0))
+           (x (/ (- svg-xw ch) 2.0))
+           (y (/ margin 2.0)))
+      (when (and svg clip)
+        (svg-circle clip cx cy radius)
+        (svg-embed svg file mime nil
+                   :x x :y y :width ch :height ch
+                   :clip-path "url(#clip)")
+        (let* ((image (disco-room--avatar-svg-image
+                       svg
+                       :scale 1.0
+                       :width (cons aw-chars 'cw)
+                       :ascent 'center
+                       :mask 'heuristic))
+               (ttop (disco-room--avatar-text-fit-width fallback aw-chars))
+               (tpad (make-string aw-chars ?\u00A0))
+               (text (cons ttop (make-list (1- cheight) tpad))))
+          ;; In batch/TTY, `image-size' can error even though the image is fine;
+          ;; keep the object and let display code decide.
+          (when image
+            (let* ((type (car image))
+                   (props (copy-sequence (cdr image))))
+              (setq props (plist-put props :disco-char-width aw-chars))
+              (setq props (plist-put props :disco-slice-height (disco-room--avatar-line-pixel-height)))
+              (setq props (plist-put props :disco-text text))
+              (setq props (plist-put props :disco-nslices cheight))
+              (cons type props))))))))
+
 (defun disco-room--avatar-rounded-image-from-file (file metrics)
   "Return circular avatar image from FILE using METRICS plist, or nil."
-  (let* ((width-px (and (listp metrics) (plist-get metrics :width-px)))
-         (height-px (and (listp metrics) (plist-get metrics :canvas-height)))
-         (draw-size (and (listp metrics) (plist-get metrics :draw-size)))
-         (draw-x (and (listp metrics) (plist-get metrics :draw-x)))
-         (draw-y (and (listp metrics) (plist-get metrics :draw-y)))
-         (radius (and (listp metrics) (plist-get metrics :radius)))
-         (center-x (and (listp metrics) (plist-get metrics :center-x)))
-         (center-y (and (listp metrics) (plist-get metrics :center-y)))
-         (slice-height (and (listp metrics) (plist-get metrics :slice-height)))
-         (width-chars (and (listp metrics) (plist-get metrics :width-chars))))
-    (when (and disco-room-avatar-round-images
-               (fboundp 'svg-create)
-               (fboundp 'svg-clip-path)
-               (fboundp 'svg-circle)
-               (fboundp 'svg-embed)
-               (fboundp 'svg-image)
-               (stringp file)
-               (file-readable-p file)
-               (integerp width-px)
-               (> width-px 0)
-               (integerp height-px)
-               (> height-px 0)
-               (numberp draw-size)
-               (> draw-size 0)
-               (numberp radius)
-               (> radius 0)
-               (numberp center-x)
-               (numberp center-y))
-      (let* ((attrs (file-attributes file))
-             (mtime (and attrs (file-attribute-modification-time attrs)))
-             (cache-key (format "%s:%s:%s:%s:%s:%s:%s"
-                                file
-                                width-px
-                                height-px
-                                draw-size
-                                mtime
-                                disco-room-avatar-round-size-factor
-                                disco-room-avatar-round-inset-ratio))
-             (cached (gethash cache-key disco-room--avatar-round-image-cache)))
-        (or (and (disco-media-image-object-valid-p cached) cached)
-            (let* ((mime (disco-room--avatar-image-mime-type file))
-                   (svg (and mime (svg-create width-px height-px))))
-              (when (and mime svg)
-                (let* ((clip-id (format "avatar-clip-%s"
-                                        (substring (md5 cache-key) 0 8)))
-                       (clip (svg-clip-path svg :id clip-id)))
-                  (svg-circle clip center-x center-y radius)
-                  (svg-embed svg file mime nil
-                             :x draw-x
-                             :y draw-y
-                             :width draw-size
-                             :height draw-size
-                             :clip-path (format "url(#%s)" clip-id))
-                  (let ((image (svg-image svg
-                                          :ascent 'center
-                                          :width width-px
-                                          :height height-px)))
-                    (when (disco-media-image-object-valid-p image)
-                      (let* ((type (car image))
-                             (props (copy-sequence (cdr image))))
-                        (when (and (integerp slice-height) (> slice-height 0))
-                          (setq props (plist-put props :disco-slice-height slice-height)))
-                        (when (and (integerp width-chars) (> width-chars 0))
-                          (setq props (plist-put props :disco-char-width width-chars))
-                          (setq props (plist-put props :width
-                                                  (disco-room--avatar-cw-width width-chars))))
-                        (setq image (cons type props)))
-                      (puthash cache-key image disco-room--avatar-round-image-cache)
-                      image))))))))))
+  ;; Deprecated: kept as thin wrapper while migrating to telega-style SVG.
+  (ignore metrics)
+  (disco-room--avatar--create-svg file "[]" 2))
 
 (defun disco-room--avatar-image-text (image &optional slice-index)
   "Return textual fallback for IMAGE and optional SLICE-INDEX."
@@ -2742,35 +2749,23 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
                                (max 8 (round (* base-size
                                                 (max 0.1 disco-room-avatar-round-size-factor))))
                              base-size))
-               (round-metrics (and disco-room-avatar-round-images
-                                   (disco-room--avatar-round-metrics 2)))
-               ;; Keep a stable width contract like telega: avatar slice-1 text
-               ;; determines the logical indentation width.
-               (target-width-chars
-                (max 1
-                     (or (and (listp round-metrics)
-                              (integerp (plist-get round-metrics :width-chars))
-                              (plist-get round-metrics :width-chars))
-                         (ceiling (/ (float pixel-size)
-                                     (float (max 1 (frame-char-width))))))))
                (cache-key (disco-room--avatar-cache-key msg))
                (cache-file (and cache-key
                                 (disco-room--avatar-cache-existing-file cache-key)))
-               (rounded (and round-metrics
-                             cache-file
-                             (disco-room--avatar-rounded-image-from-file
-                              cache-file
-                              round-metrics)))
-               (base-image (or rounded
+               (svg-avatar (and disco-room-avatar-round-images
+                                cache-file
+                                (disco-room--avatar--create-svg
+                                 cache-file
+                                 fallback
+                                 2)))
+               (base-image (or svg-avatar
                                (disco-room--avatar-image-resized image pixel-size)))
-               (base-image (or (disco-room--avatar-image-lock-char-width
-                                base-image target-width-chars)
-                               base-image))
                (scaled (disco-room--avatar-image-with-text
                         base-image
                         fallback
                         pixel-size
                         t))
+               (target-width-chars (max 1 (disco-room--avatar-image-char-width scaled)))
                (image-indent (1+ target-width-chars))
                (top (if (disco-media-image-object-valid-p scaled)
                         (disco-room--avatar-image-slice-string scaled 0)
@@ -4609,7 +4604,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
              (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
         (setq section-prefix-state
               (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
-        (let ((header-start (point)))
+        (progn
+          (insert header-prefix)
           (setq author-start (point))
           (insert author)
           (add-text-properties author-start (point) (list 'face author-face))
@@ -4622,8 +4618,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                (car time-span)
                (cdr time-span)
                (list 'help-echo timestamp))))
-          (insert "\n")
-          (disco-ui-apply-line-prefix header-start (point) header-prefix))
+          (insert "\n"))
         (when reply
           (disco-room--insert-reply-preview-line msg reply section-prefix-state))
         (unless (string-empty-p content)
