@@ -3728,23 +3728,24 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
             (let ((line-start (point))
                   (url (or (alist-get 'url attachment)
                            (alist-get 'proxy_url attachment))))
-              (insert (disco-room--line-prefix-string prefix t))
               (insert (disco-room--attachment-summary attachment))
               (insert "\n")
+              (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
               (add-text-properties line-start (point) '(face disco-room-message-meta))
               (when (and disco-room-show-attachment-urls
                          (stringp url)
                          (not (string-empty-p url)))
                 (let ((url-start (point)))
-                  (insert (disco-room--line-prefix-string prefix nil) "  " url "\n")
+                  (insert "  " url "\n")
+                  (disco-ui-apply-line-prefix url-start (point) (or prefix "    "))
                   (add-text-properties url-start (point) '(face shadow))))))
         (error
          (let ((line-start (point)))
-           (insert (disco-room--line-prefix-string prefix t)
-                   "[file] "
+           (insert "[file] "
                    (or (alist-get 'filename attachment)
                        (format "%s" (or (alist-get 'id attachment) "unknown")))
                    " [render fallback]\n")
+           (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
            (add-text-properties line-start (point) '(face shadow))))))))
 
 (defun disco-room--insert-message-embeds (msg)
@@ -4240,7 +4241,6 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
           (line-start (point))
           (first t))
       (when reactions
-        (insert (disco-room--line-prefix-string prefix t))
         (dolist (reaction reactions)
           (unless first
             (insert " "))
@@ -4253,6 +4253,7 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
                                           'disco-room-reaction-selected
                                         'disco-room-reaction)))))
         (insert "\n")
+        (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
         (add-text-properties line-start (point) '(face disco-room-message-meta))))))
 
 (defun disco-room--parse-reaction-input (emoji)
@@ -4448,11 +4449,12 @@ PREFIX defaults to four spaces for room body alignment."
   (let ((line-start (point))
         (ref-id (disco-room--reply-reference-id msg))
         (ref-channel (disco-room--message-reference-channel-id msg)))
-    (insert (disco-room--line-prefix-string prefix t) "↪ " reply)
+    (insert "↪ " reply)
     (when (and (stringp ref-id) (not (string-empty-p ref-id)))
       (insert " ")
       (disco-room--insert-reference-jump-button ref-id ref-channel "[Jump]"))
     (insert "\n")
+    (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
     (add-text-properties line-start (point) '(face shadow))))
 
 (defun disco-room--insert-forward-reference-line (msg &optional prefix)
@@ -4464,10 +4466,11 @@ When PREFIX is non-nil, use it for line indentation."
           (ref-channel (disco-room--message-reference-channel-id msg)))
       (when (and (stringp ref-id) (not (string-empty-p ref-id)))
         (let ((line-start (point)))
-          (insert (disco-room--line-prefix-string prefix t) "↪ ")
+          (insert "↪ ")
           (disco-room--insert-reference-jump-button
            ref-id ref-channel "[Jump to source]")
           (insert "\n")
+          (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
           (add-text-properties line-start (point) '(face shadow)))))))
 
 (defun disco-room--insert-forward-card (msg)
@@ -4552,58 +4555,42 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                 (disco-ui-make-prefix-state compact-prefix compact-prefix))
           (when reply
             (disco-room--insert-reply-preview-line msg reply section-prefix-state))
-          (if (string-empty-p content)
-              (let ((time-span nil))
-                (insert (disco-room--line-prefix-string section-prefix-state t))
-                (setq time-span
-                      (disco-room--insert-right-aligned-text
-                       short-time
-                       'disco-room-timestamp))
-                (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-                  (add-text-properties
-                   (car time-span)
-                   (cdr time-span)
-                   (list 'help-echo timestamp)))
-                (insert "\n"))
-            (let* ((first-prefix (disco-room--line-prefix-string section-prefix-state t))
-                   (rest-prefix (disco-room--line-prefix-string section-prefix-state nil))
-                   (compact-content
-                    (replace-regexp-in-string
-                     "\n"
-                     (concat "\n" rest-prefix)
-                     content))
-                   (time-span nil))
-              (insert first-prefix compact-content)
-              (setq time-span
-                    (disco-room--insert-right-aligned-text
-                     short-time
-                     'disco-room-timestamp))
-              (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-                (add-text-properties
-                 (car time-span)
-                 (cdr time-span)
-                 (list 'help-echo timestamp)))
-              (insert "\n"))))
+          (let ((content-start (point))
+                (time-span nil))
+            (unless (string-empty-p content)
+              (insert content))
+            (setq time-span
+                  (disco-room--insert-right-aligned-text
+                   short-time
+                   'disco-room-timestamp))
+            (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+              (add-text-properties
+               (car time-span)
+               (cdr time-span)
+               (list 'help-echo timestamp)))
+            (insert "\n")
+            (disco-ui-apply-line-prefix content-start (point) section-prefix-state)))
       (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
              (header-prefix (or (plist-get avatar-prefixes :header) ""))
              (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
              (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
         (setq section-prefix-state
               (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
-        (insert header-prefix)
-        (setq author-start (point))
-        (insert author)
-        (add-text-properties author-start (point) (list 'face author-face))
-        (let ((time-span
-               (disco-room--insert-right-aligned-text
-                short-time
-                'disco-room-timestamp)))
-          (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-            (add-text-properties
-             (car time-span)
-             (cdr time-span)
-             (list 'help-echo timestamp))))
-        (insert "\n")
+        (let ((header-start (point)))
+          (setq author-start (point))
+          (insert author)
+          (add-text-properties author-start (point) (list 'face author-face))
+          (let ((time-span
+                 (disco-room--insert-right-aligned-text
+                  short-time
+                  'disco-room-timestamp)))
+            (when (and (stringp timestamp) (not (string-empty-p timestamp)))
+              (add-text-properties
+               (car time-span)
+               (cdr time-span)
+               (list 'help-echo timestamp))))
+          (insert "\n")
+          (disco-ui-apply-line-prefix header-start (point) header-prefix))
         (when reply
           (disco-room--insert-reply-preview-line msg reply section-prefix-state))
         (unless (string-empty-p content)
@@ -4620,19 +4607,21 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                (target-thread-name (or (and (listp thread) (alist-get 'name thread))
                                        (and (stringp message-id)
                                             (format "thread:%s" message-id)))))
-          (insert (disco-room--line-prefix-string section-prefix-state t))
-          (if target-thread-id
-              (disco-ui-insert-action-button
-               "[Open thread]"
-               (lambda ()
-                 (disco-room-open
-                  target-thread-id
-                  (or target-thread-name target-thread-id)))
-               :face 'disco-room-message-meta
-               :help-echo "Open starter thread for this message")
-            (insert (propertize "[Thread id unavailable]"
-                                'face 'shadow)))
-          (insert "\n")))
+          (let ((thread-start (point)))
+            (if target-thread-id
+                (disco-ui-insert-action-button
+                 "[Open thread]"
+                 (lambda ()
+                   (disco-room-open
+                    target-thread-id
+                    (or target-thread-name target-thread-id)))
+                 :face 'disco-room-message-meta
+                 :help-echo "Open starter thread for this message")
+              (insert (propertize "[Thread id unavailable]"
+                                  'face 'shadow)))
+            (insert "\n")
+            (disco-ui-apply-line-prefix
+             thread-start (point) section-prefix-state))))
       (disco-room--insert-message-attachments msg section-prefix-state)
       (disco-room--insert-message-embeds msg)
       (disco-room--insert-message-poll msg))
