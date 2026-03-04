@@ -46,27 +46,111 @@
   (should (= 4 (disco-state-channel-unread-count "chan")))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
 
-(ert-deftest disco-state-apply-message-create-increments-unread-for-others ()
+(ert-deftest disco-state-apply-message-create-increments-unread-private-unmuted ()
   (disco-state-reset)
-  (disco-state-upsert-channel '((id . "chan") (type . 0)))
-  (disco-state-set-channel-unread "chan" 2)
-  (disco-state-apply-message-create "chan" "100" nil nil)
-  (should (= 3 (disco-state-channel-unread-count "chan")))
-  (should (null (disco-state-channel-last-read-message-id "chan"))))
+  (disco-state-upsert-channel '((id . "dm") (type . 1) (muted . :false)))
+  (disco-state-set-channel-unread "dm" 2)
+  (disco-state-apply-message-create
+   "dm"
+   '((id . "100")
+     (type . 0)
+     (author . ((id . "u2")))
+     (mentions . [])
+     (mention_roles . [])
+     (mention_everyone . :false))
+   "u1"
+   nil)
+  (should (= 3 (disco-state-channel-unread-count "dm")))
+  (should (null (disco-state-channel-last-read-message-id "dm"))))
 
-(ert-deftest disco-state-apply-message-create-acks-own-message ()
+(ert-deftest disco-state-apply-message-create-increments-unread-guild-mention ()
   (disco-state-reset)
-  (disco-state-upsert-channel '((id . "chan") (type . 0)))
-  (disco-state-set-channel-unread "chan" 5)
-  (disco-state-apply-message-create "chan" "101" nil t)
-  (should (= 0 (disco-state-channel-unread-count "chan")))
-  (should (equal "101" (disco-state-channel-last-read-message-id "chan"))))
+  (disco-state-upsert-channel '((id . "guild") (guild_id . "g") (type . 0)))
+  (disco-state-apply-message-create
+   "guild"
+   '((id . "101")
+     (type . 0)
+     (author . ((id . "u2")))
+     (mentions . [((id . "u1"))])
+     (mention_roles . [])
+     (mention_everyone . :false)
+     (member . ((roles . []))))
+   "u1"
+   nil)
+  (should (= 1 (disco-state-channel-unread-count "guild"))))
+
+(ert-deftest disco-state-apply-message-create-private-muted-requires-mention ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "dm") (type . 1) (muted . t)))
+  (disco-state-apply-message-create
+   "dm"
+   '((id . "201")
+     (type . 0)
+     (author . ((id . "u2")))
+     (mentions . [])
+     (mention_roles . [])
+     (mention_everyone . :false))
+   "u1"
+   nil)
+  (should (= 0 (disco-state-channel-unread-count "dm")))
+
+  (disco-state-apply-message-create
+   "dm"
+   '((id . "202")
+     (type . 0)
+     (author . ((id . "u2")))
+     (mentions . [((id . "u1"))])
+     (mention_roles . [])
+     (mention_everyone . :false))
+   "u1"
+   nil)
+  (should (= 1 (disco-state-channel-unread-count "dm"))))
+
+(ert-deftest disco-state-apply-message-create-acks-own-message-except-poll-result ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "dm") (type . 1) (muted . :false)))
+  (disco-state-set-channel-unread "dm" 5)
+  (disco-state-apply-message-create
+   "dm"
+   '((id . "102")
+     (type . 0)
+     (author . ((id . "u1")))
+     (mentions . [])
+     (mention_roles . [])
+     (mention_everyone . :false))
+   "u1"
+   nil)
+  (should (= 0 (disco-state-channel-unread-count "dm")))
+  (should (equal "102" (disco-state-channel-last-read-message-id "dm")))
+
+  (disco-state-set-channel-unread "dm" 4)
+  (disco-state-apply-message-create
+   "dm"
+   '((id . "103")
+     (type . 46)
+     (author . ((id . "u1")))
+     (mentions . [])
+     (mention_roles . [])
+     (mention_everyone . :false))
+   "u1"
+   nil)
+  (should (= 4 (disco-state-channel-unread-count "dm")))
+  (should (equal "102" (disco-state-channel-last-read-message-id "dm"))))
 
 (ert-deftest disco-state-apply-message-create-ignores-watched-channels ()
   (disco-state-reset)
-  (disco-state-upsert-channel '((id . "chan") (type . 0)))
+  (disco-state-upsert-channel '((id . "chan") (type . 1) (muted . :false)))
   (disco-state-set-channel-unread "chan" 4)
-  (disco-state-apply-message-create "chan" "102" t nil)
+  (disco-state-apply-message-create
+   "chan"
+   '((id . "104")
+     (type . 0)
+     (author . ((id . "u2")))
+     (mentions . [])
+     (mention_roles . [])
+     (mention_everyone . :false))
+   "u1"
+   t)
   (should (= 4 (disco-state-channel-unread-count "chan")))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
 
