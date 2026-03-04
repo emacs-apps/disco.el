@@ -149,6 +149,11 @@
     (should (eq 'full (disco-root-layout-update-mode 'activity)))
     (should (equal "Custom Demo" (disco-root-layout-label 'custom-demo)))))
 
+(ert-deftest disco-root-mode-disables-undo-history ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (should (eq buffer-undo-list t))))
+
 (ert-deftest disco-root-toggle-section-at-point-activity-falls-forward ()
   (with-temp-buffer
     (disco-root-mode)
@@ -192,7 +197,7 @@
     (disco-root-mode)
     (let ((disco-root--fill-column 80)
           rendered)
-      (cl-letf (((symbol-function 'disco-root--render-preserving-position)
+      (cl-letf (((symbol-function 'disco-root--reflow-preserving-position)
                  (lambda ()
                    (setq rendered t))))
         (should (disco-root--auto-fill-to-width 100))
@@ -204,11 +209,32 @@
     (disco-root-mode)
     (let ((disco-root--fill-column 80)
           rendered)
-      (cl-letf (((symbol-function 'disco-root--render-preserving-position)
+      (cl-letf (((symbol-function 'disco-root--reflow-preserving-position)
                  (lambda ()
                    (setq rendered t))))
         (should-not (disco-root--auto-fill-to-width 80))
         (should-not rendered)))))
+
+(ert-deftest disco-root-reflow-layout-refreshes-existing-ewoc ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--ewoc 'dummy-ewoc)
+          divider-refreshed
+          ewoc-refreshed
+          full-rendered)
+      (cl-letf (((symbol-function 'disco-root--refresh-mode-divider-line)
+                 (lambda ()
+                   (setq divider-refreshed t)))
+                ((symbol-function 'ewoc-refresh)
+                 (lambda (_ewoc)
+                   (setq ewoc-refreshed t)))
+                ((symbol-function 'disco-root-render)
+                 (lambda ()
+                   (setq full-rendered t))))
+        (disco-root--reflow-layout)
+        (should divider-refreshed)
+        (should ewoc-refreshed)
+        (should-not full-rendered)))))
 
 (ert-deftest disco-root-compute-fill-column-uses-remap-margins-and-line-number-width ()
   (with-temp-buffer

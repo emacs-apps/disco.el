@@ -162,13 +162,13 @@ Same semantics as `telega-chat-button-width':
     (date-time . "%d.%m.%y %a %H:%M"))
   "Activity timestamp formats, inspired by `telega-date-format-alist'."
   :type '(alist :key-type
-                (choice (const :tag "If date is today" today)
-                        (const :tag "If date is this week" this-week)
-                        (const :tag "If date is older" old)
-                        (const :tag "Time only" time)
-                        (const :tag "Date only" date)
-                        (const :tag "Date and time" date-time))
-                :value-type string)
+          (choice (const :tag "If date is today" today)
+                  (const :tag "If date is this week" this-week)
+                  (const :tag "If date is older" old)
+                  (const :tag "Time only" time)
+                  (const :tag "Date only" date)
+                  (const :tag "Date and time" date-time))
+          :value-type string)
   :group 'disco)
 
 (defcustom disco-root-week-start-day 1
@@ -186,7 +186,7 @@ Same semantics as `telega-chat-button-width':
 (defcustom disco-root-auto-fill-margin-columns 1
   "Additional margin columns reserved when computing root fill width."
   :type '(choice (const :tag "No extra margin" nil)
-                 integer)
+          integer)
   :group 'disco)
 
 (defcustom disco-root-live-update-debounce 0.06
@@ -347,6 +347,31 @@ between current view mode and unread-only filter."
    #'disco-root-render
    :preserve-window-start t))
 
+(defun disco-root--refresh-mode-divider-line ()
+  "Refresh only the mode-divider header line used for width framing."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (forward-line 2)
+      (delete-region (line-beginning-position) (line-end-position))
+      (insert (disco-root--mode-divider-line)))))
+
+(defun disco-root--reflow-layout ()
+  "Reflow currently rendered root layout without rebuilding model lists."
+  (let ((inhibit-read-only t))
+    (if (and (eq major-mode 'disco-root-mode)
+             disco-root--ewoc)
+        (progn
+          (disco-root--refresh-mode-divider-line)
+          (ewoc-refresh disco-root--ewoc))
+      (disco-root-render))))
+
+(defun disco-root--reflow-preserving-position ()
+  "Reflow root layout and keep point near previous line/column."
+  (disco-view-render-preserving-position
+   #'disco-root--reflow-layout
+   :preserve-window-start t))
+
 (defun disco-root--display-window (&optional buffer)
   "Return preferred live window displaying BUFFER."
   (let* ((buf (or buffer (current-buffer)))
@@ -359,7 +384,7 @@ between current view mode and unread-only filter."
       (get-buffer-window buf t)))))
 
 (defun disco-root--window-width-remap (window)
-  "Return WINDOW width in columns, respecting face remapping when possible." 
+  "Return WINDOW width in columns, respecting face remapping when possible."
   (if (not (window-live-p window))
       (window-width)
     (condition-case _err
@@ -370,7 +395,7 @@ between current view mode and unread-only filter."
        (window-width window)))))
 
 (defun disco-root--chars-xwidth (columns &optional buffer window)
-  "Return pixel width for COLUMNS in BUFFER/WINDOW metrics." 
+  "Return pixel width for COLUMNS in BUFFER/WINDOW metrics."
   (let* ((win (or window (disco-root--display-window buffer)))
          (char-width (or (and (window-live-p win)
                               (fboundp 'window-font-width)
@@ -380,7 +405,7 @@ between current view mode and unread-only filter."
     (* (max 0 columns) (max 1 char-width))))
 
 (defun disco-root--chars-in-width (pixels &optional buffer window)
-  "Return character columns required to cover PIXELS in BUFFER/WINDOW." 
+  "Return character columns required to cover PIXELS in BUFFER/WINDOW."
   (max 0
        (ceiling (/ (max 0 pixels)
                    (float (max 1 (disco-root--chars-xwidth 1 buffer window)))))))
@@ -388,7 +413,7 @@ between current view mode and unread-only filter."
 (defun disco-root--compute-fill-column (&optional buffer window)
   "Return effective render width for BUFFER.
 
-When WINDOW is non-nil, compute using WINDOW directly." 
+When WINDOW is non-nil, compute using WINDOW directly."
   (let* ((buf (or buffer (current-buffer)))
          (win (or window (disco-root--display-window buf))))
     (max 20
@@ -410,15 +435,15 @@ When WINDOW is non-nil, compute using WINDOW directly."
              adjusted-width)))))
 
 (defun disco-root--auto-fill-to-width (width &optional force)
-  "Rerender root buffer using WIDTH when it changed.
+  "Reflow root buffer using WIDTH when it changed.
 
-When FORCE is non-nil, rerender even if WIDTH matches current value."
+When FORCE is non-nil, reflow even if WIDTH matches current value."
   (when (and (integerp width)
              (> width 0)
              (or force
                  (not (eq width disco-root--fill-column))))
     (setq disco-root--fill-column width)
-    (disco-root--render-preserving-position)
+    (disco-root--reflow-preserving-position)
     t))
 
 (defun disco-root-buffer-auto-fill (&optional force)
