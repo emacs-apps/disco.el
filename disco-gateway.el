@@ -658,13 +658,14 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   "Handle MESSAGE_CREATE dispatch PAYLOAD."
   (let ((channel-id (alist-get 'channel_id payload)))
     (when channel-id
-      (let ((watched (disco-gateway--channel-watched-p channel-id)))
+      (let* ((watched (disco-gateway--channel-watched-p channel-id))
+             (message-id (alist-get 'id payload))
+             (author-id (alist-get 'id (alist-get 'author payload)))
+             (own-message (and disco-gateway--current-user-id
+                               (equal author-id disco-gateway--current-user-id))))
         (when watched
           (disco-gateway--upsert-message channel-id payload))
-        ;; Conservative unread model: only count messages for non-watched channels.
-        (when (and (not watched)
-                   (disco-state-channel channel-id))
-          (disco-state-increment-channel-unread channel-id 1))
+        (disco-state-apply-message-create channel-id message-id watched own-message)
         (disco-gateway--emit
          (list :type 'message-create
                :channel-id channel-id

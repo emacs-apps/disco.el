@@ -509,6 +509,17 @@ preserve current unread count per Discord read-state docs."
     (when (numberp mention-count)
       (disco-state-set-channel-unread channel-id mention-count))))
 
+(defun disco-state-apply-message-create (channel-id message-id watched own-message)
+  "Apply MESSAGE_CREATE read-state effects for CHANNEL-ID.
+
+WATCHED means a room buffer currently tracks this channel.
+OWN-MESSAGE means the message author is current user."
+  (when (and (not watched)
+             (disco-state-channel channel-id))
+    (if own-message
+        (disco-state-apply-message-ack channel-id message-id 0)
+      (disco-state-increment-channel-unread channel-id 1))))
+
 (defun disco-state-apply-ready-read-state-entry (entry)
   "Apply one Ready/read-state ENTRY to local channel read-state.
 
