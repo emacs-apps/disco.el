@@ -149,6 +149,17 @@
     (should (eq 'full (disco-root-layout-update-mode 'activity)))
     (should (equal "Custom Demo" (disco-root-layout-label 'custom-demo)))))
 
+(ert-deftest disco-root-toggle-section-at-point-activity-falls-forward ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--layout 'activity)
+          moved)
+      (cl-letf (((symbol-function 'disco-root-button-forward)
+                 (lambda (&optional _n)
+                   (setq moved t))))
+        (disco-root-toggle-section-at-point)
+        (should moved)))))
+
 (provide 'disco-root-test)
 
 ;;; disco-root-test.el ends here

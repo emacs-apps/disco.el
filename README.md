@@ -48,7 +48,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
 - Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus layout cycle (`l`), explicit layout selection (`L`), sort toggle (`\`), view cycle (`v`: all/unread/dms), and unread-lens toggle (`U`).
-- Root now supports multiple layouts: telega-style activity list (non-collapsible, two-line rows with context/status trail) and collapsible tree browse, with user-defined custom layouts via layout specs.
+- Root now supports multiple layouts: telega-style activity list (non-collapsible, one-line rows with unread/time/status trails and cached message preview) and collapsible tree browse, with user-defined custom layouts via layout specs.
 - Root rendering uses EWOC plus debounced live-update aggregation; tree layout applies incremental channel+heading patching while full-update layouts (for example activity) reconcile in one pass to keep ordering stable.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
