@@ -612,6 +612,70 @@ POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing."
       (push `(allowed_mentions . ,normalized-allowed-mentions) payload))
     (nreverse payload)))
 
+(defun disco-api--normalize-non-negative-integer (value field-name)
+  "Normalize VALUE into a non-negative integer for FIELD-NAME.
+
+Return nil when VALUE is nil."
+  (cond
+   ((null value)
+    nil)
+   ((and (integerp value) (>= value 0))
+    value)
+   ((and (stringp value)
+         (string-match-p "\\`[0-9]+\\'" value))
+    (string-to-number value))
+   (t
+    (user-error "disco: %s must be a non-negative integer" field-name))))
+
+(defun disco-api--message-edit-payload (content &optional allowed-mentions)
+  "Build payload for message edit endpoints.
+
+ALLOWED-MENTIONS is normalized using `disco-api--normalize-allowed-mentions'."
+  (let ((payload `((content . ,content))))
+    (when allowed-mentions
+      (let ((normalized (disco-api--normalize-allowed-mentions allowed-mentions)))
+        (when normalized
+          (setq payload (append payload `((allowed_mentions . ,normalized)))))))
+    payload))
+
+(defconst disco-api--ack-message-field-order
+  '(token manual mention_count flags last_viewed)
+  "Canonical output order for message ACK payload fields.")
+
+(defun disco-api--ack-message-payload (token manual mention-count flags last-viewed)
+  "Build payload for message read-state ACK endpoint.
+
+`mention_count' implies `manual=true' following Discord read-state docs.
+When all fields are omitted, return `:empty-object'."
+  (let* ((manual-value (or (disco-api--json-true-p manual)
+                           (not (null mention-count))))
+         (normalized-token
+          (cond
+           ((null token) nil)
+           ((or (stringp token)
+                (eq token :null))
+            token)
+           (t
+            (user-error "disco: token must be a string, :null, or nil"))))
+         (normalized-mention-count
+          (disco-api--normalize-non-negative-integer mention-count "mention_count"))
+         (normalized-flags
+          (disco-api--normalize-non-negative-integer flags "flags"))
+         (normalized-last-viewed
+          (disco-api--normalize-non-negative-integer last-viewed "last_viewed"))
+         (field-values `((token . ,normalized-token)
+                         (manual . ,(and manual-value t))
+                         (mention_count . ,normalized-mention-count)
+                         (flags . ,normalized-flags)
+                         (last_viewed . ,normalized-last-viewed)))
+         payload)
+    (dolist (field disco-api--ack-message-field-order)
+      (let ((value (cdr (assq field field-values))))
+        (when (not (null value))
+          (push (cons field value) payload))))
+    (setq payload (nreverse payload))
+    (if payload payload :empty-object)))
+
 (defun disco-api--normalize-reaction-emoji (emoji)
   "Normalize user-provided EMOJI string for Discord reaction endpoints."
   (let* ((raw (or emoji ""))

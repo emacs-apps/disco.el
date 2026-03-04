@@ -809,49 +809,23 @@ MENTION-COUNT implies MANUAL mode and is forwarded as mention_count.
 FLAGS and LAST-VIEWED are forwarded when non-nil.
 
 Response may include a refreshed ack token."
-  (let* ((manual-value (or manual (not (null mention-count))))
-         payload)
-    (when token
-      (push `(token . ,token) payload))
-    (when manual-value
-      (push '(manual . t) payload))
-    (when mention-count
-      (push `(mention_count . ,mention-count) payload))
-    (when flags
-      (push `(flags . ,flags) payload))
-    (when last-viewed
-      (push `(last_viewed . ,last-viewed) payload))
-    (disco-api--request
-     "POST"
-     (format "/channels/%s/messages/%s/ack" channel-id message-id)
-     (let ((body (nreverse payload)))
-       (if body body :empty-object))
-     nil
-     nil)))
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/messages/%s/ack" channel-id message-id)
+   (disco-api--ack-message-payload token manual mention-count flags last-viewed)
+   nil
+   nil))
 
 (cl-defun disco-api-ack-message-async (channel-id message-id
                                                   &key token manual mention-count
                                                   flags last-viewed on-success on-error)
   "Acknowledge MESSAGE-ID in CHANNEL-ID asynchronously."
-  (let* ((manual-value (or manual (not (null mention-count))))
-         payload)
-    (when token
-      (push `(token . ,token) payload))
-    (when manual-value
-      (push '(manual . t) payload))
-    (when mention-count
-      (push `(mention_count . ,mention-count) payload))
-    (when flags
-      (push `(flags . ,flags) payload))
-    (when last-viewed
-      (push `(last_viewed . ,last-viewed) payload))
-    (disco-api--request-async
-     "POST"
-     (format "/channels/%s/messages/%s/ack" channel-id message-id)
-     :payload (let ((body (nreverse payload)))
-                (if body body :empty-object))
-     :on-success on-success
-     :on-error on-error)))
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/messages/%s/ack" channel-id message-id)
+   :payload (disco-api--ack-message-payload token manual mention-count flags last-viewed)
+   :on-success on-success
+   :on-error on-error))
 
 
 (cl-defun disco-api-create-message (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll)
@@ -1110,31 +1084,21 @@ ALLOWED-MENTIONS controls mention parsing for optional CONTENT."
   "Edit MESSAGE-ID in CHANNEL-ID with new CONTENT.
 
 When ALLOWED-MENTIONS is non-nil, include it in the edit payload."
-  (let ((payload `((content . ,content))))
-    (when allowed-mentions
-      (let ((normalized (disco-api--normalize-allowed-mentions allowed-mentions)))
-        (when normalized
-          (setq payload (append payload `((allowed_mentions . ,normalized)))))))
-    (disco-api--request
-     "PATCH"
-     (format "/channels/%s/messages/%s" channel-id message-id)
-     payload
-     nil
-     nil)))
+  (disco-api--request
+   "PATCH"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   (disco-api--message-edit-payload content allowed-mentions)
+   nil
+   nil))
 
 (cl-defun disco-api-edit-message-async (channel-id message-id content &key allowed-mentions on-success on-error)
   "Edit MESSAGE-ID in CHANNEL-ID asynchronously with new CONTENT."
-  (let ((payload `((content . ,content))))
-    (when allowed-mentions
-      (let ((normalized (disco-api--normalize-allowed-mentions allowed-mentions)))
-        (when normalized
-          (setq payload (append payload `((allowed_mentions . ,normalized)))))))
-    (disco-api--request-async
-     "PATCH"
-     (format "/channels/%s/messages/%s" channel-id message-id)
-     :payload payload
-     :on-success on-success
-     :on-error on-error)))
+  (disco-api--request-async
+   "PATCH"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   :payload (disco-api--message-edit-payload content allowed-mentions)
+   :on-success on-success
+   :on-error on-error))
 
 (defun disco-api-delete-message (channel-id message-id)
   "Delete MESSAGE-ID from CHANNEL-ID."

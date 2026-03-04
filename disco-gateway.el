@@ -727,9 +727,9 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     (when channel-id
       (when message-id
         (disco-state-set-channel-last-read-message-id channel-id message-id))
-      (if (numberp mention-count)
-          (disco-state-set-channel-unread channel-id mention-count)
-        (disco-state-clear-channel-unread channel-id))
+      ;; Discord omits mention_count to mean "retain current value".
+      (when (numberp mention-count)
+        (disco-state-set-channel-unread channel-id mention-count))
       (disco-gateway--emit
        (list :type 'message-ack
              :channel-id channel-id
