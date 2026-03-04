@@ -79,6 +79,36 @@
                         (author (id . "u2"))))
                      upsert-called)))))
 
+(ert-deftest disco-gateway-dispatch-message-ack-applies-full-read-state-fields ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-message-ack)
+               (lambda (channel-id message-id mention-count flags last-viewed version)
+                 (setq captured (list channel-id
+                                      message-id
+                                      mention-count
+                                      flags
+                                      last-viewed
+                                      version))))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-message-ack
+       '((channel_id . "c2")
+         (message_id . "m9")
+         (mention_count . 3)
+         (flags . 1)
+         (last_viewed . 77)
+         (version . 4)))
+      (should (equal '("c2" "m9" 3 1 77 4) captured))
+      (should (equal '(:type message-ack
+                       :channel-id "c2"
+                       :message-id "m9"
+                       :mention-count 3
+                       :flags 1
+                       :last-viewed 77
+                       :version 4)
+                     emitted)))))
+
 (ert-deftest disco-gateway-dispatch-channel-unread-update-applies-state-and-emits ()
   (let (captured-updates emitted)
     (cl-letf (((symbol-function 'disco-state-apply-channel-unread-updates)
@@ -149,8 +179,8 @@
 (ert-deftest disco-gateway-dispatch-channel-pins-ack-applies-state-and-emits ()
   (let (captured emitted)
     (cl-letf (((symbol-function 'disco-state-apply-channel-pins-ack)
-               (lambda (channel-id timestamp)
-                 (setq captured (list channel-id timestamp))
+               (lambda (channel-id timestamp version)
+                 (setq captured (list channel-id timestamp version))
                  t))
               ((symbol-function 'disco-gateway--emit)
                (lambda (event)
@@ -159,12 +189,75 @@
        '((channel_id . "c0")
          (timestamp . "2026-03-04T01:00:00.000000+00:00")
          (version . 2)))
-      (should (equal '("c0" "2026-03-04T01:00:00.000000+00:00")
+      (should (equal '("c0" "2026-03-04T01:00:00.000000+00:00" 2)
                      captured))
       (should (equal '(:type channel-pins-ack
                        :channel-id "c0"
                        :last-pin-timestamp "2026-03-04T01:00:00.000000+00:00"
                        :version 2)
+                     emitted)))))
+
+(ert-deftest disco-gateway-dispatch-guild-feature-ack-applies-state-and-emits ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-feature-ack)
+               (lambda (read-state-type resource-id entity-id version)
+                 (setq captured (list read-state-type resource-id entity-id version))
+                 t))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-guild-feature-ack
+       '((ack_type . 1)
+         (resource_id . "guild1")
+         (entity_id . "event9")
+         (version . 7)))
+      (should (equal '(1 "guild1" "event9" 7) captured))
+      (should (equal '(:type guild-feature-ack
+                       :read-state-type 1
+                       :resource-id "guild1"
+                       :entity-id "event9"
+                       :version 7)
+                     emitted)))))
+
+(ert-deftest disco-gateway-dispatch-user-non-channel-ack-applies-state-and-emits ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-feature-ack)
+               (lambda (read-state-type resource-id entity-id version)
+                 (setq captured (list read-state-type resource-id entity-id version))
+                 t))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-user-non-channel-ack
+       '((ack_type . 5)
+         (resource_id . "user1")
+         (entity_id . "mr4")
+         (version . 2)))
+      (should (equal '(5 "user1" "mr4" 2) captured))
+      (should (equal '(:type user-non-channel-ack
+                       :read-state-type 5
+                       :resource-id "user1"
+                       :entity-id "mr4"
+                       :version 2)
+                     emitted)))))
+
+(ert-deftest disco-gateway-dispatch-notification-center-items-ack-applies-state-and-emits ()
+  (let (captured emitted)
+    (setq disco-gateway--current-user-id "user9")
+    (cl-letf (((symbol-function 'disco-state-apply-feature-ack)
+               (lambda (read-state-type resource-id entity-id &optional version)
+                 (setq captured (list read-state-type resource-id entity-id version))
+                 t))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-notification-center-items-ack
+       '((id . "notif8")))
+      (should (equal '(2 "user9" "notif8" nil) captured))
+      (should (equal '(:type notification-center-items-ack
+                       :read-state-type 2
+                       :resource-id "user9"
+                       :entity-id "notif8")
                      emitted)))))
 
 (ert-deftest disco-gateway-dispatch-passive-update-v1-applies-state-and-emits ()

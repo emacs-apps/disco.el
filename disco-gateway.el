@@ -39,6 +39,8 @@ Event schema:
   `channel-pins-update' `channel-pins-ack'
   `passive-update-v1' `passive-update-v2'
   `guild-create' `guild-update' `guild-delete' `guild-sync'
+  `guild-feature-ack' `user-non-channel-ack'
+  `notification-center-items-ack'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
   `thread-member-update' `thread-members-update' `typing-start'
 - :channel-id string for message/channel/thread/typing events
@@ -48,6 +50,8 @@ Event schema:
 - :message message object for create/update
 - :message-id string for message delete
 - :mention-count integer for message ack when present
+- :flags integer for message ack when present
+- :last-viewed integer for message ack when present
 - :timestamp integer for typing-start when present
 - :member guild member object for typing-start in guild channels
 - :emoji reaction emoji object/string for reaction events when present
@@ -60,7 +64,10 @@ Event schema:
 - :channel-unread object for channel-update-partial
 - :channel-unread-updates list for channel-unread-update
 - :last-pin-timestamp string for channel-pins-update/channel-pins-ack
-- :version integer for channel-pins-ack when present
+- :version integer for channel-pins-ack and feature ACK events when present
+- :read-state-type integer for guild/user feature ACK events
+- :resource-id string for guild/user feature ACK events
+- :entity-id string for guild/user feature ACK events and notification-center ack
 - :channels list for passive-update-v1
 - :updated-channels list for passive-update-v2
 - :threads list for thread-list-sync
@@ -512,10 +519,7 @@ Discord Ready may deliver some fields as versioned structures
    (t '())))
 
 (defun disco-gateway--ingest-ready-read-states (read-state)
-  "Ingest Ready READ-STATE payload into local channel read state.
-
-Ready may contain mixed read-state types. Local state currently tracks only
-CHANNEL read states."
+  "Ingest Ready READ-STATE payload into local read-state store."
   (dolist (entry (disco-gateway--versioned-entries read-state))
     (disco-state-apply-ready-read-state-entry entry)))
 
@@ -730,7 +734,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   (let ((channel-id (alist-get 'channel_id payload))
         (timestamp (alist-get 'timestamp payload))
         (version (alist-get 'version payload)))
-    (disco-state-apply-channel-pins-ack channel-id timestamp)
+    (disco-state-apply-channel-pins-ack channel-id timestamp version)
     (disco-gateway--emit
      (list :type 'channel-pins-ack
            :channel-id channel-id
@@ -800,14 +804,76 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   "Handle MESSAGE_ACK dispatch PAYLOAD."
   (let ((channel-id (alist-get 'channel_id payload))
         (message-id (alist-get 'message_id payload))
-        (mention-count (alist-get 'mention_count payload)))
+        (mention-count (alist-get 'mention_count payload))
+        (flags (alist-get 'flags payload))
+        (last-viewed (alist-get 'last_viewed payload))
+        (version (alist-get 'version payload)))
     (when channel-id
-      (disco-state-apply-message-ack channel-id message-id mention-count)
+      (disco-state-apply-message-ack
+       channel-id
+       message-id
+       mention-count
+       flags
+       last-viewed
+       version)
       (disco-gateway--emit
        (list :type 'message-ack
              :channel-id channel-id
              :message-id message-id
-             :mention-count mention-count)))))
+             :mention-count mention-count
+             :flags flags
+             :last-viewed last-viewed
+             :version version)))))
+
+(defun disco-gateway--dispatch-guild-feature-ack (payload)
+  "Handle GUILD_FEATURE_ACK dispatch PAYLOAD."
+  (let ((read-state-type (alist-get 'ack_type payload))
+        (resource-id (alist-get 'resource_id payload))
+        (entity-id (alist-get 'entity_id payload))
+        (version (alist-get 'version payload)))
+    (disco-state-apply-feature-ack
+     read-state-type
+     resource-id
+     entity-id
+     version)
+    (disco-gateway--emit
+     (list :type 'guild-feature-ack
+           :read-state-type read-state-type
+           :resource-id resource-id
+           :entity-id entity-id
+           :version version))))
+
+(defun disco-gateway--dispatch-user-non-channel-ack (payload)
+  "Handle USER_NON_CHANNEL_ACK dispatch PAYLOAD."
+  (let ((read-state-type (alist-get 'ack_type payload))
+        (resource-id (alist-get 'resource_id payload))
+        (entity-id (alist-get 'entity_id payload))
+        (version (alist-get 'version payload)))
+    (disco-state-apply-feature-ack
+     read-state-type
+     resource-id
+     entity-id
+     version)
+    (disco-gateway--emit
+     (list :type 'user-non-channel-ack
+           :read-state-type read-state-type
+           :resource-id resource-id
+           :entity-id entity-id
+           :version version))))
+
+(defun disco-gateway--dispatch-notification-center-items-ack (payload)
+  "Handle NOTIFICATION_CENTER_ITEMS_ACK dispatch PAYLOAD."
+  (let ((entity-id (alist-get 'id payload))
+        (resource-id disco-gateway--current-user-id))
+    (disco-state-apply-feature-ack
+     disco-state-read-state-type-notification-center
+     resource-id
+     entity-id)
+    (disco-gateway--emit
+     (list :type 'notification-center-items-ack
+           :read-state-type disco-state-read-state-type-notification-center
+           :resource-id resource-id
+           :entity-id entity-id))))
 
 (defun disco-gateway--dispatch-typing-start (payload)
   "Handle TYPING_START dispatch PAYLOAD."
@@ -926,6 +992,9 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("MESSAGE_POLL_VOTE_ADD" . disco-gateway--dispatch-message-poll-vote-add)
     ("MESSAGE_POLL_VOTE_REMOVE" . disco-gateway--dispatch-message-poll-vote-remove)
     ("MESSAGE_ACK" . disco-gateway--dispatch-message-ack)
+    ("GUILD_FEATURE_ACK" . disco-gateway--dispatch-guild-feature-ack)
+    ("USER_NON_CHANNEL_ACK" . disco-gateway--dispatch-user-non-channel-ack)
+    ("NOTIFICATION_CENTER_ITEMS_ACK" . disco-gateway--dispatch-notification-center-items-ack)
     ("TYPING_START" . disco-gateway--dispatch-typing-start)
     ("THREAD_CREATE" . disco-gateway--dispatch-thread-create)
     ("THREAD_UPDATE" . disco-gateway--dispatch-thread-update)

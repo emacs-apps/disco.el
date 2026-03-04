@@ -32,17 +32,11 @@
 (defvar disco-state--messages-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> list of message objects.")
 
-(defvar disco-state--unread-counts-by-channel (make-hash-table :test #'equal)
-  "Hash table channel-id -> unread message count.")
+(defvar disco-state--read-states (make-hash-table :test #'equal)
+  "Hash table (READ-STATE-TYPE . RESOURCE-ID) -> read-state object.")
 
-(defvar disco-state--last-read-message-id-by-channel (make-hash-table :test #'equal)
-  "Hash table channel-id -> last acknowledged message ID.")
-
-(defvar disco-state--last-read-pin-timestamp-by-channel (make-hash-table :test #'equal)
-  "Hash table channel-id -> last acknowledged channel pin timestamp.")
-
-(defvar disco-state--ack-token-by-channel (make-hash-table :test #'equal)
-  "Hash table channel-id -> last read-state ack token.")
+(defvar disco-state--ack-token-by-read-state (make-hash-table :test #'equal)
+  "Hash table (READ-STATE-TYPE . RESOURCE-ID) -> last read-state ack token.")
 
 (defvar disco-state--thread-member-ids-by-thread (make-hash-table :test #'equal)
   "Hash table thread-id -> list of known member user IDs.")
@@ -62,6 +56,47 @@
 (defconst disco-state-read-state-type-channel
   (alist-get 'channel disco-state-read-state-type-alist)
   "Read-state type value for channel message unreads.")
+
+(defconst disco-state-read-state-type-guild-event
+  (alist-get 'guild-event disco-state-read-state-type-alist)
+  "Read-state type value for guild event feature.")
+
+(defconst disco-state-read-state-type-notification-center
+  (alist-get 'notification-center disco-state-read-state-type-alist)
+  "Read-state type value for notification center feature.")
+
+(defconst disco-state-read-state-type-guild-home
+  (alist-get 'guild-home disco-state-read-state-type-alist)
+  "Read-state type value for guild home feature.")
+
+(defconst disco-state-read-state-type-guild-onboarding-question
+  (alist-get 'guild-onboarding-question disco-state-read-state-type-alist)
+  "Read-state type value for guild onboarding question feature.")
+
+(defconst disco-state-read-state-type-message-requests
+  (alist-get 'message-requests disco-state-read-state-type-alist)
+  "Read-state type value for message request feature.")
+
+(defconst disco-state--read-state-spec-alist
+  `((,disco-state-read-state-type-channel
+     :entity-field last_message_id
+     :counter-field mention_count)
+    (,disco-state-read-state-type-guild-event
+     :entity-field last_acked_id
+     :counter-field badge_count)
+    (,disco-state-read-state-type-notification-center
+     :entity-field last_acked_id
+     :counter-field badge_count)
+    (,disco-state-read-state-type-guild-home
+     :entity-field last_acked_id
+     :counter-field badge_count)
+    (,disco-state-read-state-type-guild-onboarding-question
+     :entity-field last_acked_id
+     :counter-field badge_count)
+    (,disco-state-read-state-type-message-requests
+     :entity-field last_acked_id
+     :counter-field badge_count))
+  "Declarative read-state type spec map.")
 
 (defconst disco-state-read-state-flag-alist
   '((is-guild-channel . 1)
@@ -89,6 +124,55 @@
 (defconst disco-state-message-type-poll-result 46
   "Discord message type value for `POLL_RESULT'.")
 
+(defun disco-state--normalize-id (value)
+  "Return VALUE normalized as string ID."
+  (and value (format "%s" value)))
+
+(defun disco-state--read-state-key (read-state-type resource-id)
+  "Return hash key for READ-STATE-TYPE and RESOURCE-ID."
+  (when resource-id
+    (cons read-state-type (disco-state--normalize-id resource-id))))
+
+(defun disco-state--read-state-spec (read-state-type)
+  "Return declarative spec plist for READ-STATE-TYPE."
+  (alist-get read-state-type disco-state--read-state-spec-alist))
+
+(defun disco-state--read-state-entity-field (read-state-type)
+  "Return entity cursor field symbol for READ-STATE-TYPE."
+  (plist-get (disco-state--read-state-spec read-state-type) :entity-field))
+
+(defun disco-state--read-state-counter-field (read-state-type)
+  "Return unread counter field symbol for READ-STATE-TYPE."
+  (plist-get (disco-state--read-state-spec read-state-type) :counter-field))
+
+(defun disco-state-read-state (read-state-type resource-id)
+  "Return read-state object for READ-STATE-TYPE and RESOURCE-ID."
+  (let ((key (disco-state--read-state-key read-state-type resource-id)))
+    (when key
+      (copy-tree (gethash key disco-state--read-states)))))
+
+(defun disco-state--upsert-read-state (read-state-type resource-id fields)
+  "Upsert read-state for READ-STATE-TYPE/RESOURCE-ID with FIELDS alist."
+  (let* ((normalized-resource-id (disco-state--normalize-id resource-id))
+         (key (disco-state--read-state-key read-state-type normalized-resource-id))
+         (state (and key
+                     (or (copy-tree (gethash key disco-state--read-states))
+                         `((read_state_type . ,read-state-type)
+                           (id . ,normalized-resource-id))))))
+    (when key
+      (dolist (field fields)
+        (setf (alist-get (car field) state nil nil #'eq)
+              (cdr field)))
+      (puthash key state disco-state--read-states)
+      state)))
+
+(defun disco-state--delete-read-state (read-state-type resource-id)
+  "Delete read-state and ack token for READ-STATE-TYPE/RESOURCE-ID."
+  (let ((key (disco-state--read-state-key read-state-type resource-id)))
+    (when key
+      (remhash key disco-state--read-states)
+      (remhash key disco-state--ack-token-by-read-state))))
+
 (defun disco-state-reset ()
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
@@ -98,10 +182,8 @@
   (clrhash disco-state--threads-by-parent)
   (clrhash disco-state--thread-ids-by-guild)
   (clrhash disco-state--messages-by-channel)
-  (clrhash disco-state--unread-counts-by-channel)
-  (clrhash disco-state--last-read-message-id-by-channel)
-  (clrhash disco-state--last-read-pin-timestamp-by-channel)
-  (clrhash disco-state--ack-token-by-channel)
+  (clrhash disco-state--read-states)
+  (clrhash disco-state--ack-token-by-read-state)
   (clrhash disco-state--thread-member-ids-by-thread)
   (clrhash disco-state--thread-member-count-by-thread))
 
@@ -422,10 +504,7 @@ MEMBER-COUNT is optional approximate thread member count."
           (disco-state--remove-thread-indexes channel)))
       (remhash channel-id disco-state--channels-by-id)
       (remhash channel-id disco-state--messages-by-channel)
-      (remhash channel-id disco-state--unread-counts-by-channel)
-      (remhash channel-id disco-state--last-read-message-id-by-channel)
-      (remhash channel-id disco-state--last-read-pin-timestamp-by-channel)
-      (remhash channel-id disco-state--ack-token-by-channel)))
+      (disco-state--delete-read-state disco-state-read-state-type-channel channel-id)))
   (remhash channel-id disco-state--thread-member-ids-by-thread)
   (remhash channel-id disco-state--thread-member-count-by-thread))
 
@@ -456,7 +535,12 @@ Otherwise, replace threads only under the provided parent IDs."
 
 (defun disco-state-channel-unread-count (channel-id)
   "Return unread count for CHANNEL-ID."
-  (gethash channel-id disco-state--unread-counts-by-channel 0))
+  (let* ((state (disco-state-read-state disco-state-read-state-type-channel channel-id))
+         (mention-count (and (listp state)
+                             (alist-get 'mention_count state))))
+    (if (numberp mention-count)
+        (max 0 mention-count)
+      0)))
 
 (defun disco-state-channel-own-unread-count (channel)
   "Return unread count tracked directly on CHANNEL."
@@ -485,40 +569,49 @@ Otherwise, replace threads only under the provided parent IDs."
   "Increase unread count for CHANNEL-ID by DELTA (default 1)."
   (let* ((step (max 0 (or delta 1)))
          (next (+ (disco-state-channel-unread-count channel-id) step)))
-    (puthash channel-id next disco-state--unread-counts-by-channel)
+    (disco-state-set-channel-unread channel-id next)
     next))
 
 (defun disco-state-set-channel-unread (channel-id count)
   "Set unread COUNT for CHANNEL-ID and return normalized count."
   (let ((normalized (max 0 (or count 0))))
-    (if (> normalized 0)
-        (puthash channel-id normalized disco-state--unread-counts-by-channel)
-      (remhash channel-id disco-state--unread-counts-by-channel))
+    (disco-state--upsert-read-state
+     disco-state-read-state-type-channel
+     channel-id
+     `((mention_count . ,normalized)))
     normalized))
 
 (defun disco-state-clear-channel-unread (channel-id)
   "Reset unread count for CHANNEL-ID to zero."
-  (remhash channel-id disco-state--unread-counts-by-channel)
+  (disco-state-set-channel-unread channel-id 0)
   0)
 
 (defun disco-state-channel-last-read-message-id (channel-id)
   "Return last acknowledged message ID for CHANNEL-ID, or nil."
-  (gethash channel-id disco-state--last-read-message-id-by-channel))
+  (let ((state (disco-state-read-state disco-state-read-state-type-channel channel-id)))
+    (and (listp state)
+         (alist-get 'last_message_id state))))
 
 (defun disco-state-set-channel-last-read-message-id (channel-id message-id)
   "Set CHANNEL-ID read cursor to MESSAGE-ID and return MESSAGE-ID."
-  (puthash channel-id message-id disco-state--last-read-message-id-by-channel)
+  (disco-state--upsert-read-state
+   disco-state-read-state-type-channel
+   channel-id
+   `((last_message_id . ,message-id)))
   message-id)
 
 (defun disco-state-channel-last-read-pin-timestamp (channel-id)
   "Return last acknowledged pin timestamp for CHANNEL-ID, or nil."
-  (gethash channel-id disco-state--last-read-pin-timestamp-by-channel))
+  (let ((state (disco-state-read-state disco-state-read-state-type-channel channel-id)))
+    (and (listp state)
+         (alist-get 'last_pin_timestamp state))))
 
 (defun disco-state-set-channel-last-read-pin-timestamp (channel-id timestamp)
   "Set CHANNEL-ID acknowledged pin TIMESTAMP and return TIMESTAMP."
-  (if timestamp
-      (puthash channel-id timestamp disco-state--last-read-pin-timestamp-by-channel)
-    (remhash channel-id disco-state--last-read-pin-timestamp-by-channel))
+  (disco-state--upsert-read-state
+   disco-state-read-state-type-channel
+   channel-id
+   `((last_pin_timestamp . ,timestamp)))
   timestamp)
 
 (defun disco-state-channel-has-unread-pins-p (channel)
@@ -573,18 +666,33 @@ Result contains `:flags' and `:last-viewed'."
   (list :flags (disco-state-channel-read-state-flags channel-id)
         :last-viewed (disco-state-current-last-viewed-day)))
 
-(defun disco-state-apply-message-ack (channel-id message-id &optional mention-count)
+(defun disco-state-apply-message-ack (channel-id message-id
+                                                 &optional mention-count flags
+                                                 last-viewed version)
   "Apply channel MESSAGE_ACK semantics to local state.
 
 CHANNEL-ID identifies the channel read-state.
 When MESSAGE-ID is non-nil, update the channel read cursor.
 When MENTION-COUNT is an integer, update unread count; when omitted,
-preserve current unread count per Discord read-state docs."
+preserve current unread count per Discord read-state docs.
+FLAGS, LAST-VIEWED and VERSION are applied when provided."
   (when channel-id
-    (when message-id
-      (disco-state-set-channel-last-read-message-id channel-id message-id))
-    (when (numberp mention-count)
-      (disco-state-set-channel-unread channel-id mention-count))))
+    (let (fields)
+      (when message-id
+        (push `(last_message_id . ,message-id) fields))
+      (when (numberp mention-count)
+        (push `(mention_count . ,(max 0 mention-count)) fields))
+      (when (numberp flags)
+        (push `(flags . ,flags) fields))
+      (when (numberp last-viewed)
+        (push `(last_viewed . ,last-viewed) fields))
+      (when (numberp version)
+        (push `(version . ,version) fields))
+      (when fields
+        (disco-state--upsert-read-state
+         disco-state-read-state-type-channel
+         channel-id
+         (nreverse fields))))))
 
 (defun disco-state-apply-channel-pins-update (channel-id last-pin-timestamp)
   "Apply CHANNEL_PINS_UPDATE payload fields to local channel state."
@@ -595,14 +703,38 @@ preserve current unread count per Discord read-state docs."
         (disco-state-upsert-channel updated)
         t))))
 
-(defun disco-state-apply-channel-pins-ack (channel-id timestamp)
+(defun disco-state-apply-channel-pins-ack (channel-id timestamp &optional version)
   "Apply CHANNEL_PINS_ACK payload fields to local read-state."
   (when channel-id
-    (disco-state-set-channel-last-read-pin-timestamp channel-id timestamp)))
+    (let ((fields `((last_pin_timestamp . ,timestamp))))
+      (when (numberp version)
+        (setq fields (append fields `((version . ,version)))))
+      (disco-state--upsert-read-state
+       disco-state-read-state-type-channel
+       channel-id
+       fields))))
 
-(defun disco-state--normalize-id (value)
-  "Return VALUE normalized as string ID."
-  (format "%s" value))
+(defun disco-state-apply-feature-ack (read-state-type resource-id entity-id &optional version)
+  "Apply feature ACK semantics for READ-STATE-TYPE/RESOURCE-ID.
+
+ENTITY-ID is stored as the latest acknowledged entity cursor and unread badge
+counter is reset to zero. VERSION is stored when provided."
+  (let ((entity-field (disco-state--read-state-entity-field read-state-type))
+        (counter-field (disco-state--read-state-counter-field read-state-type)))
+    (when (and (numberp read-state-type)
+               resource-id
+               entity-id
+               entity-field)
+      (let ((fields `((,entity-field . ,(disco-state--normalize-id entity-id)))))
+        (when counter-field
+          (setq fields (append fields `((,counter-field . 0)))))
+        (when (numberp version)
+          (setq fields (append fields `((version . ,version)))))
+        (disco-state--upsert-read-state
+         read-state-type
+         resource-id
+         fields)
+        t))))
 
 (defun disco-state--message-author-id (message)
   "Return author ID from MESSAGE object."
@@ -708,37 +840,60 @@ WATCHED means a room buffer currently tracks this channel."
     applied))
 
 (defun disco-state-apply-ready-read-state-entry (entry)
-  "Apply one Ready/read-state ENTRY to local channel read-state.
+  "Apply one Ready/read-state ENTRY to local read-state store.
 
-Only entries of type `CHANNEL' are applied. Returns non-nil when an
-entry is applied, else nil."
+Returns non-nil when ENTRY can be normalized and applied."
   (let ((read-state-type (or (alist-get 'read_state_type entry)
                              disco-state-read-state-type-channel))
-        (channel-id (alist-get 'id entry))
-        (message-id (alist-get 'last_message_id entry))
-        (mention-count (alist-get 'mention_count entry)))
+        (resource-id (alist-get 'id entry))
+        (state-fields
+         '(last_message_id
+           last_acked_id
+           mention_count
+           badge_count
+           last_pin_timestamp
+           flags
+           last_viewed
+           version))
+        fields)
     (when (and (numberp read-state-type)
-               (= read-state-type disco-state-read-state-type-channel)
-               channel-id)
-      (disco-state-apply-message-ack channel-id message-id mention-count)
-      (when (assq 'last_pin_timestamp entry)
-        (disco-state-set-channel-last-read-pin-timestamp
-         channel-id
-         (alist-get 'last_pin_timestamp entry)))
+               resource-id)
+      (dolist (field state-fields)
+        (when (assq field entry)
+          (push (cons field (alist-get field entry)) fields)))
+      (disco-state--upsert-read-state
+       read-state-type
+       resource-id
+       (nreverse fields))
       t)))
+
+(defun disco-state-read-state-ack-token (read-state-type resource-id)
+  "Return read-state ack token for READ-STATE-TYPE/RESOURCE-ID."
+  (let ((key (disco-state--read-state-key read-state-type resource-id)))
+    (when key
+      (gethash key disco-state--ack-token-by-read-state))))
+
+(defun disco-state-set-read-state-ack-token (read-state-type resource-id token)
+  "Store read-state ack TOKEN for READ-STATE-TYPE/RESOURCE-ID.
+
+If TOKEN is nil, clear any stored token for the read-state."
+  (let ((key (disco-state--read-state-key read-state-type resource-id)))
+    (when key
+      (if token
+          (puthash key token disco-state--ack-token-by-read-state)
+        (remhash key disco-state--ack-token-by-read-state)))
+    token))
 
 (defun disco-state-channel-ack-token (channel-id)
   "Return read-state ack token for CHANNEL-ID, or nil."
-  (gethash channel-id disco-state--ack-token-by-channel))
+  (disco-state-read-state-ack-token disco-state-read-state-type-channel channel-id))
 
 (defun disco-state-set-channel-ack-token (channel-id token)
-  "Store read-state ack TOKEN for CHANNEL-ID and return TOKEN.
-
-If TOKEN is nil, clear any stored token for CHANNEL-ID."
-  (if token
-      (puthash channel-id token disco-state--ack-token-by-channel)
-    (remhash channel-id disco-state--ack-token-by-channel))
-  token)
+  "Store read-state ack TOKEN for CHANNEL-ID and return TOKEN."
+  (disco-state-set-read-state-ack-token
+   disco-state-read-state-type-channel
+   channel-id
+   token))
 
 (defun disco-state-channel-ack-request-fields (channel-id)
   "Return keyword plist fields for channel ACK request.
@@ -749,17 +904,27 @@ Result contains `:token', `:flags', and `:last-viewed'."
           :flags (plist-get fields :flags)
           :last-viewed (plist-get fields :last-viewed))))
 
-(defun disco-state-apply-channel-ack-response (channel-id response)
-  "Apply read-state ACK RESPONSE payload for CHANNEL-ID.
+(defun disco-state-apply-read-state-ack-response (read-state-type resource-id response)
+  "Apply read-state ACK RESPONSE payload for READ-STATE-TYPE/RESOURCE-ID.
 
 When RESPONSE includes `token', update cached ack token accordingly."
   (let ((token-pair (assq 'token response)))
     (when token-pair
-      (disco-state-set-channel-ack-token channel-id (cdr token-pair)))))
+      (disco-state-set-read-state-ack-token
+       read-state-type
+       resource-id
+       (cdr token-pair)))))
+
+(defun disco-state-apply-channel-ack-response (channel-id response)
+  "Apply channel read-state ACK RESPONSE payload for CHANNEL-ID."
+  (disco-state-apply-read-state-ack-response
+   disco-state-read-state-type-channel
+   channel-id
+   response))
 
 (defun disco-state-reset-ack-tokens ()
   "Clear all stored read-state ack tokens."
-  (clrhash disco-state--ack-token-by-channel))
+  (clrhash disco-state--ack-token-by-read-state))
 
 (defun disco-state-apply-user-update ()
   "Apply USER_UPDATE read-state side effects."

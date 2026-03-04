@@ -25,6 +25,27 @@
   (disco-state-apply-message-ack "chan" nil 3)
   (should (= 3 (disco-state-channel-unread-count "chan"))))
 
+(ert-deftest disco-state-apply-message-ack-updates-flags-last-viewed-and-version ()
+  (disco-state-reset)
+  (disco-state-apply-message-ack "chan" "12" 1 3 42 9)
+  (let ((state (disco-state-read-state 0 "chan")))
+    (should (equal "12" (alist-get 'last_message_id state)))
+    (should (= 1 (alist-get 'mention_count state)))
+    (should (= 3 (alist-get 'flags state)))
+    (should (= 42 (alist-get 'last_viewed state)))
+    (should (= 9 (alist-get 'version state)))))
+
+(ert-deftest disco-state-apply-feature-ack-updates-generic-read-state ()
+  (disco-state-reset)
+  (should
+   (disco-state-apply-feature-ack 1 "guild1" "entity7" 5))
+  (let ((state (disco-state-read-state 1 "guild1")))
+    (should (= 1 (alist-get 'read_state_type state)))
+    (should (equal "guild1" (alist-get 'id state)))
+    (should (equal "entity7" (alist-get 'last_acked_id state)))
+    (should (= 0 (alist-get 'badge_count state)))
+    (should (= 5 (alist-get 'version state)))))
+
 (ert-deftest disco-state-apply-ready-read-state-entry-channel-default-type ()
   (disco-state-reset)
   (should (disco-state-apply-ready-read-state-entry
@@ -34,17 +55,21 @@
   (should (equal "7" (disco-state-channel-last-read-message-id "chan")))
   (should (= 2 (disco-state-channel-unread-count "chan"))))
 
-(ert-deftest disco-state-apply-ready-read-state-entry-non-channel-ignored ()
+(ert-deftest disco-state-apply-ready-read-state-entry-non-channel-stored ()
   (disco-state-reset)
-  (disco-state-set-channel-unread "chan" 4)
-  (should-not
+  (should
    (disco-state-apply-ready-read-state-entry
     '((read_state_type . 2)
-      (id . "chan")
-      (last_message_id . "11")
-      (mention_count . 0))))
-  (should (= 4 (disco-state-channel-unread-count "chan")))
-  (should (null (disco-state-channel-last-read-message-id "chan"))))
+      (id . "u1")
+      (last_acked_id . "11")
+      (badge_count . 3)
+      (version . 9))))
+  (let ((state (disco-state-read-state 2 "u1")))
+    (should (= 2 (alist-get 'read_state_type state)))
+    (should (equal "u1" (alist-get 'id state)))
+    (should (equal "11" (alist-get 'last_acked_id state)))
+    (should (= 3 (alist-get 'badge_count state)))
+    (should (= 9 (alist-get 'version state)))))
 
 (ert-deftest disco-state-apply-ready-read-state-entry-sets-last-read-pin-timestamp ()
   (disco-state-reset)
@@ -72,9 +97,12 @@
            (disco-state-channel "chan")))
   (disco-state-apply-channel-pins-ack
    "chan"
-   "2026-03-04T01:00:00.000000+00:00")
+   "2026-03-04T01:00:00.000000+00:00"
+   2)
   (should-not (disco-state-channel-has-unread-pins-p
                (disco-state-channel "chan")))
+  (should (= 2 (alist-get 'version
+                          (disco-state-read-state 0 "chan"))))
   (disco-state-apply-channel-pins-update
    "chan"
    "2026-03-05T01:00:00.000000+00:00")
