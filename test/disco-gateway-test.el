@@ -125,6 +125,48 @@
                         (last_message_id . "8")))
                      emitted)))))
 
+(ert-deftest disco-gateway-dispatch-channel-pins-update-applies-state-and-emits ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-channel-pins-update)
+               (lambda (channel-id timestamp)
+                 (setq captured (list channel-id timestamp))
+                 t))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-channel-pins-update
+       '((guild_id . "g")
+         (channel_id . "c0")
+         (last_pin_timestamp . "2026-03-04T01:00:00.000000+00:00")))
+      (should (equal '("c0" "2026-03-04T01:00:00.000000+00:00")
+                     captured))
+      (should (equal '(:type channel-pins-update
+                       :guild-id "g"
+                       :channel-id "c0"
+                       :last-pin-timestamp "2026-03-04T01:00:00.000000+00:00")
+                     emitted)))))
+
+(ert-deftest disco-gateway-dispatch-channel-pins-ack-applies-state-and-emits ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-channel-pins-ack)
+               (lambda (channel-id timestamp)
+                 (setq captured (list channel-id timestamp))
+                 t))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-channel-pins-ack
+       '((channel_id . "c0")
+         (timestamp . "2026-03-04T01:00:00.000000+00:00")
+         (version . 2)))
+      (should (equal '("c0" "2026-03-04T01:00:00.000000+00:00")
+                     captured))
+      (should (equal '(:type channel-pins-ack
+                       :channel-id "c0"
+                       :last-pin-timestamp "2026-03-04T01:00:00.000000+00:00"
+                       :version 2)
+                     emitted)))))
+
 (ert-deftest disco-gateway-dispatch-passive-update-v1-applies-state-and-emits ()
   (let (captured-updates emitted)
     (cl-letf (((symbol-function 'disco-state-apply-channel-unread-updates)

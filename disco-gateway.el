@@ -36,6 +36,7 @@ Event schema:
   `message-poll-vote-add' `message-poll-vote-remove'
   `channel-create' `channel-update' `channel-delete'
   `channel-update-partial' `channel-unread-update'
+  `channel-pins-update' `channel-pins-ack'
   `passive-update-v1' `passive-update-v2'
   `guild-create' `guild-update' `guild-delete' `guild-sync'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
@@ -58,6 +59,8 @@ Event schema:
 - :guild-ids list of guild IDs for guild-sync events
 - :channel-unread object for channel-update-partial
 - :channel-unread-updates list for channel-unread-update
+- :last-pin-timestamp string for channel-pins-update/channel-pins-ack
+- :version integer for channel-pins-ack when present
 - :channels list for passive-update-v1
 - :updated-channels list for passive-update-v2
 - :threads list for thread-list-sync
@@ -710,6 +713,30 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
            :removed-voice-states removed-voice-states
            :updated-members updated-members))))
 
+(defun disco-gateway--dispatch-channel-pins-update (payload)
+  "Handle CHANNEL_PINS_UPDATE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channel-id (alist-get 'channel_id payload))
+        (last-pin-timestamp (alist-get 'last_pin_timestamp payload)))
+    (disco-state-apply-channel-pins-update channel-id last-pin-timestamp)
+    (disco-gateway--emit
+     (list :type 'channel-pins-update
+           :guild-id guild-id
+           :channel-id channel-id
+           :last-pin-timestamp last-pin-timestamp))))
+
+(defun disco-gateway--dispatch-channel-pins-ack (payload)
+  "Handle CHANNEL_PINS_ACK dispatch PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload))
+        (timestamp (alist-get 'timestamp payload))
+        (version (alist-get 'version payload)))
+    (disco-state-apply-channel-pins-ack channel-id timestamp)
+    (disco-gateway--emit
+     (list :type 'channel-pins-ack
+           :channel-id channel-id
+           :last-pin-timestamp timestamp
+           :version version))))
+
 (defun disco-gateway--dispatch-message-create (payload)
   "Handle MESSAGE_CREATE dispatch PAYLOAD."
   (let ((channel-id (alist-get 'channel_id payload)))
@@ -887,6 +914,8 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("CHANNEL_UNREAD_UPDATE" . disco-gateway--dispatch-channel-unread-update)
     ("PASSIVE_UPDATE_V1" . disco-gateway--dispatch-passive-update-v1)
     ("PASSIVE_UPDATE_V2" . disco-gateway--dispatch-passive-update-v2)
+    ("CHANNEL_PINS_UPDATE" . disco-gateway--dispatch-channel-pins-update)
+    ("CHANNEL_PINS_ACK" . disco-gateway--dispatch-channel-pins-ack)
     ("MESSAGE_CREATE" . disco-gateway--dispatch-message-create)
     ("MESSAGE_UPDATE" . disco-gateway--dispatch-message-update)
     ("MESSAGE_DELETE" . disco-gateway--dispatch-message-delete)

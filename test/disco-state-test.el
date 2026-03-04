@@ -46,6 +46,41 @@
   (should (= 4 (disco-state-channel-unread-count "chan")))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
 
+(ert-deftest disco-state-apply-ready-read-state-entry-sets-last-read-pin-timestamp ()
+  (disco-state-reset)
+  (disco-state-upsert-channel
+   '((id . "chan")
+     (type . 0)
+     (last_pin_timestamp . "2026-03-04T01:00:00.000000+00:00")))
+  (should (disco-state-apply-ready-read-state-entry
+           '((id . "chan")
+             (last_message_id . "7")
+             (mention_count . 0)
+             (last_pin_timestamp . "2026-03-04T01:00:00.000000+00:00"))))
+  (should (equal "2026-03-04T01:00:00.000000+00:00"
+                 (disco-state-channel-last-read-pin-timestamp "chan")))
+  (should-not (disco-state-channel-has-unread-pins-p
+               (disco-state-channel "chan"))))
+
+(ert-deftest disco-state-channel-pins-update-and-ack-drive-unread ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "chan") (type . 0)))
+  (disco-state-apply-channel-pins-update
+   "chan"
+   "2026-03-04T01:00:00.000000+00:00")
+  (should (disco-state-channel-has-unread-pins-p
+           (disco-state-channel "chan")))
+  (disco-state-apply-channel-pins-ack
+   "chan"
+   "2026-03-04T01:00:00.000000+00:00")
+  (should-not (disco-state-channel-has-unread-pins-p
+               (disco-state-channel "chan")))
+  (disco-state-apply-channel-pins-update
+   "chan"
+   "2026-03-05T01:00:00.000000+00:00")
+  (should (disco-state-channel-has-unread-pins-p
+           (disco-state-channel "chan"))))
+
 (ert-deftest disco-state-apply-message-create-increments-unread-private-unmuted ()
   (disco-state-reset)
   (disco-state-upsert-channel '((id . "dm") (type . 1) (muted . :false)))

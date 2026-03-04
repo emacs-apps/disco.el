@@ -38,6 +38,9 @@
 (defvar disco-state--last-read-message-id-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> last acknowledged message ID.")
 
+(defvar disco-state--last-read-pin-timestamp-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> last acknowledged channel pin timestamp.")
+
 (defvar disco-state--ack-token-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> last read-state ack token.")
 
@@ -97,6 +100,7 @@
   (clrhash disco-state--messages-by-channel)
   (clrhash disco-state--unread-counts-by-channel)
   (clrhash disco-state--last-read-message-id-by-channel)
+  (clrhash disco-state--last-read-pin-timestamp-by-channel)
   (clrhash disco-state--ack-token-by-channel)
   (clrhash disco-state--thread-member-ids-by-thread)
   (clrhash disco-state--thread-member-count-by-thread))
@@ -420,6 +424,7 @@ MEMBER-COUNT is optional approximate thread member count."
       (remhash channel-id disco-state--messages-by-channel)
       (remhash channel-id disco-state--unread-counts-by-channel)
       (remhash channel-id disco-state--last-read-message-id-by-channel)
+      (remhash channel-id disco-state--last-read-pin-timestamp-by-channel)
       (remhash channel-id disco-state--ack-token-by-channel)))
   (remhash channel-id disco-state--thread-member-ids-by-thread)
   (remhash channel-id disco-state--thread-member-count-by-thread))
@@ -476,23 +481,6 @@ Otherwise, replace threads only under the provided parent IDs."
       (setq total (+ total (disco-state-channel-own-unread-count channel))))
     total))
 
-(defun disco-state-channel-own-has-unread-p (channel)
-  "Return non-nil when CHANNEL itself has unread state."
-  (let* ((channel-id (alist-get 'id channel))
-         (last-message-id (alist-get 'last_message_id channel))
-         (last-read-id (and channel-id
-                            (disco-state-channel-last-read-message-id channel-id))))
-    (or (> (disco-state-channel-own-unread-count channel) 0)
-        (and (stringp last-message-id)
-             (or (null last-read-id)
-                 (disco-state-snowflake< last-read-id last-message-id))))))
-
-(defun disco-state-channel-has-unread-p (channel)
-  "Return non-nil when CHANNEL has unread state, including child threads."
-  (or (disco-state-channel-own-has-unread-p channel)
-      (seq-some #'disco-state-channel-own-has-unread-p
-                (disco-state-parent-threads (alist-get 'id channel)))))
-
 (defun disco-state-increment-channel-unread (channel-id &optional delta)
   "Increase unread count for CHANNEL-ID by DELTA (default 1)."
   (let* ((step (max 0 (or delta 1)))
@@ -521,6 +509,45 @@ Otherwise, replace threads only under the provided parent IDs."
   "Set CHANNEL-ID read cursor to MESSAGE-ID and return MESSAGE-ID."
   (puthash channel-id message-id disco-state--last-read-message-id-by-channel)
   message-id)
+
+(defun disco-state-channel-last-read-pin-timestamp (channel-id)
+  "Return last acknowledged pin timestamp for CHANNEL-ID, or nil."
+  (gethash channel-id disco-state--last-read-pin-timestamp-by-channel))
+
+(defun disco-state-set-channel-last-read-pin-timestamp (channel-id timestamp)
+  "Set CHANNEL-ID acknowledged pin TIMESTAMP and return TIMESTAMP."
+  (if timestamp
+      (puthash channel-id timestamp disco-state--last-read-pin-timestamp-by-channel)
+    (remhash channel-id disco-state--last-read-pin-timestamp-by-channel))
+  timestamp)
+
+(defun disco-state-channel-has-unread-pins-p (channel)
+  "Return non-nil when CHANNEL has unacknowledged pinned-message updates."
+  (let* ((channel-id (alist-get 'id channel))
+         (channel-pin-timestamp (alist-get 'last_pin_timestamp channel))
+         (read-pin-timestamp (and channel-id
+                                  (disco-state-channel-last-read-pin-timestamp channel-id))))
+    (and (stringp channel-pin-timestamp)
+         (or (null read-pin-timestamp)
+             (string-lessp read-pin-timestamp channel-pin-timestamp)))))
+
+(defun disco-state-channel-own-has-unread-p (channel)
+  "Return non-nil when CHANNEL itself has unread state."
+  (let* ((channel-id (alist-get 'id channel))
+         (last-message-id (alist-get 'last_message_id channel))
+         (last-read-id (and channel-id
+                            (disco-state-channel-last-read-message-id channel-id))))
+    (or (> (disco-state-channel-own-unread-count channel) 0)
+        (and (stringp last-message-id)
+             (or (null last-read-id)
+                 (disco-state-snowflake< last-read-id last-message-id)))
+        (disco-state-channel-has-unread-pins-p channel))))
+
+(defun disco-state-channel-has-unread-p (channel)
+  "Return non-nil when CHANNEL has unread state, including child threads."
+  (or (disco-state-channel-own-has-unread-p channel)
+      (seq-some #'disco-state-channel-own-has-unread-p
+                (disco-state-parent-threads (alist-get 'id channel)))))
 
 (defun disco-state-channel-read-state-flags (channel-id)
   "Return calculated read-state flags integer for CHANNEL-ID."
@@ -558,6 +585,20 @@ preserve current unread count per Discord read-state docs."
       (disco-state-set-channel-last-read-message-id channel-id message-id))
     (when (numberp mention-count)
       (disco-state-set-channel-unread channel-id mention-count))))
+
+(defun disco-state-apply-channel-pins-update (channel-id last-pin-timestamp)
+  "Apply CHANNEL_PINS_UPDATE payload fields to local channel state."
+  (let ((channel (and channel-id (disco-state-channel channel-id))))
+    (when channel
+      (let ((updated (copy-tree channel)))
+        (setf (alist-get 'last_pin_timestamp updated) last-pin-timestamp)
+        (disco-state-upsert-channel updated)
+        t))))
+
+(defun disco-state-apply-channel-pins-ack (channel-id timestamp)
+  "Apply CHANNEL_PINS_ACK payload fields to local read-state."
+  (when channel-id
+    (disco-state-set-channel-last-read-pin-timestamp channel-id timestamp)))
 
 (defun disco-state--normalize-id (value)
   "Return VALUE normalized as string ID."
@@ -680,6 +721,10 @@ entry is applied, else nil."
                (= read-state-type disco-state-read-state-type-channel)
                channel-id)
       (disco-state-apply-message-ack channel-id message-id mention-count)
+      (when (assq 'last_pin_timestamp entry)
+        (disco-state-set-channel-last-read-pin-timestamp
+         channel-id
+         (alist-get 'last_pin_timestamp entry)))
       t)))
 
 (defun disco-state-channel-ack-token (channel-id)
