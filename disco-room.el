@@ -5072,7 +5072,12 @@ REASON is shown in the minibuffer."
        (format "disco: guild for channel %s was deleted"
                (or disco-room--channel-name disco-room--channel-id))))
      ((and (equal event-channel-id disco-room--channel-id)
-           (memq event-type '(channel-update thread-update)))
+           (memq event-type '(channel-update
+                              thread-update
+                              channel-update-partial
+                              channel-unread-update
+                              channel-pins-update
+                              channel-pins-ack)))
       (let ((at-bottom (disco-room--at-message-bottom-p))
             (channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))

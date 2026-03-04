@@ -24,6 +24,8 @@
                  (lambda (channel-id &rest args)
                    (setq called-channel-id channel-id)
                    (funcall (plist-get args :on-success) nil)))
+                ((symbol-function 'disco-room--callback-active-p)
+                 (lambda (&rest _args) t))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room-ack-channel-pins)
@@ -50,6 +52,27 @@
                  (lambda (&rest _args) nil)))
         (disco-room-ack-channel-pins)
         (should-not api-called)))))
+
+(ert-deftest disco-room-handle-gateway-pin-events-rerender-current-channel ()
+  (with-temp-buffer
+    (let ((disco-room--channel-id "chan")
+          (disco-room--channel-name "old")
+          (render-called nil)
+          (preserve-called nil))
+      (cl-letf (((symbol-function 'disco-room--at-message-bottom-p)
+                 (lambda () t))
+                ((symbol-function 'disco-room--channel-object)
+                 (lambda () '((id . "chan") (name . "new"))))
+                ((symbol-function 'disco-room-render)
+                 (lambda () (setq render-called t)))
+                ((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () (setq preserve-called t))))
+        (disco-room--handle-gateway-event
+         '(:type channel-pins-update
+           :channel-id "chan"))
+        (should render-called)
+        (should-not preserve-called)
+        (should (equal "new" disco-room--channel-name))))))
 
 (provide 'disco-room-test)
 
