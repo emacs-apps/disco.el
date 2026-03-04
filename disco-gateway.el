@@ -505,17 +505,10 @@ Discord Ready may deliver some fields as versioned structures
 (defun disco-gateway--ingest-ready-read-states (read-state)
   "Ingest Ready READ-STATE payload into local channel read state.
 
-Only CHANNEL read_state_type entries are used here."
+Ready may contain mixed read-state types. Local state currently tracks only
+CHANNEL read states."
   (dolist (entry (disco-gateway--versioned-entries read-state))
-    (let ((read-state-type (or (alist-get 'read_state_type entry) 0))
-          (channel-id (alist-get 'id entry))
-          (message-id (alist-get 'last_message_id entry))
-          (mention-count (alist-get 'mention_count entry)))
-      (when (and (= read-state-type 0) channel-id)
-        (when message-id
-          (disco-state-set-channel-last-read-message-id channel-id message-id))
-        (when (numberp mention-count)
-          (disco-state-set-channel-unread channel-id mention-count))))))
+    (disco-state-apply-ready-read-state-entry entry)))
 
 (defun disco-gateway--ingest-ready-private-channels (private-channels)
   "Ingest Ready PRIVATE-CHANNELS payload into local state."
@@ -725,11 +718,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
         (message-id (alist-get 'message_id payload))
         (mention-count (alist-get 'mention_count payload)))
     (when channel-id
-      (when message-id
-        (disco-state-set-channel-last-read-message-id channel-id message-id))
-      ;; Discord omits mention_count to mean "retain current value".
-      (when (numberp mention-count)
-        (disco-state-set-channel-unread channel-id mention-count))
+      (disco-state-apply-message-ack channel-id message-id mention-count)
       (disco-gateway--emit
        (list :type 'message-ack
              :channel-id channel-id

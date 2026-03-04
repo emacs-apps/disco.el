@@ -47,6 +47,19 @@
 (defvar disco-state--thread-member-count-by-thread (make-hash-table :test #'equal)
   "Hash table thread-id -> last known thread member count.")
 
+(defconst disco-state-read-state-type-alist
+  '((channel . 0)
+    (guild-event . 1)
+    (notification-center . 2)
+    (guild-home . 3)
+    (guild-onboarding-question . 4)
+    (message-requests . 5))
+  "Declarative map of Discord read-state type names to integer values.")
+
+(defconst disco-state-read-state-type-channel
+  (alist-get 'channel disco-state-read-state-type-alist)
+  "Read-state type value for channel message unreads.")
+
 (defun disco-state-reset ()
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
@@ -438,6 +451,35 @@ Otherwise, replace threads only under the provided parent IDs."
   "Set CHANNEL-ID read cursor to MESSAGE-ID and return MESSAGE-ID."
   (puthash channel-id message-id disco-state--last-read-message-id-by-channel)
   message-id)
+
+(defun disco-state-apply-message-ack (channel-id message-id &optional mention-count)
+  "Apply channel MESSAGE_ACK semantics to local state.
+
+CHANNEL-ID identifies the channel read-state.
+When MESSAGE-ID is non-nil, update the channel read cursor.
+When MENTION-COUNT is an integer, update unread count; when omitted,
+preserve current unread count per Discord read-state docs."
+  (when channel-id
+    (when message-id
+      (disco-state-set-channel-last-read-message-id channel-id message-id))
+    (when (numberp mention-count)
+      (disco-state-set-channel-unread channel-id mention-count))))
+
+(defun disco-state-apply-ready-read-state-entry (entry)
+  "Apply one Ready/read-state ENTRY to local channel read-state.
+
+Only entries of type `CHANNEL' are applied. Returns non-nil when an
+entry is applied, else nil."
+  (let ((read-state-type (or (alist-get 'read_state_type entry)
+                             disco-state-read-state-type-channel))
+        (channel-id (alist-get 'id entry))
+        (message-id (alist-get 'last_message_id entry))
+        (mention-count (alist-get 'mention_count entry)))
+    (when (and (numberp read-state-type)
+               (= read-state-type disco-state-read-state-type-channel)
+               channel-id)
+      (disco-state-apply-message-ack channel-id message-id mention-count)
+      t)))
 
 (defun disco-state-channel-ack-token (channel-id)
   "Return read-state ack token for CHANNEL-ID, or nil."
