@@ -811,8 +811,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
 
 (defun disco-gateway--dispatch-user-update (payload)
   "Handle USER_UPDATE dispatch PAYLOAD."
-  ;; Read-state ack tokens are account-scoped and should be reset on user updates.
-  (disco-state-reset-ack-tokens)
+  (disco-state-apply-user-update)
   (let ((user-id (alist-get 'id payload)))
     (when user-id
       (setq disco-gateway--current-user-id user-id))))

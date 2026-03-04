@@ -178,6 +178,36 @@
     (should (equal '(:flags 3 :last-viewed 3)
                    (disco-state-channel-ack-fields "thread")))))
 
+(ert-deftest disco-state-channel-ack-request-fields-include-token ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "thread") (guild_id . "g") (type . 11)))
+  (disco-state-set-channel-ack-token "thread" "tok")
+  (cl-letf (((symbol-function 'float-time)
+             (lambda () (+ disco-state-discord-epoch-seconds
+                           (* 2 86400)
+                           1.0))))
+    (should (equal '(:token "tok" :flags 3 :last-viewed 2)
+                   (disco-state-channel-ack-request-fields "thread")))))
+
+(ert-deftest disco-state-apply-channel-ack-response-updates-token ()
+  (disco-state-reset)
+  (disco-state-set-channel-ack-token "chan" "old")
+  (disco-state-apply-channel-ack-response "chan" '((token . "new")))
+  (should (equal "new" (disco-state-channel-ack-token "chan")))
+  (disco-state-apply-channel-ack-response "chan" '((token)))
+  (should (null (disco-state-channel-ack-token "chan")))
+  (disco-state-set-channel-ack-token "chan" "again")
+  (disco-state-apply-channel-ack-response "chan" '((ok . t)))
+  (should (equal "again" (disco-state-channel-ack-token "chan"))))
+
+(ert-deftest disco-state-apply-user-update-resets-ack-tokens ()
+  (disco-state-reset)
+  (disco-state-set-channel-ack-token "a" "tok-a")
+  (disco-state-set-channel-ack-token "b" "tok-b")
+  (disco-state-apply-user-update)
+  (should (null (disco-state-channel-ack-token "a")))
+  (should (null (disco-state-channel-ack-token "b"))))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

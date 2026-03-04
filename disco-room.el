@@ -1320,21 +1320,18 @@ Unread counters are always cleared locally."
                               (disco-state-snowflake< last-read-id target-id)))))
     (disco-state-apply-message-ack channel-id nil 0)
     (when should-ack
-      (let* ((token (disco-state-channel-ack-token channel-id))
-             (ack-fields (disco-state-channel-ack-fields channel-id)))
+      (let ((ack-fields (disco-state-channel-ack-request-fields channel-id)))
         (disco-api-ack-message-async
          channel-id
          target-id
-         :token token
+         :token (plist-get ack-fields :token)
          :flags (plist-get ack-fields :flags)
          :last-viewed (plist-get ack-fields :last-viewed)
          :on-success
          (lambda (response)
            (when (disco-room--callback-active-p room-buffer channel-id generation)
              (disco-state-apply-message-ack channel-id target-id 0)
-             (let ((token-pair (and (listp response) (assq 'token response))))
-               (when token-pair
-                 (disco-state-set-channel-ack-token channel-id (cdr token-pair))))))
+             (disco-state-apply-channel-ack-response channel-id response)))
          :on-error
          (lambda (err)
            (message "disco: read-state ack failed for %s: %s"

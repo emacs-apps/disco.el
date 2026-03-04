@@ -79,6 +79,15 @@
                         (author (id . "u2"))))
                      upsert-called)))))
 
+(ert-deftest disco-gateway-dispatch-user-update-applies-state-and-user-id ()
+  (let ((applied nil))
+    (setq disco-gateway--current-user-id nil)
+    (cl-letf (((symbol-function 'disco-state-apply-user-update)
+               (lambda () (setq applied t))))
+      (disco-gateway--dispatch-user-update '((id . "u9")))
+      (should applied)
+      (should (equal "u9" disco-gateway--current-user-id)))))
+
 (provide 'disco-gateway-test)
 
 ;;; disco-gateway-test.el ends here

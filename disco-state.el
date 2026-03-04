@@ -612,9 +612,30 @@ If TOKEN is nil, clear any stored token for CHANNEL-ID."
     (remhash channel-id disco-state--ack-token-by-channel))
   token)
 
+(defun disco-state-channel-ack-request-fields (channel-id)
+  "Return keyword plist fields for channel ACK request.
+
+Result contains `:token', `:flags', and `:last-viewed'."
+  (let ((fields (disco-state-channel-ack-fields channel-id)))
+    (list :token (disco-state-channel-ack-token channel-id)
+          :flags (plist-get fields :flags)
+          :last-viewed (plist-get fields :last-viewed))))
+
+(defun disco-state-apply-channel-ack-response (channel-id response)
+  "Apply read-state ACK RESPONSE payload for CHANNEL-ID.
+
+When RESPONSE includes `token', update cached ack token accordingly."
+  (let ((token-pair (assq 'token response)))
+    (when token-pair
+      (disco-state-set-channel-ack-token channel-id (cdr token-pair)))))
+
 (defun disco-state-reset-ack-tokens ()
   "Clear all stored read-state ack tokens."
   (clrhash disco-state--ack-token-by-channel))
+
+(defun disco-state-apply-user-update ()
+  "Apply USER_UPDATE read-state side effects."
+  (disco-state-reset-ack-tokens))
 
 (defun disco-state-snowflake< (left right)
   "Return non-nil when snowflake LEFT is strictly less than RIGHT.
