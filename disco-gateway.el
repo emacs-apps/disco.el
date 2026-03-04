@@ -34,7 +34,8 @@ Event schema:
   `message-reaction-add' `message-reaction-remove'
   `message-reaction-remove-all' `message-reaction-remove-emoji'
   `message-poll-vote-add' `message-poll-vote-remove'
-  `channel-create' `channel-update' `channel-delete'
+  `channel-create' `channel-update' `channel-delete' `channel-unread-update'
+  `passive-update-v1' `passive-update-v2'
   `guild-create' `guild-update' `guild-delete' `guild-sync'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
   `thread-member-update' `thread-members-update' `typing-start'
@@ -54,6 +55,9 @@ Event schema:
 - :guild guild object for guild events
 - :guild-count integer for guild-sync events
 - :guild-ids list of guild IDs for guild-sync events
+- :channel-unread-updates list for channel-unread-update
+- :channels list for passive-update-v1
+- :updated-channels list for passive-update-v2
 - :threads list for thread-list-sync
 - :thread-member thread member object for thread-member-update
 - :added-members list for thread-members-update
@@ -654,6 +658,46 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   "Handle CHANNEL_DELETE dispatch PAYLOAD."
   (disco-gateway--delete-channel-and-emit 'channel-delete payload))
 
+(defun disco-gateway--dispatch-channel-unread-update (payload)
+  "Handle CHANNEL_UNREAD_UPDATE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channel-unread-updates (or (alist-get 'channel_unread_updates payload) '())))
+    (disco-state-apply-channel-unread-updates channel-unread-updates)
+    (disco-gateway--emit
+     (list :type 'channel-unread-update
+           :guild-id guild-id
+           :channel-unread-updates channel-unread-updates))))
+
+(defun disco-gateway--dispatch-passive-update-v1 (payload)
+  "Handle PASSIVE_UPDATE_V1 dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channels (or (alist-get 'channels payload) '()))
+        (voice-states (or (alist-get 'voice_states payload) '()))
+        (members (or (alist-get 'members payload) '())))
+    (disco-state-apply-channel-unread-updates channels)
+    (disco-gateway--emit
+     (list :type 'passive-update-v1
+           :guild-id guild-id
+           :channels channels
+           :voice-states voice-states
+           :members members))))
+
+(defun disco-gateway--dispatch-passive-update-v2 (payload)
+  "Handle PASSIVE_UPDATE_V2 dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (updated-channels (or (alist-get 'updated_channels payload) '()))
+        (updated-voice-states (or (alist-get 'updated_voice_states payload) '()))
+        (removed-voice-states (or (alist-get 'removed_voice_states payload) '()))
+        (updated-members (or (alist-get 'updated_members payload) '())))
+    (disco-state-apply-channel-unread-updates updated-channels)
+    (disco-gateway--emit
+     (list :type 'passive-update-v2
+           :guild-id guild-id
+           :updated-channels updated-channels
+           :updated-voice-states updated-voice-states
+           :removed-voice-states removed-voice-states
+           :updated-members updated-members))))
+
 (defun disco-gateway--dispatch-message-create (payload)
   "Handle MESSAGE_CREATE dispatch PAYLOAD."
   (let ((channel-id (alist-get 'channel_id payload)))
@@ -827,6 +871,9 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("CHANNEL_CREATE" . disco-gateway--dispatch-channel-create)
     ("CHANNEL_UPDATE" . disco-gateway--dispatch-channel-update)
     ("CHANNEL_DELETE" . disco-gateway--dispatch-channel-delete)
+    ("CHANNEL_UNREAD_UPDATE" . disco-gateway--dispatch-channel-unread-update)
+    ("PASSIVE_UPDATE_V1" . disco-gateway--dispatch-passive-update-v1)
+    ("PASSIVE_UPDATE_V2" . disco-gateway--dispatch-passive-update-v2)
     ("MESSAGE_CREATE" . disco-gateway--dispatch-message-create)
     ("MESSAGE_UPDATE" . disco-gateway--dispatch-message-update)
     ("MESSAGE_DELETE" . disco-gateway--dispatch-message-delete)

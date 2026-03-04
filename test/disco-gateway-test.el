@@ -79,6 +79,87 @@
                         (author (id . "u2"))))
                      upsert-called)))))
 
+(ert-deftest disco-gateway-dispatch-channel-unread-update-applies-state-and-emits ()
+  (let (captured-updates emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-channel-unread-updates)
+               (lambda (updates)
+                 (setq captured-updates updates)
+                 1))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-channel-unread-update
+       '((guild_id . "g")
+         (channel_unread_updates
+          . (((id . "c1")
+              (last_message_id . "10"))))))
+      (should (equal '(((id . "c1")
+                        (last_message_id . "10")))
+                     captured-updates))
+      (should (equal '(:type channel-unread-update
+                       :guild-id "g"
+                       :channel-unread-updates
+                       (((id . "c1")
+                         (last_message_id . "10"))))
+                     emitted)))))
+
+(ert-deftest disco-gateway-dispatch-passive-update-v1-applies-state-and-emits ()
+  (let (captured-updates emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-channel-unread-updates)
+               (lambda (updates)
+                 (setq captured-updates updates)
+                 1))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-passive-update-v1
+       '((guild_id . "g")
+         (channels . (((id . "c2")
+                       (last_message_id . "20"))))
+         (voice_states . ())
+         (members . ())))
+      (should (equal '(((id . "c2")
+                        (last_message_id . "20")))
+                     captured-updates))
+      (should (equal '(:type passive-update-v1
+                       :guild-id "g"
+                       :channels
+                       (((id . "c2")
+                         (last_message_id . "20")))
+                       :voice-states nil
+                       :members nil)
+                     emitted)))))
+
+(ert-deftest disco-gateway-dispatch-passive-update-v2-applies-state-and-emits ()
+  (let (captured-updates emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-channel-unread-updates)
+               (lambda (updates)
+                 (setq captured-updates updates)
+                 2))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-passive-update-v2
+       '((guild_id . "g")
+         (updated_channels
+          . (((id . "c2")
+              (last_message_id . "20"))))
+         (updated_voice_states . ())
+         (removed_voice_states . ())
+         (updated_members . ())))
+      (should (equal '(((id . "c2")
+                        (last_message_id . "20")))
+                     captured-updates))
+      (should (equal '(:type passive-update-v2
+                       :guild-id "g"
+                       :updated-channels
+                       (((id . "c2")
+                         (last_message_id . "20")))
+                       :updated-voice-states nil
+                       :removed-voice-states nil
+                       :updated-members nil)
+                     emitted)))))
+
 (ert-deftest disco-gateway-dispatch-user-update-applies-state-and-user-id ()
   (let ((applied nil))
     (setq disco-gateway--current-user-id nil)

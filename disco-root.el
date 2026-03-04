@@ -117,7 +117,8 @@ Values are image objects or the symbol `:missing'.")
   "Return non-nil when EVENT-TYPE should trigger root rerender."
   (memq event-type
         '(message-create message-ack
-          channel-create channel-update channel-delete
+          channel-create channel-update channel-delete channel-unread-update
+          passive-update-v1 passive-update-v2
           guild-create guild-update guild-delete guild-sync
           thread-create thread-update thread-delete thread-list-sync)))
 
@@ -645,21 +646,13 @@ Discord channel position can arrive as integer or numeric string."
 
 (defun disco-root--channel-has-unread-p (channel)
   "Return non-nil when CHANNEL has unread messages tracked locally."
-  (> (disco-state-channel-effective-unread-count channel) 0))
-
-(defun disco-root--parent-has-unread-thread-p (channel)
-  "Return non-nil when CHANNEL has at least one unread thread child."
-  (let ((parent-id (alist-get 'id channel)))
-    (seq-some #'disco-root--channel-has-unread-p
-              (disco-state-parent-threads parent-id))))
+  (disco-state-channel-has-unread-p channel))
 
 (defun disco-root--channel-visible-in-view-p (channel)
   "Return non-nil when CHANNEL should appear under current view mode."
   (pcase disco-root--view-mode
     ('unread
-     (or (disco-root--channel-has-unread-p channel)
-         (and (disco-root--thread-parent-channel-p channel)
-              (disco-root--parent-has-unread-thread-p channel))))
+     (disco-root--channel-has-unread-p channel))
     ('dms
      (memq (alist-get 'type channel) '(1 3)))
     (_ t)))
@@ -697,9 +690,7 @@ current sort mode."
                         (not (gethash channel-id seen))
                         (disco-root--displayable-channel-p channel)
                         (disco-root--channel-visible-in-view-p channel)
-                        (or (disco-root--channel-has-unread-p channel)
-                            (and (disco-root--thread-parent-channel-p channel)
-                                 (disco-root--parent-has-unread-thread-p channel))))
+                        (disco-root--channel-has-unread-p channel))
                (puthash channel-id t seen)
                (push channel result)))))
       (dolist (channel (disco-state-private-channels))

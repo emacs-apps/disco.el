@@ -476,6 +476,23 @@ Otherwise, replace threads only under the provided parent IDs."
       (setq total (+ total (disco-state-channel-own-unread-count channel))))
     total))
 
+(defun disco-state-channel-own-has-unread-p (channel)
+  "Return non-nil when CHANNEL itself has unread state."
+  (let* ((channel-id (alist-get 'id channel))
+         (last-message-id (alist-get 'last_message_id channel))
+         (last-read-id (and channel-id
+                            (disco-state-channel-last-read-message-id channel-id))))
+    (or (> (disco-state-channel-own-unread-count channel) 0)
+        (and (stringp last-message-id)
+             (or (null last-read-id)
+                 (disco-state-snowflake< last-read-id last-message-id))))))
+
+(defun disco-state-channel-has-unread-p (channel)
+  "Return non-nil when CHANNEL has unread state, including child threads."
+  (or (disco-state-channel-own-has-unread-p channel)
+      (seq-some #'disco-state-channel-own-has-unread-p
+                (disco-state-parent-threads (alist-get 'id channel)))))
+
 (defun disco-state-increment-channel-unread (channel-id &optional delta)
   "Increase unread count for CHANNEL-ID by DELTA (default 1)."
   (let* ((step (max 0 (or delta 1)))
@@ -625,6 +642,29 @@ WATCHED means a room buffer currently tracks this channel."
                (equal (disco-state--normalize-id owner-id)
                       (disco-state--normalize-id current-user-id)))
       (disco-state-apply-message-ack parent-id thread-id 0))))
+
+(defun disco-state-apply-channel-unread (channel-unread)
+  "Apply one gateway CHANNEL-UNREAD structure to local channel state."
+  (let* ((channel-id (alist-get 'id channel-unread))
+         (channel (and channel-id (disco-state-channel channel-id))))
+    (when channel
+      (let ((updated (copy-tree channel)))
+        (when (assq 'last_message_id channel-unread)
+          (setf (alist-get 'last_message_id updated)
+                (alist-get 'last_message_id channel-unread)))
+        (when (assq 'last_pin_timestamp channel-unread)
+          (setf (alist-get 'last_pin_timestamp updated)
+                (alist-get 'last_pin_timestamp channel-unread)))
+        (disco-state-upsert-channel updated)
+        t))))
+
+(defun disco-state-apply-channel-unread-updates (channel-unread-updates)
+  "Apply CHANNEL-UNREAD-UPDATES list and return number of applied updates."
+  (let ((applied 0))
+    (dolist (channel-unread channel-unread-updates)
+      (when (disco-state-apply-channel-unread channel-unread)
+        (setq applied (1+ applied))))
+    applied))
 
 (defun disco-state-apply-ready-read-state-entry (entry)
   "Apply one Ready/read-state ENTRY to local channel read-state.

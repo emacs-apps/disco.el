@@ -190,6 +190,42 @@
   (should (= 5 (disco-state-channel-unread-count "text")))
   (should (null (disco-state-channel-last-read-message-id "text"))))
 
+(ert-deftest disco-state-apply-channel-unread-updates-updates-channel-fields ()
+  (disco-state-reset)
+  (disco-state-upsert-channel
+   '((id . "c1")
+     (guild_id . "g")
+     (type . 0)
+     (last_message_id . "10")
+     (last_pin_timestamp . "old")))
+  (should (= 1
+             (disco-state-apply-channel-unread-updates
+              '(((id . "c1")
+                 (last_message_id . "11")
+                 (last_pin_timestamp . "new"))))))
+  (let ((channel (disco-state-channel "c1")))
+    (should (equal "11" (alist-get 'last_message_id channel)))
+    (should (equal "new" (alist-get 'last_pin_timestamp channel)))))
+
+(ert-deftest disco-state-channel-has-unread-p-uses-read-cursor-and-threads ()
+  (disco-state-reset)
+  (disco-state-upsert-channel
+   '((id . "parent")
+     (guild_id . "g")
+     (type . 0)
+     (last_message_id . "100")))
+  (disco-state-upsert-channel
+   '((id . "thread")
+     (guild_id . "g")
+     (parent_id . "parent")
+     (type . 11)
+     (last_message_id . "101")))
+  (should (disco-state-channel-has-unread-p (disco-state-channel "parent")))
+  (disco-state-apply-message-ack "parent" "100" 0)
+  (should (disco-state-channel-has-unread-p (disco-state-channel "parent")))
+  (disco-state-apply-message-ack "thread" "101" 0)
+  (should-not (disco-state-channel-has-unread-p (disco-state-channel "parent"))))
+
 (ert-deftest disco-state-channel-effective-unread-count-includes-child-threads ()
   (disco-state-reset)
   (disco-state-upsert-channel '((id . "parent") (guild_id . "g") (type . 0)))
