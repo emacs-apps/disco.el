@@ -468,7 +468,7 @@ When PREDICATE is non-nil, include row only when (PREDICATE POS) is non-nil."
   "Toggle collapsible node at point.
 
 Supports top-level sections, guild rows, and category rows. In layouts
-without collapsible nodes, move to next channel row." 
+without collapsible nodes, move to next channel row."
   (interactive)
   (unless (disco-root--toggle-node-at-point)
     (if (eq (disco-root--ensure-layout) 'activity)
@@ -1045,7 +1045,7 @@ Discord channel position can arrive as integer or numeric string."
       label)))
 
 (defun disco-root--channel-read-p (channel)
-  "Return non-nil when CHANNEL is considered fully read." 
+  "Return non-nil when CHANNEL is considered fully read."
   (let* ((channel-id (alist-get 'id channel))
          (unread (disco-state-channel-effective-unread-count channel))
          (last-read-id (disco-state-channel-last-read-message-id channel-id))
@@ -1054,7 +1054,7 @@ Discord channel position can arrive as integer or numeric string."
          (disco-state-snowflake>= last-read-id last-message-id))))
 
 (defun disco-root--format-trail-tags (tags)
-  "Return human-readable trail string for TAGS list." 
+  "Return human-readable trail string for TAGS list."
   (when tags
     (mapconcat (lambda (tag)
                  (format "[%s]" tag))
@@ -1062,7 +1062,7 @@ Discord channel position can arrive as integer or numeric string."
                " ")))
 
 (defun disco-root--channel-static-trail-tags (channel)
-  "Return static status trail tags for CHANNEL." 
+  "Return static status trail tags for CHANNEL."
   (let (tags)
     (when (disco-state-channel-has-unread-pins-p channel)
       (push "pins" tags))
@@ -1071,7 +1071,7 @@ Discord channel position can arrive as integer or numeric string."
     (nreverse tags)))
 
 (defun disco-root--channel-dynamic-trail-tags (channel)
-  "Return dynamic status trail tags for CHANNEL." 
+  "Return dynamic status trail tags for CHANNEL."
   (let ((unread (disco-state-channel-effective-unread-count channel))
         tags)
     (if (> unread 0)
@@ -1081,7 +1081,7 @@ Discord channel position can arrive as integer or numeric string."
     (nreverse tags)))
 
 (defun disco-root--channel-context-label (channel)
-  "Return context label for CHANNEL in activity layout." 
+  "Return context label for CHANNEL in activity layout."
   (pcase (alist-get 'type channel)
     ((or 1 3)
      "direct-messages")
@@ -1117,46 +1117,47 @@ Discord channel position can arrive as integer or numeric string."
        (when parts
          (string-join (nreverse parts) " / "))))))
 
+(defun disco-root--channel-category-name (channel)
+  "Return category name for CHANNEL, or nil when not categorized."
+  (let* ((parent-id (alist-get 'parent_id channel))
+         (parent-channel (and parent-id (disco-state-channel parent-id)))
+         (category-id (cond
+                       ((and parent-channel
+                             (disco-state-channel-thread-p channel))
+                        (alist-get 'parent_id parent-channel))
+                       ((and parent-channel
+                             (disco-root--channel-category-p parent-channel))
+                        parent-id)
+                       (t nil)))
+         (category (and category-id (disco-state-channel category-id))))
+    (when (and category (disco-root--channel-category-p category))
+      (disco-root--channel-display-name category))))
+
+(defun disco-root--channel-guild-name (channel)
+  "Return guild name for CHANNEL, or nil when channel is non-guild."
+  (when-let* ((guild-id (alist-get 'guild_id channel)))
+    (disco-root--guild-name-by-id guild-id)))
+
 (defun disco-root--activity-primary-label (channel)
-  "Return activity-layout primary line label for CHANNEL." 
-  (let ((name (disco-root--channel-display-name channel))
-        (channel-type (alist-get 'type channel)))
-    (pcase channel-type
-      (1 (format "[dm] %s" name))
-      (3 (format "[group] %s" name))
-      ((or 10 11 12)
-       (let ((tags (disco-root--thread-status-tags channel)))
-         (format "[thread] %s%s"
-                 name
-                 (if (string-empty-p tags)
-                     ""
-                   (format " (%s)" tags)))))
-      ((or 0 5 15 16)
-       (let* ((thread-count (disco-root--thread-count-under-parent channel))
-              (suffix (if (> thread-count 0)
-                          (format " (%d threads)" thread-count)
-                        "")))
-         (pcase channel-type
-           ((or 0 5) (format "#%s%s" name suffix))
-           (15 (format "[forum] %s%s" name suffix))
-           (16 (format "[media] %s%s" name suffix)))))
-      (_ (format "[type-%s] %s" channel-type name)))))
+  "Return activity-layout primary label for CHANNEL."
+  (let* ((parts (delq nil
+                      (list (disco-root--channel-display-name channel)
+                            (disco-root--channel-category-name channel)
+                            (disco-root--channel-guild-name channel))))
+         (label (if parts
+                    (string-join parts " | ")
+                  (disco-root--channel-display-name channel))))
+    (format "[%s]" label)))
 
 (defun disco-root--activity-secondary-label (channel)
-  "Return activity-layout secondary line label for CHANNEL." 
-  (let* ((context (disco-root--channel-context-label channel))
-         (trail (disco-root--format-trail-tags
-                 (append (disco-root--channel-dynamic-trail-tags channel)
-                         (disco-root--channel-static-trail-tags channel)))))
-    (cond
-     ((and context trail)
-      (format "%s  %s" context trail))
-     (context context)
-     (trail trail)
-     (t nil))))
+  "Return fallback activity preview label for CHANNEL."
+  (or (disco-root--format-trail-tags
+       (append (disco-root--channel-dynamic-trail-tags channel)
+               (disco-root--channel-static-trail-tags channel)))
+      "(message)"))
 
 (defun disco-root--human-count (value)
-  "Return VALUE formatted in compact human-readable form." 
+  "Return VALUE formatted in compact human-readable form."
   (let ((n (max 0 (or value 0))))
     (cond
      ((>= n 1000000)
@@ -1171,7 +1172,7 @@ Discord channel position can arrive as integer or numeric string."
 (defun disco-root--truncate-fill (text width &optional right-align)
   "Return TEXT truncated and padded to WIDTH.
 
-When RIGHT-ALIGN is non-nil, pad on the left instead of right." 
+When RIGHT-ALIGN is non-nil, pad on the left instead of right."
   (let* ((target (max 0 (or width 0)))
          (trimmed (truncate-string-to-width (or text "") target nil nil ""))
          (padding (max 0 (- target (string-width trimmed)))))
@@ -1180,7 +1181,7 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
       (concat trimmed (make-string padding ?\s)))))
 
 (defun disco-root--snowflake-epoch-seconds (snowflake)
-  "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil." 
+  "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
   (when (and (stringp snowflake)
              (string-match-p "\\`[0-9]+\\'" snowflake))
     (let ((value (string-to-number snowflake)))
@@ -1191,7 +1192,7 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
 (defun disco-root--channel-last-activity-time-label (channel &optional message)
   "Return short time label for CHANNEL's last known activity.
 
-When MESSAGE is non-nil, use it as the cached latest message." 
+When MESSAGE is non-nil, use it as the cached latest message."
   (or (when-let* ((msg (or message (disco-msg-channel-last-cached-message channel)))
                   (timestamp (alist-get 'timestamp msg)))
         (ignore-errors
@@ -1205,79 +1206,87 @@ When MESSAGE is non-nil, use it as the cached latest message."
 (defun disco-root--activity-preview-line (channel &optional message)
   "Return one-line preview text for activity row CHANNEL.
 
-When MESSAGE is non-nil, use it as cached preview source." 
+When MESSAGE is non-nil, use it as cached preview source."
   (or (and message (disco-msg-preview-line message))
       (disco-msg-channel-preview-line channel)
-      (disco-root--activity-secondary-label channel)
-      ""))
+      (disco-root--activity-secondary-label channel)))
+
+(defun disco-root--insert-activity-icon (channel)
+  "Insert activity icon for CHANNEL with fixed-width text fallback."
+  (let ((guild (and (alist-get 'guild_id channel)
+                    (disco-root--guild-by-id (alist-get 'guild_id channel))))
+        (channel-type (alist-get 'type channel))
+        (start (point)))
+    (cond
+     (guild
+      (insert (disco-root--guild-icon-fallback guild)))
+     ((eq channel-type 1)
+      (insert "[D]"))
+     ((eq channel-type 3)
+      (insert "[G]"))
+     ((disco-state-channel-thread-p channel)
+      (insert "[T]"))
+     (t
+      (insert "[#]")))
+    (add-text-properties start (point) (list 'face 'shadow))))
 
 (defun disco-root--insert-activity-channel-line (channel indent)
-  "Insert one activity-style CHANNEL row with INDENT." 
+  "Insert one activity-style CHANNEL row with INDENT."
   (let* ((channel-id (alist-get 'id channel))
          (channel-type (alist-get 'type channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
          (padding (make-string indent ?\s))
-         (available (max 48 (- (window-width) indent)))
-         (left-width (min 48 (max 22 (/ available 4))))
-         (unread-width 7)
-         (time-width 5)
-         (preview-width (max 12 (- available left-width unread-width time-width 4)))
          (left-text (disco-root--activity-primary-label channel))
-         (unread-count (disco-state-channel-effective-unread-count channel))
-         (unread-text (if (> unread-count 0)
-                          (disco-root--human-count unread-count)
-                        ""))
          (preview-text (disco-root--activity-preview-line channel latest-message))
-         (time-text (disco-root--channel-last-activity-time-label channel latest-message)))
-    (let ((line-start (point)))
-      (insert padding)
+         (time-text (disco-root--channel-last-activity-time-label channel latest-message))
+         (line-width (max 60 (window-width)))
+         (time-width (max 5 (string-width time-text)))
+         (line-start (point)))
+    (insert padding)
+    (disco-root--insert-activity-icon channel)
+    (insert " ")
+    (let* ((content-start (current-column))
+           (content-width (max 20 (- line-width content-start time-width 1)))
+           (left-width (max 18 (min 72 (floor (* content-width 0.45)))))
+           (preview-width (max 0 (- content-width left-width 1))))
       (insert (disco-root--truncate-fill left-text left-width))
-      (insert " ")
-      (let ((unread-start (point)))
-        (insert (disco-root--truncate-fill unread-text unread-width t))
-        (add-text-properties
-         unread-start
-         (point)
-         (list 'face (if (> unread-count 0)
-                         'font-lock-warning-face
-                       'shadow))))
-      (insert " ")
-      (let ((preview-start (point))
-            (preview-value (disco-root--truncate-fill preview-text preview-width)))
-        (insert preview-value)
-        (add-text-properties
-         preview-start
-         (point)
-         (list 'face 'shadow))
-        (let ((author (disco-msg-author-display-name latest-message)))
-          (when (and author
-                     (string-match (format "\\`%s>" (regexp-quote author))
-                                   preview-value))
-            (add-text-properties
-             preview-start
-             (+ preview-start (length author) 1)
-             (list 'face 'font-lock-keyword-face)))))
-      (insert " ")
-      (let ((time-start (point)))
-        (insert (disco-root--truncate-fill time-text time-width t))
-        (add-text-properties time-start (point) (list 'face 'shadow)))
-      (insert "\n")
-      (when (disco-root--openable-channel-p channel)
-        (add-text-properties
-         line-start
-         (point)
-         (list 'mouse-face 'highlight
-               'help-echo (if (memq channel-type '(15 16))
-                              (format "Open threads under channel %s" channel-id)
-                            (format "Open channel %s" channel-id))
-               'disco-root-row-type 'channel
-               'disco-channel-id channel-id
-               'disco-unread-count unread-count))))))
+      (when (> preview-width 0)
+        (insert " ")
+        (let ((preview-start (point))
+              (preview-value (truncate-string-to-width preview-text preview-width nil nil "")))
+          (insert (disco-root--truncate-fill preview-value preview-width))
+          (add-text-properties preview-start (point) (list 'face 'shadow))
+          (let ((author (disco-msg-author-display-name latest-message)))
+            (when (and author
+                       (string-match (format "\\`%s>" (regexp-quote author))
+                                     preview-value))
+              (add-text-properties
+               preview-start
+               (+ preview-start (length author) 1)
+               (list 'face 'font-lock-keyword-face))))))
+      (let ((target-time-col (- line-width time-width)))
+        (when (< (current-column) target-time-col)
+          (move-to-column target-time-col t))
+        (let ((time-start (point)))
+          (insert (disco-root--truncate-fill time-text time-width t))
+          (add-text-properties time-start (point) (list 'face 'shadow)))))
+    (insert "\n")
+    (when (disco-root--openable-channel-p channel)
+      (add-text-properties
+       line-start
+       (point)
+       (list 'mouse-face 'highlight
+             'help-echo (if (memq channel-type '(15 16))
+                            (format "Open threads under channel %s" channel-id)
+                          (format "Open channel %s" channel-id))
+             'disco-root-row-type 'channel
+             'disco-channel-id channel-id
+             'disco-unread-count (disco-state-channel-effective-unread-count channel))))))
 
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
 
-SCOPE is a symbol describing where the row is rendered." 
+SCOPE is a symbol describing where the row is rendered."
   (let ((name (disco-root--channel-display-name channel))
         (channel-type (alist-get 'type channel))
         (channel-id (alist-get 'id channel))
@@ -2077,7 +2086,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
 (defun disco-root--insert-channel-line (channel indent &optional scope)
   "Insert one CHANNEL at INDENT spaces.
 
-SCOPE is forwarded to extra-info providers." 
+SCOPE is forwarded to extra-info providers."
   (if (eq scope 'activity)
       (disco-root--insert-activity-channel-line channel indent)
     (let* ((channel-id (alist-get 'id channel))
@@ -2349,7 +2358,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
             (disco-root--ewoc-insert-text "  (no visible guild channels)")))))))
 
 (defun disco-root--render-layout-activity ()
-  "Render activity-sorted channel list layout." 
+  "Render activity-sorted channel list layout."
   (let ((channels (disco-root--collect-activity-channels)))
     (if channels
         (dolist (channel channels)
@@ -2367,7 +2376,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
        (disco-root--refresh-heading-nodes channel-ids)))))
 
 (defun disco-root--feature-badge-summary ()
-  "Return compact summary string for read-state feature badge counters." 
+  "Return compact summary string for read-state feature badge counters."
   (let (parts)
     (dolist
         (spec
@@ -2391,7 +2400,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
       (format "badges[%s]" (string-join (nreverse parts) "  ")))))
 
 (defun disco-root--gateway-status-label ()
-  "Return short gateway/root status label for header display." 
+  "Return short gateway/root status label for header display."
   (cond
    (disco-root--refresh-in-flight
     "Refreshing")
@@ -2410,7 +2419,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
     "Offline")))
 
 (defun disco-root--activity-metrics-by-view ()
-  "Return alist MODE -> plist metrics for activity header chips." 
+  "Return alist MODE -> plist metrics for activity header chips."
   (let (metrics)
     (dolist (mode '(all unread dms))
       (let* ((disco-root--view-mode mode)
@@ -2422,7 +2431,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
     (nreverse metrics)))
 
 (defun disco-root--filter-chip (mode label metrics)
-  "Return one filter chip string for MODE and LABEL from METRICS." 
+  "Return one filter chip string for MODE and LABEL from METRICS."
   (let* ((stats (alist-get mode metrics))
          (count (or (plist-get stats :count) 0))
          (unread (or (plist-get stats :unread) 0))
@@ -2434,7 +2443,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
             (disco-root--human-count unread))))
 
 (defun disco-root--filters-line ()
-  "Return filter-chip line inspired by telega root view." 
+  "Return filter-chip line inspired by telega root view."
   (let* ((layout-label
           (downcase (disco-root-layout-label (disco-root--ensure-layout))))
          (metrics (disco-root--activity-metrics-by-view)))
@@ -2446,7 +2455,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
      "  ")))
 
 (defun disco-root--mode-divider-line ()
-  "Return divider line with active mode marker like telega root." 
+  "Return divider line with active mode marker like telega root."
   (let* ((label (format "(%s/%s)"
                         (downcase (symbol-name (disco-root--ensure-layout)))
                         (symbol-name disco-root--view-mode)))
@@ -2460,7 +2469,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
             (make-string right ?-))))
 
 (defun disco-root--header-lines ()
-  "Return fixed three-line root header block." 
+  "Return fixed three-line root header block."
   (list
    (string-join
     (delq nil
@@ -2473,7 +2482,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
    (disco-root--mode-divider-line)))
 
 (defun disco-root--refresh-header-line ()
-  "Refresh root header block in place." 
+  "Refresh root header block in place."
   (let ((inhibit-read-only t)
         (lines (disco-root--header-lines)))
     (save-excursion
@@ -2484,7 +2493,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
         (forward-line 1)))))
 
 (defun disco-root-render ()
-  "Render root dashboard from in-memory state." 
+  "Render root dashboard from in-memory state."
   (let* ((inhibit-read-only t)
          (layout (disco-root--ensure-layout))
          (renderer (disco-root-layout-renderer layout)))
