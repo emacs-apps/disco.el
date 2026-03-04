@@ -183,6 +183,12 @@ Same semantics as `telega-chat-button-width':
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-root-auto-fill-margin-columns 1
+  "Additional margin columns reserved when computing root fill width."
+  :type '(choice (const :tag "No extra margin" nil)
+                 integer)
+  :group 'disco)
+
 (defcustom disco-root-live-update-debounce 0.06
   "Seconds to debounce aggregated gateway updates before UI flush."
   :type 'number
@@ -352,23 +358,56 @@ between current view mode and unread-only filter."
      (t
       (get-buffer-window buf t)))))
 
-(defun disco-root--compute-fill-column (&optional buffer)
-  "Return effective render width for BUFFER."
-  (let ((win (disco-root--display-window buffer)))
-    (max 20
-         (if (window-live-p win)
-             (window-width win)
-           (window-width)))))
+(defun disco-root--window-width-remap (window)
+  "Return WINDOW width in columns, respecting face remapping when possible." 
+  (if (not (window-live-p window))
+      (window-width)
+    (condition-case _err
+        (window-width window 'remap)
+      (wrong-number-of-arguments
+       (window-width window))
+      (error
+       (window-width window)))))
 
-(defun disco-root--chars-xwidth (columns &optional buffer)
-  "Return pixel width for COLUMNS using BUFFER's display window metrics."
-  (let* ((win (disco-root--display-window buffer))
+(defun disco-root--chars-xwidth (columns &optional buffer window)
+  "Return pixel width for COLUMNS in BUFFER/WINDOW metrics." 
+  (let* ((win (or window (disco-root--display-window buffer)))
          (char-width (or (and (window-live-p win)
                               (fboundp 'window-font-width)
                               (window-font-width win))
                          (frame-char-width)
                          1)))
     (* (max 0 columns) (max 1 char-width))))
+
+(defun disco-root--chars-in-width (pixels &optional buffer window)
+  "Return character columns required to cover PIXELS in BUFFER/WINDOW." 
+  (max 0
+       (ceiling (/ (max 0 pixels)
+                   (float (max 1 (disco-root--chars-xwidth 1 buffer window)))))))
+
+(defun disco-root--compute-fill-column (&optional buffer window)
+  "Return effective render width for BUFFER.
+
+When WINDOW is non-nil, compute using WINDOW directly." 
+  (let* ((buf (or buffer (current-buffer)))
+         (win (or window (disco-root--display-window buf))))
+    (max 20
+         (if (not (window-live-p win))
+             (window-width)
+           (let* ((margins (window-margins win))
+                  (raw-width (+ (disco-root--window-width-remap win)
+                                (or (car margins) 0)
+                                (or (cdr margins) 0)))
+                  (line-number-columns
+                   (with-selected-window win
+                     (disco-root--chars-in-width
+                      (line-number-display-width 'pixels)
+                      buf
+                      win)))
+                  (adjusted-width (- raw-width
+                                     (or disco-root-auto-fill-margin-columns 0)
+                                     line-number-columns)))
+             adjusted-width)))))
 
 (defun disco-root--auto-fill-to-width (width &optional force)
   "Rerender root buffer using WIDTH when it changed.
@@ -389,9 +428,10 @@ With FORCE non-nil, rerender even if width has not changed."
   (interactive "P")
   (unless (derived-mode-p 'disco-root-mode)
     (user-error "disco: `disco-root-buffer-auto-fill' only works in root buffer"))
-  (disco-root--auto-fill-to-width
-   (disco-root--compute-fill-column)
-   force))
+  (when (or force disco-root-auto-fill-on-window-size-change)
+    (disco-root--auto-fill-to-width
+     (disco-root--compute-fill-column)
+     force)))
 
 (defun disco-root--window-size-change (frame)
   "Reflow visible root buffers for resized FRAME windows."
@@ -399,16 +439,15 @@ With FORCE non-nil, rerender even if width has not changed."
     (let ((buffer-widths (make-hash-table :test #'eq)))
       (walk-windows
        (lambda (win)
-         (let ((buf (window-buffer win))
-               (width (window-width win)))
-           (when (and (buffer-live-p buf)
-                      (integerp width)
-                      (> width 0))
+         (let ((buf (window-buffer win)))
+           (when (buffer-live-p buf)
              (with-current-buffer buf
                (when (eq major-mode 'disco-root-mode)
-                 (puthash buf
-                          (max width (or (gethash buf buffer-widths) 0))
-                          buffer-widths))))))
+                 (let ((width (disco-root--compute-fill-column buf win)))
+                   (when (and (integerp width) (> width 0))
+                     (puthash buf
+                              (max width (or (gethash buf buffer-widths) 0))
+                              buffer-widths))))))))
        nil
        frame)
       (maphash
@@ -2940,6 +2979,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (setq truncate-lines t)
   (disco-root--cancel-live-update-timer)
   (disco-root--ensure-window-size-hook)
+  (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
   (setq-local disco-root--sort-mode 'activity)
   (setq-local disco-root--view-mode 'all)
   (setq-local disco-root--pre-unread-view-mode 'all)
