@@ -12,6 +12,7 @@
 (require 'json)
 (require 'subr-x)
 (require 'url-util)
+(require 'disco-read-state)
 (require 'disco-util)
 
 (defun disco-api--json-true-p (value)
@@ -627,15 +628,6 @@ Return nil when VALUE is nil."
    (t
     (user-error "disco: %s must be a non-negative integer" field-name))))
 
-(defconst disco-api--read-state-type-alist
-  '((channel . 0)
-    (guild-event . 1)
-    (notification-center . 2)
-    (guild-home . 3)
-    (guild-onboarding-question . 4)
-    (message-requests . 5))
-  "Declarative map of Discord read-state type names to integer values.")
-
 (defun disco-api--normalize-read-state-type (value field-name &optional default)
   "Normalize read-state type VALUE for FIELD-NAME.
 
@@ -646,7 +638,7 @@ When VALUE is nil, return DEFAULT."
    ((integerp value)
     value)
    ((symbolp value)
-    (or (alist-get value disco-api--read-state-type-alist)
+    (or (alist-get value disco-read-state-type-alist)
         (user-error "disco: unsupported %s `%s'" field-name value)))
    (t
     (user-error "disco: unsupported %s `%s'" field-name value))))

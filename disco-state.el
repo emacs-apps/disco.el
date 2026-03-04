@@ -10,6 +10,7 @@
 
 (require 'cl-lib)
 (require 'seq)
+(require 'disco-read-state)
 
 (defvar disco-state--guilds nil
   "List of guild objects as alists.")
@@ -44,73 +45,6 @@
 (defvar disco-state--thread-member-count-by-thread (make-hash-table :test #'equal)
   "Hash table thread-id -> last known thread member count.")
 
-(defconst disco-state-read-state-type-alist
-  '((channel . 0)
-    (guild-event . 1)
-    (notification-center . 2)
-    (guild-home . 3)
-    (guild-onboarding-question . 4)
-    (message-requests . 5))
-  "Declarative map of Discord read-state type names to integer values.")
-
-(defconst disco-state-read-state-type-channel
-  (alist-get 'channel disco-state-read-state-type-alist)
-  "Read-state type value for channel message unreads.")
-
-(defconst disco-state-read-state-type-guild-event
-  (alist-get 'guild-event disco-state-read-state-type-alist)
-  "Read-state type value for guild event feature.")
-
-(defconst disco-state-read-state-type-notification-center
-  (alist-get 'notification-center disco-state-read-state-type-alist)
-  "Read-state type value for notification center feature.")
-
-(defconst disco-state-read-state-type-guild-home
-  (alist-get 'guild-home disco-state-read-state-type-alist)
-  "Read-state type value for guild home feature.")
-
-(defconst disco-state-read-state-type-guild-onboarding-question
-  (alist-get 'guild-onboarding-question disco-state-read-state-type-alist)
-  "Read-state type value for guild onboarding question feature.")
-
-(defconst disco-state-read-state-type-message-requests
-  (alist-get 'message-requests disco-state-read-state-type-alist)
-  "Read-state type value for message request feature.")
-
-(defconst disco-state--read-state-spec-alist
-  `((,disco-state-read-state-type-channel
-     :entity-field last_message_id
-     :counter-field mention_count)
-    (,disco-state-read-state-type-guild-event
-     :entity-field last_acked_id
-     :counter-field badge_count)
-    (,disco-state-read-state-type-notification-center
-     :entity-field last_acked_id
-     :counter-field badge_count)
-    (,disco-state-read-state-type-guild-home
-     :entity-field last_acked_id
-     :counter-field badge_count)
-    (,disco-state-read-state-type-guild-onboarding-question
-     :entity-field last_acked_id
-     :counter-field badge_count)
-    (,disco-state-read-state-type-message-requests
-     :entity-field last_acked_id
-     :counter-field badge_count))
-  "Declarative read-state type spec map.")
-
-(defconst disco-state-read-state-flag-alist
-  '((is-guild-channel . 1)
-    (is-thread . 2)
-    (is-mention-low-importance . 4))
-  "Declarative map of read-state channel flag names to bit values.")
-
-(defconst disco-state-read-state-flag-is-guild-channel
-  (alist-get 'is-guild-channel disco-state-read-state-flag-alist)
-  "Flag bit for guild channel read-state.")
-
-(defconst disco-state-read-state-flag-is-thread
-  (alist-get 'is-thread disco-state-read-state-flag-alist)
-  "Flag bit for thread channel read-state.")
 
 (defconst disco-state-discord-epoch-seconds 1420070400
   "Discord epoch as UNIX seconds (2015-01-01 00:00:00 UTC).")
@@ -133,23 +67,26 @@
   (when resource-id
     (cons read-state-type (disco-state--normalize-id resource-id))))
 
-(defun disco-state--read-state-spec (read-state-type)
-  "Return declarative spec plist for READ-STATE-TYPE."
-  (alist-get read-state-type disco-state--read-state-spec-alist))
-
-(defun disco-state--read-state-entity-field (read-state-type)
-  "Return entity cursor field symbol for READ-STATE-TYPE."
-  (plist-get (disco-state--read-state-spec read-state-type) :entity-field))
-
-(defun disco-state--read-state-counter-field (read-state-type)
-  "Return unread counter field symbol for READ-STATE-TYPE."
-  (plist-get (disco-state--read-state-spec read-state-type) :counter-field))
-
 (defun disco-state-read-state (read-state-type resource-id)
   "Return read-state object for READ-STATE-TYPE and RESOURCE-ID."
   (let ((key (disco-state--read-state-key read-state-type resource-id)))
     (when key
       (copy-tree (gethash key disco-state--read-states)))))
+
+(defun disco-state-read-state-counter-total (read-state-type)
+  "Return aggregated unread counter value for READ-STATE-TYPE."
+  (let ((counter-field (disco-read-state-counter-field read-state-type))
+        (total 0))
+    (when counter-field
+      (maphash
+       (lambda (key state)
+         (when (and (consp key)
+                    (= (car key) read-state-type))
+           (let ((value (alist-get counter-field state)))
+             (when (numberp value)
+               (setq total (+ total (max 0 value)))))))
+       disco-state--read-states))
+    total))
 
 (defun disco-state--upsert-read-state (read-state-type resource-id fields)
   "Upsert read-state for READ-STATE-TYPE/RESOURCE-ID with FIELDS alist."
@@ -504,7 +441,7 @@ MEMBER-COUNT is optional approximate thread member count."
           (disco-state--remove-thread-indexes channel)))
       (remhash channel-id disco-state--channels-by-id)
       (remhash channel-id disco-state--messages-by-channel)
-      (disco-state--delete-read-state disco-state-read-state-type-channel channel-id)))
+      (disco-state--delete-read-state disco-read-state-type-channel channel-id)))
   (remhash channel-id disco-state--thread-member-ids-by-thread)
   (remhash channel-id disco-state--thread-member-count-by-thread))
 
@@ -535,7 +472,7 @@ Otherwise, replace threads only under the provided parent IDs."
 
 (defun disco-state-channel-unread-count (channel-id)
   "Return unread count for CHANNEL-ID."
-  (let* ((state (disco-state-read-state disco-state-read-state-type-channel channel-id))
+  (let* ((state (disco-state-read-state disco-read-state-type-channel channel-id))
          (mention-count (and (listp state)
                              (alist-get 'mention_count state))))
     (if (numberp mention-count)
@@ -576,7 +513,7 @@ Otherwise, replace threads only under the provided parent IDs."
   "Set unread COUNT for CHANNEL-ID and return normalized count."
   (let ((normalized (max 0 (or count 0))))
     (disco-state--upsert-read-state
-     disco-state-read-state-type-channel
+     disco-read-state-type-channel
      channel-id
      `((mention_count . ,normalized)))
     normalized))
@@ -588,28 +525,28 @@ Otherwise, replace threads only under the provided parent IDs."
 
 (defun disco-state-channel-last-read-message-id (channel-id)
   "Return last acknowledged message ID for CHANNEL-ID, or nil."
-  (let ((state (disco-state-read-state disco-state-read-state-type-channel channel-id)))
+  (let ((state (disco-state-read-state disco-read-state-type-channel channel-id)))
     (and (listp state)
          (alist-get 'last_message_id state))))
 
 (defun disco-state-set-channel-last-read-message-id (channel-id message-id)
   "Set CHANNEL-ID read cursor to MESSAGE-ID and return MESSAGE-ID."
   (disco-state--upsert-read-state
-   disco-state-read-state-type-channel
+   disco-read-state-type-channel
    channel-id
    `((last_message_id . ,message-id)))
   message-id)
 
 (defun disco-state-channel-last-read-pin-timestamp (channel-id)
   "Return last acknowledged pin timestamp for CHANNEL-ID, or nil."
-  (let ((state (disco-state-read-state disco-state-read-state-type-channel channel-id)))
+  (let ((state (disco-state-read-state disco-read-state-type-channel channel-id)))
     (and (listp state)
          (alist-get 'last_pin_timestamp state))))
 
 (defun disco-state-set-channel-last-read-pin-timestamp (channel-id timestamp)
   "Set CHANNEL-ID acknowledged pin TIMESTAMP and return TIMESTAMP."
   (disco-state--upsert-read-state
-   disco-state-read-state-type-channel
+   disco-read-state-type-channel
    channel-id
    `((last_pin_timestamp . ,timestamp)))
   timestamp)
@@ -647,9 +584,9 @@ Otherwise, replace threads only under the provided parent IDs."
   (let ((channel (disco-state-channel channel-id))
         (flags 0))
     (when (alist-get 'guild_id channel)
-      (setq flags (logior flags disco-state-read-state-flag-is-guild-channel)))
+      (setq flags (logior flags disco-read-state-flag-is-guild-channel)))
     (when (disco-state-channel-thread-p channel)
-      (setq flags (logior flags disco-state-read-state-flag-is-thread)))
+      (setq flags (logior flags disco-read-state-flag-is-thread)))
     flags))
 
 (defun disco-state-current-last-viewed-day ()
@@ -690,7 +627,7 @@ FLAGS, LAST-VIEWED and VERSION are applied when provided."
         (push `(version . ,version) fields))
       (when fields
         (disco-state--upsert-read-state
-         disco-state-read-state-type-channel
+         disco-read-state-type-channel
          channel-id
          (nreverse fields))))))
 
@@ -710,7 +647,7 @@ FLAGS, LAST-VIEWED and VERSION are applied when provided."
       (when (numberp version)
         (setq fields (append fields `((version . ,version)))))
       (disco-state--upsert-read-state
-       disco-state-read-state-type-channel
+       disco-read-state-type-channel
        channel-id
        fields))))
 
@@ -719,8 +656,8 @@ FLAGS, LAST-VIEWED and VERSION are applied when provided."
 
 ENTITY-ID is stored as the latest acknowledged entity cursor and unread badge
 counter is reset to zero. VERSION is stored when provided."
-  (let ((entity-field (disco-state--read-state-entity-field read-state-type))
-        (counter-field (disco-state--read-state-counter-field read-state-type)))
+  (let ((entity-field (disco-read-state-entity-field read-state-type))
+        (counter-field (disco-read-state-counter-field read-state-type)))
     (when (and (numberp read-state-type)
                resource-id
                entity-id
@@ -844,7 +781,7 @@ WATCHED means a room buffer currently tracks this channel."
 
 Returns non-nil when ENTRY can be normalized and applied."
   (let ((read-state-type (or (alist-get 'read_state_type entry)
-                             disco-state-read-state-type-channel))
+                             disco-read-state-type-channel))
         (resource-id (alist-get 'id entry))
         (state-fields
          '(last_message_id
@@ -886,12 +823,12 @@ If TOKEN is nil, clear any stored token for the read-state."
 
 (defun disco-state-channel-ack-token (channel-id)
   "Return read-state ack token for CHANNEL-ID, or nil."
-  (disco-state-read-state-ack-token disco-state-read-state-type-channel channel-id))
+  (disco-state-read-state-ack-token disco-read-state-type-channel channel-id))
 
 (defun disco-state-set-channel-ack-token (channel-id token)
   "Store read-state ack TOKEN for CHANNEL-ID and return TOKEN."
   (disco-state-set-read-state-ack-token
-   disco-state-read-state-type-channel
+   disco-read-state-type-channel
    channel-id
    token))
 
@@ -918,7 +855,7 @@ When RESPONSE includes `token', update cached ack token accordingly."
 (defun disco-state-apply-channel-ack-response (channel-id response)
   "Apply channel read-state ACK RESPONSE payload for CHANNEL-ID."
   (disco-state-apply-read-state-ack-response
-   disco-state-read-state-type-channel
+   disco-read-state-type-channel
    channel-id
    response))
 

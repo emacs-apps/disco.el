@@ -325,6 +325,26 @@
   (should (= 1 (disco-state-channel-read-state-flags "guild-text")))
   (should (= 3 (disco-state-channel-read-state-flags "thread"))))
 
+(ert-deftest disco-state-read-state-counter-total-sums-by-type ()
+  (disco-state-reset)
+  (disco-state-apply-ready-read-state-entry
+   '((read_state_type . 2)
+     (id . "u1")
+     (badge_count . 3)
+     (last_acked_id . "n3")))
+  (disco-state-apply-ready-read-state-entry
+   '((read_state_type . 2)
+     (id . "u2")
+     (badge_count . 4)
+     (last_acked_id . "n8")))
+  (disco-state-apply-ready-read-state-entry
+   '((read_state_type . 5)
+     (id . "u1")
+     (badge_count . 6)
+     (last_acked_id . "m2")))
+  (should (= 7 (disco-state-read-state-counter-total 2)))
+  (should (= 6 (disco-state-read-state-counter-total 5))))
+
 (ert-deftest disco-state-current-last-viewed-day-uses-discord-epoch ()
   (cl-letf (((symbol-function 'float-time)
              (lambda () (+ disco-state-discord-epoch-seconds

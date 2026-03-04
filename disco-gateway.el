@@ -22,6 +22,7 @@
 (require 'subr-x)
 (require 'disco-api)
 (require 'disco-customize)
+(require 'disco-read-state)
 (require 'disco-state)
 (require 'websocket)
 
@@ -866,12 +867,12 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   (let ((entity-id (alist-get 'id payload))
         (resource-id disco-gateway--current-user-id))
     (disco-state-apply-feature-ack
-     disco-state-read-state-type-notification-center
+     disco-read-state-type-notification-center
      resource-id
      entity-id)
     (disco-gateway--emit
      (list :type 'notification-center-items-ack
-           :read-state-type disco-state-read-state-type-notification-center
+           :read-state-type disco-read-state-type-notification-center
            :resource-id resource-id
            :entity-id entity-id))))
 
