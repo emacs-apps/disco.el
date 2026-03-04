@@ -2977,6 +2977,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   "Major mode for disco.el root buffer."
   (setq buffer-read-only t)
   (setq truncate-lines t)
+  (buffer-disable-undo)
   (disco-root--cancel-live-update-timer)
   (disco-root--ensure-window-size-hook)
   (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
