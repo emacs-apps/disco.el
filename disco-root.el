@@ -113,6 +113,9 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--dirty-header-p nil
   "Non-nil when queued live updates require root header refresh.")
 
+(defvar-local disco-root--last-header-refresh-at nil
+  "Timestamp of the last root header refresh in current buffer.")
+
 (defvar-local disco-root--fill-column nil
   "Effective root layout width used for the latest render pass.")
 
@@ -199,6 +202,14 @@ by default to keep root refresh and resize reflow responsive."
 
 (defcustom disco-root-live-update-debounce 0.06
   "Seconds to debounce aggregated gateway updates before UI flush."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-root-activity-header-refresh-interval 0.2
+  "Minimum seconds between activity header refreshes from live row updates.
+
+This throttle applies only to implicit header refresh caused by dirty activity
+rows. Explicit header-dirty events bypass the throttle."
   :type 'number
   :group 'disco)
 
@@ -784,23 +795,59 @@ Return one of symbols:
                          (disco-root--channel-display-name right))
          (> left-score right-score))))))
 
-(defun disco-root--activity-find-before-node (channel &optional skip-channel-id)
-  "Return first activity row node that should come after CHANNEL."
-  (let ((cursor (and disco-root--ewoc (ewoc-nth disco-root--ewoc 0)))
-        before)
-    (while (and cursor (null before))
-      (let* ((entry (ewoc-data cursor))
-             (entry-channel (and (eq (plist-get entry :entry-type) 'channel)
-                                 (plist-get entry :channel)))
-             (entry-id (and entry-channel (alist-get 'id entry-channel))))
-        (when (and entry-channel
-                   (or (null skip-channel-id)
-                       (not (equal skip-channel-id entry-id)))
-                   (disco-root--activity-channel-before-p channel entry-channel))
-          (setq before cursor)))
-      (unless before
-        (setq cursor (ewoc-next disco-root--ewoc cursor))))
-    before))
+(defun disco-root--activity-node-channel (node)
+  "Return channel object stored in activity EWOC NODE, or nil."
+  (when node
+    (let ((entry (ewoc-data node)))
+      (when (eq (plist-get entry :entry-type) 'channel)
+        (plist-get entry :channel)))))
+
+(defun disco-root--activity-node-prev-channel (node)
+  "Return previous activity channel node before NODE, or nil."
+  (let ((probe (and node (ewoc-prev disco-root--ewoc node))))
+    (while (and probe (null (disco-root--activity-node-channel probe)))
+      (setq probe (ewoc-prev disco-root--ewoc probe)))
+    probe))
+
+(defun disco-root--activity-node-next-channel (node)
+  "Return next activity channel node after NODE, or nil."
+  (let ((probe (and node (ewoc-next disco-root--ewoc node))))
+    (while (and probe (null (disco-root--activity-node-channel probe)))
+      (setq probe (ewoc-next disco-root--ewoc probe)))
+    probe))
+
+(defun disco-root--activity-reposition-existing-node (channel-id channel node)
+  "Reposition CHANNEL-ID NODE for CHANNEL using local neighbor checks."
+  (let* ((prev-node (disco-root--activity-node-prev-channel node))
+         (next-node (disco-root--activity-node-next-channel node))
+         (prev-channel (and prev-node (disco-root--activity-node-channel prev-node)))
+         (next-channel (and next-node (disco-root--activity-node-channel next-node)))
+         target-before
+         move-to-end)
+    (cond
+     ((and prev-channel
+           (disco-root--activity-channel-before-p channel prev-channel))
+      (setq target-before prev-node)
+      (let ((probe (disco-root--activity-node-prev-channel prev-node)))
+        (while (and probe
+                    (disco-root--activity-channel-before-p
+                     channel
+                     (disco-root--activity-node-channel probe)))
+          (setq target-before probe)
+          (setq probe (disco-root--activity-node-prev-channel probe)))))
+     ((and next-channel
+           (disco-root--activity-channel-before-p next-channel channel))
+      (let ((probe next-node))
+        (while (and probe
+                    (disco-root--activity-channel-before-p
+                     (disco-root--activity-node-channel probe)
+                     channel))
+          (setq probe (disco-root--activity-node-next-channel probe)))
+        (setq target-before probe)
+        (setq move-to-end (null probe)))))
+    (when (or (and target-before (not (eq target-before node)))
+              move-to-end)
+      (disco-root--move-channel-node-before channel-id node target-before))))
 
 (defun disco-root--activity-reorder-channel-node (channel-id)
   "Reposition CHANNEL-ID node in activity EWOC.
@@ -811,10 +858,7 @@ Return `missing-visible' when a visible channel has no EWOC node."
          (node (and channel-id (disco-root--activity-channel-node channel-id))))
     (cond
      ((and visible node)
-      (disco-root--move-channel-node-before
-       channel-id
-       node
-       (disco-root--activity-find-before-node channel channel-id))
+      (disco-root--activity-reposition-existing-node channel-id channel node)
       'moved)
      ((and visible (null node))
       'missing-visible)
@@ -1065,10 +1109,12 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                     (setq needs-structural t)))
                 (when dirty-channel-ids
                   (disco-root--refresh-active-layout-headings dirty-channel-ids))
-                (when (or needs-header
-                          (and dirty-channel-ids
-                               (eq layout 'activity)))
-                  (disco-root--refresh-header-line)))
+                (cond
+                 (needs-header
+                  (disco-root--refresh-header-line))
+                 ((and dirty-channel-ids
+                       (eq layout 'activity))
+                  (disco-root--maybe-refresh-activity-header-line))))
               (when needs-structural
                 (disco-root--render-preserving-position))))))))))
 
@@ -3090,7 +3136,18 @@ Return non-nil when at least one visible row is inserted for GUILD."
       (dolist (line lines)
         (delete-region (line-beginning-position) (line-end-position))
         (insert line)
-        (forward-line 1)))))
+        (forward-line 1)))
+    (setq disco-root--last-header-refresh-at (float-time))))
+
+(defun disco-root--maybe-refresh-activity-header-line ()
+  "Refresh activity header line when throttle interval has elapsed."
+  (let ((interval (max 0 (or disco-root-activity-header-refresh-interval 0)))
+        (now (float-time))
+        (last (or disco-root--last-header-refresh-at 0.0)))
+    (when (or (zerop interval)
+              (>= (- now last) interval))
+      (disco-root--refresh-header-line)
+      t)))
 
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
@@ -3101,6 +3158,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
     (erase-buffer)
     (dolist (line (disco-root--header-lines))
       (insert line "\n"))
+    (setq-local disco-root--last-header-refresh-at (float-time))
     (insert "\n")
     (disco-root--prepare-ewoc-state)
     (if (functionp renderer)
@@ -3291,6 +3349,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (setq-local disco-root--dirty-channel-ids nil)
   (setq-local disco-root--dirty-structure-p nil)
   (setq-local disco-root--dirty-header-p nil)
+  (setq-local disco-root--last-header-refresh-at nil)
   (setq-local disco-root--fill-column nil)
   (setq-local disco-root--guild-expanded (make-hash-table :test #'equal))
   (setq-local disco-root--category-expanded (make-hash-table :test #'equal)))
