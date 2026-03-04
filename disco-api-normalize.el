@@ -627,6 +627,118 @@ Return nil when VALUE is nil."
    (t
     (user-error "disco: %s must be a non-negative integer" field-name))))
 
+(defconst disco-api--read-state-type-alist
+  '((channel . 0)
+    (guild-event . 1)
+    (notification-center . 2)
+    (guild-home . 3)
+    (guild-onboarding-question . 4)
+    (message-requests . 5))
+  "Declarative map of Discord read-state type names to integer values.")
+
+(defun disco-api--normalize-read-state-type-name (value)
+  "Normalize read-state type VALUE to canonical name form."
+  (replace-regexp-in-string
+   "[_ ]+"
+   "-"
+   (downcase (string-trim (format "%s" value)))))
+
+(defun disco-api--normalize-read-state-type (value field-name &optional default)
+  "Normalize read-state type VALUE for FIELD-NAME.
+
+When VALUE is nil, return DEFAULT."
+  (cond
+   ((null value)
+    default)
+   ((and (integerp value) (>= value 0))
+    value)
+   ((and (stringp value)
+         (string-match-p "\\`[0-9]+\\'" value))
+    (string-to-number value))
+   (t
+    (let* ((name (disco-api--normalize-read-state-type-name value))
+           (mapped (alist-get (intern name)
+                              disco-api--read-state-type-alist)))
+      (if (numberp mapped)
+          mapped
+        (user-error "disco: unsupported %s `%s'" field-name value))))))
+
+(defun disco-api--normalize-ack-token (token)
+  "Normalize read-state ack TOKEN.
+
+Return nil, string token, or :null."
+  (cond
+   ((null token)
+    nil)
+   ((or (stringp token)
+        (eq token :null))
+    token)
+   (t
+    (user-error "disco: token must be a string, :null, or nil"))))
+
+(defun disco-api--token-payload (&optional token)
+  "Build token-only payload object for read-state ACK endpoints.
+
+When TOKEN is omitted, return `:empty-object'."
+  (let ((normalized-token (disco-api--normalize-ack-token token)))
+    (if normalized-token
+        `((token . ,normalized-token))
+      :empty-object)))
+
+(defun disco-api--normalize-read-state-update-entry (entry)
+  "Normalize one bulk read-state update ENTRY payload."
+  (unless (listp entry)
+    (user-error "disco: read_states entries must be alists/plists"))
+  (let* ((read-state-type
+          (disco-api--normalize-read-state-type
+           (disco-util-object-get entry 'read_state_type 'read-state-type)
+           "read_states[].read_state_type"
+           0))
+         (channel-id
+          (disco-util-object-get entry 'channel_id 'channel-id 'id))
+         (message-id
+          (disco-util-object-get entry 'message_id 'message-id 'entity_id 'entity-id))
+         (normalized-channel-id
+          (disco-api--normalize-id-string channel-id "read_states[].channel_id"))
+         (normalized-message-id
+          (disco-api--normalize-id-string message-id "read_states[].message_id"))
+         payload)
+    (when (string-match-p "\\`0+\\'" normalized-message-id)
+      (user-error "disco: read_states[].message_id must be greater than 0"))
+    (when (/= read-state-type 0)
+      (push `(read_state_type . ,read-state-type) payload))
+    (push `(channel_id . ,normalized-channel-id) payload)
+    (push `(message_id . ,normalized-message-id) payload)
+    (nreverse payload)))
+
+(defun disco-api--read-states-bulk-payload (read-states)
+  "Build payload for bulk read-state update endpoint."
+  (let* ((source (cond
+                  ((null read-states) nil)
+                  ((vectorp read-states) (append read-states nil))
+                  ((listp read-states) read-states)
+                  (t (list read-states))))
+         (normalized (mapcar #'disco-api--normalize-read-state-update-entry source)))
+    (unless normalized
+      (user-error "disco: read_states cannot be empty"))
+    `((read_states . ,(vconcat normalized)))))
+
+(cl-defun disco-api--delete-read-state-payload (&key read-state-type version)
+  "Build payload for delete read-state endpoint."
+  (let ((normalized-read-state-type
+         (disco-api--normalize-read-state-type
+          read-state-type
+          "read_state_type"
+          nil))
+        (normalized-version
+         (disco-api--normalize-non-negative-integer version "version"))
+        payload)
+    (when (not (null normalized-read-state-type))
+      (push `(read_state_type . ,normalized-read-state-type) payload))
+    (when (not (null normalized-version))
+      (push `(version . ,normalized-version) payload))
+    (nreverse payload)))
+
 (defun disco-api--message-edit-payload (content &optional allowed-mentions)
   "Build payload for message edit endpoints.
 
@@ -650,13 +762,7 @@ When all fields are omitted, return `:empty-object'."
   (let* ((manual-value (or (disco-api--json-true-p manual)
                            (not (null mention-count))))
          (normalized-token
-          (cond
-           ((null token) nil)
-           ((or (stringp token)
-                (eq token :null))
-            token)
-           (t
-            (user-error "disco: token must be a string, :null, or nil"))))
+          (disco-api--normalize-ack-token token))
          (normalized-mention-count
           (disco-api--normalize-non-negative-integer mention-count "mention_count"))
          (normalized-flags

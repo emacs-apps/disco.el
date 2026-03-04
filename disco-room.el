@@ -1318,7 +1318,7 @@ Unread counters are always cleared locally."
          (should-ack (and target-id
                           (or (null last-read-id)
                               (disco-state-snowflake< last-read-id target-id)))))
-    (disco-state-clear-channel-unread channel-id)
+    (disco-state-apply-message-ack channel-id nil 0)
     (when should-ack
       (let ((token (disco-state-channel-ack-token channel-id)))
         (disco-api-ack-message-async
@@ -1328,7 +1328,7 @@ Unread counters are always cleared locally."
          :on-success
          (lambda (response)
            (when (disco-room--callback-active-p room-buffer channel-id generation)
-             (disco-state-set-channel-last-read-message-id channel-id target-id)
+             (disco-state-apply-message-ack channel-id target-id 0)
              (let ((token-pair (and (listp response) (assq 'token response))))
                (when token-pair
                  (disco-state-set-channel-ack-token channel-id (cdr token-pair))))))

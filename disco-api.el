@@ -827,6 +827,136 @@ Response may include a refreshed ack token."
    :on-success on-success
    :on-error on-error))
 
+(defun disco-api-ack-channel-pins (channel-id)
+  "Acknowledge currently pinned messages in CHANNEL-ID."
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/pins/ack" channel-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-ack-channel-pins-async (channel-id &key on-success on-error)
+  "Asynchronously acknowledge pinned messages in CHANNEL-ID."
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/pins/ack" channel-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-ack-guild-feature (guild-id read-state-type entity-id &optional token)
+  "Acknowledge guild feature read state for ENTITY-ID in GUILD-ID.
+
+READ-STATE-TYPE follows Discord read-state type values. TOKEN is optional."
+  (let ((normalized-guild-id (disco-api--normalize-id-string guild-id "guild_id"))
+        (normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request
+     "POST"
+     (format "/guilds/%s/ack/%s/%s"
+             normalized-guild-id
+             normalized-read-state-type
+             normalized-entity-id)
+     (disco-api--token-payload token)
+     nil
+     nil)))
+
+(cl-defun disco-api-ack-guild-feature-async (guild-id read-state-type entity-id
+                                                      &key token on-success on-error)
+  "Asynchronously acknowledge guild feature read state."
+  (let ((normalized-guild-id (disco-api--normalize-id-string guild-id "guild_id"))
+        (normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request-async
+     "POST"
+     (format "/guilds/%s/ack/%s/%s"
+             normalized-guild-id
+             normalized-read-state-type
+             normalized-entity-id)
+     :payload (disco-api--token-payload token)
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-ack-user-feature (read-state-type entity-id &optional token)
+  "Acknowledge non-channel user feature read state for ENTITY-ID.
+
+READ-STATE-TYPE follows Discord read-state type values. TOKEN is optional."
+  (let ((normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request
+     "POST"
+     (format "/users/@me/%s/%s/ack"
+             normalized-read-state-type
+             normalized-entity-id)
+     (disco-api--token-payload token)
+     nil
+     nil)))
+
+(cl-defun disco-api-ack-user-feature-async (read-state-type entity-id
+                                                            &key token on-success on-error)
+  "Asynchronously acknowledge non-channel user feature read state."
+  (let ((normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request-async
+     "POST"
+     (format "/users/@me/%s/%s/ack"
+             normalized-read-state-type
+             normalized-entity-id)
+     :payload (disco-api--token-payload token)
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-bulk-update-read-states (read-states)
+  "Bulk update READ-STATES for current user."
+  (disco-api--request
+   "POST"
+   "/read-states/ack-bulk"
+   (disco-api--read-states-bulk-payload read-states)
+   nil
+   nil))
+
+(cl-defun disco-api-bulk-update-read-states-async (read-states &key on-success on-error)
+  "Asynchronously bulk update READ-STATES for current user."
+  (disco-api--request-async
+   "POST"
+   "/read-states/ack-bulk"
+   :payload (disco-api--read-states-bulk-payload read-states)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-delete-read-state (read-state-id &key read-state-type version)
+  "Delete read state for READ-STATE-ID.
+
+READ-STATE-TYPE and VERSION are optional request fields."
+  (let ((normalized-read-state-id
+         (disco-api--normalize-id-string read-state-id "read_state.id"))
+        (payload (disco-api--delete-read-state-payload
+                  :read-state-type read-state-type
+                  :version version)))
+    (disco-api--request
+     "DELETE"
+     (format "/channels/%s/messages/ack" normalized-read-state-id)
+     payload
+     nil
+     nil)))
+
+(cl-defun disco-api-delete-read-state-async (read-state-id &key read-state-type version on-success on-error)
+  "Asynchronously delete read state for READ-STATE-ID."
+  (let ((normalized-read-state-id
+         (disco-api--normalize-id-string read-state-id "read_state.id"))
+        (payload (disco-api--delete-read-state-payload
+                  :read-state-type read-state-type
+                  :version version)))
+    (disco-api--request-async
+     "DELETE"
+     (format "/channels/%s/messages/ack" normalized-read-state-id)
+     :payload payload
+     :on-success on-success
+     :on-error on-error)))
 
 (cl-defun disco-api-create-message (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll)
   "Create one message in CHANNEL-ID.
