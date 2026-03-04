@@ -548,289 +548,379 @@ Only CHANNEL read_state_type entries are used here."
            :guild-ids (delq nil (mapcar (lambda (it) (alist-get 'id it)) ready-guilds))
            :guild-count (length ready-guilds)))))
 
-(defun disco-gateway--handle-dispatch (event-type data)
-  "Handle one dispatch EVENT-TYPE with DATA payload."
-  (pcase event-type
-    ("READY"
-     (setq disco-gateway--session-id (alist-get 'session_id data))
-     (setq disco-gateway--resume-url (alist-get 'resume_gateway_url data))
-     (let ((ready-user (alist-get 'user data)))
-       (setq disco-gateway--current-user-id
-             (and (listp ready-user)
-                  (alist-get 'id ready-user))))
-     (disco-gateway--ingest-ready-read-states (alist-get 'read_state data))
-     (when (assq 'guilds data)
-       (disco-gateway--ingest-ready-guilds
-        (alist-get 'guilds data)))
-     (when (assq 'private_channels data)
-       (disco-gateway--ingest-ready-private-channels
-        (alist-get 'private_channels data)))
-     (disco-gateway--subscribe-watched-guild-channels t)
-     (disco-gateway--reset-reconnect-backoff)
-     (message "disco: gateway READY"))
-    ("RESUMED"
-     (disco-gateway--subscribe-watched-guild-channels t)
-     (disco-gateway--reset-reconnect-backoff)
-     (message "disco: gateway RESUMED"))
-    ("GUILD_CREATE"
-     (disco-state-upsert-guild data)
-     (disco-gateway--emit-guild-event 'guild-create data))
-    ("GUILD_UPDATE"
-     (disco-state-upsert-guild data)
-     (disco-gateway--emit-guild-event 'guild-update data))
-    ("GUILD_DELETE"
-     (let ((guild-id (alist-get 'id data)))
-       (when guild-id
-         (disco-state-delete-guild guild-id))
-       (disco-gateway--emit-guild-event 'guild-delete data)))
-    ("CHANNEL_CREATE"
-     (disco-state-upsert-channel data)
-     (let ((channel-id (alist-get 'id data)))
-       (when (and channel-id (disco-gateway--channel-watched-p channel-id))
-         (disco-gateway--maybe-subscribe-watched-channel channel-id t)))
-     (disco-gateway--emit-channel-event 'channel-create data))
-    ("CHANNEL_UPDATE"
-     (disco-state-upsert-channel data)
-     (let ((channel-id (alist-get 'id data)))
-       (when (and channel-id (disco-gateway--channel-watched-p channel-id))
-         (disco-gateway--maybe-subscribe-watched-channel channel-id t)))
-     (disco-gateway--emit-channel-event 'channel-update data))
-    ("CHANNEL_DELETE"
-     (let ((channel-id (alist-get 'id data)))
-       (when channel-id
-         (disco-state-delete-channel channel-id))
-       (disco-gateway--emit-channel-event 'channel-delete data)))
-    ("MESSAGE_CREATE"
-     (let ((channel-id (alist-get 'channel_id data)))
-       (when channel-id
-         (let ((watched (disco-gateway--channel-watched-p channel-id)))
-           (when watched
-             (disco-gateway--upsert-message channel-id data))
-           ;; Conservative unread model: only count messages for non-watched channels.
-           (when (and (not watched)
-                      (disco-state-channel channel-id))
-             (disco-state-increment-channel-unread channel-id 1))
-           (disco-gateway--emit
-            (list :type 'message-create
-                  :channel-id channel-id
-                  :message data
-                  :watched watched))))))
-    ("MESSAGE_UPDATE"
-     (let ((channel-id (alist-get 'channel_id data)))
-       (when (and channel-id (disco-gateway--channel-watched-p channel-id))
-         (disco-gateway--upsert-message channel-id data)
-         (disco-gateway--emit
-          (list :type 'message-update :channel-id channel-id :message data)))))
-    ("MESSAGE_DELETE"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'id data)))
-       (when (and channel-id message-id (disco-gateway--channel-watched-p channel-id))
-         (disco-gateway--delete-message channel-id message-id)
-         (disco-gateway--emit
-          (list :type 'message-delete :channel-id channel-id :message-id message-id)))))
-    ("MESSAGE_REACTION_ADD"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'message_id data)))
-       (when (and channel-id message-id)
-         (disco-gateway--emit
-          (list :type 'message-reaction-add
-                :channel-id channel-id
-                :message-id message-id
-                :user-id (alist-get 'user_id data)
-                :emoji (or (alist-get 'emoji data)
-                           (alist-get 'emoji_name data))
-                :reaction-type (alist-get 'type data))))))
-    ("MESSAGE_REACTION_REMOVE"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'message_id data)))
-       (when (and channel-id message-id)
-         (disco-gateway--emit
-          (list :type 'message-reaction-remove
-                :channel-id channel-id
-                :message-id message-id
-                :user-id (alist-get 'user_id data)
-                :emoji (or (alist-get 'emoji data)
-                           (alist-get 'emoji_name data))
-                :reaction-type (alist-get 'type data))))))
-    ("MESSAGE_REACTION_REMOVE_ALL"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'message_id data)))
-       (when (and channel-id message-id)
-         (disco-gateway--emit
-          (list :type 'message-reaction-remove-all
-                :channel-id channel-id
-                :message-id message-id)))))
-    ("MESSAGE_REACTION_REMOVE_EMOJI"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'message_id data)))
-       (when (and channel-id message-id)
-         (disco-gateway--emit
-          (list :type 'message-reaction-remove-emoji
-                :channel-id channel-id
-                :message-id message-id
-                :emoji (or (alist-get 'emoji data)
-                           (alist-get 'emoji_name data))
-                :reaction-type (alist-get 'type data))))))
-    ("MESSAGE_POLL_VOTE_ADD"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'message_id data))
-           (answer-id (alist-get 'answer_id data)))
-       (when (and channel-id message-id)
-         (disco-gateway--emit
-          (list :type 'message-poll-vote-add
-                :channel-id channel-id
-                :guild-id (alist-get 'guild_id data)
-                :message-id message-id
-                :user-id (alist-get 'user_id data)
-                :answer-id answer-id)))))
-    ("MESSAGE_POLL_VOTE_REMOVE"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'message_id data))
-           (answer-id (alist-get 'answer_id data)))
-       (when (and channel-id message-id)
-         (disco-gateway--emit
-          (list :type 'message-poll-vote-remove
-                :channel-id channel-id
-                :guild-id (alist-get 'guild_id data)
-                :message-id message-id
-                :user-id (alist-get 'user_id data)
-                :answer-id answer-id)))))
-    ("MESSAGE_ACK"
-     (let ((channel-id (alist-get 'channel_id data))
-           (message-id (alist-get 'message_id data))
-           (mention-count (alist-get 'mention_count data)))
-       (when channel-id
-         (when message-id
-           (disco-state-set-channel-last-read-message-id channel-id message-id))
-         (if (numberp mention-count)
-             (disco-state-set-channel-unread channel-id mention-count)
-           (disco-state-clear-channel-unread channel-id))
-         (disco-gateway--emit
-          (list :type 'message-ack
-                :channel-id channel-id
-                :message-id message-id
-                :mention-count mention-count)))))
-    ("TYPING_START"
-     (let ((channel-id (alist-get 'channel_id data))
-           (guild-id (alist-get 'guild_id data))
-           (user-id (alist-get 'user_id data))
-           (timestamp (alist-get 'timestamp data))
-           (member (alist-get 'member data)))
-       (when channel-id
-         (disco-gateway--emit
-          (list :type 'typing-start
-                :channel-id channel-id
-                :guild-id guild-id
-                :user-id user-id
-                :timestamp timestamp
-                :member member)))))
-    ("THREAD_CREATE"
-     (disco-state-upsert-channel data)
-     (let ((thread-id (alist-get 'id data)))
-       (when (and thread-id (disco-gateway--channel-watched-p thread-id))
-         (disco-gateway--maybe-subscribe-watched-channel thread-id t)))
-     (disco-gateway--emit-channel-event 'thread-create data))
-    ("THREAD_UPDATE"
-     (disco-state-upsert-channel data)
-     (let ((thread-id (alist-get 'id data)))
-       (when (and thread-id (disco-gateway--channel-watched-p thread-id))
-         (disco-gateway--maybe-subscribe-watched-channel thread-id t)))
-     (disco-gateway--emit-channel-event 'thread-update data))
-    ("THREAD_DELETE"
-     (let ((thread-id (alist-get 'id data)))
-       (when thread-id
-         (disco-state-delete-channel thread-id))
-       (disco-gateway--emit-channel-event 'thread-delete data)))
-    ("THREAD_LIST_SYNC"
-     (let ((guild-id (alist-get 'guild_id data))
-           (channel-ids (alist-get 'channel_ids data))
-           (threads (alist-get 'threads data)))
-       (when guild-id
-         (disco-state-sync-threads guild-id channel-ids (or threads '()))
-         (disco-gateway--emit
-          (list :type 'thread-list-sync
-                :guild-id guild-id
-                :channel-ids channel-ids
-                :threads (or threads '()))))))
-    ("THREAD_MEMBER_UPDATE"
-     (let* ((thread-id (or (alist-get 'id data)
-                           (alist-get 'thread_id data)))
-            (guild-id (alist-get 'guild_id data))
-            (member (alist-get 'member data))
-            (member-user (and (listp member)
-                              (alist-get 'user member)))
-            (user-id (or (alist-get 'user_id data)
-                         (and (listp member-user)
-                              (alist-get 'id member-user)))))
-       (when (and thread-id user-id)
-         (disco-state-upsert-thread-member thread-id user-id))
-       (disco-gateway--emit
-        (list :type 'thread-member-update
-              :channel-id thread-id
-              :thread-id thread-id
-              :guild-id guild-id
-              :user-id user-id
-              :thread-member data))))
-    ("THREAD_MEMBERS_UPDATE"
-     (let* ((thread-id (or (alist-get 'id data)
-                           (alist-get 'thread_id data)))
-            (guild-id (alist-get 'guild_id data))
-            (added-members (or (alist-get 'added_members data) '()))
-            (removed-member-ids (or (alist-get 'removed_member_ids data) '()))
-            (member-count (alist-get 'member_count data)))
-       (when thread-id
-         (disco-state-apply-thread-members-update
-          thread-id
-          added-members
-          removed-member-ids
-          member-count))
-       (disco-gateway--emit
-        (list :type 'thread-members-update
-              :channel-id thread-id
-              :thread-id thread-id
-              :guild-id guild-id
-              :added-members added-members
-              :removed-member-ids removed-member-ids
-              :member-count member-count))))
-    ("USER_UPDATE"
-     ;; Read-state ack tokens are account-scoped and should be reset on user updates.
-     (disco-state-reset-ack-tokens)
-     (let ((user-id (alist-get 'id data)))
-       (when user-id
-         (setq disco-gateway--current-user-id user-id))))))
+(defun disco-gateway--upsert-channel-and-emit (event-type channel)
+  "Upsert CHANNEL and emit EVENT-TYPE.
+
+CHANNEL watchers are also re-subscribed using Gateway opcode 14."
+  (disco-state-upsert-channel channel)
+  (let ((channel-id (alist-get 'id channel)))
+    (when (and channel-id (disco-gateway--channel-watched-p channel-id))
+      (disco-gateway--maybe-subscribe-watched-channel channel-id t)))
+  (disco-gateway--emit-channel-event event-type channel))
+
+(defun disco-gateway--delete-channel-and-emit (event-type channel)
+  "Delete CHANNEL from indexes and emit EVENT-TYPE."
+  (let ((channel-id (alist-get 'id channel)))
+    (when channel-id
+      (disco-state-delete-channel channel-id))
+    (disco-gateway--emit-channel-event event-type channel)))
+
+(defun disco-gateway--thread-id-from-payload (payload)
+  "Return normalized thread ID from gateway PAYLOAD."
+  (or (alist-get 'id payload)
+      (alist-get 'thread_id payload)))
+
+(defun disco-gateway--reaction-emoji (payload)
+  "Return emoji object/name from reaction PAYLOAD."
+  (or (alist-get 'emoji payload)
+      (alist-get 'emoji_name payload)))
+
+(defun disco-gateway--emit-reaction-event (event-type payload)
+  "Emit reaction EVENT-TYPE from gateway PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload))
+        (message-id (alist-get 'message_id payload)))
+    (when (and channel-id message-id)
+      (disco-gateway--emit
+       (append
+        (list :type event-type
+              :channel-id channel-id
+              :message-id message-id)
+        (when (assq 'user_id payload)
+          (list :user-id (alist-get 'user_id payload)))
+        (when (or (assq 'emoji payload)
+                  (assq 'emoji_name payload))
+          (list :emoji (disco-gateway--reaction-emoji payload)))
+        (when (assq 'type payload)
+          (list :reaction-type (alist-get 'type payload))))))))
+
+(defun disco-gateway--emit-poll-vote-event (event-type payload)
+  "Emit poll vote EVENT-TYPE from gateway PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload))
+        (message-id (alist-get 'message_id payload))
+        (answer-id (alist-get 'answer_id payload)))
+    (when (and channel-id message-id)
+      (disco-gateway--emit
+       (list :type event-type
+             :channel-id channel-id
+             :guild-id (alist-get 'guild_id payload)
+             :message-id message-id
+             :user-id (alist-get 'user_id payload)
+             :answer-id answer-id)))))
+
+(defun disco-gateway--dispatch-ready (payload)
+  "Handle READY dispatch PAYLOAD."
+  (setq disco-gateway--session-id (alist-get 'session_id payload))
+  (setq disco-gateway--resume-url (alist-get 'resume_gateway_url payload))
+  (let ((ready-user (alist-get 'user payload)))
+    (setq disco-gateway--current-user-id
+          (and (listp ready-user)
+               (alist-get 'id ready-user))))
+  (disco-gateway--ingest-ready-read-states (alist-get 'read_state payload))
+  (when (assq 'guilds payload)
+    (disco-gateway--ingest-ready-guilds
+     (alist-get 'guilds payload)))
+  (when (assq 'private_channels payload)
+    (disco-gateway--ingest-ready-private-channels
+     (alist-get 'private_channels payload)))
+  (disco-gateway--subscribe-watched-guild-channels t)
+  (disco-gateway--reset-reconnect-backoff)
+  (message "disco: gateway READY"))
+
+(defun disco-gateway--dispatch-resumed (_payload)
+  "Handle RESUMED dispatch event."
+  (disco-gateway--subscribe-watched-guild-channels t)
+  (disco-gateway--reset-reconnect-backoff)
+  (message "disco: gateway RESUMED"))
+
+(defun disco-gateway--dispatch-guild-create (payload)
+  "Handle GUILD_CREATE dispatch PAYLOAD."
+  (disco-state-upsert-guild payload)
+  (disco-gateway--emit-guild-event 'guild-create payload))
+
+(defun disco-gateway--dispatch-guild-update (payload)
+  "Handle GUILD_UPDATE dispatch PAYLOAD."
+  (disco-state-upsert-guild payload)
+  (disco-gateway--emit-guild-event 'guild-update payload))
+
+(defun disco-gateway--dispatch-guild-delete (payload)
+  "Handle GUILD_DELETE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'id payload)))
+    (when guild-id
+      (disco-state-delete-guild guild-id))
+    (disco-gateway--emit-guild-event 'guild-delete payload)))
+
+(defun disco-gateway--dispatch-channel-create (payload)
+  "Handle CHANNEL_CREATE dispatch PAYLOAD."
+  (disco-gateway--upsert-channel-and-emit 'channel-create payload))
+
+(defun disco-gateway--dispatch-channel-update (payload)
+  "Handle CHANNEL_UPDATE dispatch PAYLOAD."
+  (disco-gateway--upsert-channel-and-emit 'channel-update payload))
+
+(defun disco-gateway--dispatch-channel-delete (payload)
+  "Handle CHANNEL_DELETE dispatch PAYLOAD."
+  (disco-gateway--delete-channel-and-emit 'channel-delete payload))
+
+(defun disco-gateway--dispatch-message-create (payload)
+  "Handle MESSAGE_CREATE dispatch PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload)))
+    (when channel-id
+      (let ((watched (disco-gateway--channel-watched-p channel-id)))
+        (when watched
+          (disco-gateway--upsert-message channel-id payload))
+        ;; Conservative unread model: only count messages for non-watched channels.
+        (when (and (not watched)
+                   (disco-state-channel channel-id))
+          (disco-state-increment-channel-unread channel-id 1))
+        (disco-gateway--emit
+         (list :type 'message-create
+               :channel-id channel-id
+               :message payload
+               :watched watched))))))
+
+(defun disco-gateway--dispatch-message-update (payload)
+  "Handle MESSAGE_UPDATE dispatch PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload)))
+    (when (and channel-id (disco-gateway--channel-watched-p channel-id))
+      (disco-gateway--upsert-message channel-id payload)
+      (disco-gateway--emit
+       (list :type 'message-update :channel-id channel-id :message payload)))))
+
+(defun disco-gateway--dispatch-message-delete (payload)
+  "Handle MESSAGE_DELETE dispatch PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload))
+        (message-id (alist-get 'id payload)))
+    (when (and channel-id message-id (disco-gateway--channel-watched-p channel-id))
+      (disco-gateway--delete-message channel-id message-id)
+      (disco-gateway--emit
+       (list :type 'message-delete :channel-id channel-id :message-id message-id)))))
+
+(defun disco-gateway--dispatch-message-reaction-add (payload)
+  "Handle MESSAGE_REACTION_ADD dispatch PAYLOAD."
+  (disco-gateway--emit-reaction-event 'message-reaction-add payload))
+
+(defun disco-gateway--dispatch-message-reaction-remove (payload)
+  "Handle MESSAGE_REACTION_REMOVE dispatch PAYLOAD."
+  (disco-gateway--emit-reaction-event 'message-reaction-remove payload))
+
+(defun disco-gateway--dispatch-message-reaction-remove-all (payload)
+  "Handle MESSAGE_REACTION_REMOVE_ALL dispatch PAYLOAD."
+  (disco-gateway--emit-reaction-event 'message-reaction-remove-all payload))
+
+(defun disco-gateway--dispatch-message-reaction-remove-emoji (payload)
+  "Handle MESSAGE_REACTION_REMOVE_EMOJI dispatch PAYLOAD."
+  (disco-gateway--emit-reaction-event 'message-reaction-remove-emoji payload))
+
+(defun disco-gateway--dispatch-message-poll-vote-add (payload)
+  "Handle MESSAGE_POLL_VOTE_ADD dispatch PAYLOAD."
+  (disco-gateway--emit-poll-vote-event 'message-poll-vote-add payload))
+
+(defun disco-gateway--dispatch-message-poll-vote-remove (payload)
+  "Handle MESSAGE_POLL_VOTE_REMOVE dispatch PAYLOAD."
+  (disco-gateway--emit-poll-vote-event 'message-poll-vote-remove payload))
+
+(defun disco-gateway--dispatch-message-ack (payload)
+  "Handle MESSAGE_ACK dispatch PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload))
+        (message-id (alist-get 'message_id payload))
+        (mention-count (alist-get 'mention_count payload)))
+    (when channel-id
+      (when message-id
+        (disco-state-set-channel-last-read-message-id channel-id message-id))
+      (if (numberp mention-count)
+          (disco-state-set-channel-unread channel-id mention-count)
+        (disco-state-clear-channel-unread channel-id))
+      (disco-gateway--emit
+       (list :type 'message-ack
+             :channel-id channel-id
+             :message-id message-id
+             :mention-count mention-count)))))
+
+(defun disco-gateway--dispatch-typing-start (payload)
+  "Handle TYPING_START dispatch PAYLOAD."
+  (let ((channel-id (alist-get 'channel_id payload))
+        (guild-id (alist-get 'guild_id payload))
+        (user-id (alist-get 'user_id payload))
+        (timestamp (alist-get 'timestamp payload))
+        (member (alist-get 'member payload)))
+    (when channel-id
+      (disco-gateway--emit
+       (list :type 'typing-start
+             :channel-id channel-id
+             :guild-id guild-id
+             :user-id user-id
+             :timestamp timestamp
+             :member member)))))
+
+(defun disco-gateway--dispatch-thread-create (payload)
+  "Handle THREAD_CREATE dispatch PAYLOAD."
+  (disco-gateway--upsert-channel-and-emit 'thread-create payload))
+
+(defun disco-gateway--dispatch-thread-update (payload)
+  "Handle THREAD_UPDATE dispatch PAYLOAD."
+  (disco-gateway--upsert-channel-and-emit 'thread-update payload))
+
+(defun disco-gateway--dispatch-thread-delete (payload)
+  "Handle THREAD_DELETE dispatch PAYLOAD."
+  (disco-gateway--delete-channel-and-emit 'thread-delete payload))
+
+(defun disco-gateway--dispatch-thread-list-sync (payload)
+  "Handle THREAD_LIST_SYNC dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channel-ids (alist-get 'channel_ids payload))
+        (threads (alist-get 'threads payload)))
+    (when guild-id
+      (disco-state-sync-threads guild-id channel-ids (or threads '()))
+      (disco-gateway--emit
+       (list :type 'thread-list-sync
+             :guild-id guild-id
+             :channel-ids channel-ids
+             :threads (or threads '()))))))
+
+(defun disco-gateway--dispatch-thread-member-update (payload)
+  "Handle THREAD_MEMBER_UPDATE dispatch PAYLOAD."
+  (let* ((thread-id (disco-gateway--thread-id-from-payload payload))
+         (guild-id (alist-get 'guild_id payload))
+         (member (alist-get 'member payload))
+         (member-user (and (listp member)
+                           (alist-get 'user member)))
+         (user-id (or (alist-get 'user_id payload)
+                      (and (listp member-user)
+                           (alist-get 'id member-user)))))
+    (when (and thread-id user-id)
+      (disco-state-upsert-thread-member thread-id user-id))
+    (disco-gateway--emit
+     (list :type 'thread-member-update
+           :channel-id thread-id
+           :thread-id thread-id
+           :guild-id guild-id
+           :user-id user-id
+           :thread-member payload))))
+
+(defun disco-gateway--dispatch-thread-members-update (payload)
+  "Handle THREAD_MEMBERS_UPDATE dispatch PAYLOAD."
+  (let* ((thread-id (disco-gateway--thread-id-from-payload payload))
+         (guild-id (alist-get 'guild_id payload))
+         (added-members (or (alist-get 'added_members payload) '()))
+         (removed-member-ids (or (alist-get 'removed_member_ids payload) '()))
+         (member-count (alist-get 'member_count payload)))
+    (when thread-id
+      (disco-state-apply-thread-members-update
+       thread-id
+       added-members
+       removed-member-ids
+       member-count))
+    (disco-gateway--emit
+     (list :type 'thread-members-update
+           :channel-id thread-id
+           :thread-id thread-id
+           :guild-id guild-id
+           :added-members added-members
+           :removed-member-ids removed-member-ids
+           :member-count member-count))))
+
+(defun disco-gateway--dispatch-user-update (payload)
+  "Handle USER_UPDATE dispatch PAYLOAD."
+  ;; Read-state ack tokens are account-scoped and should be reset on user updates.
+  (disco-state-reset-ack-tokens)
+  (let ((user-id (alist-get 'id payload)))
+    (when user-id
+      (setq disco-gateway--current-user-id user-id))))
+
+;; Gateway dispatch event names are UPPER_CASE in Discord docs.
+(defconst disco-gateway--dispatch-handler-alist
+  '(("READY" . disco-gateway--dispatch-ready)
+    ("RESUMED" . disco-gateway--dispatch-resumed)
+    ("GUILD_CREATE" . disco-gateway--dispatch-guild-create)
+    ("GUILD_UPDATE" . disco-gateway--dispatch-guild-update)
+    ("GUILD_DELETE" . disco-gateway--dispatch-guild-delete)
+    ("CHANNEL_CREATE" . disco-gateway--dispatch-channel-create)
+    ("CHANNEL_UPDATE" . disco-gateway--dispatch-channel-update)
+    ("CHANNEL_DELETE" . disco-gateway--dispatch-channel-delete)
+    ("MESSAGE_CREATE" . disco-gateway--dispatch-message-create)
+    ("MESSAGE_UPDATE" . disco-gateway--dispatch-message-update)
+    ("MESSAGE_DELETE" . disco-gateway--dispatch-message-delete)
+    ("MESSAGE_REACTION_ADD" . disco-gateway--dispatch-message-reaction-add)
+    ("MESSAGE_REACTION_REMOVE" . disco-gateway--dispatch-message-reaction-remove)
+    ("MESSAGE_REACTION_REMOVE_ALL" . disco-gateway--dispatch-message-reaction-remove-all)
+    ("MESSAGE_REACTION_REMOVE_EMOJI" . disco-gateway--dispatch-message-reaction-remove-emoji)
+    ("MESSAGE_POLL_VOTE_ADD" . disco-gateway--dispatch-message-poll-vote-add)
+    ("MESSAGE_POLL_VOTE_REMOVE" . disco-gateway--dispatch-message-poll-vote-remove)
+    ("MESSAGE_ACK" . disco-gateway--dispatch-message-ack)
+    ("TYPING_START" . disco-gateway--dispatch-typing-start)
+    ("THREAD_CREATE" . disco-gateway--dispatch-thread-create)
+    ("THREAD_UPDATE" . disco-gateway--dispatch-thread-update)
+    ("THREAD_DELETE" . disco-gateway--dispatch-thread-delete)
+    ("THREAD_LIST_SYNC" . disco-gateway--dispatch-thread-list-sync)
+    ("THREAD_MEMBER_UPDATE" . disco-gateway--dispatch-thread-member-update)
+    ("THREAD_MEMBERS_UPDATE" . disco-gateway--dispatch-thread-members-update)
+    ("USER_UPDATE" . disco-gateway--dispatch-user-update))
+  "Declarative map of Dispatch event name to handler function.")
+
+(defun disco-gateway--handle-dispatch (event-type payload)
+  "Handle one dispatch EVENT-TYPE with PAYLOAD data."
+  (let ((handler (cdr (assoc event-type disco-gateway--dispatch-handler-alist))))
+    (when (functionp handler)
+      (funcall handler payload))))
+
+(defun disco-gateway--handle-op-dispatch (payload)
+  "Handle Gateway opcode 0 Dispatch PAYLOAD."
+  (disco-gateway--handle-dispatch
+   (alist-get 't payload)
+   (alist-get 'd payload)))
+
+(defun disco-gateway--handle-op-heartbeat-request (_payload)
+  "Handle Gateway opcode 1 Heartbeat request.
+
+Discord may request immediate heartbeats outside the regular interval."
+  (disco-gateway--send-heartbeat))
+
+(defun disco-gateway--handle-op-hello (payload)
+  "Handle Gateway opcode 10 Hello PAYLOAD."
+  (let ((interval (alist-get 'heartbeat_interval (alist-get 'd payload))))
+    (disco-gateway--start-heartbeat interval)
+    (if (disco-gateway--can-resume-p)
+        (disco-gateway--send-resume)
+      (disco-gateway--send-identify))))
+
+(defun disco-gateway--handle-op-heartbeat-ack (_payload)
+  "Handle Gateway opcode 11 Heartbeat ACK."
+  (setq disco-gateway--awaiting-heartbeat-ack nil))
+
+(defun disco-gateway--handle-op-reconnect (_payload)
+  "Handle Gateway opcode 7 Reconnect."
+  (message "disco: gateway requested reconnect")
+  (disco-gateway--reconnect 1 nil))
+
+(defun disco-gateway--handle-op-invalid-session (payload)
+  "Handle Gateway opcode 9 Invalid Session PAYLOAD."
+  (let* ((resumable (eq (alist-get 'd payload) t))
+         (delay (disco-gateway--random-between
+                 disco-gateway-invalid-session-min-delay
+                 disco-gateway-invalid-session-max-delay)))
+    (message "disco: invalid session (resumable=%s), reconnecting in %.2fs"
+             resumable delay)
+    (disco-gateway--reconnect delay (not resumable))))
+
+;; Includes opcode 1 handler for heartbeat requests from server.
+(defconst disco-gateway--opcode-handler-alist
+  '((0 . disco-gateway--handle-op-dispatch)
+    (1 . disco-gateway--handle-op-heartbeat-request)
+    (7 . disco-gateway--handle-op-reconnect)
+    (9 . disco-gateway--handle-op-invalid-session)
+    (10 . disco-gateway--handle-op-hello)
+    (11 . disco-gateway--handle-op-heartbeat-ack))
+  "Declarative map of Gateway opcode integer to handler function.")
 
 (defun disco-gateway--handle-payload (payload)
   "Handle one decoded gateway PAYLOAD."
-  (let ((op (alist-get 'op payload))
-        (seq (alist-get 's payload))
-        (event-type (alist-get 't payload))
-        (data (alist-get 'd payload)))
+  (let ((seq (alist-get 's payload)))
     (when seq
       (setq disco-gateway--seq seq))
-    (pcase op
-      (10
-       (let ((interval (alist-get 'heartbeat_interval data)))
-         (disco-gateway--start-heartbeat interval)
-         (if (disco-gateway--can-resume-p)
-             (disco-gateway--send-resume)
-           (disco-gateway--send-identify))))
-      (11
-       (setq disco-gateway--awaiting-heartbeat-ack nil))
-      (0
-       (disco-gateway--handle-dispatch event-type data))
-      (7
-       (message "disco: gateway requested reconnect")
-       (disco-gateway--reconnect 1 nil))
-      (9
-       ;; Invalid Session can be resumable or require full identify restart.
-       (let* ((resumable (eq data t))
-              (delay (disco-gateway--random-between
-                      disco-gateway-invalid-session-min-delay
-                      disco-gateway-invalid-session-max-delay)))
-         (message "disco: invalid session (resumable=%s), reconnecting in %.2fs"
-                  resumable delay)
-         (disco-gateway--reconnect delay (not resumable))))
-      (_ nil))))
+    (let* ((op (alist-get 'op payload))
+           (handler (cdr (assoc op disco-gateway--opcode-handler-alist))))
+      (when (functionp handler)
+        (funcall handler payload)))))
 
 (defun disco-gateway--connect-url ()
   "Compute websocket URL for gateway connect."

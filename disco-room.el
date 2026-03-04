@@ -21,6 +21,7 @@
 (require 'svg nil t)
 (require 'disco-ui)
 (require 'disco-util)
+(require 'disco-msg)
 (require 'disco-markdown)
 (require 'disco-media)
 (require 'disco-embed)
@@ -1495,52 +1496,27 @@ updates, and keep draft cursor stable when point is in the composer."
 
 (defun disco-room--message-by-id (message-id)
   "Return room message object for MESSAGE-ID, or nil."
-  (seq-find (lambda (msg)
-              (equal (alist-get 'id msg) message-id))
-            (or (disco-state-messages disco-room--channel-id) '())))
+  (disco-msg-find-in-channel disco-room--channel-id message-id))
 
 (defun disco-room--channel-message-by-id (channel-id message-id)
   "Return cached MESSAGE-ID from CHANNEL-ID, or nil."
-  (let ((normalized-channel-id (disco-room--normalize-id channel-id))
-        (normalized-message-id (disco-room--normalize-id message-id)))
-    (when (and normalized-channel-id normalized-message-id)
-      (seq-find
-       (lambda (msg)
-         (equal (disco-room--normalize-id (alist-get 'id msg))
-                normalized-message-id))
-       (or (disco-state-messages normalized-channel-id) '())))))
+  (disco-msg-find-in-channel channel-id message-id))
 
 (defun disco-room--normalize-id (value)
-  "Return normalized snowflake-like ID string from VALUE, or nil.
-
-String IDs are trimmed; integer IDs are stringified. Empty results are
-rejected."
-  (let ((normalized
-         (cond
-          ((stringp value) (string-trim value))
-          ((integerp value) (number-to-string value))
-          (t nil))))
-    (when (and (stringp normalized)
-               (not (string-empty-p normalized)))
-      normalized)))
+  "Return normalized snowflake-like ID string from VALUE, or nil."
+  (disco-msg-normalize-id value))
 
 (defun disco-room--message-reference-id (msg)
   "Return generic referenced message ID for MSG, or nil."
-  (let ((reference (and (listp msg) (alist-get 'message_reference msg))))
-    (disco-room--normalize-id
-     (and (listp reference) (alist-get 'message_id reference)))))
+  (disco-msg-reference-id msg))
 
 (defun disco-room--message-reference-channel-id (msg)
   "Return generic referenced channel ID for MSG, or nil."
-  (let ((reference (and (listp msg) (alist-get 'message_reference msg))))
-    (disco-room--normalize-id
-     (and (listp reference) (alist-get 'channel_id reference)))))
+  (disco-msg-reference-channel-id msg))
 
 (defun disco-room--message-reference-guild-id (msg)
   "Return generic referenced guild ID for MSG, or nil."
-  (let ((reference (and (listp msg) (alist-get 'message_reference msg))))
-    (disco-room--normalize-id
-     (and (listp reference) (alist-get 'guild_id reference)))))
+  (disco-msg-reference-guild-id msg))
 
 (defun disco-room--message-position (message-id)
   "Return buffer position for MESSAGE-ID in current room render, or nil."
