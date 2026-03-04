@@ -41,6 +41,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
 - Root buffer now live-syncs guild/channel/thread structure from gateway create/update/delete dispatch.
 - Root channel labels include lightweight unread counters from live message events.
+- Root rows can append custom display fragments via `disco-root-extra-info-functions` (channel/guild/category providers).
 - Room open/refresh/live message flow now acknowledges Discord channel read-state (`/ack`) and tracks per-channel last-read cursor.
 - Root and room refresh paths are now asynchronous to avoid blocking Emacs UI.
 - Send/edit/delete in room use asynchronous REST requests to reduce command-time blocking.
@@ -48,7 +49,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
 - Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus sort toggle (`\`) and view cycle (`v`: all/unread/dms).
 - Root list uses a Discord-native guild -> channel -> thread tree layout.
-- Root rendering now uses EWOC, with local channel-row refresh on live message/read events.
+- Root rendering uses EWOC plus debounced live-update aggregation; message/read events patch channel rows and related guild/category/section headings incrementally before falling back to full reconcile.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
@@ -104,6 +105,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Mention send policy can be tuned via `disco-room-allowed-mentions` and `disco-room-reply-mention-replied-user`.
 - `disco-room-enable-company-backend` controls optional company integration for composer completion (`disco-room-company-completion`); `disco-company-show-user-avatars` toggles avatar rendering, and `disco-company-capf-avatar-size` keeps completion row height stable for both Corfu/CAPF and company.
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
+- `disco-root-live-update-debounce` controls how quickly aggregated gateway bursts flush into incremental root patches.
+- `disco-root-extra-info-functions` lets you inject extra row metadata without blocking network calls in the renderer.
 
 ## Gateway Configuration
 
