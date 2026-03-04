@@ -1421,9 +1421,32 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
         (concat (make-string padding ?\s) trimmed)
       (concat trimmed (make-string padding ?\s)))))
 
+(defun disco-root--current-column ()
+  "Like `current-column', but account for prior `:align-to' spacers."
+  (let* ((bol (line-beginning-position))
+         (point-now (point))
+         (scan point-now)
+         align-column)
+    (while (and (not align-column)
+                (> scan bol)
+                (setq scan (previous-single-char-property-change
+                            scan 'display nil bol)))
+      (let ((display (get-text-property scan 'display)))
+        (when (and (listp display)
+                   (> (length display) 2)
+                   (eq (nth 0 display) 'space)
+                   (eq (nth 1 display) :align-to))
+          (let ((align-val (nth 2 display)))
+            (setq align-column
+                  (+ (if (listp align-val)
+                         (disco-root--chars-in-width (or (car align-val) 0))
+                       (or align-val 0))
+                     (string-width (buffer-substring scan point-now))))))))
+    (or align-column (current-column))))
+
 (defun disco-root--move-to-column (column)
   "Insert one align-to spacer for COLUMN, matching telega inserters."
-  (let* ((target (max (current-column) (max 0 (or column 0))))
+  (let* ((target (max (disco-root--current-column) (max 0 (or column 0))))
          (align-to (if (display-graphic-p)
                        (list (disco-root--chars-xwidth target))
                      target)))
@@ -1567,6 +1590,44 @@ Guild rows use real guild icons when available, with fixed text fallback."
       (insert "[#]")))
     (add-text-properties start (point) (list 'face 'shadow))))
 
+(defun disco-root--activity-column-widths (content-width preview-text)
+  "Return plist describing context/preview widths for CONTENT-WIDTH.
+
+When PREVIEW-TEXT is short, unused preview columns are reclaimed by
+context so channel labels can expand in wider windows."
+  (let* ((preview-nonempty (and (stringp preview-text)
+                                (not (string-empty-p preview-text))))
+         (separator-width (if preview-nonempty 1 0))
+         (max-context-inner (max 0 (- content-width 2 separator-width)))
+         (base-context-inner
+          (max 8
+               (min max-context-inner
+                    (disco-root--canonicalize-number
+                     disco-root-activity-context-width
+                     content-width))))
+         (base-preview-width
+          (max 0 (- content-width base-context-inner 2 separator-width)))
+         (preview-needed-width (if preview-nonempty
+                                   (string-width preview-text)
+                                 0))
+         (preview-used-width (min base-preview-width preview-needed-width))
+         (context-inner-width (min max-context-inner
+                                   (+ base-context-inner
+                                      (- base-preview-width preview-used-width))))
+         (preview-width (max 0 (- content-width context-inner-width 2 separator-width))))
+    (when (and preview-nonempty (= preview-width 0))
+      (setq separator-width 0)
+      (setq max-context-inner (max 0 (- content-width 2)))
+      (setq context-inner-width (min max-context-inner
+                                     (max 8
+                                          (disco-root--canonicalize-number
+                                           disco-root-activity-context-width
+                                           content-width))))
+      (setq preview-width (max 0 (- content-width context-inner-width 2))))
+    (list :context-inner-width context-inner-width
+          :preview-width preview-width
+          :separator-width separator-width)))
+
 (defun disco-root--insert-activity-channel-line (channel indent)
   "Insert one activity-style CHANNEL row with INDENT."
   (let* ((channel-id (alist-get 'id channel))
@@ -1581,33 +1642,30 @@ Guild rows use real guild icons when available, with fixed text fallback."
          (time-width (max 6 (string-width time-text)))
          (line-start (point)))
     (insert padding)
-    (let* ((icon-start (current-column))
+    (let* ((icon-start (disco-root--current-column))
            (icon-slot-width
             (max 2
                  (ceiling (* disco-root--activity-icon-slot-width
                              (disco-root--text-scale-factor)))))
            icon-width)
       (disco-root--insert-activity-icon channel)
-      (setq icon-width (- (current-column) icon-start))
+      (setq icon-width (- (disco-root--current-column) icon-start))
       (when (< icon-width icon-slot-width)
         (insert (make-string (- icon-slot-width icon-width) ?\s)))
       (insert " "))
-    (let* ((content-start (current-column))
+    (let* ((content-start (disco-root--current-column))
            (content-width (max 20 (- line-width content-start time-width 1)))
-           (context-inner-width
-            (max 8
-                 (min (- content-width 3)
-                      (disco-root--canonicalize-number
-                       disco-root-activity-context-width
-                       content-width))))
-           (context-total-width (+ context-inner-width 2))
-           (preview-width (max 0 (- content-width context-total-width 1))))
-      (let ((context-start (current-column)))
+           (widths (disco-root--activity-column-widths content-width preview-text))
+           (context-inner-width (or (plist-get widths :context-inner-width) 8))
+           (preview-width (or (plist-get widths :preview-width) 0))
+           (separator-width (or (plist-get widths :separator-width) 0)))
+      (let ((context-start (disco-root--current-column)))
         (insert "[")
         (insert (truncate-string-to-width context-text context-inner-width nil nil "…"))
         (disco-root--move-to-column (+ context-start 1 context-inner-width))
         (insert "]"))
-      (when (> preview-width 0)
+      (when (and (> preview-width 0)
+                 (> separator-width 0))
         (insert " ")
         (let* ((preview-start (point))
                (preview-value (truncate-string-to-width preview-text preview-width nil nil "…")))

@@ -193,6 +193,17 @@
   (should (= 60 (disco-root--canonicalize-number '(0.8 20 60) 100)))
   (should (= 90 (disco-root--canonicalize-number '(0.9 20) 100))))
 
+(ert-deftest disco-root-activity-column-widths-reclaim-preview-slack ()
+  (let ((disco-root-activity-context-width '(0.45 20)))
+    (let ((widths (disco-root--activity-column-widths 60 "x")))
+      (should (= 56 (plist-get widths :context-inner-width)))
+      (should (= 1 (plist-get widths :preview-width)))
+      (should (= 1 (plist-get widths :separator-width))))
+    (let ((widths (disco-root--activity-column-widths 60 "")))
+      (should (= 58 (plist-get widths :context-inner-width)))
+      (should (= 0 (plist-get widths :preview-width)))
+      (should (= 0 (plist-get widths :separator-width))))))
+
 (ert-deftest disco-root-auto-fill-to-width-rerenders-on-change ()
   (with-temp-buffer
     (disco-root-mode)
@@ -280,6 +291,7 @@
     (let ((insert-pos (point)))
       (disco-root--move-to-column 3)
       (should (= (point) (1+ insert-pos)))
+      (should (>= (disco-root--current-column) 3))
       (let ((display-prop (get-text-property insert-pos 'display)))
         (should (consp display-prop))
         (should (eq (car display-prop) 'space))
