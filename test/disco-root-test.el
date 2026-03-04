@@ -132,8 +132,9 @@
       (cl-letf (((symbol-function 'disco-root--refresh-channel-node)
                  (lambda (_channel-id) 'updated))
                 ((symbol-function 'disco-root--activity-reorder-visible-nodes)
-                 (lambda ()
-                   (setq reordered t)))
+                 (lambda (&optional _channel-ids)
+                   (setq reordered t)
+                   nil))
                 ((symbol-function 'disco-root--refresh-header-line)
                  (lambda () nil))
                 ((symbol-function 'disco-root--render-preserving-position)
@@ -142,6 +143,36 @@
         (disco-root--flush-live-updates (current-buffer))
         (should reordered)
         (should-not rendered)))))
+
+(ert-deftest disco-root-activity-reorder-visible-nodes-dirty-path-skips-full-collect ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--layout 'activity)
+          (disco-root--ewoc t)
+          full-collect-called
+          reordered-ids)
+      (cl-letf (((symbol-function 'disco-root--activity-reorder-channel-node)
+                 (lambda (channel-id)
+                   (push channel-id reordered-ids)
+                   'moved))
+                ((symbol-function 'disco-root--collect-activity-channels)
+                 (lambda ()
+                   (setq full-collect-called t)
+                   nil)))
+        (disco-root--activity-reorder-visible-nodes '("c1" "c1" "c2"))
+        (should-not full-collect-called)
+        (should (equal '("c1" "c2")
+                       (sort (copy-sequence reordered-ids) #'string-lessp)))))))
+
+(ert-deftest disco-root-activity-reorder-visible-nodes-signals-structural-fallback ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--layout 'activity)
+          (disco-root--ewoc t))
+      (cl-letf (((symbol-function 'disco-root--activity-reorder-channel-node)
+                 (lambda (_channel-id)
+                   'missing-visible)))
+        (should (disco-root--activity-reorder-visible-nodes '("c1")))))))
 
 (ert-deftest disco-root-toggle-unread-lens-tree-toggles-section ()
   (with-temp-buffer

@@ -770,21 +770,87 @@ Return one of symbols:
         (puthash channel-id (list node) disco-root--channel-node-table))
       node)))
 
-(defun disco-root--activity-reorder-visible-nodes ()
-  "Reorder activity rows to match current sort/filter state."
+(defun disco-root--activity-channel-before-p (left right)
+  "Return non-nil when LEFT should be ordered before RIGHT in activity view."
+  (pcase disco-root--sort-mode
+    ('name
+     (string-lessp (disco-root--channel-display-name left)
+                   (disco-root--channel-display-name right)))
+    (_
+     (let ((left-score (disco-root--channel-activity-score left))
+           (right-score (disco-root--channel-activity-score right)))
+       (if (= left-score right-score)
+           (string-lessp (disco-root--channel-display-name left)
+                         (disco-root--channel-display-name right))
+         (> left-score right-score))))))
+
+(defun disco-root--activity-find-before-node (channel &optional skip-channel-id)
+  "Return first activity row node that should come after CHANNEL."
+  (let ((cursor (and disco-root--ewoc (ewoc-nth disco-root--ewoc 0)))
+        before)
+    (while (and cursor (null before))
+      (let* ((entry (ewoc-data cursor))
+             (entry-channel (and (eq (plist-get entry :entry-type) 'channel)
+                                 (plist-get entry :channel)))
+             (entry-id (and entry-channel (alist-get 'id entry-channel))))
+        (when (and entry-channel
+                   (or (null skip-channel-id)
+                       (not (equal skip-channel-id entry-id)))
+                   (disco-root--activity-channel-before-p channel entry-channel))
+          (setq before cursor)))
+      (unless before
+        (setq cursor (ewoc-next disco-root--ewoc cursor))))
+    before))
+
+(defun disco-root--activity-reorder-channel-node (channel-id)
+  "Reposition CHANNEL-ID node in activity EWOC.
+
+Return `missing-visible' when a visible channel has no EWOC node."
+  (let* ((channel (and channel-id (disco-state-channel channel-id)))
+         (visible (and channel (disco-root--activity-channel-eligible-p channel)))
+         (node (and channel-id (disco-root--activity-channel-node channel-id))))
+    (cond
+     ((and visible node)
+      (disco-root--move-channel-node-before
+       channel-id
+       node
+       (disco-root--activity-find-before-node channel channel-id))
+      'moved)
+     ((and visible (null node))
+      'missing-visible)
+     ((and (not visible) node)
+      (ewoc-delete disco-root--ewoc node)
+      (remhash channel-id disco-root--channel-node-table)
+      'removed)
+     (t
+      'unchanged))))
+
+(defun disco-root--activity-reorder-visible-nodes (&optional channel-ids)
+  "Reorder activity rows to match current sort/filter state.
+
+When CHANNEL-IDS is non-nil, only reposition those rows and return non-nil
+if structural fallback is required."
   (when (and disco-root--ewoc
              (eq (disco-root--ensure-layout) 'activity))
-    (let ((cursor (ewoc-nth disco-root--ewoc 0)))
-      (dolist (channel (disco-root--collect-activity-channels))
-        (let* ((channel-id (alist-get 'id channel))
-               (node (and channel-id
-                          (disco-root--activity-channel-node channel-id))))
-          (when node
-            (unless (eq node cursor)
-              (setq node (disco-root--move-channel-node-before channel-id
-                                                               node
-                                                               cursor)))
-            (setq cursor (ewoc-next disco-root--ewoc node))))))))
+    (if channel-ids
+        (let (missing-visible)
+          (dolist (channel-id (seq-uniq (delq nil channel-ids) #'equal))
+            (when (eq (disco-root--activity-reorder-channel-node channel-id)
+                      'missing-visible)
+              (setq missing-visible t)))
+          missing-visible)
+      (let ((cursor (ewoc-nth disco-root--ewoc 0)))
+        (dolist (channel (disco-root--collect-activity-channels))
+          (let* ((channel-id (alist-get 'id channel))
+                 (node (and channel-id
+                            (disco-root--activity-channel-node channel-id))))
+            (when node
+              (unless (eq node cursor)
+                (setq node (disco-root--move-channel-node-before channel-id
+                                                                 node
+                                                                 cursor)))
+              (setq cursor (ewoc-next disco-root--ewoc node)))))
+        nil))))
 
 (defun disco-root--count-visible-unread-channels ()
   "Return count of unread channels visible under current root view mode."
@@ -995,7 +1061,8 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                 (when (and (not needs-structural)
                            dirty-channel-ids
                            (eq layout 'activity))
-                  (disco-root--activity-reorder-visible-nodes))
+                  (when (disco-root--activity-reorder-visible-nodes dirty-channel-ids)
+                    (setq needs-structural t)))
                 (when dirty-channel-ids
                   (disco-root--refresh-active-layout-headings dirty-channel-ids))
                 (when (or needs-header
