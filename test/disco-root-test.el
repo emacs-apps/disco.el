@@ -210,6 +210,17 @@
         (should-not (disco-root--auto-fill-to-width 80))
         (should-not rendered)))))
 
+(ert-deftest disco-root-move-to-column-always-inserts-align-spacer ()
+  (with-temp-buffer
+    (insert "abc")
+    (let ((insert-pos (point)))
+      (disco-root--move-to-column 3)
+      (should (= (point) (1+ insert-pos)))
+      (let ((display-prop (get-text-property insert-pos 'display)))
+        (should (consp display-prop))
+        (should (eq (car display-prop) 'space))
+        (should (plist-member (cdr display-prop) :align-to))))))
+
 (provide 'disco-root-test)
 
 ;;; disco-root-test.el ends here

@@ -1295,13 +1295,12 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
       (concat trimmed (make-string padding ?\s)))))
 
 (defun disco-root--move-to-column (column)
-  "Insert space aligned to COLUMN, like telega root inserters."
-  (let ((target (max 0 (or column 0))))
-    (when (< (current-column) target)
-      (let ((align-to (if (display-graphic-p)
-                          (list (* target (frame-char-width)))
-                        target)))
-        (insert (propertize " " 'display `(space :align-to ,align-to)))))))
+  "Insert one align-to spacer for COLUMN, matching telega inserters."
+  (let* ((target (max (current-column) (max 0 (or column 0))))
+         (align-to (if (display-graphic-p)
+                       (list (* target (frame-char-width)))
+                     target)))
+    (insert (propertize " " 'display `(space :align-to ,align-to)))))
 
 (defun disco-root--snowflake-epoch-seconds (snowflake)
   "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
