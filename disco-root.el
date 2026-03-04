@@ -601,21 +601,6 @@ Discord channel position can arrive as integer or numeric string."
                                    (disco-root--channel-display-name b))
                    (< a-pos b-pos)))))))))
 
-(defun disco-root--parent-thread-unread-total (channel)
-  "Return unread total aggregated from CHANNEL child threads."
-  (let ((total 0)
-        (parent-id (alist-get 'id channel)))
-    (dolist (thread (disco-state-parent-threads parent-id))
-      (setq total (+ total (disco-state-channel-unread-count (alist-get 'id thread)))))
-    total))
-
-(defun disco-root--channel-effective-unread-count (channel)
-  "Return unread count for CHANNEL including visible child-thread unread."
-  (let ((own (disco-state-channel-unread-count (alist-get 'id channel))))
-    (if (disco-root--thread-parent-channel-p channel)
-        (+ own (disco-root--parent-thread-unread-total channel))
-      own)))
-
 (defun disco-root--thread-count-under-parent (channel)
   "Return number of indexed threads under CHANNEL."
   (length (disco-state-parent-threads (alist-get 'id channel))))
@@ -625,7 +610,7 @@ Discord channel position can arrive as integer or numeric string."
   (let ((name (disco-root--channel-display-name channel))
         (channel-type (alist-get 'type channel))
         (channel-id (alist-get 'id channel))
-        (unread (disco-root--channel-effective-unread-count channel)))
+        (unread (disco-state-channel-effective-unread-count channel)))
     (let ((unread-suffix (if (> unread 0)
                              (format " [%d]" unread)
                            ""))
@@ -660,7 +645,7 @@ Discord channel position can arrive as integer or numeric string."
 
 (defun disco-root--channel-has-unread-p (channel)
   "Return non-nil when CHANNEL has unread messages tracked locally."
-  (> (disco-root--channel-effective-unread-count channel) 0))
+  (> (disco-state-channel-effective-unread-count channel) 0))
 
 (defun disco-root--parent-has-unread-thread-p (channel)
   "Return non-nil when CHANNEL has at least one unread thread child."
@@ -731,13 +716,12 @@ current sort mode."
   "Return aggregated unread count for GUILD-ID.
 
 When VISIBLE-ONLY is non-nil, only count channels visible in current view."
-  (let ((total 0))
-    (dolist (channel (append (or (disco-state-guild-channels guild-id) '())
-                             (or (disco-state-guild-threads guild-id) '())))
-      (when (or (not visible-only)
-                (disco-root--channel-visible-in-view-p channel))
-        (setq total (+ total (disco-state-channel-unread-count (alist-get 'id channel))))))
-    total))
+  (let ((channels
+         (append (or (disco-state-guild-channels guild-id) '())
+                 (or (disco-state-guild-threads guild-id) '()))))
+    (when visible-only
+      (setq channels (seq-filter #'disco-root--channel-visible-in-view-p channels)))
+    (disco-state-channels-unread-total channels)))
 
 (defun disco-root--channel-activity-score (channel)
   "Return sortable activity score for CHANNEL.
@@ -1338,7 +1322,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   (let ((channel-id (alist-get 'id channel))
         (channel-type (alist-get 'type channel))
         (label (disco-root--channel-label channel))
-        (unread-count (disco-root--channel-effective-unread-count channel))
+        (unread-count (disco-state-channel-effective-unread-count channel))
         (padding (make-string indent ?\s)))
     (let ((line-start (point)))
       (insert (format "%s%s\n" padding label))
@@ -1466,7 +1450,7 @@ INDENT controls child-thread row indentation and defaults to 8 spaces."
   "Return aggregated unread count for one category CHILDREN list."
   (let ((total 0))
     (dolist (channel children)
-      (setq total (+ total (disco-root--channel-effective-unread-count channel))))
+      (setq total (+ total (disco-state-channel-effective-unread-count channel))))
     total))
 
 (defun disco-root--insert-guild (guild)

@@ -449,6 +449,29 @@ Otherwise, replace threads only under the provided parent IDs."
   "Return unread count for CHANNEL-ID."
   (gethash channel-id disco-state--unread-counts-by-channel 0))
 
+(defun disco-state-channel-own-unread-count (channel)
+  "Return unread count tracked directly on CHANNEL."
+  (disco-state-channel-unread-count (alist-get 'id channel)))
+
+(defun disco-state-parent-thread-unread-total (parent-channel-id)
+  "Return unread total aggregated from threads under PARENT-CHANNEL-ID."
+  (let ((total 0))
+    (dolist (thread (disco-state-parent-threads parent-channel-id))
+      (setq total (+ total (disco-state-channel-own-unread-count thread))))
+    total))
+
+(defun disco-state-channel-effective-unread-count (channel)
+  "Return unread count for CHANNEL including child-thread unread."
+  (+ (disco-state-channel-own-unread-count channel)
+     (disco-state-parent-thread-unread-total (alist-get 'id channel))))
+
+(defun disco-state-channels-unread-total (channels)
+  "Return aggregated unread count for CHANNELS."
+  (let ((total 0))
+    (dolist (channel channels)
+      (setq total (+ total (disco-state-channel-own-unread-count channel))))
+    total))
+
 (defun disco-state-increment-channel-unread (channel-id &optional delta)
   "Increase unread count for CHANNEL-ID by DELTA (default 1)."
   (let* ((step (max 0 (or delta 1)))

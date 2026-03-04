@@ -154,6 +154,35 @@
   (should (= 4 (disco-state-channel-unread-count "chan")))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
 
+(ert-deftest disco-state-channel-effective-unread-count-includes-child-threads ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "parent") (guild_id . "g") (type . 0)))
+  (disco-state-upsert-channel
+   '((id . "t1") (guild_id . "g") (parent_id . "parent") (type . 11)))
+  (disco-state-upsert-channel
+   '((id . "t2") (guild_id . "g") (parent_id . "parent") (type . 11)))
+  (disco-state-set-channel-unread "parent" 2)
+  (disco-state-set-channel-unread "t1" 4)
+  (disco-state-set-channel-unread "t2" 1)
+  (should (= 5 (disco-state-parent-thread-unread-total "parent")))
+  (should (= 7
+             (disco-state-channel-effective-unread-count
+              (disco-state-channel "parent"))))
+  (should (= 4
+             (disco-state-channel-effective-unread-count
+              (disco-state-channel "t1")))))
+
+(ert-deftest disco-state-channels-unread-total-sums-own-unread ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "a") (type . 1)))
+  (disco-state-upsert-channel '((id . "b") (type . 1)))
+  (disco-state-set-channel-unread "a" 3)
+  (disco-state-set-channel-unread "b" 6)
+  (should (= 9
+             (disco-state-channels-unread-total
+              (list (disco-state-channel "a")
+                    (disco-state-channel "b"))))))
+
 (ert-deftest disco-state-channel-read-state-flags-guild-and-thread ()
   (disco-state-reset)
   (disco-state-upsert-channel '((id . "guild-text") (guild_id . "g") (type . 0)))
