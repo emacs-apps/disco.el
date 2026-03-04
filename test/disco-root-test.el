@@ -101,7 +101,12 @@
 (ert-deftest disco-root-flush-live-updates-renders-for-full-layout ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((disco-root--layout 'activity)
+    (let ((disco-root-custom-layouts
+           '((stress-full
+              :label "Stress Full"
+              :render disco-root--render-layout-activity
+              :update-mode full)))
+          (disco-root--layout 'stress-full)
           (disco-root--dirty-channel-ids '("c1"))
           (disco-root--dirty-structure-p nil)
           (disco-root--dirty-header-p nil)
@@ -112,6 +117,31 @@
                    (setq rendered t))))
         (disco-root--flush-live-updates (current-buffer))
         (should rendered)))))
+
+(ert-deftest disco-root-flush-live-updates-activity-reorders-incrementally ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--layout 'activity)
+          (disco-root--dirty-channel-ids '("c1"))
+          (disco-root--dirty-structure-p nil)
+          (disco-root--dirty-header-p nil)
+          (disco-root--refresh-in-flight nil)
+          (disco-root--view-mode 'all)
+          reordered
+          rendered)
+      (cl-letf (((symbol-function 'disco-root--refresh-channel-node)
+                 (lambda (_channel-id) 'updated))
+                ((symbol-function 'disco-root--activity-reorder-visible-nodes)
+                 (lambda ()
+                   (setq reordered t)))
+                ((symbol-function 'disco-root--refresh-header-line)
+                 (lambda () nil))
+                ((symbol-function 'disco-root--render-preserving-position)
+                 (lambda ()
+                   (setq rendered t))))
+        (disco-root--flush-live-updates (current-buffer))
+        (should reordered)
+        (should-not rendered)))))
 
 (ert-deftest disco-root-toggle-unread-lens-tree-toggles-section ()
   (with-temp-buffer
@@ -148,6 +178,10 @@
     (should (equal "Recent" (disco-root-layout-label 'activity)))
     (should (eq 'full (disco-root-layout-update-mode 'activity)))
     (should (equal "Custom Demo" (disco-root-layout-label 'custom-demo)))))
+
+(ert-deftest disco-root-layout-activity-default-update-mode-is-incremental ()
+  (let ((disco-root-custom-layouts nil))
+    (should (eq 'incremental (disco-root-layout-update-mode 'activity)))))
 
 (ert-deftest disco-root-mode-disables-undo-history ()
   (with-temp-buffer

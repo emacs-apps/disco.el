@@ -55,7 +55,7 @@ Custom entries can override built-in layouts when NAME matches."
     (activity
      :label "Activity"
      :render disco-root--render-layout-activity
-     :update-mode full
+     :update-mode incremental
      :unread-mode filter
      :toggle-hint "next channel"))
   "Built-in root layout specs.")

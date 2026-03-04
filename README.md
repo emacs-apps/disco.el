@@ -50,7 +50,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus layout cycle (`l`), explicit layout selection (`L`), sort toggle (`\`), view cycle (`v`: all/unread/dms), and unread-lens toggle (`U`).
 - Root now supports multiple layouts: telega-style activity list (non-collapsible, one-line rows as `<icon> [channel | category | guild] <preview> <time>`) and collapsible tree browse, with user-defined custom layouts via layout specs.
 - Activity layout excludes thread rows by default to keep large guilds responsive; enable them with `disco-root-activity-include-threads` when needed.
-- Root rendering uses EWOC plus debounced live-update aggregation; tree layout applies incremental channel+heading patching while full-update layouts (for example activity) reconcile in one pass to keep ordering stable.
+- Root rendering uses EWOC plus debounced live-update aggregation; tree and activity layouts now patch rows incrementally, with activity row reordering to track sort changes without full buffer rebuilds.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 

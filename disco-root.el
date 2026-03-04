@@ -741,6 +741,51 @@ Return one of symbols:
               (if updated 'updated 'missing))
           'stale))))))
 
+(defun disco-root--channel-node-list (channel-id)
+  "Return normalized EWOC node list for CHANNEL-ID."
+  (let ((nodes (and channel-id
+                    disco-root--channel-node-table
+                    (gethash channel-id disco-root--channel-node-table))))
+    (cond
+     ((null nodes) nil)
+     ((listp nodes) nodes)
+     (t (list nodes)))))
+
+(defun disco-root--activity-channel-node (channel-id)
+  "Return primary activity EWOC node for CHANNEL-ID, or nil."
+  (car (disco-root--channel-node-list channel-id)))
+
+(defun disco-root--move-channel-node-before (channel-id node before-node)
+  "Move CHANNEL-ID NODE before BEFORE-NODE, returning resulting node."
+  (if (or (null node)
+          (null disco-root--ewoc)
+          (eq node before-node))
+      node
+    (let ((entry (copy-sequence (ewoc-data node))))
+      (ewoc-delete disco-root--ewoc node)
+      (setq node (if before-node
+                     (ewoc-enter-before disco-root--ewoc before-node entry)
+                   (ewoc-enter-last disco-root--ewoc entry)))
+      (when channel-id
+        (puthash channel-id (list node) disco-root--channel-node-table))
+      node)))
+
+(defun disco-root--activity-reorder-visible-nodes ()
+  "Reorder activity rows to match current sort/filter state."
+  (when (and disco-root--ewoc
+             (eq (disco-root--ensure-layout) 'activity))
+    (let ((cursor (ewoc-nth disco-root--ewoc 0)))
+      (dolist (channel (disco-root--collect-activity-channels))
+        (let* ((channel-id (alist-get 'id channel))
+               (node (and channel-id
+                          (disco-root--activity-channel-node channel-id))))
+          (when node
+            (unless (eq node cursor)
+              (setq node (disco-root--move-channel-node-before channel-id
+                                                               node
+                                                               cursor)))
+            (setq cursor (ewoc-next disco-root--ewoc node))))))))
+
 (defun disco-root--count-visible-unread-channels ()
   "Return count of unread channels visible under current root view mode."
   (let ((seen (make-hash-table :test #'equal))
@@ -942,15 +987,20 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                    (eq disco-root--view-mode 'unread))
               (disco-root--render-preserving-position))
              (t
-              (let ((inhibit-read-only t))
+              (let ((inhibit-read-only t)
+                    (layout (disco-root--ensure-layout)))
                 (dolist (channel-id dirty-channel-ids)
                   (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
                     (setq needs-structural t)))
+                (when (and (not needs-structural)
+                           dirty-channel-ids
+                           (eq layout 'activity))
+                  (disco-root--activity-reorder-visible-nodes))
                 (when dirty-channel-ids
                   (disco-root--refresh-active-layout-headings dirty-channel-ids))
                 (when (or needs-header
                           (and dirty-channel-ids
-                               (eq (disco-root--ensure-layout) 'activity)))
+                               (eq layout 'activity)))
                   (disco-root--refresh-header-line)))
               (when needs-structural
                 (disco-root--render-preserving-position))))))))))
@@ -1827,21 +1877,29 @@ SCOPE is a symbol describing where the row is rendered."
   "Return non-nil when CHANNEL has unread messages tracked locally."
   (disco-state-channel-has-unread-p channel))
 
-(defun disco-root--channel-visible-in-view-p (channel)
-  "Return non-nil when CHANNEL should appear under current view mode."
-  (pcase disco-root--view-mode
+(defun disco-root--channel-visible-in-mode-p (channel mode)
+  "Return non-nil when CHANNEL should be visible for MODE."
+  (pcase mode
     ('unread
      (disco-root--channel-has-unread-p channel))
     ('dms
      (memq (alist-get 'type channel) '(1 3)))
     (_ t)))
 
-(defun disco-root--activity-channel-eligible-p (channel)
-  "Return non-nil when CHANNEL should appear in activity layout."
+(defun disco-root--channel-visible-in-view-p (channel)
+  "Return non-nil when CHANNEL should appear under current view mode."
+  (disco-root--channel-visible-in-mode-p channel disco-root--view-mode))
+
+(defun disco-root--activity-channel-base-eligible-p (channel)
+  "Return non-nil when CHANNEL is eligible for activity regardless of filter."
   (and (disco-root--displayable-channel-p channel)
-       (disco-root--channel-visible-in-view-p channel)
        (or disco-root-activity-include-threads
            (not (disco-state-channel-thread-p channel)))))
+
+(defun disco-root--activity-channel-eligible-p (channel)
+  "Return non-nil when CHANNEL should appear in activity layout."
+  (and (disco-root--activity-channel-base-eligible-p channel)
+       (disco-root--channel-visible-in-view-p channel)))
 
 (defun disco-root--private-channels-sorted ()
   "Return private channels sorted by recency (newest first)."
@@ -1889,8 +1947,8 @@ current sort mode."
             (push-unique thread)))))
     (disco-root--sort-channels (nreverse result))))
 
-(defun disco-root--collect-activity-channels ()
-  "Return unique channels for activity layout under current filter mode."
+(defun disco-root--collect-activity-candidates ()
+  "Return unique channels eligible for activity independent of view filter."
   (let ((seen (make-hash-table :test #'equal))
         result)
     (cl-labels
@@ -1898,7 +1956,7 @@ current sort mode."
            (let ((channel-id (alist-get 'id channel)))
              (when (and channel-id
                         (not (gethash channel-id seen))
-                        (disco-root--activity-channel-eligible-p channel))
+                        (disco-root--activity-channel-base-eligible-p channel))
                (puthash channel-id t seen)
                (push channel result)))))
       (dolist (channel (disco-state-private-channels))
@@ -1910,7 +1968,13 @@ current sort mode."
           (when disco-root-activity-include-threads
             (dolist (thread (or (disco-state-guild-threads guild-id) '()))
               (push-unique thread))))))
-    (disco-root--sort-channels (nreverse result))))
+    (nreverse result)))
+
+(defun disco-root--collect-activity-channels ()
+  "Return unique channels for activity layout under current filter mode."
+  (disco-root--sort-channels
+   (seq-filter #'disco-root--channel-visible-in-view-p
+               (disco-root--collect-activity-candidates))))
 
 (defun disco-root--tree-unread-section-channels (unread-channels)
   "Return channels to render in tree unread section from UNREAD-CHANNELS."
@@ -2877,15 +2941,25 @@ Return non-nil when at least one visible row is inserted for GUILD."
 
 (defun disco-root--activity-metrics-by-view ()
   "Return alist MODE -> plist metrics for activity header chips."
-  (let (metrics)
-    (dolist (mode '(all unread dms))
-      (let* ((disco-root--view-mode mode)
-             (channels (disco-root--collect-activity-channels)))
-        (push (cons mode
-                    (list :count (length channels)
-                          :unread (disco-state-channels-unread-total channels)))
-              metrics)))
-    (nreverse metrics)))
+  (let ((all-count 0)
+        (all-unread 0)
+        (unread-count 0)
+        (unread-unread 0)
+        (dms-count 0)
+        (dms-unread 0))
+    (dolist (channel (disco-root--collect-activity-candidates))
+      (let ((own-unread (disco-state-channel-own-unread-count channel)))
+        (setq all-count (1+ all-count))
+        (setq all-unread (+ all-unread own-unread))
+        (when (disco-root--channel-visible-in-mode-p channel 'unread)
+          (setq unread-count (1+ unread-count))
+          (setq unread-unread (+ unread-unread own-unread)))
+        (when (disco-root--channel-visible-in-mode-p channel 'dms)
+          (setq dms-count (1+ dms-count))
+          (setq dms-unread (+ dms-unread own-unread)))))
+    `((all :count ,all-count :unread ,all-unread)
+      (unread :count ,unread-count :unread ,unread-unread)
+      (dms :count ,dms-count :unread ,dms-unread))))
 
 (defun disco-root--filter-chip (mode label metrics)
   "Return one filter chip string for MODE and LABEL from METRICS."
