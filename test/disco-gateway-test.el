@@ -103,6 +103,28 @@
                          (last_message_id . "10"))))
                      emitted)))))
 
+(ert-deftest disco-gateway-dispatch-channel-update-partial-applies-state-and-emits ()
+  (let (captured-payload emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-channel-unread)
+               (lambda (payload)
+                 (setq captured-payload payload)
+                 t))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-channel-update-partial
+       '((id . "c0")
+         (last_message_id . "8")))
+      (should (equal '((id . "c0")
+                       (last_message_id . "8"))
+                     captured-payload))
+      (should (equal '(:type channel-update-partial
+                       :channel-id "c0"
+                       :channel-unread
+                       ((id . "c0")
+                        (last_message_id . "8")))
+                     emitted)))))
+
 (ert-deftest disco-gateway-dispatch-passive-update-v1-applies-state-and-emits ()
   (let (captured-updates emitted)
     (cl-letf (((symbol-function 'disco-state-apply-channel-unread-updates)

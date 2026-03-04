@@ -34,7 +34,8 @@ Event schema:
   `message-reaction-add' `message-reaction-remove'
   `message-reaction-remove-all' `message-reaction-remove-emoji'
   `message-poll-vote-add' `message-poll-vote-remove'
-  `channel-create' `channel-update' `channel-delete' `channel-unread-update'
+  `channel-create' `channel-update' `channel-delete'
+  `channel-update-partial' `channel-unread-update'
   `passive-update-v1' `passive-update-v2'
   `guild-create' `guild-update' `guild-delete' `guild-sync'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
@@ -55,6 +56,7 @@ Event schema:
 - :guild guild object for guild events
 - :guild-count integer for guild-sync events
 - :guild-ids list of guild IDs for guild-sync events
+- :channel-unread object for channel-update-partial
 - :channel-unread-updates list for channel-unread-update
 - :channels list for passive-update-v1
 - :updated-channels list for passive-update-v2
@@ -658,6 +660,16 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   "Handle CHANNEL_DELETE dispatch PAYLOAD."
   (disco-gateway--delete-channel-and-emit 'channel-delete payload))
 
+(defun disco-gateway--dispatch-channel-update-partial (payload)
+  "Handle CHANNEL_UPDATE_PARTIAL dispatch PAYLOAD."
+  (let ((channel-id (alist-get 'id payload)))
+    (disco-state-apply-channel-unread payload)
+    (when channel-id
+      (disco-gateway--emit
+       (list :type 'channel-update-partial
+             :channel-id channel-id
+             :channel-unread payload)))))
+
 (defun disco-gateway--dispatch-channel-unread-update (payload)
   "Handle CHANNEL_UNREAD_UPDATE dispatch PAYLOAD."
   (let ((guild-id (alist-get 'guild_id payload))
@@ -871,6 +883,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("CHANNEL_CREATE" . disco-gateway--dispatch-channel-create)
     ("CHANNEL_UPDATE" . disco-gateway--dispatch-channel-update)
     ("CHANNEL_DELETE" . disco-gateway--dispatch-channel-delete)
+    ("CHANNEL_UPDATE_PARTIAL" . disco-gateway--dispatch-channel-update-partial)
     ("CHANNEL_UNREAD_UPDATE" . disco-gateway--dispatch-channel-unread-update)
     ("PASSIVE_UPDATE_V1" . disco-gateway--dispatch-passive-update-v1)
     ("PASSIVE_UPDATE_V2" . disco-gateway--dispatch-passive-update-v2)

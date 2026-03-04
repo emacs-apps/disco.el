@@ -117,8 +117,8 @@ Values are image objects or the symbol `:missing'.")
   "Return non-nil when EVENT-TYPE should trigger root rerender."
   (memq event-type
         '(message-create message-ack
-          channel-create channel-update channel-delete channel-unread-update
-          passive-update-v1 passive-update-v2
+          channel-create channel-update channel-delete channel-update-partial
+          channel-unread-update passive-update-v1 passive-update-v2
           guild-create guild-update guild-delete guild-sync
           thread-create thread-update thread-delete thread-list-sync)))
 
