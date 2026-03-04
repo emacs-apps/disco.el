@@ -116,6 +116,9 @@ Supported values: `all', `unread', and `dms'.")
 (defconst disco-root--section-order '(activity unread private guilds)
   "Known top-level section symbols for root buffer rendering.")
 
+(defconst disco-root--activity-icon-slot-width 4
+  "Reserved icon slot width (columns) in activity rows.")
+
 (defvar-local disco-root--section-expanded nil
   "Alist of section expansion state in root buffer.
 
@@ -135,6 +138,16 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defcustom disco-root-guild-icon-size 18
   "Pixel size used for inline guild icons in root rows."
   :type 'integer
+  :group 'disco)
+
+(defcustom disco-root-activity-context-width '(0.45 20 72)
+  "Width of activity context block before preview text.
+
+Same semantics as `telega-chat-button-width':
+- Integer means fixed columns.
+- Float means percentage of activity content width.
+- List (VALUE MIN MAX) constrains computed width."
+  :type '(choice number (list number))
   :group 'disco)
 
 (defcustom disco-root-live-update-debounce 0.06
@@ -1143,11 +1156,10 @@ Discord channel position can arrive as integer or numeric string."
   (let* ((parts (delq nil
                       (list (disco-root--channel-display-name channel)
                             (disco-root--channel-category-name channel)
-                            (disco-root--channel-guild-name channel))))
-         (label (if parts
-                    (string-join parts " | ")
-                  (disco-root--channel-display-name channel))))
-    (format "[%s]" label)))
+                            (disco-root--channel-guild-name channel)))))
+    (if parts
+        (string-join parts " | ")
+      (disco-root--channel-display-name channel))))
 
 (defun disco-root--activity-secondary-label (channel)
   "Return fallback activity preview label for CHANNEL."
@@ -1155,6 +1167,24 @@ Discord channel position can arrive as integer or numeric string."
        (append (disco-root--channel-dynamic-trail-tags channel)
                (disco-root--channel-static-trail-tags channel)))
       "(message)"))
+
+(defun disco-root--canonicalize-number (spec base)
+  "Resolve SPEC against BASE columns.
+
+SPEC can be an integer, float ratio, or list (VALUE MIN MAX)."
+  (let* ((raw (if (consp spec) (car spec) spec))
+         (min-value (when (consp spec) (nth 1 spec)))
+         (max-value (when (consp spec) (nth 2 spec)))
+         (value (cond
+                 ((integerp raw) raw)
+                 ((floatp raw) (round (* raw base)))
+                 ((numberp raw) (round raw))
+                 (t base))))
+    (when (numberp min-value)
+      (setq value (max value min-value)))
+    (when (numberp max-value)
+      (setq value (min value max-value)))
+    value))
 
 (defun disco-root--human-count (value)
   "Return VALUE formatted in compact human-readable form."
@@ -1179,6 +1209,15 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
     (if right-align
         (concat (make-string padding ?\s) trimmed)
       (concat trimmed (make-string padding ?\s)))))
+
+(defun disco-root--move-to-column (column)
+  "Insert space aligned to COLUMN, like telega root inserters."
+  (let ((target (max 0 (or column 0))))
+    (when (< (current-column) target)
+      (let ((align-to (if (display-graphic-p)
+                          (list (* target (frame-char-width)))
+                        target)))
+        (insert (propertize " " 'display `(space :align-to ,align-to)))))))
 
 (defun disco-root--snowflake-epoch-seconds (snowflake)
   "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
@@ -1212,14 +1251,18 @@ When MESSAGE is non-nil, use it as cached preview source."
       (disco-root--activity-secondary-label channel)))
 
 (defun disco-root--insert-activity-icon (channel)
-  "Insert activity icon for CHANNEL with fixed-width text fallback."
+  "Insert activity icon for CHANNEL.
+
+Guild rows use real guild icons when available, with fixed text fallback."
   (let ((guild (and (alist-get 'guild_id channel)
                     (disco-root--guild-by-id (alist-get 'guild_id channel))))
         (channel-type (alist-get 'type channel))
         (start (point)))
     (cond
      (guild
-      (insert (disco-root--guild-icon-fallback guild)))
+      (if disco-root-show-guild-icons
+          (disco-root--insert-guild-icon guild)
+        (insert (disco-root--guild-icon-fallback guild))))
      ((eq channel-type 1)
       (insert "[D]"))
      ((eq channel-type 3)
@@ -1236,24 +1279,41 @@ When MESSAGE is non-nil, use it as cached preview source."
          (channel-type (alist-get 'type channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
          (padding (make-string indent ?\s))
-         (left-text (disco-root--activity-primary-label channel))
+         (context-text (disco-root--activity-primary-label channel))
          (preview-text (disco-root--activity-preview-line channel latest-message))
          (time-text (disco-root--channel-last-activity-time-label channel latest-message))
-         (line-width (max 60 (window-width)))
+         (line-width (max 60 (if-let* ((win (get-buffer-window (current-buffer) t)))
+                                 (window-width win)
+                               (window-width))))
          (time-width (max 5 (string-width time-text)))
          (line-start (point)))
     (insert padding)
-    (disco-root--insert-activity-icon channel)
-    (insert " ")
+    (let ((icon-start (current-column)))
+      (disco-root--insert-activity-icon channel)
+      (let ((icon-width (- (current-column) icon-start)))
+        (when (< icon-width disco-root--activity-icon-slot-width)
+          (insert (make-string (- disco-root--activity-icon-slot-width icon-width)
+                               ?\s))))
+      (insert " "))
     (let* ((content-start (current-column))
            (content-width (max 20 (- line-width content-start time-width 1)))
-           (left-width (max 18 (min 72 (floor (* content-width 0.45)))))
-           (preview-width (max 0 (- content-width left-width 1))))
-      (insert (disco-root--truncate-fill left-text left-width))
+           (context-inner-width
+            (max 8
+                 (min (- content-width 3)
+                      (disco-root--canonicalize-number
+                       disco-root-activity-context-width
+                       content-width))))
+           (context-total-width (+ context-inner-width 2))
+           (preview-width (max 0 (- content-width context-total-width 1))))
+      (let ((context-start (current-column)))
+        (insert "[")
+        (insert (truncate-string-to-width context-text context-inner-width nil nil "…"))
+        (disco-root--move-to-column (+ context-start 1 context-inner-width))
+        (insert "]"))
       (when (> preview-width 0)
         (insert " ")
-        (let ((preview-start (point))
-              (preview-value (truncate-string-to-width preview-text preview-width nil nil "")))
+        (let* ((preview-start (point))
+               (preview-value (truncate-string-to-width preview-text preview-width nil nil "…")))
           (insert (disco-root--truncate-fill preview-value preview-width))
           (add-text-properties preview-start (point) (list 'face 'shadow))
           (let ((author (disco-msg-author-display-name latest-message)))
@@ -1265,8 +1325,7 @@ When MESSAGE is non-nil, use it as cached preview source."
                (+ preview-start (length author) 1)
                (list 'face 'font-lock-keyword-face))))))
       (let ((target-time-col (- line-width time-width)))
-        (when (< (current-column) target-time-col)
-          (move-to-column target-time-col t))
+        (disco-root--move-to-column target-time-col)
         (let ((time-start (point)))
           (insert (disco-root--truncate-fill time-text time-width t))
           (add-text-properties time-start (point) (list 'face 'shadow)))))

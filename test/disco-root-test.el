@@ -160,6 +160,33 @@
         (disco-root-toggle-section-at-point)
         (should moved)))))
 
+(ert-deftest disco-root-activity-primary-label-includes-channel-category-guild ()
+  (disco-state-reset)
+  (let* ((guild-id "g1")
+         (category '((id . "cat1")
+                     (guild_id . "g1")
+                     (type . 4)
+                     (name . "General")))
+         (channel '((id . "chan1")
+                    (guild_id . "g1")
+                    (type . 0)
+                    (name . "emacs")
+                    (parent_id . "cat1"))))
+    (unwind-protect
+        (progn
+          (disco-state-set-guilds (list `((id . ,guild-id)
+                                          (name . "Emacs CN"))))
+          (disco-state-put-channels guild-id (list category channel))
+          (should (equal "emacs | General | Emacs CN"
+                         (disco-root--activity-primary-label channel))))
+      (disco-state-reset))))
+
+(ert-deftest disco-root-canonicalize-number-supports-ratio-and-bounds ()
+  (should (= 42 (disco-root--canonicalize-number 42 100)))
+  (should (= 35 (disco-root--canonicalize-number 0.35 100)))
+  (should (= 20 (disco-root--canonicalize-number '(0.1 20 60) 100)))
+  (should (= 60 (disco-root--canonicalize-number '(0.8 20 60) 100))))
+
 (provide 'disco-root-test)
 
 ;;; disco-root-test.el ends here

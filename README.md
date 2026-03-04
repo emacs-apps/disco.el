@@ -48,7 +48,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
 - Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus layout cycle (`l`), explicit layout selection (`L`), sort toggle (`\`), view cycle (`v`: all/unread/dms), and unread-lens toggle (`U`).
-- Root now supports multiple layouts: telega-style activity list (non-collapsible, one-line rows with unread/time/status trails and cached message preview) and collapsible tree browse, with user-defined custom layouts via layout specs.
+- Root now supports multiple layouts: telega-style activity list (non-collapsible, one-line rows as `<icon> [channel | category | guild] <preview> <time>`) and collapsible tree browse, with user-defined custom layouts via layout specs.
 - Root rendering uses EWOC plus debounced live-update aggregation; tree layout applies incremental channel+heading patching while full-update layouts (for example activity) reconcile in one pass to keep ordering stable.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
@@ -108,6 +108,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 - `disco-root-live-update-debounce` controls how quickly aggregated gateway bursts flush into incremental root patches.
 - `disco-root-default-layout`, `disco-root-custom-layouts`, `disco-root-tree-default-show-unread-section`, and `disco-root-tree-unread-section-limit` control root layout behavior.
+- `disco-root-activity-context-width` controls the left context block width in activity rows (telega-like fixed/ratio/bounded semantics).
 - `disco-root-extra-info-functions` lets you inject extra row metadata without blocking network calls in the renderer.
 
 ## Gateway Configuration
