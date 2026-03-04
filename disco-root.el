@@ -113,6 +113,9 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--dirty-header-p nil
   "Non-nil when queued live updates require root header refresh.")
 
+(defvar-local disco-root--fill-column nil
+  "Effective root layout width used for the latest render pass.")
+
 (defconst disco-root--section-order '(activity unread private guilds)
   "Known top-level section symbols for root buffer rendering.")
 
@@ -150,6 +153,11 @@ Same semantics as `telega-chat-button-width':
   :type '(choice number (list number))
   :group 'disco)
 
+(defcustom disco-root-auto-fill-on-window-size-change t
+  "When non-nil, rerender visible root buffers after window width changes."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-root-live-update-debounce 0.06
   "Seconds to debounce aggregated gateway updates before UI flush."
   :type 'number
@@ -178,6 +186,9 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-root--guild-icon-fetching (make-hash-table :test #'equal)
   "Global set of guild icon cache keys currently being fetched.")
+
+(defvar disco-root--window-size-hook-installed nil
+  "Non-nil once root auto-fill window-size hook has been installed.")
 
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root updates."
@@ -304,6 +315,79 @@ between current view mode and unread-only filter."
   (disco-view-render-preserving-position
    #'disco-root-render
    :preserve-window-start t))
+
+(defun disco-root--display-window (&optional buffer)
+  "Return preferred live window displaying BUFFER."
+  (let* ((buf (or buffer (current-buffer)))
+         (selected (selected-window)))
+    (cond
+     ((and (window-live-p selected)
+           (eq (window-buffer selected) buf))
+      selected)
+     (t
+      (get-buffer-window buf t)))))
+
+(defun disco-root--compute-fill-column (&optional buffer)
+  "Return effective render width for BUFFER."
+  (let ((win (disco-root--display-window buffer)))
+    (max 20
+         (if (window-live-p win)
+             (window-width win)
+           (window-width)))))
+
+(defun disco-root--auto-fill-to-width (width &optional force)
+  "Rerender root buffer using WIDTH when it changed.
+
+When FORCE is non-nil, rerender even if WIDTH matches current value."
+  (when (and (integerp width)
+             (> width 0)
+             (or force
+                 (not (eq width disco-root--fill-column))))
+    (setq disco-root--fill-column width)
+    (disco-root--render-preserving-position)
+    t))
+
+(defun disco-root-buffer-auto-fill (&optional force)
+  "Reflow current root buffer to match current window width.
+
+With FORCE non-nil, rerender even if width has not changed."
+  (interactive "P")
+  (unless (derived-mode-p 'disco-root-mode)
+    (user-error "disco: `disco-root-buffer-auto-fill' only works in root buffer"))
+  (disco-root--auto-fill-to-width
+   (disco-root--compute-fill-column)
+   force))
+
+(defun disco-root--window-size-change (frame)
+  "Reflow visible root buffers for resized FRAME windows."
+  (when disco-root-auto-fill-on-window-size-change
+    (let ((buffer-widths (make-hash-table :test #'eq)))
+      (walk-windows
+       (lambda (win)
+         (let ((buf (window-buffer win))
+               (width (window-width win)))
+           (when (and (buffer-live-p buf)
+                      (integerp width)
+                      (> width 0))
+             (with-current-buffer buf
+               (when (eq major-mode 'disco-root-mode)
+                 (puthash buf
+                          (max width (or (gethash buf buffer-widths) 0))
+                          buffer-widths))))))
+       nil
+       frame)
+      (maphash
+       (lambda (buf width)
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (disco-root--auto-fill-to-width width nil))))
+       buffer-widths))))
+
+(defun disco-root--ensure-window-size-hook ()
+  "Install global window-size hook used by root auto-fill."
+  (unless disco-root--window-size-hook-installed
+    (add-hook 'window-size-change-functions #'disco-root--window-size-change)
+    (setq disco-root--window-size-hook-installed t)))
 
 (defun disco-root--ensure-section-state (&optional sections)
   "Ensure `disco-root--section-expanded' has defaults for SECTIONS.
@@ -1282,9 +1366,8 @@ Guild rows use real guild icons when available, with fixed text fallback."
          (context-text (disco-root--activity-primary-label channel))
          (preview-text (disco-root--activity-preview-line channel latest-message))
          (time-text (disco-root--channel-last-activity-time-label channel latest-message))
-         (line-width (max 60 (if-let* ((win (get-buffer-window (current-buffer) t)))
-                                 (window-width win)
-                               (window-width))))
+         (line-width (max 60 (or disco-root--fill-column
+                                 (disco-root--compute-fill-column))))
          (time-width (max 5 (string-width time-text)))
          (line-start (point)))
     (insert padding)
@@ -2518,7 +2601,9 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (let* ((label (format "(%s/%s)"
                         (downcase (symbol-name (disco-root--ensure-layout)))
                         (symbol-name disco-root--view-mode)))
-         (width (max (window-width) (+ 8 (string-width label))))
+         (base-width (or disco-root--fill-column
+                         (disco-root--compute-fill-column)))
+         (width (max base-width (+ 8 (string-width label))))
          (filler (max 0 (- width (string-width label) 2)))
          (left (/ filler 2))
          (right (- filler left)))
@@ -2556,6 +2641,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (let* ((inhibit-read-only t)
          (layout (disco-root--ensure-layout))
          (renderer (disco-root-layout-renderer layout)))
+    (setq-local disco-root--fill-column (disco-root--compute-fill-column))
     (erase-buffer)
     (dolist (line (disco-root--header-lines))
       (insert line "\n"))
@@ -2730,6 +2816,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (disco-root--cancel-live-update-timer)
+  (disco-root--ensure-window-size-hook)
   (setq-local disco-root--sort-mode 'activity)
   (setq-local disco-root--view-mode 'all)
   (setq-local disco-root--pre-unread-view-mode 'all)
@@ -2746,6 +2833,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (setq-local disco-root--dirty-channel-ids nil)
   (setq-local disco-root--dirty-structure-p nil)
   (setq-local disco-root--dirty-header-p nil)
+  (setq-local disco-root--fill-column nil)
   (setq-local disco-root--guild-expanded (make-hash-table :test #'equal))
   (setq-local disco-root--category-expanded (make-hash-table :test #'equal)))
 

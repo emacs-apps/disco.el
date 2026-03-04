@@ -187,6 +187,29 @@
   (should (= 20 (disco-root--canonicalize-number '(0.1 20 60) 100)))
   (should (= 60 (disco-root--canonicalize-number '(0.8 20 60) 100))))
 
+(ert-deftest disco-root-auto-fill-to-width-rerenders-on-change ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--fill-column 80)
+          rendered)
+      (cl-letf (((symbol-function 'disco-root--render-preserving-position)
+                 (lambda ()
+                   (setq rendered t))))
+        (should (disco-root--auto-fill-to-width 100))
+        (should (= 100 disco-root--fill-column))
+        (should rendered)))))
+
+(ert-deftest disco-root-auto-fill-to-width-noop-when-unchanged ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--fill-column 80)
+          rendered)
+      (cl-letf (((symbol-function 'disco-root--render-preserving-position)
+                 (lambda ()
+                   (setq rendered t))))
+        (should-not (disco-root--auto-fill-to-width 80))
+        (should-not rendered)))))
+
 (provide 'disco-root-test)
 
 ;;; disco-root-test.el ends here
