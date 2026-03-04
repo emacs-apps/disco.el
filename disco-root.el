@@ -400,7 +400,8 @@ between current view mode and unread-only filter."
 
 (defun disco-root--refresh-mode-divider-line ()
   "Refresh only the mode-divider header line used for width framing."
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t))
     (save-excursion
       (goto-char (point-min))
       (forward-line 2)
@@ -1139,6 +1140,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
               (disco-root--render-preserving-position))
              (t
               (let ((inhibit-read-only t)
+                    (buffer-undo-list t)
                     (layout (disco-root--ensure-layout)))
                 (dolist (channel-id dirty-channel-ids)
                   (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
@@ -3183,6 +3185,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
 (defun disco-root--refresh-header-line ()
   "Refresh root header block in place."
   (let ((inhibit-read-only t)
+        (buffer-undo-list t)
         (lines (disco-root--header-lines)))
     (save-excursion
       (goto-char (point-min))
@@ -3209,6 +3212,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
   (let* ((inhibit-read-only t)
+         (buffer-undo-list t)
          (layout (disco-root--ensure-layout))
          (renderer (disco-root-layout-renderer layout)))
     (setq-local disco-root--fill-column (disco-root--compute-fill-column))
@@ -3387,6 +3391,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (buffer-disable-undo)
+  (setq-local buffer-undo-list t)
   (disco-root--cancel-live-update-timer)
   (disco-root--ensure-window-size-hook)
   (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
@@ -3418,6 +3423,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
     (with-current-buffer buf
       (unless (derived-mode-p 'disco-root-mode)
         (disco-root-mode))
+      (setq-local buffer-undo-list t)
       (disco-root--attach-live-updates)
       (disco-root-render))
     (pop-to-buffer buf)))
