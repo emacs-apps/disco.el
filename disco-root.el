@@ -19,6 +19,7 @@
 (require 'disco-gateway)
 (require 'disco-room)
 (require 'disco-state)
+(require 'disco-thread)
 (require 'disco-permission)
 (require 'disco-transient)
 
@@ -417,30 +418,19 @@ This prevents noisy permission errors for sources that require elevated access."
 
 (defun disco-root--thread-parent-channel-p (channel)
   "Return non-nil when CHANNEL can contain visible threads in UI."
-  (memq (alist-get 'type channel) '(0 5 15 16)))
+  (disco-thread-parent-channel-p channel))
 
 (defun disco-root--forum-or-media-channel-p (channel)
   "Return non-nil when CHANNEL is a forum/media parent channel."
-  (memq (alist-get 'type channel) '(15 16)))
+  (disco-thread-forum-or-media-channel-p channel))
 
 (defun disco-root--thread-metadata (channel)
   "Return thread metadata for CHANNEL."
-  (or (alist-get 'thread_metadata channel) '()))
+  (disco-thread-metadata channel))
 
 (defun disco-root--thread-status-tags (thread)
   "Return comma-joined status tags for THREAD."
-  (let* ((meta (disco-root--thread-metadata thread))
-         (thread-type (alist-get 'type thread))
-         tags)
-    (when (or (disco-root--json-true-p (alist-get 'archived meta))
-              (disco-root--json-true-p (alist-get 'archived thread)))
-      (push "archived" tags))
-    (when (or (disco-root--json-true-p (alist-get 'locked meta))
-              (disco-root--json-true-p (alist-get 'locked thread)))
-      (push "locked" tags))
-    (when (= thread-type 12)
-      (push "private" tags))
-    (mapconcat #'identity (nreverse tags) ", ")))
+  (disco-thread-status-string thread))
 
 (defun disco-root--recipient-display-name (recipient)
   "Return best display name for one DM RECIPIENT user object."

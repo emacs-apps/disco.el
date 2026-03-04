@@ -22,6 +22,8 @@
 (require 'disco-ui)
 (require 'disco-util)
 (require 'disco-msg)
+(require 'disco-thread)
+(require 'disco-typing)
 (require 'disco-markdown)
 (require 'disco-media)
 (require 'disco-embed)
@@ -741,42 +743,23 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
 
 (defun disco-room--thread-channel-p (&optional channel)
   "Return non-nil when CHANNEL (or current room channel) is a thread."
-  (let ((target (or channel (disco-room--channel-object))))
-    (and target (disco-state-channel-thread-p target))))
+  (disco-thread-channel-p (or channel (disco-room--channel-object))))
 
 (defun disco-room--thread-metadata (&optional channel)
   "Return thread metadata alist for CHANNEL or current room channel."
-  (let ((target (or channel (disco-room--channel-object))))
-    (or (alist-get 'thread_metadata target) '())))
+  (disco-thread-metadata (or channel (disco-room--channel-object))))
 
 (defun disco-room--thread-archived-p (&optional channel)
   "Return non-nil when CHANNEL thread is archived."
-  (let* ((target (or channel (disco-room--channel-object)))
-         (meta (disco-room--thread-metadata target)))
-    (or (disco-util-json-true-p (alist-get 'archived meta))
-        (disco-util-json-true-p (alist-get 'archived target)))))
+  (disco-thread-archived-p (or channel (disco-room--channel-object))))
 
 (defun disco-room--thread-locked-p (&optional channel)
   "Return non-nil when CHANNEL thread is locked."
-  (let* ((target (or channel (disco-room--channel-object)))
-         (meta (disco-room--thread-metadata target)))
-    (or (disco-util-json-true-p (alist-get 'locked meta))
-        (disco-util-json-true-p (alist-get 'locked target)))))
+  (disco-thread-locked-p (or channel (disco-room--channel-object))))
 
 (defun disco-room--thread-header-suffix ()
   "Return human-readable status suffix for thread header."
-  (if (not (disco-room--thread-channel-p))
-      ""
-    (let (tags)
-      (when (disco-room--thread-archived-p)
-        (push "archived" tags))
-      (when (disco-room--thread-locked-p)
-        (push "locked" tags))
-      (when (= (alist-get 'type (disco-room--channel-object)) 12)
-        (push "private" tags))
-      (if tags
-          (format " [thread: %s]" (mapconcat #'identity (nreverse tags) ", "))
-        " [thread]"))))
+  (disco-thread-header-suffix (disco-room--channel-object)))
 
 (defun disco-room--ensure-thread-channel ()
   "Signal user error unless current room channel is a thread."
@@ -873,11 +856,11 @@ treated as allowed."
 
 (defun disco-room--typing-timeout-seconds ()
   "Return normalized typing indicator timeout in seconds."
-  (max 1 (or disco-room-typing-indicator-timeout 10)))
+  (disco-typing-timeout-seconds disco-room-typing-indicator-timeout))
 
 (defun disco-room--typing-normalize-user-id (user-id)
   "Return USER-ID as string, or nil when missing."
-  (and user-id (format "%s" user-id)))
+  (disco-typing-normalize-user-id user-id))
 
 (defun disco-room--typing-member-display-name (member)
   "Extract display name from gateway MEMBER payload."
@@ -940,72 +923,22 @@ treated as allowed."
 
 (defun disco-room--typing-prune-expired (&optional now)
   "Drop expired typing entries and return non-nil when anything changed."
-  (let ((cutoff (or now (float-time)))
-        stale-ids)
-    (when (hash-table-p disco-room--typing-users)
-      (maphash
-       (lambda (user-id entry)
-         (let ((expires-at (plist-get entry :expires-at)))
-           (when (or (not (numberp expires-at))
-                     (<= expires-at cutoff))
-             (push user-id stale-ids))))
-       disco-room--typing-users))
-    (dolist (user-id stale-ids)
-      (remhash user-id disco-room--typing-users))
-    (and stale-ids t)))
+  (disco-typing-prune-expired disco-room--typing-users now))
 
 (defun disco-room--typing-active-entries ()
   "Return active typing entries sorted by recent typing timestamp."
-  (disco-room--typing-prune-expired)
-  (let (entries)
-    (when (hash-table-p disco-room--typing-users)
-      (maphash
-       (lambda (_user-id entry)
-         (when (listp entry)
-           (push entry entries)))
-       disco-room--typing-users))
-    (sort entries
-          (lambda (left right)
-            (let ((left-updated (or (plist-get left :updated-at) 0))
-                  (right-updated (or (plist-get right :updated-at) 0))
-                  (left-name (or (plist-get left :display-name) ""))
-                  (right-name (or (plist-get right :display-name) "")))
-              (if (= left-updated right-updated)
-                  (string-lessp (downcase left-name) (downcase right-name))
-                (> left-updated right-updated)))))))
+  (disco-typing-active-entries disco-room--typing-users (float-time)))
 
 (defun disco-room--typing-indicator-text ()
   "Return one-line typing indicator text, or nil when idle."
   (when disco-room-show-typing-indicators
-    (let* ((entries (disco-room--typing-active-entries))
-           (names (mapcar (lambda (entry)
-                            (or (plist-get entry :display-name) "unknown"))
-                          entries))
-           (count (length names)))
-      (pcase count
-        (0 nil)
-        (1 (format "%s is typing..." (nth 0 names)))
-        (2 (format "%s and %s are typing..." (nth 0 names) (nth 1 names)))
-        (3 (format "%s, %s and %s are typing..."
-                   (nth 0 names) (nth 1 names) (nth 2 names)))
-        (_ (format "%s, %s and %d others are typing..."
-                   (nth 0 names) (nth 1 names) (- count 2)))))))
+    (disco-typing-indicator-text-from-table
+     disco-room--typing-users
+     (float-time))))
 
 (defun disco-room--typing-next-expiry ()
   "Return nearest typing expiry timestamp, or nil when none remain."
-  (let (next-expiry)
-    (when (hash-table-p disco-room--typing-users)
-      (maphash
-       (lambda (_user-id entry)
-         (let ((expires-at (plist-get entry :expires-at)))
-           (when (numberp expires-at)
-             (setq next-expiry
-                   (if (or (null next-expiry)
-                           (< expires-at next-expiry))
-                       expires-at
-                     next-expiry)))))
-       disco-room--typing-users))
-    next-expiry))
+  (disco-typing-next-expiry disco-room--typing-users))
 
 (defun disco-room--typing-cancel-expire-timer ()
   "Cancel room-local typing expiry timer when active."
@@ -1788,37 +1721,19 @@ Search uses `disco-room--last-search-query' and wraps once."
   "Prompt for optional auto archive duration in minutes.
 
 Returns nil when left blank."
-  (let* ((choices '("" "60" "1440" "4320" "10080"))
-         (raw (completing-read
-               "Auto archive minutes (empty for default): "
-               choices nil t nil nil "")))
-    (unless (string-empty-p raw)
-      (string-to-number raw))))
+  (disco-thread-read-auto-archive-duration nil nil))
 
 (defun disco-room--read-required-thread-auto-archive-duration (&optional default)
   "Prompt for required auto archive duration in minutes.
 
 DEFAULT, when non-nil, is preselected in completion candidates."
-  (let* ((choices '("60" "1440" "4320" "10080"))
-         (initial (and default (format "%s" default)))
-         (raw (completing-read
-               "Auto archive minutes: "
-               choices nil t nil nil initial)))
-    (string-to-number raw)))
+  (disco-thread-read-auto-archive-duration t default))
 
 (defun disco-room--read-tristate-bool (prompt current-value)
   "Read tri-state boolean with PROMPT and CURRENT-VALUE.
 
 Return symbol `keep', t, or :false."
-  (let* ((choice (completing-read
-                  (format "%s (keep/yes/no, current %s): "
-                          prompt
-                          (if current-value "yes" "no"))
-                  '("keep" "yes" "no") nil t nil nil "keep")))
-    (pcase choice
-      ("yes" t)
-      ("no" :false)
-      (_ 'keep))))
+  (disco-thread-read-tristate-bool prompt current-value))
 
 (defun disco-room--read-optional-nonnegative-int (prompt)
   "Read optional non-negative integer using PROMPT.
@@ -1833,46 +1748,31 @@ Returns nil when left blank."
 
 (defun disco-room--read-detached-thread-type ()
   "Prompt for detached thread type; return numeric channel type or nil."
-  (let ((choice (completing-read
-                 "Thread type (empty/public/private): "
-                 '("" "public" "private") nil t nil nil "")))
-    (pcase choice
-      ("public" 11)
-      ("private" 12)
-      (_ nil))))
+  (disco-thread-read-detached-type))
 
 (defun disco-room--forum-or-media-channel-p (&optional channel)
   "Return non-nil when CHANNEL (or current room channel) is forum/media."
-  (let* ((target (or channel (disco-room--channel-object)))
-         (type (and target (alist-get 'type target))))
-    (memq type '(15 16))))
+  (disco-thread-forum-or-media-channel-p
+   (or channel (disco-room--channel-object))))
 
 (defun disco-room--thread-with-meta-field (channel key value)
   "Return CHANNEL with thread metadata KEY set to VALUE."
-  (let* ((updated (copy-tree channel))
-         (meta (copy-tree (or (alist-get 'thread_metadata updated) '()))))
-    (setf (alist-get key meta nil 'remove) value)
-    (setf (alist-get 'thread_metadata updated nil 'remove) meta)
-    updated))
+  (disco-thread-with-meta-field channel key value))
 
 (defun disco-room--thread-with-field (channel key value)
   "Return CHANNEL with top-level KEY set to VALUE."
-  (let ((updated (copy-tree channel)))
-    (setf (alist-get key updated nil 'remove) value)
-    updated))
+  (disco-thread-with-field channel key value))
 
 (defun disco-room--resolve-thread-update (updated fallback)
   "Resolve UPDATED thread channel response with FALLBACK object.
 
 When UPDATED does not contain a full channel object, FALLBACK is used."
-  (let ((next (if (and (listp updated) (alist-get 'id updated))
-                  updated
-                fallback)))
-    (when next
-      (disco-state-upsert-channel next)
-      (when (alist-get 'name next)
-        (setq disco-room--channel-name (alist-get 'name next))))
-    next))
+  (disco-thread-resolve-update
+   updated
+   fallback
+   (lambda (channel)
+     (when (alist-get 'name channel)
+       (setq disco-room--channel-name (alist-get 'name channel))))))
 
 (defun disco-room--buffer-name (channel-name channel-id)
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
@@ -6441,15 +6341,15 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
          (next-archived (not (disco-room--thread-archived-p channel)))
-         (updated (disco-api-set-thread-archived disco-room--channel-id next-archived nil)))
-    (if (and (listp updated) (alist-get 'id updated))
-        (disco-state-upsert-channel updated)
-      ;; Fallback when API returns empty body.
-      (disco-state-upsert-channel
-       (disco-room--thread-with-meta-field
-        channel
-        'archived
-        (if next-archived t :false))))
+         (updated (disco-api-set-thread-archived disco-room--channel-id next-archived nil))
+         (fallback (disco-thread-apply-updates
+                    channel
+                    (list
+                     (list :kind 'meta
+                           :key 'archived
+                           :value (if next-archived t :false)
+                           :present t)))))
+    (disco-room--resolve-thread-update updated fallback)
     (disco-room--render-preserving-point)
     (message "disco: thread %s" (if next-archived "archived" "unarchived"))))
 
@@ -6468,7 +6368,10 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
          (updated (disco-api-update-thread disco-room--channel-id :name name))
-         (fallback (disco-room--thread-with-field channel 'name name)))
+         (fallback (disco-thread-apply-updates
+                    channel
+                    (list
+                     (list :kind 'field :key 'name :value name :present t)))))
     (disco-room--resolve-thread-update updated fallback)
     (disco-room--render-preserving-point)
     (message "disco: thread renamed to %s" name)))
@@ -6481,10 +6384,13 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
                       (user-error "disco: unknown thread in state")))
          (next-locked (not (disco-room--thread-locked-p channel)))
          (updated (disco-api-update-thread disco-room--channel-id :locked next-locked))
-         (fallback (disco-room--thread-with-meta-field
+         (fallback (disco-thread-apply-updates
                     channel
-                    'locked
-                    (if next-locked t :false))))
+                    (list
+                     (list :kind 'meta
+                           :key 'locked
+                           :value (if next-locked t :false)
+                           :present t)))))
     (disco-room--resolve-thread-update updated fallback)
     (disco-room--render-preserving-point)
     (message "disco: thread %s" (if next-locked "locked" "unlocked"))))
@@ -6503,7 +6409,13 @@ When called interactively, empty input clears slowmode (sets to 0)."
          (updated (disco-api-update-thread
                    disco-room--channel-id
                    :rate-limit-per-user seconds))
-         (fallback (disco-room--thread-with-field channel 'rate_limit_per_user seconds)))
+         (fallback (disco-thread-apply-updates
+                    channel
+                    (list
+                     (list :kind 'field
+                           :key 'rate_limit_per_user
+                           :value seconds
+                           :present t)))))
     (disco-room--resolve-thread-update updated fallback)
     (disco-room--render-preserving-point)
     (message "disco: thread slowmode -> %ss" seconds)))
@@ -6523,10 +6435,13 @@ When called interactively, empty input clears slowmode (sets to 0)."
          (updated (disco-api-update-thread
                    disco-room--channel-id
                    :auto-archive-duration minutes))
-         (fallback (disco-room--thread-with-meta-field
+         (fallback (disco-thread-apply-updates
                     channel
-                    'auto_archive_duration
-                    minutes)))
+                    (list
+                     (list :kind 'meta
+                           :key 'auto_archive_duration
+                           :value minutes
+                           :present t)))))
     (disco-room--resolve-thread-update updated fallback)
     (disco-room--render-preserving-point)
     (message "disco: auto archive -> %s minutes" minutes)))
@@ -6594,30 +6509,29 @@ When called interactively, empty input clears slowmode (sets to 0)."
              :rate-limit-per-user rate-limit-per-user
              :archived archived
              :locked locked))
-           (fallback (copy-tree channel)))
-      (when name
-        (setf (alist-get 'name fallback nil 'remove) name))
-      (when auto-archive-duration
-        (setq fallback
-              (disco-room--thread-with-meta-field
-               fallback
-               'auto_archive_duration
-               auto-archive-duration)))
-      (when (not (null rate-limit-per-user))
-        (setf (alist-get 'rate_limit_per_user fallback nil 'remove)
-              rate-limit-per-user))
-      (when (not (eq archived-choice 'keep))
-        (setq fallback
-              (disco-room--thread-with-meta-field
-               fallback
-               'archived
-               archived)))
-      (when (not (eq locked-choice 'keep))
-        (setq fallback
-              (disco-room--thread-with-meta-field
-               fallback
-               'locked
-               locked)))
+           (fallback-updates
+            (list
+             (list :kind 'field
+                   :key 'name
+                   :value name
+                   :present (not (null name)))
+             (list :kind 'meta
+                   :key 'auto_archive_duration
+                   :value auto-archive-duration
+                   :present (not (null auto-archive-duration)))
+             (list :kind 'field
+                   :key 'rate_limit_per_user
+                   :value rate-limit-per-user
+                   :present (not (null rate-limit-per-user)))
+             (list :kind 'meta
+                   :key 'archived
+                   :value archived
+                   :present (not (eq archived-choice 'keep)))
+             (list :kind 'meta
+                   :key 'locked
+                   :value locked
+                   :present (not (eq locked-choice 'keep)))))
+           (fallback (disco-thread-apply-updates channel fallback-updates)))
       (disco-room--resolve-thread-update updated fallback)
       (disco-room--render-preserving-point)
       (message "disco: updated thread settings"))))
