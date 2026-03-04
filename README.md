@@ -47,9 +47,9 @@ This repository currently contains an MVP scaffold designed with these reference
 - Send/edit/delete in room use asynchronous REST requests to reduce command-time blocking.
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
-- Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus sort toggle (`\`) and view cycle (`v`: all/unread/dms).
-- Root list uses a Discord-native guild -> channel -> thread tree layout.
-- Root rendering uses EWOC plus debounced live-update aggregation; message/read events patch channel rows and related guild/category/section headings incrementally before falling back to full reconcile.
+- Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus layout cycle (`l`), explicit layout selection (`L`), sort toggle (`\`), view cycle (`v`: all/unread/dms), and unread-lens toggle (`U`).
+- Root now supports multiple layouts: telega-style activity list (non-collapsible, two-line rows with context/status trail) and collapsible tree browse, with user-defined custom layouts via layout specs.
+- Root rendering uses EWOC plus debounced live-update aggregation; tree layout applies incremental channel+heading patching while full-update layouts (for example activity) reconcile in one pass to keep ordering stable.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 
@@ -69,7 +69,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-permission.el`: shared Discord permission bitfield constants/parsing/check helpers.
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
-- `disco-root.el`: root dashboard buffer.
+- `disco-root-layout.el`: root layout registry, built-in layout specs, and user-defined layout customization.
+- `disco-root.el`: root dashboard buffer and layout renderers.
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
 - `disco-company.el`: composer completion engine (`@`/`#`, CAPF, optional company backend).
 
@@ -106,6 +107,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-room-enable-company-backend` controls optional company integration for composer completion (`disco-room-company-completion`); `disco-company-show-user-avatars` toggles avatar rendering, and `disco-company-capf-avatar-size` keeps completion row height stable for both Corfu/CAPF and company.
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 - `disco-root-live-update-debounce` controls how quickly aggregated gateway bursts flush into incremental root patches.
+- `disco-root-default-layout`, `disco-root-custom-layouts`, `disco-root-tree-default-show-unread-section`, and `disco-root-tree-unread-section-limit` control root layout behavior.
 - `disco-root-extra-info-functions` lets you inject extra row metadata without blocking network calls in the renderer.
 
 ## Gateway Configuration

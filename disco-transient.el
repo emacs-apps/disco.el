@@ -18,6 +18,9 @@
 
 (declare-function disco-root-refresh "disco-root")
 (declare-function disco-root-list-archived-threads "disco-root")
+(declare-function disco-root-cycle-layout "disco-root")
+(declare-function disco-root-set-layout "disco-root")
+(declare-function disco-root-toggle-unread-lens "disco-root")
 
 (declare-function disco-room-refresh "disco-room")
 (declare-function disco-room-load-older-messages "disco-room")
@@ -101,6 +104,10 @@
     ("A" "Archived threads..." disco-root-list-archived-threads)
     ("t" "Toggle active thread prefetch" disco-transient-toggle-active-thread-prefetch)
     ("L" "Set archive fetch limit" disco-transient-set-thread-archive-fetch-limit)]
+   ["View"
+    ("l" "Cycle layout" disco-root-cycle-layout)
+    ("V" "Set layout..." disco-root-set-layout)
+    ("U" "Toggle unread lens" disco-root-toggle-unread-lens)]
    ["Inspect"
     ("H" "HTTP queue" disco-http-describe-queue)
     ("R" "Rate limits" disco-api-describe-rate-limits)
