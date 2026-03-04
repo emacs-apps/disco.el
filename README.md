@@ -109,6 +109,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-root-live-update-debounce` controls how quickly aggregated gateway bursts flush into incremental root patches.
 - `disco-root-default-layout`, `disco-root-custom-layouts`, `disco-root-tree-default-show-unread-section`, and `disco-root-tree-unread-section-limit` control root layout behavior.
 - `disco-root-activity-context-width` controls the left context block width in activity rows (telega-like fixed/ratio/bounded semantics).
+- `disco-root-activity-time-format-alist` and `disco-root-week-start-day` control telega-like activity timestamp formatting buckets.
 - `disco-root-auto-fill-on-window-size-change` keeps root rows auto-aligned when window width changes; `M-x disco-root-buffer-auto-fill` forces one manual reflow.
 - `disco-root-extra-info-functions` lets you inject extra row metadata without blocking network calls in the renderer.
 

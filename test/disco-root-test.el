@@ -221,6 +221,46 @@
         (should (eq (car display-prop) 'space))
         (should (plist-member (cdr display-prop) :align-to))))))
 
+(ert-deftest disco-root-activity-time-status-symbol-checkmarks-own-message ()
+  (let ((channel '((id . "c1")
+                   (last_message_id . "99")))
+        (message '((id . "99")
+                   (author . ((id . "u1"))))))
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "u1"))
+              ((symbol-function 'disco-root--channel-read-p)
+               (lambda (_channel) t)))
+      (should (equal "✔"
+                     (disco-root--activity-time-status-symbol channel message))))
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "u1"))
+              ((symbol-function 'disco-root--channel-read-p)
+               (lambda (_channel) nil)))
+      (should (equal "✓"
+                     (disco-root--activity-time-status-symbol channel message))))))
+
+(ert-deftest disco-root-activity-time-status-symbol-uses-unread-dot ()
+  (let ((channel '((id . "c2")))
+        (message '((id . "100")
+                   (author . ((id . "u9"))))))
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "u1"))
+              ((symbol-function 'disco-state-channel-effective-unread-count)
+               (lambda (_channel) 3)))
+      (should (equal "•"
+                     (disco-root--activity-time-status-symbol channel message))))))
+
+(ert-deftest disco-root-channel-last-activity-time-label-appends-status ()
+  (let ((channel '((id . "c3"))))
+    (cl-letf (((symbol-function 'disco-root--channel-last-activity-seconds)
+               (lambda (&rest _args) 123456.0))
+              ((symbol-function 'disco-root--activity-time-string)
+               (lambda (&rest _args) "Wed"))
+              ((symbol-function 'disco-root--activity-time-status-symbol)
+               (lambda (&rest _args) "•")))
+      (should (equal "Wed•"
+                     (disco-root--channel-last-activity-time-label channel nil))))))
+
 (provide 'disco-root-test)
 
 ;;; disco-root-test.el ends here

@@ -153,6 +153,31 @@ Same semantics as `telega-chat-button-width':
   :type '(choice number (list number))
   :group 'disco)
 
+(defcustom disco-root-activity-time-format-alist
+  '((today . "%H:%M")
+    (this-week . "%a")
+    (old . "%d.%m.%y")
+    (time . "%H:%M")
+    (date . "%d.%m.%y")
+    (date-time . "%d.%m.%y %a %H:%M"))
+  "Activity timestamp formats, inspired by `telega-date-format-alist'."
+  :type '(alist :key-type
+                (choice (const :tag "If date is today" today)
+                        (const :tag "If date is this week" this-week)
+                        (const :tag "If date is older" old)
+                        (const :tag "Time only" time)
+                        (const :tag "Date only" date)
+                        (const :tag "Date and time" date-time))
+                :value-type string)
+  :group 'disco)
+
+(defcustom disco-root-week-start-day 1
+  "Day of week considered as start of week.
+
+0 means Sunday, 1 means Monday."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-root-auto-fill-on-window-size-change t
   "When non-nil, rerender visible root buffers after window width changes."
   :type 'boolean
@@ -334,6 +359,16 @@ between current view mode and unread-only filter."
          (if (window-live-p win)
              (window-width win)
            (window-width)))))
+
+(defun disco-root--chars-xwidth (columns &optional buffer)
+  "Return pixel width for COLUMNS using BUFFER's display window metrics."
+  (let* ((win (disco-root--display-window buffer))
+         (char-width (or (and (window-live-p win)
+                              (fboundp 'window-font-width)
+                              (window-font-width win))
+                         (frame-char-width)
+                         1)))
+    (* (max 0 columns) (max 1 char-width))))
 
 (defun disco-root--auto-fill-to-width (width &optional force)
   "Rerender root buffer using WIDTH when it changed.
@@ -1298,7 +1333,7 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
   "Insert one align-to spacer for COLUMN, matching telega inserters."
   (let* ((target (max (current-column) (max 0 (or column 0))))
          (align-to (if (display-graphic-p)
-                       (list (* target (frame-char-width)))
+                       (list (disco-root--chars-xwidth target))
                      target)))
     (insert (propertize " " 'display `(space :align-to ,align-to)))))
 
@@ -1311,19 +1346,103 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
         (+ disco-state-discord-epoch-seconds
            (/ (float (ash value -22)) 1000.0))))))
 
-(defun disco-root--channel-last-activity-time-label (channel &optional message)
-  "Return short time label for CHANNEL's last known activity.
+(defun disco-root--activity-time-format-type (seconds)
+  "Return time format type symbol for SECONDS.
+
+Values match keys in `disco-root-activity-time-format-alist'."
+  (let* ((now (float-time))
+         (day-seconds (* 24 60 60))
+         (ctime (decode-time now))
+         (today00 (float-time (encode-time 0 0 0
+                                           (nth 3 ctime)
+                                           (nth 4 ctime)
+                                           (nth 5 ctime)))))
+    (if (and (> seconds today00)
+             (< seconds (+ today00 day-seconds)))
+        'today
+      (let* ((week-day (nth 6 ctime))
+             (mdays (+ week-day
+                       (- (if (< week-day disco-root-week-start-day) 7 0)
+                          disco-root-week-start-day)))
+             (week-start00 (- today00 (* mdays day-seconds))))
+        (if (and (> seconds week-start00)
+                 (< seconds (+ week-start00 (* 7 day-seconds))))
+            'this-week
+          'old)))))
+
+(defun disco-root--activity-time-string (seconds &optional fmt-type)
+  "Return formatted activity time string for SECONDS.
+
+FMT-TYPE can be a symbol key from
+`disco-root-activity-time-format-alist' or a format string accepted by
+`format-time-string'."
+  (let* ((kind (or fmt-type (disco-root--activity-time-format-type seconds)))
+         (fmt (or (and (stringp kind) kind)
+                  (cdr (assq kind disco-root-activity-time-format-alist))
+                  (cdr (assq 'time disco-root-activity-time-format-alist))
+                  "%H:%M")))
+    (format-time-string fmt (seconds-to-time seconds))))
+
+(defun disco-root--message-author-id (message)
+  "Return author ID from MESSAGE, or nil."
+  (let ((author (and (listp message) (alist-get 'author message))))
+    (and (listp author)
+         (alist-get 'id author))))
+
+(defun disco-root--channel-last-activity-seconds (channel &optional message)
+  "Return latest activity timestamp seconds for CHANNEL, or nil.
 
 When MESSAGE is non-nil, use it as the cached latest message."
   (or (when-let* ((msg (or message (disco-msg-channel-last-cached-message channel)))
                   (timestamp (alist-get 'timestamp msg)))
         (ignore-errors
-          (format-time-string "%H:%M" (date-to-time timestamp))))
-      (when-let* ((seconds
-                   (disco-root--snowflake-epoch-seconds
-                    (alist-get 'last_message_id channel))))
-        (format-time-string "%H:%M" (seconds-to-time seconds)))
-      ""))
+          (float-time (date-to-time timestamp))))
+      (disco-root--snowflake-epoch-seconds
+       (alist-get 'last_message_id channel))))
+
+(defun disco-root--activity-time-status-symbol (channel &optional message)
+  "Return telega-like status symbol for CHANNEL timestamp column."
+  (let* ((latest-message (or message (disco-msg-channel-last-cached-message channel)))
+         (current-user-id (and (fboundp 'disco-gateway-current-user-id)
+                               (disco-gateway-current-user-id)))
+         (own-latest-message
+          (and latest-message
+               current-user-id
+               (equal (format "%s" (disco-root--message-author-id latest-message))
+                      (format "%s" current-user-id))))
+         (unread (disco-state-channel-effective-unread-count channel)))
+    (cond
+     (own-latest-message
+      (if (disco-root--channel-read-p channel)
+          "✔"
+        "✓"))
+     ((> unread 0)
+      "•")
+     (t
+      " "))))
+
+(defun disco-root--activity-time-status-face (channel &optional message)
+  "Return face used for timestamp status indicator in CHANNEL row."
+  (let ((status (disco-root--activity-time-status-symbol channel message)))
+    (cond
+     ((equal status "•") 'font-lock-warning-face)
+     ((or (equal status "✓")
+          (equal status "✔"))
+      'success)
+     (t 'shadow))))
+
+(defun disco-root--channel-last-activity-time-label (channel &optional message)
+  "Return timestamp column text for CHANNEL.
+
+Output includes formatted date/time and a trailing status symbol."
+  (let* ((seconds (disco-root--channel-last-activity-seconds channel message))
+         (time-part (and seconds
+                         (ignore-errors
+                           (disco-root--activity-time-string seconds))))
+         (status (disco-root--activity-time-status-symbol channel message)))
+    (if (and time-part (not (string-empty-p time-part)))
+        (concat time-part status)
+      status)))
 
 (defun disco-root--activity-preview-line (channel &optional message)
   "Return one-line preview text for activity row CHANNEL.
@@ -1367,7 +1486,7 @@ Guild rows use real guild icons when available, with fixed text fallback."
          (time-text (disco-root--channel-last-activity-time-label channel latest-message))
          (line-width (max 60 (or disco-root--fill-column
                                  (disco-root--compute-fill-column))))
-         (time-width (max 5 (string-width time-text)))
+         (time-width (max 6 (string-width time-text)))
          (line-start (point)))
     (insert padding)
     (let ((icon-start (current-column)))
@@ -1408,9 +1527,14 @@ Guild rows use real guild icons when available, with fixed text fallback."
                (list 'face 'font-lock-keyword-face))))))
       (let ((target-time-col (- line-width time-width)))
         (disco-root--move-to-column target-time-col)
-        (let ((time-start (point)))
+        (let ((time-start (point))
+              (status-face (disco-root--activity-time-status-face
+                            channel latest-message)))
           (insert (disco-root--truncate-fill time-text time-width t))
-          (add-text-properties time-start (point) (list 'face 'shadow)))))
+          (let ((status-pos (max time-start (1- (point)))))
+            (add-text-properties time-start status-pos (list 'face 'shadow))
+            (add-text-properties status-pos (point)
+                                 (list 'face status-face))))))
     (insert "\n")
     (when (disco-root--openable-channel-p channel)
       (add-text-properties
