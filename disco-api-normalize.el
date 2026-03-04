@@ -636,13 +636,6 @@ Return nil when VALUE is nil."
     (message-requests . 5))
   "Declarative map of Discord read-state type names to integer values.")
 
-(defun disco-api--normalize-read-state-type-name (value)
-  "Normalize read-state type VALUE to canonical name form."
-  (replace-regexp-in-string
-   "[_ ]+"
-   "-"
-   (downcase (string-trim (format "%s" value)))))
-
 (defun disco-api--normalize-read-state-type (value field-name &optional default)
   "Normalize read-state type VALUE for FIELD-NAME.
 
@@ -650,18 +643,13 @@ When VALUE is nil, return DEFAULT."
   (cond
    ((null value)
     default)
-   ((and (integerp value) (>= value 0))
+   ((integerp value)
     value)
-   ((and (stringp value)
-         (string-match-p "\\`[0-9]+\\'" value))
-    (string-to-number value))
+   ((symbolp value)
+    (or (alist-get value disco-api--read-state-type-alist)
+        (user-error "disco: unsupported %s `%s'" field-name value)))
    (t
-    (let* ((name (disco-api--normalize-read-state-type-name value))
-           (mapped (alist-get (intern name)
-                              disco-api--read-state-type-alist)))
-      (if (numberp mapped)
-          mapped
-        (user-error "disco: unsupported %s `%s'" field-name value))))))
+    (user-error "disco: unsupported %s `%s'" field-name value))))
 
 (defun disco-api--normalize-ack-token (token)
   "Normalize read-state ack TOKEN.
@@ -687,21 +675,19 @@ When TOKEN is omitted, return `:empty-object'."
 
 (defun disco-api--normalize-read-state-update-entry (entry)
   "Normalize one bulk read-state update ENTRY payload."
-  (unless (listp entry)
-    (user-error "disco: read_states entries must be alists/plists"))
   (let* ((read-state-type
           (disco-api--normalize-read-state-type
-           (disco-util-object-get entry 'read_state_type 'read-state-type)
+           (alist-get 'read_state_type entry)
            "read_states[].read_state_type"
            0))
-         (channel-id
-          (disco-util-object-get entry 'channel_id 'channel-id 'id))
-         (message-id
-          (disco-util-object-get entry 'message_id 'message-id 'entity_id 'entity-id))
          (normalized-channel-id
-          (disco-api--normalize-id-string channel-id "read_states[].channel_id"))
+          (disco-api--normalize-id-string
+           (alist-get 'channel_id entry)
+           "read_states[].channel_id"))
          (normalized-message-id
-          (disco-api--normalize-id-string message-id "read_states[].message_id"))
+          (disco-api--normalize-id-string
+           (alist-get 'message_id entry)
+           "read_states[].message_id"))
          payload)
     (when (string-match-p "\\`0+\\'" normalized-message-id)
       (user-error "disco: read_states[].message_id must be greater than 0"))

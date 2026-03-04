@@ -60,6 +60,26 @@
   (alist-get 'channel disco-state-read-state-type-alist)
   "Read-state type value for channel message unreads.")
 
+(defconst disco-state-read-state-flag-alist
+  '((is-guild-channel . 1)
+    (is-thread . 2)
+    (is-mention-low-importance . 4))
+  "Declarative map of read-state channel flag names to bit values.")
+
+(defconst disco-state-read-state-flag-is-guild-channel
+  (alist-get 'is-guild-channel disco-state-read-state-flag-alist)
+  "Flag bit for guild channel read-state.")
+
+(defconst disco-state-read-state-flag-is-thread
+  (alist-get 'is-thread disco-state-read-state-flag-alist)
+  "Flag bit for thread channel read-state.")
+
+(defconst disco-state-discord-epoch-seconds 1420070400
+  "Discord epoch as UNIX seconds (2015-01-01 00:00:00 UTC).")
+
+(defconst disco-state--seconds-per-day 86400
+  "Number of seconds in one UTC day.")
+
 (defun disco-state-reset ()
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
@@ -451,6 +471,30 @@ Otherwise, replace threads only under the provided parent IDs."
   "Set CHANNEL-ID read cursor to MESSAGE-ID and return MESSAGE-ID."
   (puthash channel-id message-id disco-state--last-read-message-id-by-channel)
   message-id)
+
+(defun disco-state-channel-read-state-flags (channel-id)
+  "Return calculated read-state flags integer for CHANNEL-ID."
+  (let ((channel (disco-state-channel channel-id))
+        (flags 0))
+    (when (alist-get 'guild_id channel)
+      (setq flags (logior flags disco-state-read-state-flag-is-guild-channel)))
+    (when (disco-state-channel-thread-p channel)
+      (setq flags (logior flags disco-state-read-state-flag-is-thread)))
+    flags))
+
+(defun disco-state-current-last-viewed-day ()
+  "Return current `last_viewed' day value for Discord read-state ACK.
+
+The value is the number of UTC days since the Discord epoch."
+  (floor (/ (- (float-time) disco-state-discord-epoch-seconds)
+            disco-state--seconds-per-day)))
+
+(defun disco-state-channel-ack-fields (channel-id)
+  "Return keyword plist for channel ACK payload fields.
+
+Result contains `:flags' and `:last-viewed'."
+  (list :flags (disco-state-channel-read-state-flags channel-id)
+        :last-viewed (disco-state-current-last-viewed-day)))
 
 (defun disco-state-apply-message-ack (channel-id message-id &optional mention-count)
   "Apply channel MESSAGE_ACK semantics to local state.

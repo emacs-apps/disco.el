@@ -37,11 +37,8 @@
 (ert-deftest disco-api-normalize-read-state-type ()
   (should (= 0 (disco-api--normalize-read-state-type nil "read_state_type" 0)))
   (should (= 1 (disco-api--normalize-read-state-type 'guild-event "read_state_type" nil)))
-  (should (= 2 (disco-api--normalize-read-state-type "notification_center"
-                                                     "read_state_type"
-                                                     nil)))
-  (should (= 5 (disco-api--normalize-read-state-type "5" "read_state_type" nil)))
-  (should-error (disco-api--normalize-read-state-type "unknown" "read_state_type" nil)
+  (should (= 2 (disco-api--normalize-read-state-type 2 "read_state_type" nil)))
+  (should-error (disco-api--normalize-read-state-type 'unknown "read_state_type" nil)
                 :type 'error))
 
 (ert-deftest disco-api-normalize-read-states-bulk-payload ()

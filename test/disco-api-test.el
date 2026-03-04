@@ -56,6 +56,28 @@
                '("DELETE" "/channels/987/messages/ack" nil nil nil nil nil nil)
                captured)))))
 
+(ert-deftest disco-api-ack-channel-pins-builds-endpoint ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query unauthenticated raw-body extra-headers body-type)
+                 (setq captured (list method endpoint payload query unauthenticated raw-body extra-headers body-type))
+                 'ok)))
+      (should (eq 'ok (disco-api-ack-channel-pins "555")))
+      (should (equal
+               '("POST" "/channels/555/pins/ack" nil nil nil nil nil nil)
+               captured)))))
+
+(ert-deftest disco-api-ack-user-feature-builds-endpoint-and-payload ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query unauthenticated raw-body extra-headers body-type)
+                 (setq captured (list method endpoint payload query unauthenticated raw-body extra-headers body-type))
+                 'ok)))
+      (should (eq 'ok (disco-api-ack-user-feature 'notification-center "456" :null)))
+      (should (equal
+               '("POST" "/users/@me/2/456/ack" ((token . :null)) nil nil nil nil nil)
+               captured)))))
+
 (provide 'disco-api-test)
 
 ;;; disco-api-test.el ends here

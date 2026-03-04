@@ -1,6 +1,7 @@
 ;;; disco-state-test.el --- Tests for disco-state read-state helpers -*- lexical-binding: t; -*-
 
 (require 'ert)
+(require 'cl-lib)
 
 (add-to-list 'load-path
              (expand-file-name ".."
@@ -44,6 +45,30 @@
       (mention_count . 0))))
   (should (= 4 (disco-state-channel-unread-count "chan")))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
+
+(ert-deftest disco-state-channel-read-state-flags-guild-and-thread ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "guild-text") (guild_id . "g") (type . 0)))
+  (disco-state-upsert-channel '((id . "thread") (guild_id . "g") (type . 11)))
+  (should (= 1 (disco-state-channel-read-state-flags "guild-text")))
+  (should (= 3 (disco-state-channel-read-state-flags "thread"))))
+
+(ert-deftest disco-state-current-last-viewed-day-uses-discord-epoch ()
+  (cl-letf (((symbol-function 'float-time)
+             (lambda () (+ disco-state-discord-epoch-seconds
+                           (* 5 86400)
+                           123.0))))
+    (should (= 5 (disco-state-current-last-viewed-day)))))
+
+(ert-deftest disco-state-channel-ack-fields-returns-flags-and-last-viewed ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "thread") (guild_id . "g") (type . 11)))
+  (cl-letf (((symbol-function 'float-time)
+             (lambda () (+ disco-state-discord-epoch-seconds
+                           (* 3 86400)
+                           1.0))))
+    (should (equal '(:flags 3 :last-viewed 3)
+                   (disco-state-channel-ack-fields "thread")))))
 
 (provide 'disco-state-test)
 
