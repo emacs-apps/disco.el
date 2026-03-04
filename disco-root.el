@@ -143,13 +143,13 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
   :type 'integer
   :group 'disco)
 
-(defcustom disco-root-activity-context-width '(0.45 20 72)
+(defcustom disco-root-activity-context-width '(0.45 20)
   "Width of activity context block before preview text.
 
 Same semantics as `telega-chat-button-width':
 - Integer means fixed columns.
 - Float means percentage of activity content width.
-- List (VALUE MIN MAX) constrains computed width."
+- List (VALUE MIN MAX) constrains computed width (MAX is optional)."
   :type '(choice number (list number))
   :group 'disco)
 
@@ -409,6 +409,32 @@ between current view mode and unread-only filter."
   (max 0
        (ceiling (/ (max 0 pixels)
                    (float (max 1 (disco-root--chars-xwidth 1 buffer window)))))))
+
+(defun disco-root--text-scale-factor (&optional buffer)
+  "Return text scale factor for BUFFER (or current buffer)."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((step (if (boundp 'text-scale-mode-step)
+                    text-scale-mode-step
+                  1.2))
+          (amount (if (boundp 'text-scale-mode-amount)
+                      text-scale-mode-amount
+                    0)))
+      (if (= amount 0)
+          1.0
+        (expt step amount)))))
+
+(defun disco-root--scaled-image (image &optional buffer)
+  "Return IMAGE spec scaled for BUFFER text scale when possible."
+  (let ((factor (disco-root--text-scale-factor buffer)))
+    (if (and (consp image)
+             (eq (car image) 'image)
+             (numberp factor)
+             (> factor 0)
+             (/= factor 1.0))
+        (let ((scaled (copy-tree image)))
+          (setcdr scaled (plist-put (cdr scaled) :scale factor))
+          scaled)
+      image)))
 
 (defun disco-root--compute-fill-column (&optional buffer window)
   "Return effective render width for BUFFER.
@@ -1163,10 +1189,12 @@ Starts asynchronous fetch when cache miss occurs."
 
 (defun disco-root--insert-guild-icon (guild)
   "Insert one guild icon for GUILD, falling back to text when needed."
-  (let ((fallback (disco-root--guild-icon-fallback guild))
-        (image (disco-root--guild-icon-image guild)))
-    (if (disco-root--guild-icon-image-valid-p image)
-        (insert-image image fallback)
+  (let* ((fallback (disco-root--guild-icon-fallback guild))
+         (image (disco-root--guild-icon-image guild))
+         (display-image (and (disco-root--guild-icon-image-valid-p image)
+                             (disco-root--scaled-image image))))
+    (if (disco-root--guild-icon-image-valid-p display-image)
+        (insert-image display-image fallback)
       (insert fallback))))
 
 (defun disco-root--channel-category-p (channel)
@@ -1553,12 +1581,16 @@ Guild rows use real guild icons when available, with fixed text fallback."
          (time-width (max 6 (string-width time-text)))
          (line-start (point)))
     (insert padding)
-    (let ((icon-start (current-column)))
+    (let* ((icon-start (current-column))
+           (icon-slot-width
+            (max 2
+                 (ceiling (* disco-root--activity-icon-slot-width
+                             (disco-root--text-scale-factor)))))
+           icon-width)
       (disco-root--insert-activity-icon channel)
-      (let ((icon-width (- (current-column) icon-start)))
-        (when (< icon-width disco-root--activity-icon-slot-width)
-          (insert (make-string (- disco-root--activity-icon-slot-width icon-width)
-                               ?\s))))
+      (setq icon-width (- (current-column) icon-start))
+      (when (< icon-width icon-slot-width)
+        (insert (make-string (- icon-slot-width icon-width) ?\s)))
       (insert " "))
     (let* ((content-start (current-column))
            (content-width (max 20 (- line-width content-start time-width 1)))

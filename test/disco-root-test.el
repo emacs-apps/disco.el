@@ -190,7 +190,8 @@
   (should (= 42 (disco-root--canonicalize-number 42 100)))
   (should (= 35 (disco-root--canonicalize-number 0.35 100)))
   (should (= 20 (disco-root--canonicalize-number '(0.1 20 60) 100)))
-  (should (= 60 (disco-root--canonicalize-number '(0.8 20 60) 100))))
+  (should (= 60 (disco-root--canonicalize-number '(0.8 20 60) 100)))
+  (should (= 90 (disco-root--canonicalize-number '(0.9 20) 100))))
 
 (ert-deftest disco-root-auto-fill-to-width-rerenders-on-change ()
   (with-temp-buffer
@@ -283,6 +284,23 @@
         (should (consp display-prop))
         (should (eq (car display-prop) 'space))
         (should (plist-member (cdr display-prop) :align-to))))))
+
+(ert-deftest disco-root-scaled-image-applies-text-scale-factor ()
+  (with-temp-buffer
+    (setq-local text-scale-mode-amount 2)
+    (let* ((text-scale-mode-step 1.2)
+           (image '(image :type png :data "x"))
+           (scaled (disco-root--scaled-image image (current-buffer)))
+           (scale (plist-get (cdr scaled) :scale)))
+      (should (numberp scale))
+      (should (< (abs (- scale 1.44)) 0.001))
+      (should-not (plist-member (cdr image) :scale)))))
+
+(ert-deftest disco-root-scaled-image-noop-at-default-text-scale ()
+  (with-temp-buffer
+    (setq-local text-scale-mode-amount 0)
+    (let ((image '(image :type png :data "x")))
+      (should (eq image (disco-root--scaled-image image (current-buffer)))))))
 
 (ert-deftest disco-root-activity-time-status-symbol-checkmarks-own-message ()
   (let ((channel '((id . "c1")
