@@ -724,18 +724,27 @@ MESSAGE is the gateway message object.
 CURRENT-USER-ID identifies the active account user.
 WATCHED means a room buffer currently tracks this channel."
   (let* ((channel (disco-state-channel channel-id))
-         (message-id (alist-get 'id message))
+         (message-id (disco-state--normalize-id (alist-get 'id message)))
          (message-type (alist-get 'type message))
          (author-id (disco-state--message-author-id message))
          (own-message (equal (disco-state--normalize-id author-id)
                              (disco-state--normalize-id current-user-id))))
-    (when (and channel (not watched))
-      (if own-message
-          (when (/= message-type disco-state-message-type-poll-result)
-            (disco-state-apply-message-ack channel-id message-id 0))
-        (when (disco-state--message-create-should-increment-unread-p
-               channel message current-user-id)
-          (disco-state-increment-channel-unread channel-id 1))))))
+    (when channel
+      (let ((channel-last-message-id
+             (disco-state--normalize-id (alist-get 'last_message_id channel))))
+        (when (and message-id
+                   (or (null channel-last-message-id)
+                       (disco-state-snowflake< channel-last-message-id message-id)))
+          (let ((updated (copy-tree channel)))
+            (setf (alist-get 'last_message_id updated) message-id)
+            (disco-state-upsert-channel updated))))
+      (unless watched
+        (if own-message
+            (when (/= message-type disco-state-message-type-poll-result)
+              (disco-state-apply-message-ack channel-id message-id 0))
+          (when (disco-state--message-create-should-increment-unread-p
+                 channel message current-user-id)
+            (disco-state-increment-channel-unread channel-id 1)))))))
 
 (defun disco-state-apply-thread-create (thread current-user-id)
   "Apply THREAD_CREATE read-state effects from THREAD for CURRENT-USER-ID."

@@ -366,6 +366,38 @@ between current view mode and unread-only filter."
    #'disco-root-render
    :preserve-window-start t))
 
+(defun disco-root--buffer-visible-p (&optional buffer)
+  "Return non-nil when BUFFER is currently displayed in any live window."
+  (or noninteractive
+      (window-live-p (get-buffer-window (or buffer (current-buffer)) t))))
+
+(defun disco-root--buffer-corrupted-p ()
+  "Return non-nil when root buffer appears to have duplicated header artifacts."
+  (and (eq major-mode 'disco-root-mode)
+       disco-root--ewoc
+       (save-excursion
+         (goto-char (point-min))
+         (let ((line1 (buffer-substring-no-properties
+                       (line-beginning-position)
+                       (line-end-position)))
+               (line3 (progn
+                        (forward-line 2)
+                        (buffer-substring-no-properties
+                         (line-beginning-position)
+                         (line-end-position))))
+               (scan-start
+                (or (when-let* ((node (ewoc-nth disco-root--ewoc 0)))
+                      (ewoc-location node))
+                    (save-excursion
+                      (goto-char (point-min))
+                      (forward-line 4)
+                      (point)))))
+           (or (not (string-prefix-p "Status: " line1))
+               (not (string-prefix-p "_/" line3))
+               (save-excursion
+                 (goto-char scan-start)
+                 (re-search-forward "^Status: " nil t)))))))
+
 (defun disco-root--refresh-mode-divider-line ()
   "Refresh only the mode-divider header line used for width framing."
   (let ((inhibit-read-only t))
@@ -1085,6 +1117,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
             (setq disco-root--dirty-channel-ids nil)
             (setq disco-root--dirty-structure-p nil)
             (setq disco-root--dirty-header-p nil)
+            (unless (disco-root--buffer-visible-p root-buffer)
+              ;; Hidden root buffers are more prone to stale incremental layout state.
+              ;; Reconcile structurally to keep EWOC/header markers coherent.
+              (setq needs-structural t))
             (cond
              (needs-structural
               (disco-root--render-preserving-position))
@@ -1114,7 +1150,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                   (disco-root--refresh-header-line))
                  ((and dirty-channel-ids
                        (eq layout 'activity))
-                  (disco-root--maybe-refresh-activity-header-line))))
+                  (disco-root--maybe-refresh-activity-header-line)))
+                (when (and (not needs-structural)
+                           (disco-root--buffer-corrupted-p))
+                  (setq needs-structural t)))
               (when needs-structural
                 (disco-root--render-preserving-position))))))))))
 
@@ -3133,10 +3172,14 @@ Return non-nil when at least one visible row is inserted for GUILD."
         (lines (disco-root--header-lines)))
     (save-excursion
       (goto-char (point-min))
-      (dolist (line lines)
-        (delete-region (line-beginning-position) (line-end-position))
-        (insert line)
-        (forward-line 1)))
+      (let ((start (point))
+            (end (progn
+                   (forward-line 3)
+                   (point))))
+        (delete-region start end)
+        (goto-char start)
+        (dolist (line lines)
+          (insert line "\n"))))
     (setq disco-root--last-header-refresh-at (float-time))))
 
 (defun disco-root--maybe-refresh-activity-header-line ()

@@ -124,6 +124,8 @@
    "u1"
    nil)
   (should (= 3 (disco-state-channel-unread-count "dm")))
+  (should (equal "100" (alist-get 'last_message_id
+                                    (disco-state-channel "dm"))))
   (should (null (disco-state-channel-last-read-message-id "dm"))))
 
 (ert-deftest disco-state-apply-message-create-increments-unread-guild-mention ()
@@ -140,7 +142,9 @@
      (member . ((roles . []))))
    "u1"
    nil)
-  (should (= 1 (disco-state-channel-unread-count "guild"))))
+  (should (= 1 (disco-state-channel-unread-count "guild")))
+  (should (equal "101" (alist-get 'last_message_id
+                                    (disco-state-channel "guild")))))
 
 (ert-deftest disco-state-apply-message-create-private-muted-requires-mention ()
   (disco-state-reset)
@@ -215,7 +219,27 @@
    "u1"
    t)
   (should (= 4 (disco-state-channel-unread-count "chan")))
+  (should (equal "104" (alist-get 'last_message_id
+                                    (disco-state-channel "chan"))))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
+
+(ert-deftest disco-state-apply-message-create-does-not-regress-channel-last-message-id ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "chan")
+                                (type . 1)
+                                (last_message_id . "200")))
+  (disco-state-apply-message-create
+   "chan"
+   '((id . "199")
+     (type . 0)
+     (author . ((id . "u2")))
+     (mentions . [])
+     (mention_roles . [])
+     (mention_everyone . :false))
+   "u1"
+   nil)
+  (should (equal "200" (alist-get 'last_message_id
+                                    (disco-state-channel "chan")))))
 
 (ert-deftest disco-state-apply-thread-create-acks-own-thread-in-thread-only-parent ()
   (disco-state-reset)

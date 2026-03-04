@@ -26,6 +26,8 @@
 (require 'disco-state)
 (require 'websocket)
 
+(defvar disco-gateway-enable-passive-guild-update-v2)
+
 (defvar disco-gateway-event-hook nil
   "Hook called with one event plist argument.
 
@@ -103,6 +105,9 @@ Event schema:
 
 (defconst disco-gateway--zlib-suffix (string 0 0 255 255)
   "Z_SYNC_FLUSH suffix used by Discord zlib-stream transport.")
+
+(defconst disco-gateway--capability-passive-guild-update-v2 (ash 1 14)
+  "Gateway capability bit for PASSIVE_GUILD_UPDATE_V2.")
 
 (defvar disco-gateway--zlib-stream-buffer ""
   "Accumulated compressed bytes for current gateway connection.")
@@ -406,18 +411,29 @@ This shape follows Discord gateway identify expectations."
     (browser . "disco.el")
     (device . "disco.el")))
 
+(defun disco-gateway--effective-identify-capabilities ()
+  "Return effective capabilities bitmask for Identify payload, or nil."
+  (let ((capabilities (and (integerp disco-gateway-identify-capabilities)
+                           disco-gateway-identify-capabilities)))
+    (when disco-gateway-enable-passive-guild-update-v2
+      (setq capabilities
+            (logior (or capabilities 0)
+                    disco-gateway--capability-passive-guild-update-v2)))
+    capabilities))
+
 (defun disco-gateway--identify-payload ()
   "Build identify payload body for Gateway opcode 2."
   (let ((payload
          `((token . ,(or (disco-current-token) ""))
            (properties . ,(disco-gateway--identify-properties))
            (compress . :false)
-           (large_threshold . 250))))
+           (large_threshold . 250)))
+        (capabilities (disco-gateway--effective-identify-capabilities)))
     (when disco-gateway-identify-intents
       (setq payload (append payload `((intents . ,disco-gateway-identify-intents)))))
-    (when disco-gateway-identify-capabilities
+    (when capabilities
       (setq payload
-            (append payload `((capabilities . ,disco-gateway-identify-capabilities)))))
+            (append payload `((capabilities . ,capabilities)))))
     (when disco-gateway-identify-presence
       (setq payload (append payload `((presence . ,disco-gateway-identify-presence)))))
     payload))

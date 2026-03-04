@@ -145,6 +145,15 @@ When nil, omit capabilities from Identify payload."
   :type '(choice (const :tag "Unset" nil) integer)
   :group 'disco)
 
+(defcustom disco-gateway-enable-passive-guild-update-v2 t
+  "When non-nil, opt into PASSIVE_GUILD_UPDATE_V2 gateway capability.
+
+This keeps unread/activity deltas flowing for guilds without explicit
+channel subscriptions, which is important for root/activity views that
+primarily rely on passive updates."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-gateway-identify-presence nil
   "Optional presence object sent in Identify payload.
 

@@ -124,7 +124,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway-identify-intents`: optional identify intents bitmask.
   - If intents are explicitly set, include `GUILD_MESSAGE_TYPING` (`1<<11`) and/or `DIRECT_MESSAGE_TYPING` (`1<<14`) to receive typing events.
   - Include `GUILD_MESSAGE_POLLS` (`1<<24`) and/or `DIRECT_MESSAGE_POLLS` (`1<<25`) to receive `MESSAGE_POLL_VOTE_ADD` / `MESSAGE_POLL_VOTE_REMOVE` events.
-- `disco-gateway-identify-capabilities`: optional identify capabilities bitmask.
+- `disco-gateway-identify-capabilities`: optional identify capabilities bitmask (merged with passive-v2 bit when enabled below).
+- `disco-gateway-enable-passive-guild-update-v2`: when non-nil (default), automatically include `PASSIVE_GUILD_UPDATE_V2` capability so activity/root can refresh from passive guild unread deltas without channel-wide subscriptions.
 - `disco-gateway-identify-presence`: optional identify presence object (alist).
 - `disco-gateway-enable-lazy-channel-subscriptions`: when non-nil, send Gateway op 14 channel subscriptions for watched guild channels (needed in user sessions so guild `TYPING_START` is delivered reliably).
 - `disco-fetch-guild-active-threads`: optionally fetch `/guilds/{id}/threads/active` during root refresh (Discord docs mark this route bot-only; user accounts return 403).
