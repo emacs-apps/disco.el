@@ -153,6 +153,14 @@ Same semantics as `telega-chat-button-width':
   :type '(choice number (list number))
   :group 'disco)
 
+(defcustom disco-root-activity-include-threads nil
+  "When non-nil, include thread channels in activity layout.
+
+Thread-heavy guilds can create very large activity lists, so this is off
+by default to keep root refresh and resize reflow responsive."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-root-activity-time-format-alist
   '((today . "%H:%M")
     (this-week . "%a")
@@ -1421,6 +1429,52 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
         (concat (make-string padding ?\s) trimmed)
       (concat trimmed (make-string padding ?\s)))))
 
+(defun disco-root--string-width (str &optional from to)
+  "Return width of STR, optionally limited to FROM..TO."
+  (string-width
+   (if (or from to)
+       (substring str (or from 0) to)
+     str)))
+
+(defun disco-root--elide-string (str max &optional face)
+  "Return STR visually elided to MAX columns using display properties.
+
+This mirrors telega's `telega-fmt-eval-eliding' behavior for right-elision."
+  (let* ((text (or str ""))
+         (str-width (disco-root--string-width text))
+         (limit (max 0 (or max 0))))
+    (if (<= str-width limit)
+        text
+      (let* ((elide-str "…")
+             (elide-width (disco-root--string-width elide-str))
+             (elide-pos 1)
+             (str-len (length text))
+             (elide-trail (floor (* limit (- 1 elide-pos))))
+             (trail-width
+              (progn
+                (while (and (> elide-trail 0)
+                            (> (disco-root--string-width text (- str-len elide-trail))
+                               (floor (* limit (- 1 elide-pos)))))
+                  (setq elide-trail (1- elide-trail)))
+                (disco-root--string-width text (- str-len elide-trail))))
+             (elide-lead (- (min limit str-len) elide-width trail-width))
+             (result (copy-sequence text)))
+        (when (< elide-lead 0)
+          (setq elide-lead 0))
+        (while (and (> elide-lead 0)
+                    (> (+ (disco-root--string-width result 0 elide-lead)
+                          elide-width trail-width)
+                       limit))
+          (setq elide-lead (1- elide-lead)))
+        (add-text-properties
+         elide-lead
+         (- str-len elide-trail)
+         (list 'display elide-str
+               'rear-nonsticky '(display)
+               'face face)
+         result)
+        result))))
+
 (defun disco-root--current-column ()
   "Like `current-column', but account for prior `:align-to' spacers."
   (let* ((bol (line-beginning-position))
@@ -1441,12 +1495,13 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
                   (+ (if (listp align-val)
                          (disco-root--chars-in-width (or (car align-val) 0))
                        (or align-val 0))
-                     (string-width (buffer-substring scan point-now))))))))
+                     (disco-root--string-width
+                      (buffer-substring scan point-now))))))))
     (or align-column (current-column))))
 
 (defun disco-root--move-to-column (column)
   "Insert one align-to spacer for COLUMN, matching telega inserters."
-  (let* ((target (max (disco-root--current-column) (max 0 (or column 0))))
+  (let* ((target (max 0 (or column 0)))
          (align-to (if (display-graphic-p)
                        (list (disco-root--chars-xwidth target))
                      target)))
@@ -1590,43 +1645,19 @@ Guild rows use real guild icons when available, with fixed text fallback."
       (insert "[#]")))
     (add-text-properties start (point) (list 'face 'shadow))))
 
-(defun disco-root--activity-column-widths (content-width preview-text)
-  "Return plist describing context/preview widths for CONTENT-WIDTH.
-
-When PREVIEW-TEXT is short, unused preview columns are reclaimed by
-context so channel labels can expand in wider windows."
-  (let* ((preview-nonempty (and (stringp preview-text)
-                                (not (string-empty-p preview-text))))
-         (separator-width (if preview-nonempty 1 0))
-         (max-context-inner (max 0 (- content-width 2 separator-width)))
-         (base-context-inner
+(defun disco-root--activity-column-widths (content-width)
+  "Return telega-like context/preview width split for CONTENT-WIDTH."
+  (let* ((max-context-inner (max 8 (- content-width 3)))
+         (context-inner-width
           (max 8
                (min max-context-inner
                     (disco-root--canonicalize-number
                      disco-root-activity-context-width
                      content-width))))
-         (base-preview-width
-          (max 0 (- content-width base-context-inner 2 separator-width)))
-         (preview-needed-width (if preview-nonempty
-                                   (string-width preview-text)
-                                 0))
-         (preview-used-width (min base-preview-width preview-needed-width))
-         (context-inner-width (min max-context-inner
-                                   (+ base-context-inner
-                                      (- base-preview-width preview-used-width))))
-         (preview-width (max 0 (- content-width context-inner-width 2 separator-width))))
-    (when (and preview-nonempty (= preview-width 0))
-      (setq separator-width 0)
-      (setq max-context-inner (max 0 (- content-width 2)))
-      (setq context-inner-width (min max-context-inner
-                                     (max 8
-                                          (disco-root--canonicalize-number
-                                           disco-root-activity-context-width
-                                           content-width))))
-      (setq preview-width (max 0 (- content-width context-inner-width 2))))
+         (preview-width (max 0 (- content-width context-inner-width 3))))
     (list :context-inner-width context-inner-width
           :preview-width preview-width
-          :separator-width separator-width)))
+          :separator-width (if (> preview-width 0) 1 0))))
 
 (defun disco-root--insert-activity-channel-line (channel indent)
   "Insert one activity-style CHANNEL row with INDENT."
@@ -1655,21 +1686,21 @@ context so channel labels can expand in wider windows."
       (insert " "))
     (let* ((content-start (disco-root--current-column))
            (content-width (max 20 (- line-width content-start time-width 1)))
-           (widths (disco-root--activity-column-widths content-width preview-text))
+           (widths (disco-root--activity-column-widths content-width))
            (context-inner-width (or (plist-get widths :context-inner-width) 8))
            (preview-width (or (plist-get widths :preview-width) 0))
            (separator-width (or (plist-get widths :separator-width) 0)))
       (let ((context-start (disco-root--current-column)))
         (insert "[")
-        (insert (truncate-string-to-width context-text context-inner-width nil nil "…"))
+        (insert (disco-root--elide-string context-text context-inner-width 'default))
         (disco-root--move-to-column (+ context-start 1 context-inner-width))
         (insert "]"))
-      (when (and (> preview-width 0)
-                 (> separator-width 0))
-        (insert " ")
+      (when (> preview-width 0)
+        (when (> separator-width 0)
+          (insert " "))
         (let* ((preview-start (point))
-               (preview-value (truncate-string-to-width preview-text preview-width nil nil "…")))
-          (insert (disco-root--truncate-fill preview-value preview-width))
+               (preview-value (or preview-text "")))
+          (insert (disco-root--elide-string preview-value preview-width 'shadow))
           (add-text-properties preview-start (point) (list 'face 'shadow))
           (let ((author (disco-msg-author-display-name latest-message)))
             (when (and author
@@ -1805,6 +1836,13 @@ SCOPE is a symbol describing where the row is rendered."
      (memq (alist-get 'type channel) '(1 3)))
     (_ t)))
 
+(defun disco-root--activity-channel-eligible-p (channel)
+  "Return non-nil when CHANNEL should appear in activity layout."
+  (and (disco-root--displayable-channel-p channel)
+       (disco-root--channel-visible-in-view-p channel)
+       (or disco-root-activity-include-threads
+           (not (disco-state-channel-thread-p channel)))))
+
 (defun disco-root--private-channels-sorted ()
   "Return private channels sorted by recency (newest first)."
   (sort (copy-sequence (disco-state-private-channels))
@@ -1860,8 +1898,7 @@ current sort mode."
            (let ((channel-id (alist-get 'id channel)))
              (when (and channel-id
                         (not (gethash channel-id seen))
-                        (disco-root--displayable-channel-p channel)
-                        (disco-root--channel-visible-in-view-p channel))
+                        (disco-root--activity-channel-eligible-p channel))
                (puthash channel-id t seen)
                (push channel result)))))
       (dolist (channel (disco-state-private-channels))
@@ -1870,8 +1907,9 @@ current sort mode."
         (let ((guild-id (alist-get 'id guild)))
           (dolist (channel (or (disco-state-guild-channels guild-id) '()))
             (push-unique channel))
-          (dolist (thread (or (disco-state-guild-threads guild-id) '()))
-            (push-unique thread)))))
+          (when disco-root-activity-include-threads
+            (dolist (thread (or (disco-state-guild-threads guild-id) '()))
+              (push-unique thread))))))
     (disco-root--sort-channels (nreverse result))))
 
 (defun disco-root--tree-unread-section-channels (unread-channels)

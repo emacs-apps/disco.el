@@ -186,6 +186,62 @@
                          (disco-root--activity-primary-label channel))))
       (disco-state-reset))))
 
+(ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
+  (disco-state-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-root-mode)
+        (let ((disco-root-activity-include-threads nil)
+              (guild-id "g1"))
+          (disco-state-set-guilds (list `((id . ,guild-id)
+                                          (name . "Guild One"))))
+          (disco-state-put-channels
+           guild-id
+           (list '((id . "c1")
+                   (guild_id . "g1")
+                   (type . 0)
+                   (name . "general")
+                   (last_message_id . "10"))
+                 '((id . "t1")
+                   (guild_id . "g1")
+                   (type . 11)
+                   (parent_id . "c1")
+                   (name . "hot-thread")
+                   (last_message_id . "11"))))
+          (let ((ids (mapcar (lambda (ch) (alist-get 'id ch))
+                             (disco-root--collect-activity-channels))))
+            (should (member "c1" ids))
+            (should-not (member "t1" ids)))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-collect-activity-channels-includes-threads-when-enabled ()
+  (disco-state-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-root-mode)
+        (let ((disco-root-activity-include-threads t)
+              (guild-id "g1"))
+          (disco-state-set-guilds (list `((id . ,guild-id)
+                                          (name . "Guild One"))))
+          (disco-state-put-channels
+           guild-id
+           (list '((id . "c1")
+                   (guild_id . "g1")
+                   (type . 0)
+                   (name . "general")
+                   (last_message_id . "10"))
+                 '((id . "t1")
+                   (guild_id . "g1")
+                   (type . 11)
+                   (parent_id . "c1")
+                   (name . "hot-thread")
+                   (last_message_id . "11"))))
+          (let ((ids (mapcar (lambda (ch) (alist-get 'id ch))
+                             (disco-root--collect-activity-channels))))
+            (should (member "c1" ids))
+            (should (member "t1" ids)))))
+    (disco-state-reset)))
+
 (ert-deftest disco-root-canonicalize-number-supports-ratio-and-bounds ()
   (should (= 42 (disco-root--canonicalize-number 42 100)))
   (should (= 35 (disco-root--canonicalize-number 0.35 100)))
@@ -193,16 +249,16 @@
   (should (= 60 (disco-root--canonicalize-number '(0.8 20 60) 100)))
   (should (= 90 (disco-root--canonicalize-number '(0.9 20) 100))))
 
-(ert-deftest disco-root-activity-column-widths-reclaim-preview-slack ()
+(ert-deftest disco-root-activity-column-widths-follow-fill-column-ratio ()
   (let ((disco-root-activity-context-width '(0.45 20)))
-    (let ((widths (disco-root--activity-column-widths 60 "x")))
-      (should (= 56 (plist-get widths :context-inner-width)))
-      (should (= 1 (plist-get widths :preview-width)))
+    (let ((widths (disco-root--activity-column-widths 60)))
+      (should (= 27 (plist-get widths :context-inner-width)))
+      (should (= 30 (plist-get widths :preview-width)))
       (should (= 1 (plist-get widths :separator-width))))
-    (let ((widths (disco-root--activity-column-widths 60 "")))
-      (should (= 58 (plist-get widths :context-inner-width)))
-      (should (= 0 (plist-get widths :preview-width)))
-      (should (= 0 (plist-get widths :separator-width))))))
+    (let ((widths (disco-root--activity-column-widths 30)))
+      (should (= 20 (plist-get widths :context-inner-width)))
+      (should (= 7 (plist-get widths :preview-width)))
+      (should (= 1 (plist-get widths :separator-width))))))
 
 (ert-deftest disco-root-auto-fill-to-width-rerenders-on-change ()
   (with-temp-buffer
@@ -296,6 +352,19 @@
         (should (consp display-prop))
         (should (eq (car display-prop) 'space))
         (should (plist-member (cdr display-prop) :align-to))))))
+
+(ert-deftest disco-root-elide-string-adds-display-ellipsis ()
+  (let* ((text "abcdefghijklmnopqrstuvwxyz")
+         (elided (disco-root--elide-string text 8 'shadow)))
+    (should (> (length elided) 8))
+    (let ((display-pos (next-single-property-change 0 'display elided)))
+      (should (integerp display-pos))
+      (should (equal "…"
+                     (get-text-property display-pos 'display elided))))))
+
+(ert-deftest disco-root-elide-string-noop-when-string-fits ()
+  (let ((text "short"))
+    (should (equal text (disco-root--elide-string text 12 'shadow)))))
 
 (ert-deftest disco-root-scaled-image-applies-text-scale-factor ()
   (with-temp-buffer
