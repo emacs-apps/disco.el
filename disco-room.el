@@ -721,6 +721,7 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   (define-key map (kbd "C-c C-p v") #'disco-room-submit-poll-vote)
   (define-key map (kbd "C-c C-p c") #'disco-room-clear-poll-votes)
   (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
+  (define-key map (kbd "C-c C-P") #'disco-room-ack-channel-pins)
   (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
   (define-key map (kbd "C-c C-F") #'disco-room-forward-message)
   (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
@@ -1337,6 +1338,35 @@ Unread counters are always cleared locally."
            (message "disco: read-state ack failed for %s: %s"
                     channel-id
                     (disco-room--async-error-message err))))))))
+
+(defun disco-room-ack-channel-pins ()
+  "Acknowledge currently pinned messages in the active room channel."
+  (interactive)
+  (let* ((room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (generation disco-room--refresh-generation)
+         (channel (disco-room--channel-object))
+         (last-pin-timestamp (and channel (alist-get 'last_pin_timestamp channel))))
+    (cond
+     ((not channel-id)
+      (user-error "disco: room is not bound to a channel"))
+     ((not (stringp last-pin-timestamp))
+      (message "disco: channel %s has no pinned messages" channel-id))
+     ((not (disco-state-channel-has-unread-pins-p channel))
+      (message "disco: pins already acknowledged for %s" channel-id))
+     (t
+      (disco-api-ack-channel-pins-async
+       channel-id
+       :on-success
+       (lambda (_response)
+         (when (disco-room--callback-active-p room-buffer channel-id generation)
+           (disco-state-apply-channel-pins-ack channel-id last-pin-timestamp)
+           (message "disco: acknowledged pins for %s" channel-id)))
+       :on-error
+       (lambda (err)
+         (message "disco: pins ack failed for %s: %s"
+                  channel-id
+                  (disco-room--async-error-message err))))))))
 
 (defun disco-room--update-message-window-state (messages)
   "Update pagination cursors from MESSAGES (newest-first list)."
@@ -4909,7 +4939,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-f/C-F: attach/forward   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert "g: refresh   M-<: older   s/n/p: search   r/e/d: reply/edit/delete   C-c C-g: jump msg-id   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-P: ack pins   C-c C-f/C-F: attach/forward   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -6560,6 +6590,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-p v") #'disco-room-submit-poll-vote)
     (define-key map (kbd "C-c C-p c") #'disco-room-clear-poll-votes)
     (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
+    (define-key map (kbd "C-c C-P") #'disco-room-ack-channel-pins)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-F") #'disco-room-forward-message)

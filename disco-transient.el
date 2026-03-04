@@ -43,6 +43,7 @@
 (declare-function disco-room-submit-poll-vote "disco-room")
 (declare-function disco-room-clear-poll-votes "disco-room")
 (declare-function disco-room-expire-poll "disco-room")
+(declare-function disco-room-ack-channel-pins "disco-room")
 (declare-function disco-room-create-thread-from-message "disco-room")
 (declare-function disco-room-open-thread-from-message-at-point "disco-room")
 (declare-function disco-room-create-thread "disco-room")
@@ -134,7 +135,8 @@
    ("t" "Toggle staged answer" disco-room-toggle-poll-answer)
    ("W" "Submit staged vote" disco-room-submit-poll-vote)
    ("C" "Remove my vote" disco-room-clear-poll-votes)
-   ("X" "End poll" disco-room-expire-poll)]
+   ("X" "End poll" disco-room-expire-poll)
+   ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message)
     ("o" "Open msg thread" disco-room-open-thread-from-message-at-point)
