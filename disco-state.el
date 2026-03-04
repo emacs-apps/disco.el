@@ -109,6 +109,10 @@
   "Return non-nil when CHANNEL is a DM or group DM channel."
   (memq (alist-get 'type channel) '(1 3)))
 
+(defun disco-state-thread-only-parent-channel-p (channel)
+  "Return non-nil when CHANNEL is a thread-only parent channel."
+  (memq (alist-get 'type channel) '(15 16)))
+
 (defun disco-state--parent-threads-upsert (parent-id channel)
   "Insert or replace thread CHANNEL under PARENT-ID."
   (let ((channel-id (alist-get 'id channel))
@@ -605,6 +609,22 @@ WATCHED means a room buffer currently tracks this channel."
         (when (disco-state--message-create-should-increment-unread-p
                channel message current-user-id)
           (disco-state-increment-channel-unread channel-id 1))))))
+
+(defun disco-state-apply-thread-create (thread current-user-id)
+  "Apply THREAD_CREATE read-state effects from THREAD for CURRENT-USER-ID."
+  (let* ((parent-id (alist-get 'parent_id thread))
+         (thread-id (alist-get 'id thread))
+         (owner-id (alist-get 'owner_id thread))
+         (parent-channel (and parent-id
+                              (disco-state-channel parent-id))))
+    (when (and parent-id
+               thread-id
+               owner-id
+               current-user-id
+               (disco-state-thread-only-parent-channel-p parent-channel)
+               (equal (disco-state--normalize-id owner-id)
+                      (disco-state--normalize-id current-user-id)))
+      (disco-state-apply-message-ack parent-id thread-id 0))))
 
 (defun disco-state-apply-ready-read-state-entry (entry)
   "Apply one Ready/read-state ENTRY to local channel read-state.

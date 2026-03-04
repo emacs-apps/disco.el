@@ -744,6 +744,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
 
 (defun disco-gateway--dispatch-thread-create (payload)
   "Handle THREAD_CREATE dispatch PAYLOAD."
+  (disco-state-apply-thread-create payload disco-gateway--current-user-id)
   (disco-gateway--upsert-channel-and-emit 'thread-create payload))
 
 (defun disco-gateway--dispatch-thread-update (payload)

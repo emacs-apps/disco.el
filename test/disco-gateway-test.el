@@ -88,6 +88,28 @@
       (should applied)
       (should (equal "u9" disco-gateway--current-user-id)))))
 
+(ert-deftest disco-gateway-dispatch-thread-create-applies-read-state-first ()
+  (let (calls)
+    (setq disco-gateway--current-user-id "u1")
+    (cl-letf (((symbol-function 'disco-state-apply-thread-create)
+               (lambda (payload current-user-id)
+                 (setq calls (append calls
+                                     (list (list :apply payload current-user-id))))))
+              ((symbol-function 'disco-gateway--upsert-channel-and-emit)
+               (lambda (event-type payload)
+                 (setq calls (append calls
+                                     (list (list :upsert event-type payload)))))))
+      (disco-gateway--dispatch-thread-create
+       '((id . "th1")
+         (parent_id . "forum")))
+      (should (equal '((:apply ((id . "th1")
+                                (parent_id . "forum"))
+                               "u1")
+                       (:upsert thread-create
+                                ((id . "th1")
+                                 (parent_id . "forum"))))
+                     calls)))))
+
 (provide 'disco-gateway-test)
 
 ;;; disco-gateway-test.el ends here
