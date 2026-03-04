@@ -567,8 +567,8 @@
                    (author . ((id . "u9"))))))
     (cl-letf (((symbol-function 'disco-gateway-current-user-id)
                (lambda () "u1"))
-              ((symbol-function 'disco-state-channel-effective-unread-count)
-               (lambda (_channel) 3)))
+              ((symbol-function 'disco-root--channel-has-unread-p)
+               (lambda (_channel) t)))
       (should (equal "•"
                      (disco-root--activity-time-status-symbol channel message))))))
 
@@ -582,6 +582,41 @@
                (lambda (&rest _args) "•")))
       (should (equal "Wed•"
                      (disco-root--channel-last-activity-time-label channel nil))))))
+
+(ert-deftest disco-root-channel-label-uses-mention-badge ()
+  (let ((channel '((id . "c4")
+                   (type . 0)
+                   (name . "general"))))
+    (cl-letf (((symbol-function 'disco-state-channel-effective-unread-count)
+               (lambda (_channel) 3))
+              ((symbol-function 'disco-root--channel-has-unread-p)
+               (lambda (_channel) t)))
+      (let ((label (disco-root--channel-label channel)))
+        (should (string-match-p "\\[@3\\]" label))
+        (should-not (string-match-p "\\[unread\\]" label))
+        (should-not (string-match-p "\\[read\\]" label))))))
+
+(ert-deftest disco-root-channel-label-shows-unread-when-no-mention-badge ()
+  (let ((channel '((id . "c5")
+                   (type . 0)
+                   (name . "general"))))
+    (cl-letf (((symbol-function 'disco-state-channel-effective-unread-count)
+               (lambda (_channel) 0))
+              ((symbol-function 'disco-root--channel-has-unread-p)
+               (lambda (_channel) t)))
+      (let ((label (disco-root--channel-label channel)))
+        (should (string-match-p "\\[unread\\]" label))
+        (should-not (string-match-p "\\[@[0-9]+\\]" label))))))
+
+(ert-deftest disco-root-line-has-unread-p-uses-state-flag-or-count ()
+  (with-temp-buffer
+    (insert "row\n")
+    (add-text-properties 1 4 '(disco-unread-count 0))
+    (should-not (disco-root--line-has-unread-p 1))
+    (add-text-properties 1 4 '(disco-unread-count 2))
+    (should (disco-root--line-has-unread-p 1))
+    (add-text-properties 1 4 '(disco-has-unread t disco-unread-count 0))
+    (should (disco-root--line-has-unread-p 1))))
 
 (provide 'disco-root-test)
 

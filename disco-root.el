@@ -658,8 +658,13 @@ When SECTIONS is nil, use `disco-root--section-order'."
   (disco-root--line-property 'disco-channel-id pos))
 
 (defun disco-root--line-unread-count (&optional pos)
-  "Return unread count for row at POS, defaulting to 0."
+  "Return mention badge count for row at POS, defaulting to 0."
   (or (disco-root--line-property 'disco-unread-count pos) 0))
+
+(defun disco-root--line-has-unread-p (&optional pos)
+  "Return non-nil when row at POS has unread state."
+  (or (disco-root--line-property 'disco-has-unread pos)
+      (> (disco-root--line-unread-count pos) 0)))
 
 (defun disco-root--channel-line-positions (&optional predicate)
   "Return ordered list of channel row positions.
@@ -1506,12 +1511,13 @@ Discord channel position can arrive as integer or numeric string."
 
 (defun disco-root--channel-dynamic-trail-tags (channel)
   "Return dynamic status trail tags for CHANNEL."
-  (let ((unread (disco-state-channel-effective-unread-count channel))
+  (let ((mention-count (disco-state-channel-effective-unread-count channel))
+        (has-unread (disco-root--channel-has-unread-p channel))
         tags)
-    (if (> unread 0)
-        (push (format "unread:%d" unread) tags)
-      (when (disco-root--channel-read-p channel)
-        (push "read" tags)))
+    (when has-unread
+      (push "unread" tags))
+    (when (> mention-count 0)
+      (push (format "@%d" mention-count) tags))
     (nreverse tags)))
 
 (defun disco-root--channel-context-label (channel)
@@ -1782,13 +1788,13 @@ When MESSAGE is non-nil, use it as the cached latest message."
                current-user-id
                (equal (format "%s" (disco-root--message-author-id latest-message))
                       (format "%s" current-user-id))))
-         (unread (disco-state-channel-effective-unread-count channel)))
+         (has-unread (disco-root--channel-has-unread-p channel)))
     (cond
      (own-latest-message
       (if (disco-root--channel-read-p channel)
           "✔"
         "✓"))
-     ((> unread 0)
+     (has-unread
       "•")
      (t
       " "))))
@@ -1866,6 +1872,8 @@ Guild rows use real guild icons when available, with fixed text fallback."
   (let* ((channel-id (alist-get 'id channel))
          (channel-type (alist-get 'type channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
+         (mention-count (disco-state-channel-effective-unread-count channel))
+         (has-unread (disco-root--channel-has-unread-p channel))
          (padding (make-string indent ?\s))
          (context-text (disco-root--activity-primary-label channel))
          (preview-text (disco-root--activity-preview-line channel latest-message))
@@ -1933,7 +1941,8 @@ Guild rows use real guild icons when available, with fixed text fallback."
                           (format "Open channel %s" channel-id))
              'disco-root-row-type 'channel
              'disco-channel-id channel-id
-             'disco-unread-count (disco-state-channel-effective-unread-count channel))))))
+             'disco-unread-count mention-count
+             'disco-has-unread (and has-unread t))))))
 
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
@@ -1942,14 +1951,16 @@ SCOPE is a symbol describing where the row is rendered."
   (let ((name (disco-root--channel-display-name channel))
         (channel-type (alist-get 'type channel))
         (channel-id (alist-get 'id channel))
-        (unread (disco-state-channel-effective-unread-count channel))
+        (mention-count (disco-state-channel-effective-unread-count channel))
+        (has-unread (disco-root--channel-has-unread-p channel))
         base-label)
-    (let ((unread-suffix (if (> unread 0)
-                             (format " [%d]" unread)
-                           ""))
-          (read-suffix (if (disco-root--channel-read-p channel)
-                           " [read]"
-                         ""))
+    (let ((state-suffix (cond
+                         ((> mention-count 0)
+                          (format " [@%d]" mention-count))
+                         (has-unread
+                          " [unread]")
+                         (t
+                          "")))
           (trail-suffix
            (if (eq scope 'activity)
                ""
@@ -1960,8 +1971,8 @@ SCOPE is a symbol describing where the row is rendered."
                  "")))))
       (setq base-label
             (pcase channel-type
-              (1 (format "[dm] %s%s%s" name (concat unread-suffix read-suffix) trail-suffix))
-              (3 (format "[group] %s%s%s" name (concat unread-suffix read-suffix) trail-suffix))
+              (1 (format "[dm] %s%s%s" name state-suffix trail-suffix))
+              (3 (format "[group] %s%s%s" name state-suffix trail-suffix))
               ((or 10 11 12)
                (let ((tags (disco-root--thread-status-tags channel)))
                  (format "[thread] %s%s%s%s"
@@ -1969,7 +1980,7 @@ SCOPE is a symbol describing where the row is rendered."
                          (if (string-empty-p tags)
                              ""
                            (format " (%s)" tags))
-                         (concat unread-suffix read-suffix)
+                         state-suffix
                          trail-suffix)))
               ((or 0 5 15 16)
                (let* ((thread-count (disco-root--thread-count-under-parent channel))
@@ -1977,10 +1988,10 @@ SCOPE is a symbol describing where the row is rendered."
                                   (format " (%d threads)" thread-count)
                                 "")))
                  (pcase channel-type
-                   ((or 0 5) (format "#%s%s%s%s" name suffix (concat unread-suffix read-suffix) trail-suffix))
-                   (15 (format "[forum] %s%s%s%s" name suffix (concat unread-suffix read-suffix) trail-suffix))
-                   (16 (format "[media] %s%s%s%s" name suffix (concat unread-suffix read-suffix) trail-suffix)))))
-              (_ (format "[type-%s] %s%s%s" channel-type name (concat unread-suffix read-suffix) trail-suffix)))))
+                   ((or 0 5) (format "#%s%s%s%s" name suffix state-suffix trail-suffix))
+                   (15 (format "[forum] %s%s%s%s" name suffix state-suffix trail-suffix))
+                   (16 (format "[media] %s%s%s%s" name suffix state-suffix trail-suffix)))))
+              (_ (format "[type-%s] %s%s%s" channel-type name state-suffix trail-suffix)))))
     (disco-root--append-extra-info
      base-label
      'channel
@@ -1988,7 +1999,8 @@ SCOPE is a symbol describing where the row is rendered."
      (list :scope (or scope 'root)
            :channel-id channel-id
            :channel-type channel-type
-           :unread unread))))
+           :unread mention-count
+           :has-unread has-unread))))
 
 (defun disco-root--guild-label (guild unread-count &optional scope)
   "Return display label for GUILD with UNREAD-COUNT badge."
@@ -2766,6 +2778,7 @@ SCOPE is forwarded to extra-info providers."
            (channel-type (alist-get 'type channel))
            (label (disco-root--channel-label channel scope))
            (unread-count (disco-state-channel-effective-unread-count channel))
+           (has-unread (disco-root--channel-has-unread-p channel))
            (padding (make-string indent ?\s)))
       (let ((line-start (point)))
         (insert (format "%s%s\n" padding label))
@@ -2779,7 +2792,8 @@ SCOPE is forwarded to extra-info providers."
                               (format "Open channel %s" channel-id))
                  'disco-root-row-type 'channel
                  'disco-channel-id channel-id
-                 'disco-unread-count unread-count)))))))
+                 'disco-unread-count unread-count
+                 'disco-has-unread (and has-unread t))))))))
 
 (defun disco-root-button-forward (&optional n)
   "Move point to next channel row by N steps."
@@ -2839,11 +2853,11 @@ If point is not on actionable row, jump to next channel row and open it."
           (user-error "disco: no openable channel at point")))))))
 
 (defun disco-root-next-unread ()
-  "Jump to next channel row with unread count > 0."
+  "Jump to next channel row with unread state."
   (interactive)
   (let* ((positions
           (disco-root--channel-line-positions
-           (lambda (pos) (> (disco-root--line-unread-count pos) 0))))
+           (lambda (pos) (disco-root--line-has-unread-p pos))))
          (origin (line-beginning-position))
          (found (or (disco-root--next-position-after positions origin)
                     (car positions))))

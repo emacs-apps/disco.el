@@ -40,7 +40,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
 - Root buffer now live-syncs guild/channel/thread structure from gateway create/update/delete dispatch.
-- Root channel labels include lightweight unread counters from live message events.
+- Root channel labels show unread state plus mention badges (`[@N]`), aligned with Discord read-state semantics (not per-channel unread message counts).
 - Root rows can append custom display fragments via `disco-root-extra-info-functions` (channel/guild/category providers).
 - Room open/refresh/live message flow now acknowledges Discord channel read-state (`/ack`) and tracks per-channel last-read cursor.
 - Root and room refresh paths are now asynchronous to avoid blocking Emacs UI.
