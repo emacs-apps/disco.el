@@ -476,9 +476,11 @@ after incremental EWOC updates."
 (defun disco-root--ensure-markers ()
   "Ensure header and ewoc markers exist for the current buffer."
   (unless (markerp disco-root--header-marker)
-    (setq-local disco-root--header-marker (copy-marker (point-min) t)))
+    (setq-local disco-root--header-marker (copy-marker (point-min))))
   (unless (markerp disco-root--ewoc-marker)
-    (setq-local disco-root--ewoc-marker (copy-marker (point-min) t))))
+    (setq-local disco-root--ewoc-marker (copy-marker (point-min))))
+  (set-marker-insertion-type disco-root--header-marker nil)
+  (set-marker-insertion-type disco-root--ewoc-marker nil))
 
 (defun disco-root--header-start ()
   "Return buffer position of the root header start."
@@ -488,7 +490,10 @@ after incremental EWOC updates."
 
 (defun disco-root--ewoc-start ()
   "Return buffer position of root EWOC content start."
-  (or (and (markerp disco-root--ewoc-marker)
+  (or (and disco-root--ewoc
+           (ewoc-nth disco-root--ewoc 0)
+           (ewoc-location (ewoc-nth disco-root--ewoc 0)))
+      (and (markerp disco-root--ewoc-marker)
            (marker-position disco-root--ewoc-marker))
       (save-excursion
         (goto-char (disco-root--header-start))
@@ -1523,12 +1528,16 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                 (with-silent-modifications
                   (dolist (channel-id dirty-channel-ids)
                     (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
-                      (setq needs-structural t)))
+                      (setq needs-structural t)
+                      (disco-root--debug-log
+                       "flush-live-updates -> structural(stale %s)" channel-id)))
                   (when (and (not needs-structural)
                              dirty-channel-ids
                              (eq layout 'activity))
                     (when (disco-root--activity-reorder-visible-nodes dirty-channel-ids)
-                      (setq needs-structural t)))
+                      (setq needs-structural t)
+                      (disco-root--debug-log
+                       "flush-live-updates -> structural(activity-reorder)")))
                   (when dirty-channel-ids
                     (disco-root--refresh-active-layout-headings dirty-channel-ids))
                   (cond
@@ -1539,7 +1548,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                     (disco-root--maybe-refresh-activity-header-line)))
                   (when (and (not needs-structural)
                              (disco-root--buffer-corrupted-p))
-                    (setq needs-structural t))
+                    (setq needs-structural t)
+                    (disco-root--debug-log
+                     "flush-live-updates -> structural(corrupted)"))
                   (when (and (not needs-structural)
                              position-snapshot)
                     (disco-view-restore-position position-snapshot)
@@ -3678,7 +3689,9 @@ Return non-nil when at least one visible row is inserted for GUILD."
           (insert line "\n"))
         (insert "\n")
         (set-marker disco-root--header-marker start)
-        (set-marker disco-root--ewoc-marker (point))))
+        (set-marker disco-root--ewoc-marker (point))
+        (set-marker-insertion-type disco-root--header-marker nil)
+        (set-marker-insertion-type disco-root--ewoc-marker nil)))
     (setq disco-root--last-header-refresh-at (float-time))))
 
 (defun disco-root--maybe-refresh-activity-header-line ()
@@ -3706,12 +3719,14 @@ Return non-nil when at least one visible row is inserted for GUILD."
     (erase-buffer)
     (disco-root--ensure-markers)
     (set-marker disco-root--header-marker (point-min))
+    (set-marker-insertion-type disco-root--header-marker nil)
     (goto-char (point-min))
     (dolist (line (disco-root--header-lines))
       (insert line "\n"))
     (setq-local disco-root--last-header-refresh-at (float-time))
     (insert "\n")
     (set-marker disco-root--ewoc-marker (point))
+    (set-marker-insertion-type disco-root--ewoc-marker nil)
     (disco-root--prepare-ewoc-state)
     (if (functionp renderer)
         (funcall renderer)
