@@ -569,6 +569,24 @@ When WINDOW is non-nil, compute using WINDOW directly."
                                      line-number-columns)))
              adjusted-width)))))
 
+(defun disco-root--render-fill-column (&optional buffer)
+  "Return stable fill width for BUFFER before one render pass.
+
+Prefer width from a live BUFFER window. Hidden buffers keep previous
+`disco-root--fill-column' to avoid background width jitter."
+  (with-current-buffer (or buffer (current-buffer))
+    (let* ((win (disco-root--display-window (current-buffer)))
+           (computed-width
+            (and (window-live-p win)
+                 (disco-root--compute-fill-column (current-buffer) win))))
+      (or (and (integerp computed-width)
+               (> computed-width 0)
+               computed-width)
+          (and (integerp disco-root--fill-column)
+               (> disco-root--fill-column 0)
+               disco-root--fill-column)
+          (disco-root--compute-fill-column (current-buffer) win)))))
+
 (defun disco-root--auto-fill-to-width (width &optional force)
   "Reflow root buffer using WIDTH when it changed.
 
@@ -1264,11 +1282,12 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                    nil
                    #'disco-root--flush-live-updates
                    root-buffer))
-          (let ((dirty-channel-ids (nreverse disco-root--dirty-channel-ids))
-                (needs-structural disco-root--dirty-structure-p)
-                (needs-header disco-root--dirty-header-p)
-                (layout-update-mode
-                 (disco-root-layout-update-mode (disco-root--ensure-layout))))
+          (let* ((dirty-channel-ids (nreverse disco-root--dirty-channel-ids))
+                 (needs-structural disco-root--dirty-structure-p)
+                 (needs-header disco-root--dirty-header-p)
+                 (layout (disco-root--ensure-layout))
+                 (layout-update-mode
+                  (disco-root-layout-update-mode layout)))
             (setq disco-root--dirty-channel-ids nil)
             (setq disco-root--dirty-structure-p nil)
             (setq disco-root--dirty-header-p nil)
@@ -1290,7 +1309,11 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
              (t
               (let ((inhibit-read-only t)
                     (buffer-undo-list t)
-                    (layout (disco-root--ensure-layout)))
+                    (position-snapshot
+                     (and (disco-root--buffer-visible-p root-buffer)
+                          (disco-view-capture-position
+                           :anchor-property 'disco-channel-id
+                           :preserve-window-start t))))
                 (dolist (channel-id dirty-channel-ids)
                   (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
                     (setq needs-structural t)))
@@ -1309,7 +1332,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                   (disco-root--maybe-refresh-activity-header-line)))
                 (when (and (not needs-structural)
                            (disco-root--buffer-corrupted-p))
-                  (setq needs-structural t)))
+                  (setq needs-structural t))
+                (when (and (not needs-structural)
+                           position-snapshot)
+                  (disco-view-restore-position position-snapshot)))
               (when needs-structural
                 (disco-root--render-preserving-position))))))))))
 
@@ -3453,7 +3479,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
          (buffer-undo-list t)
          (layout (disco-root--ensure-layout))
          (renderer (disco-root-layout-renderer layout)))
-    (setq-local disco-root--fill-column (disco-root--compute-fill-column))
+    (setq-local disco-root--fill-column (disco-root--render-fill-column))
     (erase-buffer)
     (dolist (line (disco-root--header-lines))
       (insert line "\n"))
@@ -3714,6 +3740,7 @@ When QUIET is non-nil, suppress minibuffer status messages."
   "Major mode for disco.el root buffer."
   (setq buffer-read-only t)
   (setq truncate-lines t)
+  (setq-local switch-to-buffer-preserve-window-point nil)
   (buffer-disable-undo)
   (setq-local buffer-undo-list t)
   (disco-root--cancel-live-update-timer)

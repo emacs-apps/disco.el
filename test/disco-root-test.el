@@ -176,6 +176,43 @@
         (disco-root--flush-live-updates (current-buffer))
         (should rendered)))))
 
+(ert-deftest disco-root-flush-live-updates-unfocused-activity-keeps-incremental-path ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--layout 'activity)
+          (disco-root--dirty-channel-ids '("c1"))
+          (disco-root--dirty-structure-p nil)
+          (disco-root--dirty-header-p nil)
+          (disco-root--refresh-in-flight nil)
+          (disco-root--view-mode 'all)
+          rendered
+          patched
+          restored)
+      (cl-letf (((symbol-function 'disco-root--buffer-visible-p)
+                 (lambda (&optional _buffer) t))
+                ((symbol-function 'disco-view-capture-position)
+                 (lambda (&rest _args) 'snapshot))
+                ((symbol-function 'disco-view-restore-position)
+                 (lambda (_snapshot)
+                   (setq restored t)))
+                ((symbol-function 'disco-root--refresh-channel-node)
+                 (lambda (_channel-id)
+                   (setq patched t)
+                   'updated))
+                ((symbol-function 'disco-root--activity-reorder-visible-nodes)
+                 (lambda (&optional _channel-ids) nil))
+                ((symbol-function 'disco-root--refresh-active-layout-headings)
+                 (lambda (_channel-ids) nil))
+                ((symbol-function 'disco-root--maybe-refresh-activity-header-line)
+                 (lambda () t))
+                ((symbol-function 'disco-root--render-preserving-position)
+                 (lambda ()
+                   (setq rendered t))))
+        (disco-root--flush-live-updates (current-buffer))
+        (should patched)
+        (should restored)
+        (should-not rendered)))))
+
 (ert-deftest disco-root-flush-live-updates-corruption-falls-back-to-structural-render ()
   (with-temp-buffer
     (disco-root-mode)
@@ -279,6 +316,16 @@
         (should (disco-root--maybe-refresh-activity-header-line))
         (should refreshed)))))
 
+(ert-deftest disco-root-render-fill-column-hidden-buffer-reuses-last-width ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--fill-column 88))
+      (cl-letf (((symbol-function 'disco-root--display-window)
+                 (lambda (&optional _buffer) nil))
+                ((symbol-function 'disco-root--compute-fill-column)
+                 (lambda (&optional _buffer _window) 42)))
+        (should (= 88 (disco-root--render-fill-column)))))))
+
 (ert-deftest disco-root-toggle-unread-lens-tree-toggles-section ()
   (with-temp-buffer
     (disco-root-mode)
@@ -322,7 +369,8 @@
 (ert-deftest disco-root-mode-disables-undo-history ()
   (with-temp-buffer
     (disco-root-mode)
-    (should (eq buffer-undo-list t))))
+    (should (eq buffer-undo-list t))
+    (should-not switch-to-buffer-preserve-window-point)))
 
 (ert-deftest disco-root-toggle-section-at-point-activity-falls-forward ()
   (with-temp-buffer
