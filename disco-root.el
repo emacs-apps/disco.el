@@ -1291,10 +1291,6 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
             (setq disco-root--dirty-channel-ids nil)
             (setq disco-root--dirty-structure-p nil)
             (setq disco-root--dirty-header-p nil)
-            (unless (disco-root--buffer-visible-p root-buffer)
-              ;; Hidden root buffers are more prone to stale incremental layout state.
-              ;; Reconcile structurally to keep EWOC/header markers coherent.
-              (setq needs-structural t))
             (cond
              (needs-structural
               (disco-root--render-preserving-position))

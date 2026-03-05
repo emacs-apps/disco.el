@@ -158,7 +158,7 @@
         (should reordered)
         (should-not rendered)))))
 
-(ert-deftest disco-root-flush-live-updates-hidden-buffer-forces-structural-render ()
+(ert-deftest disco-root-flush-live-updates-hidden-buffer-keeps-incremental-path ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--layout 'activity)
@@ -167,14 +167,26 @@
           (disco-root--dirty-header-p nil)
           (disco-root--refresh-in-flight nil)
           (disco-root--view-mode 'all)
-          rendered)
+          rendered
+          patched)
       (cl-letf (((symbol-function 'disco-root--buffer-visible-p)
                  (lambda (&optional _buffer) nil))
+                ((symbol-function 'disco-root--refresh-channel-node)
+                 (lambda (_channel-id)
+                   (setq patched t)
+                   'updated))
+                ((symbol-function 'disco-root--activity-reorder-visible-nodes)
+                 (lambda (&optional _channel-ids) nil))
+                ((symbol-function 'disco-root--refresh-active-layout-headings)
+                 (lambda (_channel-ids) nil))
+                ((symbol-function 'disco-root--maybe-refresh-activity-header-line)
+                 (lambda () t))
                 ((symbol-function 'disco-root--render-preserving-position)
                  (lambda ()
                    (setq rendered t))))
         (disco-root--flush-live-updates (current-buffer))
-        (should rendered)))))
+        (should patched)
+        (should-not rendered)))))
 
 (ert-deftest disco-root-flush-live-updates-unfocused-activity-keeps-incremental-path ()
   (with-temp-buffer
