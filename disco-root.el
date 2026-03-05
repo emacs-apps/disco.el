@@ -621,7 +621,7 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
        disco-root--ewoc
        (save-excursion
          (let* ((start (disco-root--header-start))
-                (end (disco-root--ewoc-start))
+                (end (or (disco-root--ewoc-start) start))
                 (line1 (progn
                          (goto-char start)
                          (buffer-substring-no-properties
@@ -633,15 +633,22 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
                          (buffer-substring-no-properties
                           (line-beginning-position)
                           (line-end-position))))
-                (scan-start
-                 (or (when-let* ((node (ewoc-nth disco-root--ewoc 0)))
-                       (ewoc-location node))
-                     end)))
-           (or (not (string-prefix-p "Status: " line1))
-               (not (string-prefix-p "_/" line3))
-               (save-excursion
-                 (goto-char scan-start)
-                 (re-search-forward "^Status: " nil t)))))))
+                (node-location (when-let* ((node (ewoc-nth disco-root--ewoc 0)))
+                                 (ewoc-location node)))
+                (scan-start (max start end))
+                (line1-ok (string-prefix-p "Status: " line1))
+                (line3-ok (string-prefix-p "_/" line3))
+                (duplicate (save-excursion
+                             (goto-char scan-start)
+                             (re-search-forward "^Status: " nil t)))
+                (corrupted (or (not line1-ok)
+                               (not line3-ok)
+                               duplicate)))
+           (when (and corrupted (disco-root--debug-log-verbose-p))
+             (disco-root--debug-log
+              "buffer-corrupted start=%s ewoc=%s node=%s line1=%S line3=%S dup=%s"
+              start end node-location line1 line3 (and duplicate t)))
+           corrupted))))
 
 (defun disco-root--refresh-mode-divider-line ()
   "Refresh only the mode-divider header line used for width framing."
@@ -3680,14 +3687,15 @@ Return non-nil when at least one visible row is inserted for GUILD."
         (lines (disco-root--header-lines)))
     (disco-root--ensure-markers)
     (save-excursion
-      (let* ((region (disco-root--header-region))
-             (start (car region))
-             (end (cdr region)))
+      (let ((start (disco-root--header-start))
+            (end-marker disco-root--ewoc-marker))
         (goto-char start)
-        (delete-region start end)
         (dolist (line lines)
           (insert line "\n"))
         (insert "\n")
+        (when (and (markerp end-marker)
+                   (> (marker-position end-marker) (point)))
+          (delete-region (point) end-marker))
         (set-marker disco-root--header-marker start)
         (set-marker disco-root--ewoc-marker (point))
         (set-marker-insertion-type disco-root--header-marker nil)
