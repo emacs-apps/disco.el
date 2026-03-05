@@ -387,6 +387,46 @@
                          (disco-root--activity-secondary-label channel))))
       (disco-state-reset))))
 
+(ert-deftest disco-root-activity-secondary-label-queues-preview-fetch ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((channel '((id . "c3")
+                     (guild_id . "g1")
+                     (type . 0)
+                     (last_message_id . "44")))
+          queued)
+      (cl-letf (((symbol-function 'disco-root--queue-missing-preview-fetch)
+                 (lambda (_channel)
+                   (setq queued t))))
+        (should (equal "(preview unavailable)"
+                       (disco-root--activity-secondary-label channel)))
+        (should queued)))))
+
+(ert-deftest disco-root-flush-missing-preview-fetches-batches-op34 ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (calls)
+      (puthash "g1" '("c1" "c2")
+               disco-root--missing-preview-pending-by-guild)
+      (cl-letf (((symbol-function 'disco-gateway-running-p)
+                 (lambda () t))
+                ((symbol-function 'float-time)
+                 (lambda () 100.0))
+                ((symbol-function 'disco-gateway-request-last-messages)
+                 (lambda (guild-id channel-ids)
+                   (push (list guild-id channel-ids) calls)
+                   t)))
+        (disco-root--flush-missing-preview-fetches (current-buffer))
+        (should (equal '(("g1" ("c1" "c2")))
+                       (nreverse calls)))
+        (should (= 100.0
+                   (gethash "c1" disco-root--missing-preview-requested-at)))
+        (should (= 100.0
+                   (gethash "c2" disco-root--missing-preview-requested-at)))
+        (should (= 0
+                   (hash-table-count
+                    disco-root--missing-preview-pending-by-guild)))))))
+
 (ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
   (disco-state-reset)
   (unwind-protect

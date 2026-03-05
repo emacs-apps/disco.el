@@ -104,6 +104,15 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--live-update-timer nil
   "Debounce timer used to flush aggregated gateway updates.")
 
+(defvar-local disco-root--missing-preview-fetch-timer nil
+  "Debounce timer used to flush missing last-message fetch requests.")
+
+(defvar-local disco-root--missing-preview-pending-by-guild nil
+  "Hash table guild-id -> pending channel-id list for preview fetch.")
+
+(defvar-local disco-root--missing-preview-requested-at nil
+  "Hash table channel-id -> float-time of last proactive preview fetch.")
+
 (defvar-local disco-root--dirty-channel-ids nil
   "List of channel IDs queued for incremental live patching.")
 
@@ -233,6 +242,26 @@ Discord limits one request to at most 100 channel IDs."
 (defcustom disco-root-gateway-context-request-channel-info t
   "When non-nil, request op43 channel metadata fields during root sync."
   :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-missing-preview-fetch-enabled t
+  "When non-nil, proactively request missing last-message previews in activity rows."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-missing-preview-fetch-debounce 0.3
+  "Seconds to debounce batched proactive last-message requests."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-root-missing-preview-fetch-max-per-guild 60
+  "Maximum number of channel IDs per guild in one proactive op34 request."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-root-missing-preview-fetch-retry-interval 45
+  "Minimum seconds before re-requesting the same channel preview via op34."
+  :type 'number
   :group 'disco)
 
 (defcustom disco-root-extra-info-functions nil
@@ -1109,6 +1138,81 @@ if structural fallback is required."
     (cancel-timer disco-root--live-update-timer)
     (setq disco-root--live-update-timer nil)))
 
+(defun disco-root--cancel-missing-preview-fetch-timer ()
+  "Cancel pending proactive missing-preview fetch timer when present."
+  (when (timerp disco-root--missing-preview-fetch-timer)
+    (cancel-timer disco-root--missing-preview-fetch-timer)
+    (setq disco-root--missing-preview-fetch-timer nil)))
+
+(defun disco-root--schedule-missing-preview-fetch ()
+  "Schedule debounced proactive fetch for missing preview messages."
+  (unless (timerp disco-root--missing-preview-fetch-timer)
+    (setq disco-root--missing-preview-fetch-timer
+          (run-with-timer
+           (max 0 (or disco-root-missing-preview-fetch-debounce 0))
+           nil
+           #'disco-root--flush-missing-preview-fetches
+           (current-buffer)))))
+
+(defun disco-root--flush-missing-preview-fetches (root-buffer)
+  "Flush queued missing-preview requests in ROOT-BUFFER via op34."
+  (when (buffer-live-p root-buffer)
+    (with-current-buffer root-buffer
+      (when (eq major-mode 'disco-root-mode)
+        (setq disco-root--missing-preview-fetch-timer nil)
+        (when (and (disco-gateway-running-p)
+                   (hash-table-p disco-root--missing-preview-pending-by-guild)
+                   (> (hash-table-count disco-root--missing-preview-pending-by-guild) 0))
+          (let ((max-per-guild
+                 (max 1 (or disco-root-missing-preview-fetch-max-per-guild 1)))
+                (now (float-time)))
+            (maphash
+             (lambda (guild-id pending-channel-ids)
+               (let ((channel-ids
+                      (disco-root--normalize-id-list pending-channel-ids max-per-guild)))
+                 (when (and guild-id channel-ids
+                            (disco-gateway-request-last-messages guild-id channel-ids))
+                   (dolist (channel-id channel-ids)
+                     (puthash channel-id now
+                              disco-root--missing-preview-requested-at)))))
+             disco-root--missing-preview-pending-by-guild)
+            (clrhash disco-root--missing-preview-pending-by-guild)))))))
+
+(defun disco-root--queue-missing-preview-fetch (channel)
+  "Queue proactive op34 fetch when CHANNEL lacks cached preview message."
+  (when (and disco-root-missing-preview-fetch-enabled
+             (listp channel)
+             (disco-gateway-running-p))
+    (let* ((guild-id (and (alist-get 'guild_id channel)
+                          (format "%s" (alist-get 'guild_id channel))))
+           (channel-id (and (alist-get 'id channel)
+                            (format "%s" (alist-get 'id channel))))
+           (last-message-id (alist-get 'last_message_id channel))
+           (retry-interval
+            (max 0 (or disco-root-missing-preview-fetch-retry-interval 0)))
+           (request-cache
+            (or disco-root--missing-preview-requested-at
+                (setq-local disco-root--missing-preview-requested-at
+                            (make-hash-table :test #'equal))))
+           (pending-by-guild
+            (or disco-root--missing-preview-pending-by-guild
+                (setq-local disco-root--missing-preview-pending-by-guild
+                            (make-hash-table :test #'equal))))
+           (last-request-at (and channel-id
+                                 (gethash channel-id request-cache)))
+           (now (float-time)))
+      (when (and guild-id
+                 channel-id
+                 (stringp last-message-id)
+                 (not (disco-msg-channel-last-cached-message channel))
+                 (or (null last-request-at)
+                     (>= (- now last-request-at) retry-interval)))
+        (let ((pending (copy-sequence (or (gethash guild-id pending-by-guild)
+                                          '()))))
+          (cl-pushnew channel-id pending :test #'equal)
+          (puthash guild-id pending pending-by-guild))
+        (disco-root--schedule-missing-preview-fetch)))))
+
 (defun disco-root--queue-live-update (channel-ids &optional structural-p header-p)
   "Queue CHANNEL-IDS for debounced UI update.
 
@@ -1210,9 +1314,12 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
     (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
     (disco-gateway-unwatch-global))
   (disco-root--cancel-live-update-timer)
+  (disco-root--cancel-missing-preview-fetch-timer)
   (setq disco-root--dirty-channel-ids nil)
   (setq disco-root--dirty-structure-p nil)
   (setq disco-root--dirty-header-p nil)
+  (when (hash-table-p disco-root--missing-preview-pending-by-guild)
+    (clrhash disco-root--missing-preview-pending-by-guild))
   (let ((root-buffer (current-buffer)))
     (setq disco-root--gateway-handler
           (lambda (event)
@@ -1226,9 +1333,12 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 (defun disco-root--detach-live-updates ()
   "Detach root buffer from global gateway update stream."
   (disco-root--cancel-live-update-timer)
+  (disco-root--cancel-missing-preview-fetch-timer)
   (setq disco-root--dirty-channel-ids nil)
   (setq disco-root--dirty-structure-p nil)
   (setq disco-root--dirty-header-p nil)
+  (when (hash-table-p disco-root--missing-preview-pending-by-guild)
+    (clrhash disco-root--missing-preview-pending-by-guild))
   (when disco-root--gateway-handler
     (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
     (setq disco-root--gateway-handler nil))
@@ -1660,7 +1770,12 @@ Fallback stays message-oriented and avoids status-tag placeholders."
     (or (and channel-id
              (disco-state-channel-conversation-summary-preview channel-id))
         (and (alist-get 'last_message_id channel)
-             "(last message unavailable)")
+             (progn
+               (disco-root--queue-missing-preview-fetch channel)
+               ;; Keep this neutral: missing preview here means op34/cache did not
+               ;; materialize a message, not necessarily that summaries are
+               ;; unavailable for the guild/channel.
+               "(preview unavailable)"))
         "(no messages)")))
 
 (defun disco-root--canonicalize-number (spec base)
@@ -3584,6 +3699,7 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (buffer-disable-undo)
   (setq-local buffer-undo-list t)
   (disco-root--cancel-live-update-timer)
+  (disco-root--cancel-missing-preview-fetch-timer)
   (disco-root--ensure-window-size-hook)
   (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
   (setq-local disco-root--sort-mode 'activity)
@@ -3599,6 +3715,11 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq-local disco-root--guild-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--category-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--live-update-timer nil)
+  (setq-local disco-root--missing-preview-fetch-timer nil)
+  (setq-local disco-root--missing-preview-pending-by-guild
+              (make-hash-table :test #'equal))
+  (setq-local disco-root--missing-preview-requested-at
+              (make-hash-table :test #'equal))
   (setq-local disco-root--dirty-channel-ids nil)
   (setq-local disco-root--dirty-structure-p nil)
   (setq-local disco-root--dirty-header-p nil)
