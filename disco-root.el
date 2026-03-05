@@ -145,6 +145,12 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defvar-local disco-root--category-expanded nil
   "Hash table category-channel-id -> expansion state for category rows.")
 
+(defvar-local disco-root--header-marker nil
+  "Marker pointing at the start of the root header block.")
+
+(defvar-local disco-root--ewoc-marker nil
+  "Marker pointing at the start of root EWOC content.")
+
 (defvar-local disco-root--debug-log-enabled nil
   "Non-nil when root debug logging is enabled in this buffer.")
 
@@ -467,6 +473,34 @@ after incremental EWOC updates."
       (when (window-live-p win)
         (set-window-point win pos)))))
 
+(defun disco-root--ensure-markers ()
+  "Ensure header and ewoc markers exist for the current buffer."
+  (unless (markerp disco-root--header-marker)
+    (setq-local disco-root--header-marker (copy-marker (point-min) t)))
+  (unless (markerp disco-root--ewoc-marker)
+    (setq-local disco-root--ewoc-marker (copy-marker (point-min) t))))
+
+(defun disco-root--header-start ()
+  "Return buffer position of the root header start."
+  (or (and (markerp disco-root--header-marker)
+           (marker-position disco-root--header-marker))
+      (point-min)))
+
+(defun disco-root--ewoc-start ()
+  "Return buffer position of root EWOC content start."
+  (or (and (markerp disco-root--ewoc-marker)
+           (marker-position disco-root--ewoc-marker))
+      (save-excursion
+        (goto-char (disco-root--header-start))
+        (forward-line (1+ (length (disco-root--header-lines))))
+        (point))))
+
+(defun disco-root--header-region ()
+  "Return cons of header region start/end positions."
+  (let ((start (disco-root--header-start))
+        (end (disco-root--ewoc-start)))
+    (cons start (max start end))))
+
 (defun disco-root--debug-log-enabled-p ()
   "Return non-nil when root debug logging is enabled."
   (or disco-root--debug-log-enabled
@@ -581,22 +615,23 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
   (and (eq major-mode 'disco-root-mode)
        disco-root--ewoc
        (save-excursion
-         (goto-char (point-min))
-         (let ((line1 (buffer-substring-no-properties
-                       (line-beginning-position)
-                       (line-end-position)))
-               (line3 (progn
-                        (forward-line 2)
-                        (buffer-substring-no-properties
-                         (line-beginning-position)
-                         (line-end-position))))
-               (scan-start
-                (or (when-let* ((node (ewoc-nth disco-root--ewoc 0)))
-                      (ewoc-location node))
-                    (save-excursion
-                      (goto-char (point-min))
-                      (forward-line 4)
-                      (point)))))
+         (let* ((start (disco-root--header-start))
+                (end (disco-root--ewoc-start))
+                (line1 (progn
+                         (goto-char start)
+                         (buffer-substring-no-properties
+                          (line-beginning-position)
+                          (line-end-position))))
+                (line3 (progn
+                         (goto-char start)
+                         (forward-line 2)
+                         (buffer-substring-no-properties
+                          (line-beginning-position)
+                          (line-end-position))))
+                (scan-start
+                 (or (when-let* ((node (ewoc-nth disco-root--ewoc 0)))
+                       (ewoc-location node))
+                     end)))
            (or (not (string-prefix-p "Status: " line1))
                (not (string-prefix-p "_/" line3))
                (save-excursion
@@ -608,7 +643,7 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
   (let ((inhibit-read-only t)
         (buffer-undo-list t))
     (save-excursion
-      (goto-char (point-min))
+      (goto-char (disco-root--header-start))
       (forward-line 2)
       (delete-region (line-beginning-position) (line-end-position))
       (insert (disco-root--mode-divider-line)))))
@@ -3632,16 +3667,18 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (let ((inhibit-read-only t)
         (buffer-undo-list t)
         (lines (disco-root--header-lines)))
+    (disco-root--ensure-markers)
     (save-excursion
-      (goto-char (point-min))
-      (let ((start (point))
-            (end (progn
-                   (forward-line 3)
-                   (point))))
-        (delete-region start end)
+      (let* ((region (disco-root--header-region))
+             (start (car region))
+             (end (cdr region)))
         (goto-char start)
+        (delete-region start end)
         (dolist (line lines)
-          (insert line "\n"))))
+          (insert line "\n"))
+        (insert "\n")
+        (set-marker disco-root--header-marker start)
+        (set-marker disco-root--ewoc-marker (point))))
     (setq disco-root--last-header-refresh-at (float-time))))
 
 (defun disco-root--maybe-refresh-activity-header-line ()
@@ -3667,10 +3704,14 @@ Return non-nil when at least one visible row is inserted for GUILD."
      disco-root--view-mode
      disco-root--fill-column)
     (erase-buffer)
+    (disco-root--ensure-markers)
+    (set-marker disco-root--header-marker (point-min))
+    (goto-char (point-min))
     (dolist (line (disco-root--header-lines))
       (insert line "\n"))
     (setq-local disco-root--last-header-refresh-at (float-time))
     (insert "\n")
+    (set-marker disco-root--ewoc-marker (point))
     (disco-root--prepare-ewoc-state)
     (if (functionp renderer)
         (funcall renderer)
@@ -3961,6 +4002,8 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq-local disco-root--dirty-header-p nil)
   (setq-local disco-root--last-header-refresh-at nil)
   (setq-local disco-root--fill-column nil)
+  (setq-local disco-root--header-marker nil)
+  (setq-local disco-root--ewoc-marker nil)
   (setq-local disco-root--guild-expanded (make-hash-table :test #'equal))
   (setq-local disco-root--category-expanded (make-hash-table :test #'equal)))
 
