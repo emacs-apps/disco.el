@@ -416,6 +416,71 @@
   (should (null (disco-state-channel-ack-token "a")))
   (should (null (disco-state-channel-ack-token "b"))))
 
+(ert-deftest disco-state-sessions-store-and-overall-session ()
+  (disco-state-reset)
+  (disco-state-set-sessions
+   '(((session_id . "all")
+      (status . "online"))
+     ((session_id . "desktop")
+      (status . "online"))))
+  (should (= 2 (length (disco-state-sessions))))
+  (should (equal "online"
+                 (alist-get 'status (disco-state-overall-session)))))
+
+(ert-deftest disco-state-voice-state-update-tracks-channel-membership ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "v1") (guild_id . "g") (type . 2)))
+  (disco-state-upsert-channel '((id . "v2") (guild_id . "g") (type . 2)))
+
+  (let ((delta
+         (disco-state-apply-voice-state-update
+          '((guild_id . "g")
+            (channel_id . "v1")
+            (user_id . "u1")
+            (session_id . "s1")))))
+    (should (equal "v1" (plist-get delta :channel-id)))
+    (should (= 1 (disco-state-channel-voice-member-count "v1")))
+    (should (= 0 (disco-state-channel-voice-member-count "v2"))))
+
+  (let ((delta
+         (disco-state-apply-voice-state-update
+          '((guild_id . "g")
+            (channel_id . "v2")
+            (user_id . "u1")
+            (session_id . "s1")))))
+    (should (equal "v1" (plist-get delta :previous-channel-id)))
+    (should (equal "v2" (plist-get delta :channel-id)))
+    (should (= 0 (disco-state-channel-voice-member-count "v1")))
+    (should (= 1 (disco-state-channel-voice-member-count "v2"))))
+
+  (disco-state-apply-voice-state-update
+   '((guild_id . "g")
+     (channel_id . nil)
+     (user_id . "u1")
+     (session_id . "s1")))
+  (should (= 0 (disco-state-channel-voice-member-count "v1")))
+  (should (= 0 (disco-state-channel-voice-member-count "v2"))))
+
+(ert-deftest disco-state-conversation-summary-update-merges-and-previews ()
+  (disco-state-reset)
+  (disco-state-apply-conversation-summary-update
+   "c1"
+   '(((id . "10")
+      (summ_short . "older"))
+     ((id . "12")
+      (topic . "newer-topic"))))
+  (should (equal "newer-topic"
+                 (disco-state-channel-conversation-summary-preview "c1")))
+
+  (disco-state-apply-conversation-summary-update
+   "c1"
+   '(((id . "13")
+      (summ_short . "fresh-summary"))))
+  (should (equal "fresh-summary"
+                 (disco-state-channel-conversation-summary-preview "c1")))
+  (should (= 3
+             (length (disco-state-channel-conversation-summaries "c1")))))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

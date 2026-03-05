@@ -213,6 +213,28 @@ rows. Explicit header-dirty events bypass the throttle."
   :type 'number
   :group 'disco)
 
+(defcustom disco-root-gateway-context-sync-on-refresh t
+  "When non-nil, request extra root context via Gateway after root refresh."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-gateway-context-max-guilds 4
+  "Maximum number of guilds to request extra Gateway context for per sync."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-root-gateway-context-last-messages-per-guild 30
+  "Maximum channel IDs per guild for op34 last-message requests.
+
+Discord limits one request to at most 100 channel IDs."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-root-gateway-context-request-channel-info t
+  "When non-nil, request op43 channel metadata fields during root sync."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-root-extra-info-functions nil
   "Functions that return additional display information for root rows.
 
@@ -247,6 +269,10 @@ Values are image objects or the symbol `:missing'.")
           channel-create channel-update channel-delete channel-update-partial
           channel-unread-update passive-update-v1 passive-update-v2
           channel-pins-update channel-pins-ack
+          channel-statuses channel-info channel-member-count-update
+          last-messages conversation-summary-update
+          presence-update sessions-replace
+          voice-state-update voice-channel-status-update voice-channel-start-time-update
           guild-create guild-update guild-delete guild-sync
           guild-feature-ack user-non-channel-ack notification-center-items-ack
           thread-create thread-update thread-delete thread-list-sync)))
@@ -261,12 +287,14 @@ Values are image objects or the symbol `:missing'.")
 (defun disco-root--live-event-header-p (event-type)
   "Return non-nil when EVENT-TYPE affects root header state only."
   (memq event-type
-        '(guild-feature-ack user-non-channel-ack notification-center-items-ack)))
+        '(guild-feature-ack user-non-channel-ack notification-center-items-ack
+          sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
 
 (defun disco-root--event-channel-ids (event)
   "Extract channel IDs from gateway EVENT."
   (let (ids)
     (dolist (value (list (plist-get event :channel-id)
+                         (plist-get event :previous-channel-id)
                          (plist-get event :thread-id)))
       (when value
         (push value ids)))
@@ -281,6 +309,9 @@ Values are image objects or the symbol `:missing'.")
     (dolist (item (or (plist-get event :updated-channels) '()))
       (when-let* ((id (or (alist-get 'id item)
                           (alist-get 'channel_id item))))
+        (push id ids)))
+    (dolist (item (or (plist-get event :messages) '()))
+      (when-let* ((id (alist-get 'channel_id item)))
         (push id ids)))
     (dolist (item (or (plist-get event :threads) '()))
       (when-let* ((thread-id (alist-get 'id item)))
@@ -1219,6 +1250,19 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
     (string-to-number value))
    (t nil)))
 
+(defun disco-root--normalize-id-list (ids &optional max-items)
+  "Normalize IDS as unique string list, optionally capped by MAX-ITEMS."
+  (let (result)
+    (dolist (it (or ids '()))
+      (let ((normalized (and it (format "%s" it))))
+        (when normalized
+          (cl-pushnew normalized result :test #'equal))))
+    (let ((ordered (nreverse result)))
+      (if (and (integerp max-items)
+               (> (length ordered) max-items))
+          (seq-take ordered max-items)
+        ordered))))
+
 (defun disco-root--channel-viewable-p (channel)
   "Return non-nil when CHANNEL should be visible to current user.
 
@@ -1251,7 +1295,7 @@ This prevents noisy permission errors for sources that require elevated access."
 
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
-  (and (memq (alist-get 'type channel) '(0 1 3 5 10 11 12 15 16))
+  (and (memq (alist-get 'type channel) '(0 1 2 3 5 10 11 12 13 15 16))
        (disco-root--channel-viewable-p channel)))
 
 (defun disco-root--openable-channel-p (channel)
@@ -1504,11 +1548,29 @@ Discord channel position can arrive as integer or numeric string."
 
 (defun disco-root--channel-static-trail-tags (channel)
   "Return static status trail tags for CHANNEL."
-  (let (tags)
+  (let* ((channel-id (alist-get 'id channel))
+         (channel-type (alist-get 'type channel))
+         (voice-member-count (and channel-id
+                                  (disco-state-channel-voice-member-count channel-id)))
+         (member-count (and channel-id
+                            (disco-state-channel-member-count channel-id)))
+         (voice-start-time (alist-get 'voice_start_time channel))
+         tags)
     (when (disco-state-channel-has-unread-pins-p channel)
       (push "pins" tags))
     (when (eq t (alist-get 'muted channel))
       (push "muted" tags))
+    (when (and (memq channel-type '(2 13))
+               (numberp voice-member-count)
+               (> voice-member-count 0))
+      (push (format "voice:%d" voice-member-count) tags))
+    (when (and (memq channel-type '(2 13))
+               (numberp member-count)
+               (> member-count 0))
+      (push (format "members:%d" member-count) tags))
+    (when (and (memq channel-type '(2 13))
+               voice-start-time)
+      (push "live" tags))
     (nreverse tags)))
 
 (defun disco-root--channel-dynamic-trail-tags (channel)
@@ -1592,10 +1654,13 @@ Discord channel position can arrive as integer or numeric string."
 
 (defun disco-root--activity-secondary-label (channel)
   "Return fallback activity preview label for CHANNEL."
-  (or (disco-root--format-trail-tags
-       (append (disco-root--channel-dynamic-trail-tags channel)
-               (disco-root--channel-static-trail-tags channel)))
-      "(message)"))
+  (let ((channel-id (alist-get 'id channel)))
+    (or (and channel-id
+             (disco-state-channel-conversation-summary-preview channel-id))
+        (disco-root--format-trail-tags
+         (append (disco-root--channel-dynamic-trail-tags channel)
+                 (disco-root--channel-static-trail-tags channel)))
+        "(message)")))
 
 (defun disco-root--canonicalize-number (spec base)
   "Resolve SPEC against BASE columns.
@@ -1933,6 +1998,13 @@ Guild rows use real guild icons when available, with fixed text fallback."
             (add-text-properties status-pos (point)
                                  (list 'face status-face))))))
     (insert "\n")
+    (add-text-properties
+     line-start
+     (point)
+     (list 'disco-root-row-type 'channel
+           'disco-channel-id channel-id
+           'disco-unread-count mention-count
+           'disco-has-unread (and has-unread t)))
     (when (disco-root--openable-channel-p channel)
       (add-text-properties
        line-start
@@ -1940,11 +2012,7 @@ Guild rows use real guild icons when available, with fixed text fallback."
        (list 'mouse-face 'highlight
              'help-echo (if (memq channel-type '(15 16))
                             (format "Open threads under channel %s" channel-id)
-                          (format "Open channel %s" channel-id))
-             'disco-root-row-type 'channel
-             'disco-channel-id channel-id
-             'disco-unread-count mention-count
-             'disco-has-unread (and has-unread t))))))
+                          (format "Open channel %s" channel-id)))))))
 
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
@@ -1993,6 +2061,8 @@ SCOPE is a symbol describing where the row is rendered."
                    ((or 0 5) (format "#%s%s%s%s" name suffix state-suffix trail-suffix))
                    (15 (format "[forum] %s%s%s%s" name suffix state-suffix trail-suffix))
                    (16 (format "[media] %s%s%s%s" name suffix state-suffix trail-suffix)))))
+              (2 (format "[voice] %s%s%s" name state-suffix trail-suffix))
+              (13 (format "[stage] %s%s%s" name state-suffix trail-suffix))
               (_ (format "[type-%s] %s%s%s" channel-type name state-suffix trail-suffix)))))
     (disco-root--append-extra-info
      base-label
@@ -2696,6 +2766,8 @@ channels open room timeline buffers."
   (let ((channel (and channel-id (disco-state-channel channel-id))))
     (unless channel
       (user-error "disco: channel %s is unavailable" channel-id))
+    (unless (disco-root--openable-channel-p channel)
+      (user-error "disco: channel %s does not support timeline view" channel-id))
     (if (disco-root--forum-or-media-channel-p channel)
         (disco-root-open-parent-threads channel-id)
       (disco-room-open channel-id (disco-root--channel-display-name channel)))))
@@ -2784,6 +2856,13 @@ SCOPE is forwarded to extra-info providers."
            (padding (make-string indent ?\s)))
       (let ((line-start (point)))
         (insert (format "%s%s\n" padding label))
+        (add-text-properties
+         line-start
+         (point)
+         (list 'disco-root-row-type 'channel
+               'disco-channel-id channel-id
+               'disco-unread-count unread-count
+               'disco-has-unread (and has-unread t)))
         (when (disco-root--openable-channel-p channel)
           (add-text-properties
            line-start
@@ -2791,11 +2870,7 @@ SCOPE is forwarded to extra-info providers."
            (list 'mouse-face 'highlight
                  'help-echo (if (memq channel-type '(15 16))
                                 (format "Open threads under channel %s" channel-id)
-                              (format "Open channel %s" channel-id))
-                 'disco-root-row-type 'channel
-                 'disco-channel-id channel-id
-                 'disco-unread-count unread-count
-                 'disco-has-unread (and has-unread t))))))))
+                              (format "Open channel %s" channel-id)))))))))
 
 (defun disco-root-button-forward (&optional n)
   "Move point to next channel row by N steps."
@@ -3107,6 +3182,31 @@ Return non-nil when at least one visible row is inserted for GUILD."
    (t
     "Offline")))
 
+(defun disco-root--sessions-summary-label ()
+  "Return compact sessions summary for root header, or nil."
+  (let* ((sessions (disco-state-sessions))
+         (overall (disco-state-overall-session))
+         (overall-status (and (listp overall)
+                              (let ((status (alist-get 'status overall)))
+                                (and (stringp status)
+                                     (not (string-empty-p status))
+                                     status))))
+         (session-count (length sessions))
+         (device-count (if overall
+                           (max 0 (1- session-count))
+                         session-count)))
+    (when (> session-count 0)
+      (if overall-status
+          (format "sessions[%s/%d]" overall-status device-count)
+        (format "sessions[%d]" device-count)))))
+
+(defun disco-root--voice-summary-label ()
+  "Return compact tracked voice summary for root header, or nil."
+  (let ((channel-count (disco-state-voice-active-channel-count))
+        (user-count (disco-state-voice-active-user-count)))
+    (when (> (+ channel-count user-count) 0)
+      (format "voice[%dc %du]" channel-count user-count))))
+
 (defun disco-root--activity-metrics-by-view ()
   "Return alist MODE -> plist metrics for activity header chips."
   (let ((all-count 0)
@@ -3175,9 +3275,13 @@ Return non-nil when at least one visible row is inserted for GUILD."
    (string-join
     (delq nil
           (list (format "Status: %s" (disco-root--gateway-status-label))
+                (let ((sessions (disco-root--sessions-summary-label)))
+                  (and sessions (format "  %s" sessions)))
+                (let ((voice (disco-root--voice-summary-label)))
+                  (and voice (format "  %s" voice)))
                 (let ((badge (disco-root--feature-badge-summary)))
-                  (and badge (format " %s" badge)))
-                (format "  keys[g refresh, l/L layout, U unread-lens, ? menu]")))
+                  (and badge (format "  %s" badge)))
+                (format "  keys[g refresh, G gw-sync, l/L layout, U unread-lens, ? menu]")))
     "")
    (disco-root--filters-line)
    (disco-root--mode-divider-line)))
@@ -3226,6 +3330,88 @@ Return non-nil when at least one visible row is inserted for GUILD."
         (funcall renderer)
       (disco-root--render-layout-tree))
     (goto-char (point-min))))
+
+(defun disco-root--gateway-sync-guild-ids ()
+  "Return guild IDs prioritized for gateway context requests."
+  (let* ((max-guilds (max 0 (or disco-root-gateway-context-max-guilds 0)))
+         (guilds (copy-sequence (or (disco-state-guilds) '()))))
+    (if (or (<= max-guilds 0)
+            (null guilds))
+        '()
+      (let ((sorted
+             (sort guilds
+                   (lambda (left right)
+                     (let* ((left-id (alist-get 'id left))
+                            (right-id (alist-get 'id right))
+                            (left-unread (disco-root--guild-unread-total left-id))
+                            (right-unread (disco-root--guild-unread-total right-id)))
+                       (if (= left-unread right-unread)
+                           (string-lessp (or left-id "") (or right-id ""))
+                         (> left-unread right-unread)))))))
+        (disco-root--normalize-id-list
+         (mapcar (lambda (guild)
+                   (alist-get 'id guild))
+                 (seq-take sorted max-guilds)))))))
+
+(defun disco-root--gateway-last-message-eligible-p (channel)
+  "Return non-nil when CHANNEL should be included in op34 last-message sync."
+  (and (listp channel)
+       (alist-get 'guild_id channel)
+       (disco-root--channel-viewable-p channel)
+       (memq (alist-get 'type channel) '(0 2 5 10 11 12 13 15 16))))
+
+(defun disco-root--gateway-last-message-channel-ids (guild-id)
+  "Return prioritized channel IDs for op34 request in GUILD-ID."
+  (let* ((limit (max 0 (or disco-root-gateway-context-last-messages-per-guild 0)))
+         (channels
+          (append (or (disco-state-guild-channels guild-id) '())
+                  (or (disco-state-guild-threads guild-id) '()))))
+    (if (<= limit 0)
+        '()
+      (let ((eligible
+             (seq-filter #'disco-root--gateway-last-message-eligible-p channels)))
+        (setq eligible
+              (sort eligible
+                    (lambda (left right)
+                      (> (disco-root--channel-activity-score left)
+                         (disco-root--channel-activity-score right)))))
+        (disco-root--normalize-id-list
+         (mapcar (lambda (channel)
+                   (alist-get 'id channel))
+                 (seq-take eligible limit)))))))
+
+(defun disco-root-sync-gateway-context (&optional quiet)
+  "Request additional gateway context for current root state.
+
+When QUIET is non-nil, suppress minibuffer status messages."
+  (interactive)
+  (let ((guild-ids (disco-root--gateway-sync-guild-ids))
+        (requests 0)
+        (requested-guilds 0))
+    (when (disco-gateway-running-p)
+      (dolist (guild-id guild-ids)
+        (let ((guild-requested nil)
+              (channel-ids (disco-root--gateway-last-message-channel-ids guild-id)))
+          (when (disco-gateway-request-channel-statuses guild-id)
+            (setq requests (1+ requests))
+            (setq guild-requested t))
+          (when (and disco-root-gateway-context-request-channel-info
+                     (disco-gateway-request-channel-info
+                      guild-id
+                      '("status" "voice_start_time")))
+            (setq requests (1+ requests))
+            (setq guild-requested t))
+          (when (and channel-ids
+                     (disco-gateway-request-last-messages guild-id channel-ids))
+            (setq requests (1+ requests))
+            (setq guild-requested t))
+          (when guild-requested
+            (setq requested-guilds (1+ requested-guilds))))))
+    (unless quiet
+      (message "disco: requested %d gateway context ops across %d guilds"
+               requests
+               requested-guilds))
+    requests))
 
 (defun disco-root--async-error-message (err)
   "Return user-facing error message extracted from async ERR payload."
@@ -3280,6 +3466,9 @@ Return non-nil when at least one visible row is inserted for GUILD."
                            disco-root--dirty-header-p
                            disco-root--dirty-channel-ids)
                    (disco-root--queue-live-update nil nil nil))
+                 (when disco-root-gateway-context-sync-on-refresh
+                   (ignore-errors
+                     (disco-root-sync-gateway-context t)))
                  (if errors
                      (message
                       "disco: loaded %d guilds, %d channels (%d threads), %d DMs (%d errors)"
@@ -3367,6 +3556,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
 (defvar disco-root-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-root-refresh)
+    (define-key map (kbd "G") #'disco-root-sync-gateway-context)
     (define-key map (kbd "A") #'disco-root-list-archived-threads)
     (define-key map (kbd "l") #'disco-root-cycle-layout)
     (define-key map (kbd "L") #'disco-root-set-layout)

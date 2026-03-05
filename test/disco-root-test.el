@@ -28,6 +28,16 @@
                  ((id . "c2") (parent_id . "p4")))
        :channel-ids ("c5" "c0"))))))
 
+(ert-deftest disco-root-event-channel-ids-includes-voice-move-and-message-payloads ()
+  (should
+   (equal
+    '("c2" "c1" "c3")
+    (disco-root--event-channel-ids
+     '(:channel-id "c2"
+       :previous-channel-id "c1"
+       :messages (((channel_id . "c3"))
+                  ((channel_id . "c2"))))))))
+
 (ert-deftest disco-root-append-extra-info-merges-provider-output ()
   (let ((disco-root-extra-info-functions
          (list (lambda (_kind _object _context) "one")

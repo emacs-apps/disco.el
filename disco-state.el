@@ -45,6 +45,27 @@
 (defvar disco-state--thread-member-count-by-thread (make-hash-table :test #'equal)
   "Hash table thread-id -> last known thread member count.")
 
+(defvar disco-state--presences-by-user (make-hash-table :test #'equal)
+  "Hash table user-id -> latest user presence object.")
+
+(defvar disco-state--presences-by-guild-user (make-hash-table :test #'equal)
+  "Hash table (guild-id . user-id) -> latest guild-scoped presence object.")
+
+(defvar disco-state--sessions nil
+  "List of gateway session objects from SESSIONS_REPLACE.")
+
+(defvar disco-state--voice-states-by-key (make-hash-table :test #'equal)
+  "Hash table (user-id . session-id) -> latest voice-state object.")
+
+(defvar disco-state--voice-state-keys-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> list of tracked (user-id . session-id) keys.")
+
+(defvar disco-state--channel-member-counts-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> alist with member/presence counters.")
+
+(defvar disco-state--conversation-summaries-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> list of conversation summary objects.")
+
 
 (defconst disco-state-discord-epoch-seconds 1420070400
   "Discord epoch as UNIX seconds (2015-01-01 00:00:00 UTC).")
@@ -58,9 +79,17 @@
 (defconst disco-state-message-type-poll-result 46
   "Discord message type value for `POLL_RESULT'.")
 
+(defconst disco-state-message-preview-cache-limit 40
+  "Maximum cached preview messages per channel from lightweight gateway responses.")
+
 (defun disco-state--normalize-id (value)
   "Return VALUE normalized as string ID."
   (and value (format "%s" value)))
+
+(defun disco-state--non-empty-string-p (value)
+  "Return non-nil when VALUE is a non-empty string."
+  (and (stringp value)
+       (> (length value) 0)))
 
 (defun disco-state--read-state-key (read-state-type resource-id)
   "Return hash key for READ-STATE-TYPE and RESOURCE-ID."
@@ -114,6 +143,7 @@
   "Reset all in-memory state."
   (setq disco-state--guilds nil)
   (setq disco-state--private-channels nil)
+  (setq disco-state--sessions nil)
   (clrhash disco-state--channels-by-guild)
   (clrhash disco-state--channels-by-id)
   (clrhash disco-state--threads-by-parent)
@@ -122,7 +152,13 @@
   (clrhash disco-state--read-states)
   (clrhash disco-state--ack-token-by-read-state)
   (clrhash disco-state--thread-member-ids-by-thread)
-  (clrhash disco-state--thread-member-count-by-thread))
+  (clrhash disco-state--thread-member-count-by-thread)
+  (clrhash disco-state--presences-by-user)
+  (clrhash disco-state--presences-by-guild-user)
+  (clrhash disco-state--voice-states-by-key)
+  (clrhash disco-state--voice-state-keys-by-channel)
+  (clrhash disco-state--channel-member-counts-by-channel)
+  (clrhash disco-state--conversation-summaries-by-channel))
 
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."
@@ -329,6 +365,7 @@ MEMBER-COUNT is optional approximate thread member count."
     (let ((channel-id (alist-get 'id channel)))
       (when channel-id
         (disco-state-delete-channel channel-id))))
+  (disco-state-remove-voice-states-for-guild guild-id)
   (remhash guild-id disco-state--channels-by-guild)
   (remhash guild-id disco-state--thread-ids-by-guild))
 
@@ -442,8 +479,16 @@ MEMBER-COUNT is optional approximate thread member count."
       (remhash channel-id disco-state--channels-by-id)
       (remhash channel-id disco-state--messages-by-channel)
       (disco-state--delete-read-state disco-read-state-type-channel channel-id)))
+  (let ((voice-state-keys
+         (copy-sequence (or (gethash channel-id disco-state--voice-state-keys-by-channel)
+                            '()))))
+    (dolist (voice-key voice-state-keys)
+      (remhash voice-key disco-state--voice-states-by-key)))
   (remhash channel-id disco-state--thread-member-ids-by-thread)
-  (remhash channel-id disco-state--thread-member-count-by-thread))
+  (remhash channel-id disco-state--thread-member-count-by-thread)
+  (remhash channel-id disco-state--conversation-summaries-by-channel)
+  (remhash channel-id disco-state--channel-member-counts-by-channel)
+  (remhash channel-id disco-state--voice-state-keys-by-channel))
 
 (defun disco-state-sync-threads (guild-id parent-channel-ids threads)
   "Sync active THREADS for GUILD-ID.
@@ -469,6 +514,471 @@ Otherwise, replace threads only under the provided parent IDs."
 (defun disco-state-messages (channel-id)
   "Return messages list for CHANNEL-ID."
   (gethash channel-id disco-state--messages-by-channel))
+
+(defun disco-state-upsert-message (channel-id message)
+  "Insert or replace MESSAGE in CHANNEL-ID cache, returning new message list."
+  (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
+         (message-id (disco-state--normalize-id (alist-get 'id message))))
+    (when (and normalized-channel-id
+               message-id
+               (listp message))
+      (let* ((existing (copy-sequence
+                        (or (gethash normalized-channel-id
+                                     disco-state--messages-by-channel)
+                            '())))
+             (updated (cons message
+                            (cl-remove-if
+                             (lambda (it)
+                               (equal (disco-state--normalize-id (alist-get 'id it))
+                                      message-id))
+                             existing))))
+        (when (and (integerp disco-state-message-preview-cache-limit)
+                   (> disco-state-message-preview-cache-limit 0)
+                   (> (length updated) disco-state-message-preview-cache-limit))
+          (setq updated (seq-take updated disco-state-message-preview-cache-limit)))
+        (puthash normalized-channel-id updated disco-state--messages-by-channel)
+        updated))))
+
+(defun disco-state-apply-last-messages (messages)
+  "Apply LAST_MESSAGES payload MESSAGES and return affected channel IDs."
+  (let (channel-ids)
+    (dolist (message (or messages '()))
+      (let ((channel-id (disco-state--normalize-id (alist-get 'channel_id message))))
+        (when (and channel-id (listp message))
+          (disco-state-upsert-message channel-id message)
+          (cl-pushnew channel-id channel-ids :test #'equal))))
+    (nreverse channel-ids)))
+
+(defun disco-state-sessions ()
+  "Return copy of tracked gateway sessions list."
+  (copy-tree (or disco-state--sessions '())))
+
+(defun disco-state-set-sessions (sessions)
+  "Replace tracked gateway SESSIONS list."
+  (setq disco-state--sessions (copy-tree (or sessions '()))))
+
+(defun disco-state-overall-session ()
+  "Return synthetic `all' session object when present."
+  (seq-find
+   (lambda (session)
+     (equal (disco-state--normalize-id (alist-get 'session_id session))
+            "all"))
+   (or disco-state--sessions '())))
+
+(defun disco-state--presence-key (guild-id user-id)
+  "Return key for GUILD-ID and USER-ID presence entry."
+  (cons (disco-state--normalize-id guild-id)
+        (disco-state--normalize-id user-id)))
+
+(defun disco-state-presence (user-id &optional guild-id)
+  "Return copied presence for USER-ID, optionally scoped to GUILD-ID."
+  (let ((normalized-user-id (disco-state--normalize-id user-id))
+        (normalized-guild-id (disco-state--normalize-id guild-id)))
+    (when normalized-user-id
+      (copy-tree
+       (if normalized-guild-id
+           (gethash (disco-state--presence-key normalized-guild-id normalized-user-id)
+                    disco-state--presences-by-guild-user)
+         (gethash normalized-user-id disco-state--presences-by-user))))))
+
+(defun disco-state-apply-presence-update (presence)
+  "Apply PRESENCE_UPDATE payload PRESENCE and return non-nil when stored."
+  (let* ((user (alist-get 'user presence))
+         (user-id (disco-state--normalize-id
+                   (or (alist-get 'id presence)
+                       (and (listp user) (alist-get 'id user)))))
+         (guild-id (disco-state--normalize-id (alist-get 'guild_id presence))))
+    (when (and user-id (listp presence))
+      (puthash user-id (copy-tree presence) disco-state--presences-by-user)
+      (when guild-id
+        (puthash (disco-state--presence-key guild-id user-id)
+                 (copy-tree presence)
+                 disco-state--presences-by-guild-user))
+      t)))
+
+(defun disco-state-channel-member-count (channel-id)
+  "Return last known member_count for CHANNEL-ID, or nil."
+  (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
+         (entry (and normalized-channel-id
+                     (gethash normalized-channel-id
+                              disco-state--channel-member-counts-by-channel))))
+    (and (listp entry)
+         (numberp (alist-get 'member_count entry))
+         (alist-get 'member_count entry))))
+
+(defun disco-state-channel-presence-count (channel-id)
+  "Return last known presence_count for CHANNEL-ID, or nil."
+  (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
+         (entry (and normalized-channel-id
+                     (gethash normalized-channel-id
+                              disco-state--channel-member-counts-by-channel))))
+    (and (listp entry)
+         (numberp (alist-get 'presence_count entry))
+         (alist-get 'presence_count entry))))
+
+(defun disco-state-apply-channel-member-count-update (channel-id member-count presence-count)
+  "Apply CHANNEL_MEMBER_COUNT_UPDATE fields for CHANNEL-ID."
+  (let ((normalized-channel-id (disco-state--normalize-id channel-id)))
+    (when normalized-channel-id
+      (let ((entry (or (copy-tree (gethash normalized-channel-id
+                                           disco-state--channel-member-counts-by-channel))
+                       `((id . ,normalized-channel-id)))))
+        (when (numberp member-count)
+          (setf (alist-get 'member_count entry nil nil #'eq)
+                (max 0 member-count)))
+        (when (numberp presence-count)
+          (setf (alist-get 'presence_count entry nil nil #'eq)
+                (max 0 presence-count)))
+        (puthash normalized-channel-id entry
+                 disco-state--channel-member-counts-by-channel)
+        entry))))
+
+(defun disco-state--voice-state-key (voice-state)
+  "Return stable voice-state key for VOICE-STATE payload."
+  (let ((user-id (disco-state--normalize-id (alist-get 'user_id voice-state)))
+        (session-id (disco-state--normalize-id (alist-get 'session_id voice-state))))
+    (when user-id
+      (cons user-id (or session-id "")))))
+
+(defun disco-state--voice-state-channel-id (voice-state)
+  "Return normalized channel id from VOICE-STATE payload."
+  (disco-state--normalize-id (alist-get 'channel_id voice-state)))
+
+(defun disco-state--voice-state-guild-id (voice-state)
+  "Return normalized guild id from VOICE-STATE payload."
+  (disco-state--normalize-id (alist-get 'guild_id voice-state)))
+
+(defun disco-state--voice-state-user-id-from-key (voice-key)
+  "Return user id component from VOICE-KEY cons cell."
+  (cond
+   ((consp voice-key)
+    (disco-state--normalize-id (car voice-key)))
+   ((stringp voice-key)
+    voice-key)
+   (t nil)))
+
+(defun disco-state--voice-remove-key-from-channel (channel-id voice-key)
+  "Remove VOICE-KEY from CHANNEL-ID index."
+  (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
+         (existing (and normalized-channel-id
+                        (copy-sequence
+                         (or (gethash normalized-channel-id
+                                      disco-state--voice-state-keys-by-channel)
+                             '()))))
+         (updated (cl-remove voice-key existing :test #'equal)))
+    (when normalized-channel-id
+      (if updated
+          (puthash normalized-channel-id updated
+                   disco-state--voice-state-keys-by-channel)
+        (remhash normalized-channel-id disco-state--voice-state-keys-by-channel)))))
+
+(defun disco-state--voice-add-key-to-channel (channel-id voice-key)
+  "Add VOICE-KEY to CHANNEL-ID index."
+  (let ((normalized-channel-id (disco-state--normalize-id channel-id)))
+    (when normalized-channel-id
+      (let ((existing (copy-sequence
+                       (or (gethash normalized-channel-id
+                                    disco-state--voice-state-keys-by-channel)
+                           '()))))
+        (cl-pushnew voice-key existing :test #'equal)
+        (puthash normalized-channel-id existing
+                 disco-state--voice-state-keys-by-channel)))))
+
+(defun disco-state-channel-voice-user-ids (channel-id)
+  "Return unique user IDs currently tracked in voice CHANNEL-ID."
+  (let ((keys (copy-sequence
+               (or (gethash (disco-state--normalize-id channel-id)
+                            disco-state--voice-state-keys-by-channel)
+                   '())))
+        user-ids)
+    (dolist (voice-key keys)
+      (let ((user-id (disco-state--voice-state-user-id-from-key voice-key)))
+        (when user-id
+          (cl-pushnew user-id user-ids :test #'equal))))
+    (nreverse user-ids)))
+
+(defun disco-state-channel-voice-member-count (channel-id)
+  "Return count of unique users currently tracked in voice CHANNEL-ID."
+  (length (disco-state-channel-voice-user-ids channel-id)))
+
+(defun disco-state-voice-active-channel-count ()
+  "Return number of channels with tracked voice participants."
+  (let ((count 0))
+    (maphash
+     (lambda (_channel-id voice-keys)
+       (when voice-keys
+         (setq count (1+ count))))
+     disco-state--voice-state-keys-by-channel)
+    count))
+
+(defun disco-state-voice-active-user-count ()
+  "Return number of unique users with tracked voice states."
+  (let (user-ids)
+    (maphash
+     (lambda (voice-key _voice-state)
+       (let ((user-id (disco-state--voice-state-user-id-from-key voice-key)))
+         (when user-id
+           (cl-pushnew user-id user-ids :test #'equal))))
+     disco-state--voice-states-by-key)
+    (length user-ids)))
+
+(defun disco-state-apply-voice-state-update (voice-state)
+  "Apply VOICE_STATE_UPDATE payload VOICE-STATE.
+
+Returns plist containing :user-id, :session-id, :guild-id, :channel-id,
+:previous-channel-id and :channel-ids (affected channel ids)."
+  (let* ((voice-key (disco-state--voice-state-key voice-state))
+         (old-state (and voice-key
+                         (copy-tree (gethash voice-key disco-state--voice-states-by-key))))
+         (new-state (and voice-key (listp voice-state) (copy-tree voice-state)))
+         (old-channel-id (and old-state
+                              (disco-state--voice-state-channel-id old-state)))
+         (new-channel-id (and new-state
+                              (disco-state--voice-state-channel-id new-state)))
+         (guild-id (or (and new-state (disco-state--voice-state-guild-id new-state))
+                       (and old-state (disco-state--voice-state-guild-id old-state))))
+         (user-id (and voice-key
+                       (disco-state--voice-state-user-id-from-key voice-key)))
+         (session-id (and (consp voice-key)
+                          (disco-state--normalize-id (cdr voice-key))))
+         channel-ids)
+    (when voice-key
+      (when (and old-channel-id
+                 (not (equal old-channel-id new-channel-id)))
+        (disco-state--voice-remove-key-from-channel old-channel-id voice-key))
+      (if new-channel-id
+          (progn
+            (disco-state--voice-add-key-to-channel new-channel-id voice-key)
+            (puthash voice-key new-state disco-state--voice-states-by-key))
+        (remhash voice-key disco-state--voice-states-by-key))
+      (when old-channel-id
+        (cl-pushnew old-channel-id channel-ids :test #'equal))
+      (when new-channel-id
+        (cl-pushnew new-channel-id channel-ids :test #'equal))
+      (list :user-id user-id
+            :session-id session-id
+            :guild-id guild-id
+            :channel-id new-channel-id
+            :previous-channel-id old-channel-id
+            :channel-ids (nreverse channel-ids)))))
+
+(defun disco-state--remove-voice-states-by-predicate (predicate)
+  "Remove tracked voice states matching PREDICATE.
+
+PREDICATE is called with key and voice-state object.
+Returns list of affected channel ids."
+  (let (keys channel-ids)
+    (maphash
+     (lambda (voice-key voice-state)
+       (when (funcall predicate voice-key voice-state)
+         (push voice-key keys)))
+     disco-state--voice-states-by-key)
+    (dolist (voice-key keys)
+      (let* ((voice-state (gethash voice-key disco-state--voice-states-by-key))
+             (channel-id (and voice-state
+                              (disco-state--voice-state-channel-id voice-state))))
+        (when channel-id
+          (disco-state--voice-remove-key-from-channel channel-id voice-key)
+          (cl-pushnew channel-id channel-ids :test #'equal))
+        (remhash voice-key disco-state--voice-states-by-key)))
+    (nreverse channel-ids)))
+
+(defun disco-state-remove-voice-states-for-user (user-id)
+  "Remove tracked voice states for USER-ID and return affected channels."
+  (let ((normalized-user-id (disco-state--normalize-id user-id)))
+    (disco-state--remove-voice-states-by-predicate
+     (lambda (voice-key _voice-state)
+       (equal (disco-state--voice-state-user-id-from-key voice-key)
+              normalized-user-id)))))
+
+(defun disco-state-remove-voice-states-for-user-in-guild (user-id guild-id)
+  "Remove tracked voice states for USER-ID scoped to GUILD-ID."
+  (let ((normalized-user-id (disco-state--normalize-id user-id))
+        (normalized-guild-id (disco-state--normalize-id guild-id)))
+    (disco-state--remove-voice-states-by-predicate
+     (lambda (voice-key voice-state)
+       (and (equal (disco-state--voice-state-user-id-from-key voice-key)
+                   normalized-user-id)
+            (equal (disco-state--voice-state-guild-id voice-state)
+                   normalized-guild-id))))))
+
+(defun disco-state-remove-voice-states-for-guild (guild-id)
+  "Remove tracked voice states for GUILD-ID and return affected channels."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (disco-state--remove-voice-states-by-predicate
+     (lambda (_voice-key voice-state)
+       (equal (disco-state--voice-state-guild-id voice-state)
+              normalized-guild-id)))))
+
+(defun disco-state-apply-passive-voice-state-snapshot (guild-id voice-states)
+  "Apply passive voice state snapshot for GUILD-ID.
+
+VOICE-STATES is a full guild-scoped voice-state list.
+Returns affected channel IDs."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id))
+        channel-ids)
+    (setq channel-ids
+          (append channel-ids
+                  (disco-state-remove-voice-states-for-guild normalized-guild-id)))
+    (dolist (voice-state (or voice-states '()))
+      (let* ((voice-state-with-guild
+              (if (assq 'guild_id voice-state)
+                  voice-state
+                (cons (cons 'guild_id normalized-guild-id) voice-state)))
+             (delta (disco-state-apply-voice-state-update voice-state-with-guild)))
+        (setq channel-ids
+              (append (plist-get delta :channel-ids)
+                      channel-ids))))
+    (seq-uniq (nreverse channel-ids) #'equal)))
+
+(defun disco-state-apply-passive-voice-state-updates (guild-id updated removed-user-ids)
+  "Apply passive voice deltas for GUILD-ID and return affected channel IDs.
+
+UPDATED is list of updated voice states.
+REMOVED-USER-IDS is list of user IDs removed from voice state."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id))
+        channel-ids)
+    (dolist (voice-state (or updated '()))
+      (let* ((voice-state-with-guild
+              (if (assq 'guild_id voice-state)
+                  voice-state
+                (cons (cons 'guild_id normalized-guild-id) voice-state)))
+             (delta (disco-state-apply-voice-state-update voice-state-with-guild)))
+        (setq channel-ids
+              (append (plist-get delta :channel-ids)
+                      channel-ids))))
+    (dolist (user-id (or removed-user-ids '()))
+      (setq channel-ids
+            (append (disco-state-remove-voice-states-for-user-in-guild
+                     user-id normalized-guild-id)
+                    channel-ids)))
+    (seq-uniq (nreverse channel-ids) #'equal)))
+
+(defun disco-state--update-channel-fields (channel-id fields)
+  "Update CHANNEL-ID object with FIELDS and return non-nil when updated."
+  (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
+         (channel (and normalized-channel-id
+                       (disco-state-channel normalized-channel-id))))
+    (when channel
+      (let ((updated (copy-tree channel))
+            (changed nil))
+        (dolist (field fields)
+          (let ((key (car field))
+                (value (cdr field)))
+            (unless (equal (alist-get key updated nil nil #'eq) value)
+              (setq changed t))
+            (setf (alist-get key updated nil nil #'eq) value)))
+        (when changed
+          (disco-state-upsert-channel updated))
+        changed))))
+
+(defun disco-state-apply-channel-status-update (channel-id status)
+  "Apply voice/status field update for CHANNEL-ID."
+  (disco-state--update-channel-fields
+   channel-id
+   `((status . ,status))))
+
+(defun disco-state-apply-channel-voice-start-time-update (channel-id voice-start-time)
+  "Apply voice_start_time field update for CHANNEL-ID."
+  (disco-state--update-channel-fields
+   channel-id
+   `((voice_start_time . ,voice-start-time))))
+
+(defun disco-state-apply-channel-statuses (channels)
+  "Apply CHANNEL_STATUSES response CHANNELS and return updated channel IDs."
+  (let (channel-ids)
+    (dolist (channel-status (or channels '()))
+      (let ((channel-id (alist-get 'id channel-status)))
+        (when (and channel-id
+                   (assq 'status channel-status)
+                   (disco-state-apply-channel-status-update
+                    channel-id
+                    (alist-get 'status channel-status)))
+          (cl-pushnew (disco-state--normalize-id channel-id)
+                      channel-ids
+                      :test #'equal))))
+    (nreverse channel-ids)))
+
+(defun disco-state-apply-channel-info (channels)
+  "Apply CHANNEL_INFO response CHANNELS and return updated channel IDs."
+  (let (channel-ids)
+    (dolist (channel-info (or channels '()))
+      (let ((channel-id (alist-get 'id channel-info))
+            fields)
+        (when (assq 'status channel-info)
+          (push `(status . ,(alist-get 'status channel-info)) fields))
+        (when (assq 'voice_start_time channel-info)
+          (push `(voice_start_time . ,(alist-get 'voice_start_time channel-info))
+                fields))
+        (when (and channel-id
+                   fields
+                   (disco-state--update-channel-fields channel-id (nreverse fields)))
+          (cl-pushnew (disco-state--normalize-id channel-id)
+                      channel-ids
+                      :test #'equal))))
+    (nreverse channel-ids)))
+
+(defun disco-state-channel-conversation-summaries (channel-id)
+  "Return copied conversation summaries list for CHANNEL-ID."
+  (copy-tree
+   (or (gethash (disco-state--normalize-id channel-id)
+                disco-state--conversation-summaries-by-channel)
+       '())))
+
+(defun disco-state--conversation-summary-sort-id (summary)
+  "Return snowflake-like sort key for conversation SUMMARY object."
+  (or (disco-state--normalize-id (alist-get 'end_id summary))
+      (disco-state--normalize-id (alist-get 'id summary))))
+
+(defun disco-state-channel-conversation-summary-preview (channel-id)
+  "Return best effort preview text from CHANNEL-ID conversation summaries."
+  (let* ((summary (car (disco-state-channel-conversation-summaries channel-id)))
+         (short (and (listp summary) (alist-get 'summ_short summary)))
+         (topic (and (listp summary) (alist-get 'topic summary))))
+    (cond
+     ((disco-state--non-empty-string-p short)
+      short)
+     ((disco-state--non-empty-string-p topic)
+      topic)
+     (t nil))))
+
+(defun disco-state-apply-conversation-summary-update (channel-id summaries)
+  "Apply CONVERSATION_SUMMARY_UPDATE for CHANNEL-ID.
+
+SUMMARIES are merged by summary `id'.
+Returns updated summaries list."
+  (let ((normalized-channel-id (disco-state--normalize-id channel-id)))
+    (when normalized-channel-id
+      (let ((existing
+             (copy-tree
+              (or (gethash normalized-channel-id
+                           disco-state--conversation-summaries-by-channel)
+                  '()))))
+        (dolist (summary (or summaries '()))
+          (let ((summary-id (disco-state--normalize-id (alist-get 'id summary))))
+            (when summary-id
+              (setq existing
+                    (cl-remove-if
+                     (lambda (it)
+                       (equal (disco-state--normalize-id (alist-get 'id it))
+                              summary-id))
+                     existing)))
+            (when (listp summary)
+              (push (copy-tree summary) existing))))
+        (setq existing
+              (sort existing
+                    (lambda (left right)
+                      (let ((left-id (disco-state--conversation-summary-sort-id left))
+                            (right-id (disco-state--conversation-summary-sort-id right)))
+                        (cond
+                         ((and left-id right-id)
+                          (disco-state-snowflake< right-id left-id))
+                         (left-id t)
+                         (right-id nil)
+                         (t nil))))))
+        (puthash normalized-channel-id existing
+                 disco-state--conversation-summaries-by-channel)
+        existing))))
 
 (defun disco-state-channel-unread-count (channel-id)
   "Return unread count for CHANNEL-ID."

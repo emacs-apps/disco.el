@@ -11,6 +11,10 @@
 ;; - `disco-gateway-unwatch-channel'
 ;; - `disco-gateway-watch-global'
 ;; - `disco-gateway-unwatch-global'
+;; - `disco-gateway-request-last-messages'
+;; - `disco-gateway-request-channel-statuses'
+;; - `disco-gateway-request-channel-member-count'
+;; - `disco-gateway-request-channel-info'
 ;; - `disco-gateway-event-hook' events with
 ;;   :type one of message/channel/guild/thread/typing event symbols,
 ;;   plus event-scoped payload fields (e.g., :channel-id, :guild-id).
@@ -40,10 +44,15 @@ Event schema:
   `channel-create' `channel-update' `channel-delete'
   `channel-update-partial' `channel-unread-update'
   `channel-pins-update' `channel-pins-ack'
+  `channel-statuses' `channel-info' `channel-member-count-update'
   `passive-update-v1' `passive-update-v2'
   `guild-create' `guild-update' `guild-delete' `guild-sync'
   `guild-feature-ack' `user-non-channel-ack'
   `notification-center-items-ack'
+  `presence-update' `sessions-replace'
+  `voice-state-update' `voice-channel-status-update'
+  `voice-channel-start-time-update'
+  `conversation-summary-update' `last-messages'
   `thread-create' `thread-update' `thread-delete' `thread-list-sync'
   `thread-member-update' `thread-members-update' `typing-start'
 - :channel-id string for message/channel/thread/typing events
@@ -77,7 +86,16 @@ Event schema:
 - :thread-member thread member object for thread-member-update
 - :added-members list for thread-members-update
 - :removed-member-ids list for thread-members-update
-- :member-count integer for thread-members-update when present")
+- :member-count integer for thread-members-update when present
+- :presence-count integer for channel-member-count-update when present
+- :presence presence object for presence-update
+- :sessions session list for sessions-replace
+- :previous-channel-id string for voice-state-update when moved/disconnected
+- :status string for voice-channel-status-update/channel-statuses when present
+- :voice-start-time string for voice-channel-start-time-update/channel-info
+- :summaries list for conversation-summary-update
+- :messages list for last-messages
+- :channel-ids list of affected channel IDs for derived response events")
 
 (defvar disco-gateway--watch-counts (make-hash-table :test #'equal))
 
@@ -188,6 +206,73 @@ When FORCE is non-nil, resend subscriptions even when already tracked."
      (lambda (channel-id _count)
        (disco-gateway--maybe-subscribe-watched-channel channel-id force))
      disco-gateway--watch-counts)))
+
+(defun disco-gateway--normalize-id-list (ids &optional max-items)
+  "Normalize IDS into a list of unique snowflake-like strings.
+
+When MAX-ITEMS is non-nil, truncate to that many IDs."
+  (let (result)
+    (dolist (it (or ids '()))
+      (let ((normalized (and it (format "%s" it))))
+        (when normalized
+          (cl-pushnew normalized result :test #'equal))))
+    (let ((ordered (nreverse result)))
+      (if (and (integerp max-items)
+               (> (length ordered) max-items))
+          (seq-take ordered max-items)
+        ordered))))
+
+(defun disco-gateway-request-last-messages (guild-id channel-ids)
+  "Request last messages for GUILD-ID and CHANNEL-IDS via Gateway op 34.
+
+CHANNEL-IDS is limited to 100 IDs per request by Discord."
+  (let* ((normalized-guild-id (and guild-id (format "%s" guild-id)))
+         (normalized-channel-ids (disco-gateway--normalize-id-list channel-ids 100)))
+    (when (and normalized-guild-id normalized-channel-ids)
+      (disco-gateway--send-op
+       34
+       `((guild_id . ,normalized-guild-id)
+         (channel_ids . ,normalized-channel-ids))))))
+
+(defun disco-gateway-request-channel-statuses (guild-id)
+  "Request voice channel statuses for GUILD-ID via Gateway op 36."
+  (let ((normalized-guild-id (and guild-id (format "%s" guild-id))))
+    (when normalized-guild-id
+      (disco-gateway--send-op
+       36
+       `((guild_id . ,normalized-guild-id))))))
+
+(defun disco-gateway-request-channel-member-count (guild-id channel-id)
+  "Request member counts for GUILD-ID/CHANNEL-ID via Gateway op 39."
+  (let ((normalized-guild-id (and guild-id (format "%s" guild-id)))
+        (normalized-channel-id (and channel-id (format "%s" channel-id))))
+    (when (and normalized-guild-id normalized-channel-id)
+      (disco-gateway--send-op
+       39
+       `((guild_id . ,normalized-guild-id)
+         (channel_id . ,normalized-channel-id))))))
+
+(defun disco-gateway-request-channel-info (guild-id fields)
+  "Request extra channel info FIELDS for GUILD-ID via Gateway op 43.
+
+FIELDS should be a list of strings such as `status' and
+`voice_start_time'."
+  (let* ((normalized-guild-id (and guild-id (format "%s" guild-id)))
+         (normalized-fields
+          (delq nil
+                (mapcar (lambda (field)
+                          (cond
+                           ((symbolp field)
+                            (symbol-name field))
+                           ((stringp field)
+                            field)
+                           (t nil)))
+                        (or fields '())))))
+    (when (and normalized-guild-id normalized-fields)
+      (disco-gateway--send-op
+       43
+       `((guild_id . ,normalized-guild-id)
+         (fields . ,normalized-fields))))))
 
 (defun disco-gateway--emit (event)
   "Emit EVENT plist to `disco-gateway-event-hook'."
@@ -704,27 +789,51 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
            :guild-id guild-id
            :channel-unread-updates channel-unread-updates))))
 
+(defun disco-gateway--channel-unread-channel-ids (updates)
+  "Extract channel IDs from channel unread UPDATES list."
+  (disco-gateway--normalize-id-list
+   (mapcar (lambda (it)
+             (and (listp it)
+                  (alist-get 'id it)))
+           (or updates '()))))
+
 (defun disco-gateway--dispatch-passive-update-v1 (payload)
   "Handle PASSIVE_UPDATE_V1 dispatch PAYLOAD."
-  (let ((guild-id (alist-get 'guild_id payload))
-        (channels (or (alist-get 'channels payload) '()))
-        (voice-states (or (alist-get 'voice_states payload) '()))
-        (members (or (alist-get 'members payload) '())))
+  (let* ((guild-id (alist-get 'guild_id payload))
+         (channels (or (alist-get 'channels payload) '()))
+         (voice-states (or (alist-get 'voice_states payload) '()))
+         (members (or (alist-get 'members payload) '()))
+         (voice-channel-ids
+          (disco-state-apply-passive-voice-state-snapshot guild-id voice-states))
+         (channel-ids
+          (disco-gateway--normalize-id-list
+           (append (disco-gateway--channel-unread-channel-ids channels)
+                   voice-channel-ids))))
     (disco-state-apply-channel-unread-updates channels)
     (disco-gateway--emit
      (list :type 'passive-update-v1
            :guild-id guild-id
            :channels channels
            :voice-states voice-states
-           :members members))))
+           :members members
+           :channel-ids channel-ids))))
 
 (defun disco-gateway--dispatch-passive-update-v2 (payload)
   "Handle PASSIVE_UPDATE_V2 dispatch PAYLOAD."
-  (let ((guild-id (alist-get 'guild_id payload))
-        (updated-channels (or (alist-get 'updated_channels payload) '()))
-        (updated-voice-states (or (alist-get 'updated_voice_states payload) '()))
-        (removed-voice-states (or (alist-get 'removed_voice_states payload) '()))
-        (updated-members (or (alist-get 'updated_members payload) '())))
+  (let* ((guild-id (alist-get 'guild_id payload))
+         (updated-channels (or (alist-get 'updated_channels payload) '()))
+         (updated-voice-states (or (alist-get 'updated_voice_states payload) '()))
+         (removed-voice-states (or (alist-get 'removed_voice_states payload) '()))
+         (updated-members (or (alist-get 'updated_members payload) '()))
+         (voice-channel-ids
+          (disco-state-apply-passive-voice-state-updates
+           guild-id
+           updated-voice-states
+           removed-voice-states))
+         (channel-ids
+          (disco-gateway--normalize-id-list
+           (append (disco-gateway--channel-unread-channel-ids updated-channels)
+                   voice-channel-ids))))
     (disco-state-apply-channel-unread-updates updated-channels)
     (disco-gateway--emit
      (list :type 'passive-update-v2
@@ -732,7 +841,144 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
            :updated-channels updated-channels
            :updated-voice-states updated-voice-states
            :removed-voice-states removed-voice-states
-           :updated-members updated-members))))
+           :updated-members updated-members
+           :channel-ids channel-ids))))
+
+(defun disco-gateway--dispatch-channel-statuses (payload)
+  "Handle CHANNEL_STATUSES dispatch PAYLOAD."
+  (let* ((guild-id (alist-get 'guild_id payload))
+         (channels (or (alist-get 'channels payload) '()))
+         (channel-ids (or (disco-state-apply-channel-statuses channels) '())))
+    (disco-gateway--emit
+     (list :type 'channel-statuses
+           :guild-id guild-id
+           :channels channels
+           :channel-ids channel-ids))))
+
+(defun disco-gateway--dispatch-channel-info (payload)
+  "Handle CHANNEL_INFO dispatch PAYLOAD."
+  (let* ((guild-id (alist-get 'guild_id payload))
+         (channels (or (alist-get 'channels payload) '()))
+         (channel-ids (or (disco-state-apply-channel-info channels) '())))
+    (disco-gateway--emit
+     (list :type 'channel-info
+           :guild-id guild-id
+           :channels channels
+           :channel-ids channel-ids))))
+
+(defun disco-gateway--dispatch-channel-member-count-update (payload)
+  "Handle CHANNEL_MEMBER_COUNT_UPDATE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channel-id (alist-get 'channel_id payload))
+        (member-count (alist-get 'member_count payload))
+        (presence-count (alist-get 'presence_count payload)))
+    (when channel-id
+      (disco-state-apply-channel-member-count-update
+       channel-id
+       member-count
+       presence-count))
+    (disco-gateway--emit
+     (list :type 'channel-member-count-update
+           :guild-id guild-id
+           :channel-id channel-id
+           :member-count member-count
+           :presence-count presence-count
+           :channel-ids (and channel-id (list channel-id))))))
+
+(defun disco-gateway--dispatch-last-messages (payload)
+  "Handle LAST_MESSAGES dispatch PAYLOAD."
+  (let* ((guild-id (alist-get 'guild_id payload))
+         (messages (or (alist-get 'messages payload) '()))
+         (channel-ids (or (disco-state-apply-last-messages messages) '())))
+    (disco-gateway--emit
+     (list :type 'last-messages
+           :guild-id guild-id
+           :messages messages
+           :channel-ids channel-ids))))
+
+(defun disco-gateway--dispatch-conversation-summary-update (payload)
+  "Handle CONVERSATION_SUMMARY_UPDATE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channel-id (alist-get 'channel_id payload))
+        (summaries (or (alist-get 'summaries payload) '())))
+    (when channel-id
+      (disco-state-apply-conversation-summary-update channel-id summaries))
+    (disco-gateway--emit
+     (list :type 'conversation-summary-update
+           :guild-id guild-id
+           :channel-id channel-id
+           :summaries summaries
+           :channel-ids (and channel-id (list channel-id))))))
+
+(defun disco-gateway--dispatch-presence-update (payload)
+  "Handle PRESENCE_UPDATE dispatch PAYLOAD."
+  (let* ((user (alist-get 'user payload))
+         (user-id (or (alist-get 'user_id payload)
+                      (and (listp user) (alist-get 'id user))))
+         (guild-id (alist-get 'guild_id payload)))
+    (disco-state-apply-presence-update payload)
+    (disco-gateway--emit
+     (list :type 'presence-update
+           :guild-id guild-id
+           :user-id user-id
+           :presence payload))))
+
+(defun disco-gateway--dispatch-sessions-replace (payload)
+  "Handle SESSIONS_REPLACE dispatch PAYLOAD."
+  (let ((sessions (or payload '())))
+    (disco-state-set-sessions sessions)
+    (disco-gateway--emit
+     (list :type 'sessions-replace
+           :sessions sessions))))
+
+(defun disco-gateway--dispatch-voice-state-update (payload)
+  "Handle VOICE_STATE_UPDATE dispatch PAYLOAD."
+  (let* ((delta (disco-state-apply-voice-state-update payload))
+         (guild-id (or (plist-get delta :guild-id)
+                       (alist-get 'guild_id payload)))
+         (channel-id (or (plist-get delta :channel-id)
+                         (alist-get 'channel_id payload)))
+         (previous-channel-id (plist-get delta :previous-channel-id))
+         (channel-ids (or (plist-get delta :channel-ids)
+                          (and channel-id (list channel-id))))
+         (user-id (or (plist-get delta :user-id)
+                      (alist-get 'user_id payload))))
+    (disco-gateway--emit
+     (list :type 'voice-state-update
+           :guild-id guild-id
+           :channel-id channel-id
+           :previous-channel-id previous-channel-id
+           :channel-ids channel-ids
+           :user-id user-id
+           :voice-state payload))))
+
+(defun disco-gateway--dispatch-voice-channel-start-time-update (payload)
+  "Handle VOICE_CHANNEL_START_TIME_UPDATE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channel-id (alist-get 'id payload))
+        (voice-start-time (alist-get 'voice_start_time payload)))
+    (when channel-id
+      (disco-state-apply-channel-voice-start-time-update channel-id voice-start-time))
+    (disco-gateway--emit
+     (list :type 'voice-channel-start-time-update
+           :guild-id guild-id
+           :channel-id channel-id
+           :voice-start-time voice-start-time
+           :channel-ids (and channel-id (list channel-id))))))
+
+(defun disco-gateway--dispatch-voice-channel-status-update (payload)
+  "Handle VOICE_CHANNEL_STATUS_UPDATE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (channel-id (alist-get 'id payload))
+        (status (alist-get 'status payload)))
+    (when channel-id
+      (disco-state-apply-channel-status-update channel-id status))
+    (disco-gateway--emit
+     (list :type 'voice-channel-status-update
+           :guild-id guild-id
+           :channel-id channel-id
+           :status status
+           :channel-ids (and channel-id (list channel-id))))))
 
 (defun disco-gateway--dispatch-channel-pins-update (payload)
   "Handle CHANNEL_PINS_UPDATE dispatch PAYLOAD."
@@ -763,8 +1009,9 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   (let ((channel-id (alist-get 'channel_id payload)))
     (when channel-id
       (let ((watched (disco-gateway--channel-watched-p channel-id)))
-        (when watched
-          (disco-gateway--upsert-message channel-id payload))
+        (if watched
+            (disco-gateway--upsert-message channel-id payload)
+          (disco-state-upsert-message channel-id payload))
         (disco-state-apply-message-create
          channel-id
          payload
@@ -995,8 +1242,14 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("CHANNEL_DELETE" . disco-gateway--dispatch-channel-delete)
     ("CHANNEL_UPDATE_PARTIAL" . disco-gateway--dispatch-channel-update-partial)
     ("CHANNEL_UNREAD_UPDATE" . disco-gateway--dispatch-channel-unread-update)
+    ("CHANNEL_STATUSES" . disco-gateway--dispatch-channel-statuses)
+    ("CHANNEL_INFO" . disco-gateway--dispatch-channel-info)
+    ("CHANNEL_MEMBER_COUNT_UPDATE" . disco-gateway--dispatch-channel-member-count-update)
     ("PASSIVE_UPDATE_V1" . disco-gateway--dispatch-passive-update-v1)
     ("PASSIVE_UPDATE_V2" . disco-gateway--dispatch-passive-update-v2)
+    ("VOICE_STATE_UPDATE" . disco-gateway--dispatch-voice-state-update)
+    ("VOICE_CHANNEL_START_TIME_UPDATE" . disco-gateway--dispatch-voice-channel-start-time-update)
+    ("VOICE_CHANNEL_STATUS_UPDATE" . disco-gateway--dispatch-voice-channel-status-update)
     ("CHANNEL_PINS_UPDATE" . disco-gateway--dispatch-channel-pins-update)
     ("CHANNEL_PINS_ACK" . disco-gateway--dispatch-channel-pins-ack)
     ("MESSAGE_CREATE" . disco-gateway--dispatch-message-create)
@@ -1009,6 +1262,10 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("MESSAGE_POLL_VOTE_ADD" . disco-gateway--dispatch-message-poll-vote-add)
     ("MESSAGE_POLL_VOTE_REMOVE" . disco-gateway--dispatch-message-poll-vote-remove)
     ("MESSAGE_ACK" . disco-gateway--dispatch-message-ack)
+    ("LAST_MESSAGES" . disco-gateway--dispatch-last-messages)
+    ("CONVERSATION_SUMMARY_UPDATE" . disco-gateway--dispatch-conversation-summary-update)
+    ("PRESENCE_UPDATE" . disco-gateway--dispatch-presence-update)
+    ("SESSIONS_REPLACE" . disco-gateway--dispatch-sessions-replace)
     ("GUILD_FEATURE_ACK" . disco-gateway--dispatch-guild-feature-ack)
     ("USER_NON_CHANNEL_ACK" . disco-gateway--dispatch-user-non-channel-ack)
     ("NOTIFICATION_CENTER_ITEMS_ACK" . disco-gateway--dispatch-notification-center-items-ack)

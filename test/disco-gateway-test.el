@@ -298,6 +298,9 @@
                (lambda (updates)
                  (setq captured-updates updates)
                  1))
+              ((symbol-function 'disco-state-apply-passive-voice-state-snapshot)
+               (lambda (_guild-id _voice-states)
+                 '("v1")))
               ((symbol-function 'disco-gateway--emit)
                (lambda (event)
                  (setq emitted event))))
@@ -316,7 +319,8 @@
                        (((id . "c2")
                          (last_message_id . "20")))
                        :voice-states nil
-                       :members nil)
+                       :members nil
+                       :channel-ids ("c2" "v1"))
                      emitted)))))
 
 (ert-deftest disco-gateway-dispatch-passive-update-v2-applies-state-and-emits ()
@@ -325,6 +329,9 @@
                (lambda (updates)
                  (setq captured-updates updates)
                  2))
+              ((symbol-function 'disco-state-apply-passive-voice-state-updates)
+               (lambda (_guild-id _updated _removed)
+                 '("v2")))
               ((symbol-function 'disco-gateway--emit)
                (lambda (event)
                  (setq emitted event))))
@@ -346,7 +353,8 @@
                          (last_message_id . "20")))
                        :updated-voice-states nil
                        :removed-voice-states nil
-                       :updated-members nil)
+                       :updated-members nil
+                       :channel-ids ("c2" "v2"))
                      emitted)))))
 
 (ert-deftest disco-gateway-dispatch-user-update-applies-state-and-user-id ()
@@ -379,6 +387,68 @@
                                 ((id . "th1")
                                  (parent_id . "forum"))))
                      calls)))))
+
+(ert-deftest disco-gateway-request-channel-info-sends-op43 ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-gateway--send-op)
+               (lambda (op d)
+                 (setq captured (list op d))
+                 t)))
+      (should (disco-gateway-request-channel-info "guild1" '(status "voice_start_time")))
+      (should (equal '(43
+                       ((guild_id . "guild1")
+                        (fields "status" "voice_start_time")))
+                     captured)))))
+
+(ert-deftest disco-gateway-dispatch-voice-state-update-emits-channel-delta ()
+  (let (emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-voice-state-update)
+               (lambda (_payload)
+                 '(:guild-id "g"
+                   :channel-id "c2"
+                   :previous-channel-id "c1"
+                   :channel-ids ("c1" "c2")
+                   :user-id "u1")))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-voice-state-update
+       '((guild_id . "g")
+         (channel_id . "c2")
+         (user_id . "u1")))
+      (should (equal '(:type voice-state-update
+                       :guild-id "g"
+                       :channel-id "c2"
+                       :previous-channel-id "c1"
+                       :channel-ids ("c1" "c2")
+                       :user-id "u1"
+                       :voice-state ((guild_id . "g")
+                                     (channel_id . "c2")
+                                     (user_id . "u1")))
+                     emitted)))))
+
+(ert-deftest disco-gateway-dispatch-last-messages-applies-state-and-emits ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-last-messages)
+               (lambda (messages)
+                 (setq captured messages)
+                 '("c1" "c2")))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-last-messages
+       '((guild_id . "g")
+         (messages . (((id . "m1") (channel_id . "c1"))
+                      ((id . "m2") (channel_id . "c2"))))))
+      (should (equal '(((id . "m1") (channel_id . "c1"))
+                       ((id . "m2") (channel_id . "c2")))
+                     captured))
+      (should (equal '(:type last-messages
+                       :guild-id "g"
+                       :messages (((id . "m1") (channel_id . "c1"))
+                                  ((id . "m2") (channel_id . "c2")))
+                       :channel-ids ("c1" "c2"))
+                     emitted)))))
 
 (provide 'disco-gateway-test)
 
