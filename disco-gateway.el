@@ -49,6 +49,7 @@ Event schema:
   `guild-create' `guild-update' `guild-delete' `guild-sync'
   `guild-feature-ack' `user-non-channel-ack'
   `notification-center-items-ack'
+  `rate-limited'
   `presence-update' `sessions-replace'
   `voice-state-update' `voice-channel-status-update'
   `voice-channel-start-time-update'
@@ -88,6 +89,9 @@ Event schema:
 - :removed-member-ids list for thread-members-update
 - :member-count integer for thread-members-update when present
 - :presence-count integer for channel-member-count-update when present
+- :opcode integer for rate-limited events when present
+- :retry-after float seconds for rate-limited events when present
+- :meta metadata object for rate-limited events when present
 - :presence presence object for presence-update
 - :sessions session list for sessions-replace
 - :previous-channel-id string for voice-state-update when moved/disconnected
@@ -120,6 +124,27 @@ Event schema:
 
 (defvar disco-gateway--reconnect-timer nil)
 (defvar disco-gateway--reconnect-attempt 0)
+
+(defvar disco-gateway--send-history nil
+  "List of recent gateway send timestamps (float-time seconds).")
+
+(defvar disco-gateway--send-queue-high nil
+  "FIFO queue of high-priority outbound payloads.")
+
+(defvar disco-gateway--send-queue-normal nil
+  "FIFO queue of normal-priority outbound payloads.")
+
+(defvar disco-gateway--send-queue-timer nil
+  "Timer used to continue draining outbound send queue when rate limited.")
+
+(defvar disco-gateway--send-opcode-cooldowns (make-hash-table :test #'equal)
+  "Hash table of outbound opcode cooldown deadlines keyed by opcode scope.")
+
+(defconst disco-gateway--send-priority-high 'high
+  "Queue marker for high-priority outbound gateway payloads.")
+
+(defconst disco-gateway--send-priority-normal 'normal
+  "Queue marker for normal-priority outbound gateway payloads.")
 
 (defconst disco-gateway--zlib-suffix (string 0 0 255 255)
   "Z_SYNC_FLUSH suffix used by Discord zlib-stream transport.")
@@ -402,6 +427,7 @@ If CLEAR-SESSION is non-nil, drop resume-related values too."
   (setq disco-gateway--heartbeat-interval-ms nil)
   (setq disco-gateway--awaiting-heartbeat-ack nil)
   (disco-gateway--zlib-reset-state)
+  (disco-gateway--reset-send-rate-state)
   (clrhash disco-gateway--lazy-subscribed-channels)
 
   (when disco-gateway--ws
@@ -456,18 +482,218 @@ If CLEAR-SESSION is non-nil, clear resume values first."
   (setq disco-gateway--reconnect-attempt (1+ disco-gateway--reconnect-attempt))
   (disco-gateway--backoff-delay-for-attempt disco-gateway--reconnect-attempt))
 
-(defun disco-gateway--send-op (op d)
-  "Send one gateway payload with OP and D."
+(defun disco-gateway--send-rate-limit-max-events ()
+  "Return max outbound gateway events allowed per rate-limit window."
+  (max 1 (or disco-gateway-send-max-events-per-window 1)))
+
+(defun disco-gateway--send-rate-limit-window-seconds ()
+  "Return outbound gateway rate-limit window length in seconds."
+  (max 1.0 (float (or disco-gateway-send-window-seconds 60))))
+
+(defun disco-gateway--send-min-interval ()
+  "Return minimum spacing in seconds between outbound gateway sends."
+  (/ (disco-gateway--send-rate-limit-window-seconds)
+     (float (disco-gateway--send-rate-limit-max-events))))
+
+(defun disco-gateway--send-queue-size ()
+  "Return number of outbound gateway payloads currently queued."
+  (+ (length disco-gateway--send-queue-high)
+     (length disco-gateway--send-queue-normal)))
+
+(defun disco-gateway--cancel-send-queue-timer ()
+  "Cancel pending outbound send queue drain timer when present."
+  (when (timerp disco-gateway--send-queue-timer)
+    (cancel-timer disco-gateway--send-queue-timer)
+    (setq disco-gateway--send-queue-timer nil)))
+
+(defun disco-gateway--reset-send-rate-state ()
+  "Reset outbound send history, cooldowns, and pending queue state."
+  (disco-gateway--cancel-send-queue-timer)
+  (setq disco-gateway--send-history nil)
+  (setq disco-gateway--send-queue-high nil)
+  (setq disco-gateway--send-queue-normal nil)
+  (clrhash disco-gateway--send-opcode-cooldowns))
+
+(defun disco-gateway--prune-send-history ()
+  "Drop outbound send history entries that are outside rate-limit window."
+  (let ((cutoff (- (float-time)
+                   (disco-gateway--send-rate-limit-window-seconds))))
+    (setq disco-gateway--send-history
+          (seq-filter
+           (lambda (timestamp)
+             (> timestamp cutoff))
+           disco-gateway--send-history))))
+
+(defun disco-gateway--send-capacity-remaining ()
+  "Return outbound send slots currently available in rate-limit window."
+  (disco-gateway--prune-send-history)
+  (max 0 (- (disco-gateway--send-rate-limit-max-events)
+            (length disco-gateway--send-history))))
+
+(defun disco-gateway--next-send-delay ()
+  "Return seconds until next outbound send slot becomes available."
+  (disco-gateway--prune-send-history)
+  (if (< (length disco-gateway--send-history)
+         (disco-gateway--send-rate-limit-max-events))
+      0.0
+    (let* ((oldest (car (last disco-gateway--send-history)))
+           (window (disco-gateway--send-rate-limit-window-seconds))
+           (now (float-time)))
+      (max 0.01 (- (+ oldest window) now)))))
+
+(defun disco-gateway--next-send-spacing-delay ()
+  "Return seconds to wait to respect minimum outbound send spacing."
+  (let ((latest (car disco-gateway--send-history)))
+    (if (null latest)
+        0.0
+      (max 0.0 (- (+ latest (disco-gateway--send-min-interval))
+                  (float-time))))))
+
+(defun disco-gateway--enqueue-send-op (op d priority)
+  "Push outbound payload OP/D into PRIORITY queue.
+
+Return non-nil when payload is queued."
+  (let ((max-size (max 1 (or disco-gateway-send-queue-max-size 1)))
+        (accept t))
+    (when (>= (disco-gateway--send-queue-size) max-size)
+      (if (and (eq priority disco-gateway--send-priority-high)
+               disco-gateway--send-queue-normal)
+          (setq disco-gateway--send-queue-normal
+                (cdr disco-gateway--send-queue-normal))
+        (setq accept nil)
+        (message "disco: gateway send queue full (%d), dropping op %s"
+                 max-size op)))
+    (when accept
+      (let ((entry (cons op d)))
+        (if (eq priority disco-gateway--send-priority-high)
+            (setq disco-gateway--send-queue-high
+                  (nconc disco-gateway--send-queue-high (list entry)))
+          (setq disco-gateway--send-queue-normal
+                (nconc disco-gateway--send-queue-normal (list entry))))
+        t))))
+
+(defun disco-gateway--dequeue-send-op ()
+  "Pop next outbound payload entry, preferring high-priority queue."
+  (cond
+   (disco-gateway--send-queue-high
+    (prog1 (car disco-gateway--send-queue-high)
+      (setq disco-gateway--send-queue-high
+            (cdr disco-gateway--send-queue-high))))
+   (disco-gateway--send-queue-normal
+    (prog1 (car disco-gateway--send-queue-normal)
+      (setq disco-gateway--send-queue-normal
+            (cdr disco-gateway--send-queue-normal))))
+   (t nil)))
+
+(defun disco-gateway--send-priority-for-op (op)
+  "Return send queue priority symbol for gateway OP."
+  (if (memq op '(1 2 6))
+      disco-gateway--send-priority-high
+    disco-gateway--send-priority-normal))
+
+(defun disco-gateway--send-cooldown-key-for-op (op &optional d)
+  "Return cooldown key for outbound OP and payload D."
+  (let ((guild-id (and (listp d) (alist-get 'guild_id d))))
+    (if guild-id
+        (cons op (format "%s" guild-id))
+      op)))
+
+(defun disco-gateway--send-cooldown-delay (op &optional d)
+  "Return remaining cooldown delay in seconds for outbound OP and D."
+  (let* ((key (disco-gateway--send-cooldown-key-for-op op d))
+         (deadline (gethash key disco-gateway--send-opcode-cooldowns))
+         (remaining (and deadline (- deadline (float-time)))))
+    (if (and (numberp remaining) (> remaining 0))
+        remaining
+      0.0)))
+
+(defun disco-gateway--set-send-cooldown (opcode retry-after &optional meta)
+  "Store outbound cooldown for OPCODE using RETRY-AFTER seconds and META."
+  (when (and (integerp opcode)
+             (numberp retry-after)
+             (> retry-after 0))
+    (let* ((guild-id (and (listp meta) (alist-get 'guild_id meta)))
+           (key (if guild-id
+                    (cons opcode (format "%s" guild-id))
+                  opcode))
+           (deadline (+ (float-time) retry-after)))
+      (puthash key deadline disco-gateway--send-opcode-cooldowns))))
+
+(defun disco-gateway--send-op-now (op d)
+  "Send gateway payload OP/D immediately.
+
+Return non-nil when payload is written to websocket process."
   (when (and disco-gateway--ws (websocket-openp disco-gateway--ws))
-    (websocket-send-text
-     disco-gateway--ws
-     (disco-gateway--json-encode `((op . ,op) (d . ,d))))))
+    (condition-case err
+        (progn
+          (websocket-send-text
+           disco-gateway--ws
+           (disco-gateway--json-encode `((op . ,op) (d . ,d))))
+          (when (= op 1)
+            (setq disco-gateway--awaiting-heartbeat-ack t))
+          (push (float-time) disco-gateway--send-history)
+          t)
+      (error
+       (message "disco: gateway send op %s failed: %s"
+                op
+                (error-message-string err))
+       (unless (or disco-gateway--stopping
+                   (timerp disco-gateway--reconnect-timer))
+         (disco-gateway--schedule-reconnect nil))
+       nil))))
+
+(defun disco-gateway--schedule-send-queue-drain (delay)
+  "Schedule queue drain attempt after DELAY seconds."
+  (disco-gateway--cancel-send-queue-timer)
+  (setq disco-gateway--send-queue-timer
+        (run-at-time (max 0.01 delay)
+                     nil
+                     #'disco-gateway--flush-send-queue)))
+
+(defun disco-gateway--flush-send-queue ()
+  "Attempt to drain outbound gateway queue under rate limits."
+  (setq disco-gateway--send-queue-timer nil)
+  (when (and disco-gateway--ws (websocket-openp disco-gateway--ws)
+             (> (disco-gateway--send-queue-size) 0))
+    (let ((delay (max (disco-gateway--next-send-delay)
+                      (disco-gateway--next-send-spacing-delay))))
+      (if (> delay 0)
+          (disco-gateway--schedule-send-queue-drain delay)
+        (let* ((entry (disco-gateway--dequeue-send-op))
+               (op (car entry))
+               (d (cdr entry))
+               (cooldown (and entry (disco-gateway--send-cooldown-delay op d))))
+          (cond
+           ((null entry)
+            nil)
+           ((> cooldown 0)
+            (disco-gateway--enqueue-send-op
+             op d (disco-gateway--send-priority-for-op op))
+            (disco-gateway--schedule-send-queue-drain
+             (max cooldown
+                  (disco-gateway--next-send-delay)
+                  (disco-gateway--next-send-spacing-delay))))
+           ((disco-gateway--send-op-now op d)
+            (when (> (disco-gateway--send-queue-size) 0)
+              (disco-gateway--schedule-send-queue-drain
+               (max (disco-gateway--next-send-delay)
+                    (disco-gateway--next-send-spacing-delay)))))))))))
+
+(defun disco-gateway--send-op (op d)
+  "Queue one gateway payload OP/D for rate-limited send.
+
+Return non-nil when payload is queued for send."
+  (when (and disco-gateway--ws (websocket-openp disco-gateway--ws))
+    (when (disco-gateway--enqueue-send-op
+           op
+           d
+           (disco-gateway--send-priority-for-op op))
+      (disco-gateway--flush-send-queue)
+      t)))
 
 (defun disco-gateway--send-heartbeat ()
   "Send heartbeat (op 1) with latest sequence value."
-  (when (and disco-gateway--ws (websocket-openp disco-gateway--ws))
-    (setq disco-gateway--awaiting-heartbeat-ack t)
-    (disco-gateway--send-op 1 (or disco-gateway--seq :null))))
+  (disco-gateway--send-op 1 (or disco-gateway--seq :null)))
 
 (defun disco-gateway--heartbeat-tick ()
   "Heartbeat timer callback."
@@ -1139,6 +1365,21 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
            :resource-id resource-id
            :entity-id entity-id))))
 
+(defun disco-gateway--dispatch-rate-limited (payload)
+  "Handle RATE_LIMITED dispatch PAYLOAD."
+  (let ((opcode (alist-get 'opcode payload))
+        (retry-after (alist-get 'retry_after payload))
+        (meta (alist-get 'meta payload)))
+    (disco-gateway--set-send-cooldown opcode retry-after meta)
+    (message "disco: gateway rate-limited opcode=%s retry-after=%s"
+             (or opcode "?")
+             (or retry-after "?"))
+    (disco-gateway--emit
+     (list :type 'rate-limited
+           :opcode opcode
+           :retry-after retry-after
+           :meta meta))))
+
 (defun disco-gateway--dispatch-typing-start (payload)
   "Handle TYPING_START dispatch PAYLOAD."
   (let ((channel-id (alist-get 'channel_id payload))
@@ -1269,6 +1510,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("GUILD_FEATURE_ACK" . disco-gateway--dispatch-guild-feature-ack)
     ("USER_NON_CHANNEL_ACK" . disco-gateway--dispatch-user-non-channel-ack)
     ("NOTIFICATION_CENTER_ITEMS_ACK" . disco-gateway--dispatch-notification-center-items-ack)
+    ("RATE_LIMITED" . disco-gateway--dispatch-rate-limited)
     ("TYPING_START" . disco-gateway--dispatch-typing-start)
     ("THREAD_CREATE" . disco-gateway--dispatch-thread-create)
     ("THREAD_UPDATE" . disco-gateway--dispatch-thread-update)
@@ -1377,6 +1619,7 @@ Discord may request immediate heartbeats outside the regular interval."
              url
              :on-open (lambda (_ws)
                         (disco-gateway--zlib-reset-state)
+                        (disco-gateway--reset-send-rate-state)
                         (setq disco-gateway--connecting nil)
                         (message "disco: gateway websocket opened"))
              :on-message (lambda (_ws frame)
@@ -1397,6 +1640,7 @@ Discord may request immediate heartbeats outside the regular interval."
                            (setq disco-gateway--heartbeat-timer nil))
                          (setq disco-gateway--awaiting-heartbeat-ack nil)
                          (disco-gateway--zlib-reset-state)
+                         (disco-gateway--reset-send-rate-state)
                          (unless (or disco-gateway--stopping
                                      (timerp disco-gateway--reconnect-timer))
                            (message "disco: gateway websocket closed, reconnecting")
@@ -1404,6 +1648,7 @@ Discord may request immediate heartbeats outside the regular interval."
              :on-error (lambda (_ws _type err)
                          (setq disco-gateway--connecting nil)
                          (disco-gateway--zlib-reset-state)
+                         (disco-gateway--reset-send-rate-state)
                          (message "disco: gateway websocket error: %s"
                                   (error-message-string err))
                          (unless (or disco-gateway--stopping

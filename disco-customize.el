@@ -169,6 +169,24 @@ receive `TYPING_START` events in guild channels (DM typing does not need it)."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-gateway-send-max-events-per-window 110
+  "Maximum gateway events sent per connection window.
+
+Discord documents a hard limit of 120 events per 60 seconds per connection.
+This setting keeps a small safety margin for bursty timers and reconnect edges."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-gateway-send-window-seconds 60
+  "Time window in seconds used by gateway send rate limiter."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-gateway-send-queue-max-size 600
+  "Maximum buffered gateway payload count waiting for rate-limit send slots."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-rate-limit-max-retries 2
   "Maximum retries for 429 responses in one API call."
   :type 'integer
