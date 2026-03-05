@@ -490,11 +490,11 @@ after incremental EWOC updates."
 
 (defun disco-root--ewoc-start ()
   "Return buffer position of root EWOC content start."
-  (or (and disco-root--ewoc
+  (or (and (markerp disco-root--ewoc-marker)
+           (marker-position disco-root--ewoc-marker))
+      (and disco-root--ewoc
            (ewoc-nth disco-root--ewoc 0)
            (ewoc-location (ewoc-nth disco-root--ewoc 0)))
-      (and (markerp disco-root--ewoc-marker)
-           (marker-position disco-root--ewoc-marker))
       (save-excursion
         (goto-char (disco-root--header-start))
         (forward-line (1+ (length (disco-root--header-lines))))
@@ -3691,7 +3691,12 @@ Return non-nil when at least one visible row is inserted for GUILD."
         (set-marker disco-root--header-marker start)
         (set-marker disco-root--ewoc-marker (point))
         (set-marker-insertion-type disco-root--header-marker nil)
-        (set-marker-insertion-type disco-root--ewoc-marker nil)))
+        (set-marker-insertion-type disco-root--ewoc-marker nil)
+        (when (and disco-root--ewoc
+                   (fboundp 'ewoc--header)
+                   (fboundp 'ewoc--node-start-marker))
+          (set-marker (ewoc--node-start-marker (ewoc--header disco-root--ewoc))
+                      (marker-position disco-root--ewoc-marker)))))
     (setq disco-root--last-header-refresh-at (float-time))))
 
 (defun disco-root--maybe-refresh-activity-header-line ()
