@@ -110,9 +110,6 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--missing-preview-pending-by-guild nil
   "Hash table guild-id -> pending channel-id list for preview fetch.")
 
-(defvar-local disco-root--missing-preview-requested-at nil
-  "Hash table channel-id -> float-time of last proactive preview fetch.")
-
 (defvar-local disco-root--dirty-channel-ids nil
   "List of channel IDs queued for incremental live patching.")
 
@@ -249,7 +246,7 @@ Discord limits one request to at most 100 channel IDs."
   :type 'boolean
   :group 'disco)
 
-(defcustom disco-root-missing-preview-fetch-debounce 0.3
+(defcustom disco-root-missing-preview-fetch-debounce 0.6
   "Seconds to debounce batched proactive last-message requests."
   :type 'number
   :group 'disco)
@@ -257,11 +254,6 @@ Discord limits one request to at most 100 channel IDs."
 (defcustom disco-root-missing-preview-fetch-max-per-guild 60
   "Maximum number of channel IDs per guild in one proactive op34 request."
   :type 'integer
-  :group 'disco)
-
-(defcustom disco-root-missing-preview-fetch-retry-interval 45
-  "Minimum seconds before re-requesting the same channel preview via op34."
-  :type 'number
   :group 'disco)
 
 (defcustom disco-root-extra-info-functions nil
@@ -1165,18 +1157,26 @@ if structural fallback is required."
                    (> (hash-table-count disco-root--missing-preview-pending-by-guild) 0))
           (let ((max-per-guild
                  (max 1 (or disco-root-missing-preview-fetch-max-per-guild 1)))
-                (now (float-time)))
+                next-pending)
             (maphash
              (lambda (guild-id pending-channel-ids)
-               (let ((channel-ids
-                      (disco-root--normalize-id-list pending-channel-ids max-per-guild)))
-                 (when (and guild-id channel-ids
-                            (disco-gateway-request-last-messages guild-id channel-ids))
-                   (dolist (channel-id channel-ids)
-                     (puthash channel-id now
-                              disco-root--missing-preview-requested-at)))))
+               (let* ((ordered (disco-root--normalize-id-list pending-channel-ids))
+                      (batch (seq-take ordered max-per-guild))
+                      (remaining (nthcdr (length batch) ordered)))
+                 (if (and guild-id batch
+                          (disco-gateway-request-last-messages guild-id batch))
+                     (when remaining
+                       (push (cons guild-id remaining) next-pending))
+                   (when ordered
+                     (push (cons guild-id ordered) next-pending)))))
              disco-root--missing-preview-pending-by-guild)
-            (clrhash disco-root--missing-preview-pending-by-guild)))))))
+            (clrhash disco-root--missing-preview-pending-by-guild)
+            (dolist (entry next-pending)
+              (puthash (car entry)
+                       (cdr entry)
+                       disco-root--missing-preview-pending-by-guild))
+            (when next-pending
+              (disco-root--schedule-missing-preview-fetch))))))))
 
 (defun disco-root--queue-missing-preview-fetch (channel)
   "Queue proactive op34 fetch when CHANNEL lacks cached preview message."
@@ -1188,25 +1188,14 @@ if structural fallback is required."
            (channel-id (and (alist-get 'id channel)
                             (format "%s" (alist-get 'id channel))))
            (last-message-id (alist-get 'last_message_id channel))
-           (retry-interval
-            (max 0 (or disco-root-missing-preview-fetch-retry-interval 0)))
-           (request-cache
-            (or disco-root--missing-preview-requested-at
-                (setq-local disco-root--missing-preview-requested-at
-                            (make-hash-table :test #'equal))))
            (pending-by-guild
             (or disco-root--missing-preview-pending-by-guild
                 (setq-local disco-root--missing-preview-pending-by-guild
-                            (make-hash-table :test #'equal))))
-           (last-request-at (and channel-id
-                                 (gethash channel-id request-cache)))
-           (now (float-time)))
+                            (make-hash-table :test #'equal)))))
       (when (and guild-id
                  channel-id
                  (stringp last-message-id)
-                 (not (disco-msg-channel-last-cached-message channel))
-                 (or (null last-request-at)
-                     (>= (- now last-request-at) retry-interval)))
+                 (not (disco-msg-channel-last-cached-message channel)))
         (let ((pending (copy-sequence (or (gethash guild-id pending-by-guild)
                                           '()))))
           (cl-pushnew channel-id pending :test #'equal)
@@ -3717,8 +3706,6 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq-local disco-root--live-update-timer nil)
   (setq-local disco-root--missing-preview-fetch-timer nil)
   (setq-local disco-root--missing-preview-pending-by-guild
-              (make-hash-table :test #'equal))
-  (setq-local disco-root--missing-preview-requested-at
               (make-hash-table :test #'equal))
   (setq-local disco-root--dirty-channel-ids nil)
   (setq-local disco-root--dirty-structure-p nil)

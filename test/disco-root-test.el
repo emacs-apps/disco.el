@@ -410,8 +410,6 @@
                disco-root--missing-preview-pending-by-guild)
       (cl-letf (((symbol-function 'disco-gateway-running-p)
                  (lambda () t))
-                ((symbol-function 'float-time)
-                 (lambda () 100.0))
                 ((symbol-function 'disco-gateway-request-last-messages)
                  (lambda (guild-id channel-ids)
                    (push (list guild-id channel-ids) calls)
@@ -419,13 +417,33 @@
         (disco-root--flush-missing-preview-fetches (current-buffer))
         (should (equal '(("g1" ("c1" "c2")))
                        (nreverse calls)))
-        (should (= 100.0
-                   (gethash "c1" disco-root--missing-preview-requested-at)))
-        (should (= 100.0
-                   (gethash "c2" disco-root--missing-preview-requested-at)))
         (should (= 0
                    (hash-table-count
                     disco-root--missing-preview-pending-by-guild)))))))
+
+(ert-deftest disco-root-flush-missing-preview-fetches-keeps-overflow-queued ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root-missing-preview-fetch-max-per-guild 1)
+          calls
+          rescheduled)
+      (puthash "g1" '("c1" "c2" "c3")
+               disco-root--missing-preview-pending-by-guild)
+      (cl-letf (((symbol-function 'disco-gateway-running-p)
+                 (lambda () t))
+                ((symbol-function 'disco-root--schedule-missing-preview-fetch)
+                 (lambda ()
+                   (setq rescheduled t)))
+                ((symbol-function 'disco-gateway-request-last-messages)
+                 (lambda (guild-id channel-ids)
+                   (push (list guild-id channel-ids) calls)
+                   t)))
+        (disco-root--flush-missing-preview-fetches (current-buffer))
+        (should (equal '(("g1" ("c1")))
+                       (nreverse calls)))
+        (should rescheduled)
+        (should (equal '("c2" "c3")
+                       (gethash "g1" disco-root--missing-preview-pending-by-guild)))))))
 
 (ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
   (disco-state-reset)
