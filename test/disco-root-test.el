@@ -402,6 +402,35 @@
                        (disco-root--activity-secondary-label channel)))
         (should queued)))))
 
+(ert-deftest disco-root-queue-missing-preview-fetch-dedupes-same-last-message-id ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((channel '((id . "c1")
+                     (guild_id . "g1")
+                     (type . 0)
+                     (last_message_id . "44")))
+          (updated-channel '((id . "c1")
+                             (guild_id . "g1")
+                             (type . 0)
+                             (last_message_id . "45")))
+          scheduled)
+      (cl-letf (((symbol-function 'disco-gateway-running-p)
+                 (lambda () t))
+                ((symbol-function 'disco-root--schedule-missing-preview-fetch)
+                 (lambda ()
+                   (setq scheduled (1+ (or scheduled 0))))))
+        (disco-root--queue-missing-preview-fetch channel)
+        (disco-root--queue-missing-preview-fetch channel)
+        (disco-root--queue-missing-preview-fetch updated-channel)
+        (should (= 2 scheduled))
+        (should (equal '("c1")
+                       (gethash "g1"
+                                disco-root--missing-preview-pending-by-guild)))
+        (should (equal "45"
+                       (gethash
+                        "c1"
+                        disco-root--missing-preview-requested-last-message-id-by-channel)))))))
+
 (ert-deftest disco-root-flush-missing-preview-fetches-batches-op34 ()
   (with-temp-buffer
     (disco-root-mode)
@@ -443,6 +472,30 @@
                        (nreverse calls)))
         (should rescheduled)
         (should (equal '("c2" "c3")
+                       (gethash "g1" disco-root--missing-preview-pending-by-guild)))))))
+
+(ert-deftest disco-root-flush-missing-preview-fetches-defers-when-send-queue-full ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (requested
+          rescheduled)
+      (puthash "g1" '("c1" "c2")
+               disco-root--missing-preview-pending-by-guild)
+      (cl-letf (((symbol-function 'disco-gateway-running-p)
+                 (lambda () t))
+                ((symbol-function 'disco-gateway-send-queue-slot-available-p)
+                 (lambda (&optional _slots) nil))
+                ((symbol-function 'disco-root--schedule-missing-preview-fetch)
+                 (lambda ()
+                   (setq rescheduled t)))
+                ((symbol-function 'disco-gateway-request-last-messages)
+                 (lambda (&rest _args)
+                   (setq requested t)
+                   t)))
+        (disco-root--flush-missing-preview-fetches (current-buffer))
+        (should-not requested)
+        (should rescheduled)
+        (should (equal '("c1" "c2")
                        (gethash "g1" disco-root--missing-preview-pending-by-guild)))))))
 
 (ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()

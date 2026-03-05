@@ -418,6 +418,13 @@
       (should-not (disco-gateway--send-op-now 34 '((guild_id . "g1"))))
       (should scheduled))))
 
+(ert-deftest disco-gateway-send-queue-slot-available-p-reflects-capacity ()
+  (let ((disco-gateway--send-queue-high '((1 . :null)))
+        (disco-gateway--send-queue-normal '((34 . ((guild_id . "g1")))))
+        (disco-gateway-send-queue-max-size 3))
+    (should (disco-gateway-send-queue-slot-available-p))
+    (should-not (disco-gateway-send-queue-slot-available-p 2))))
+
 (ert-deftest disco-gateway-send-op-queues-when-rate-window-full ()
   (let ((disco-gateway--ws 'ws)
         (disco-gateway--send-history '(99.95 99.9))

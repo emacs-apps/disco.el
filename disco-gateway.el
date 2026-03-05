@@ -15,6 +15,7 @@
 ;; - `disco-gateway-request-channel-statuses'
 ;; - `disco-gateway-request-channel-member-count'
 ;; - `disco-gateway-request-channel-info'
+;; - `disco-gateway-send-queue-slot-available-p'
 ;; - `disco-gateway-event-hook' events with
 ;;   :type one of message/channel/guild/thread/typing event symbols,
 ;;   plus event-scoped payload fields (e.g., :channel-id, :guild-id).
@@ -166,6 +167,13 @@ Event schema:
 (defun disco-gateway-current-user-id ()
   "Return current Discord account user ID from gateway session, or nil."
   disco-gateway--current-user-id)
+
+(defun disco-gateway-send-queue-slot-available-p (&optional slots)
+  "Return non-nil when outbound send queue can accept SLOTS payloads."
+  (let* ((required (max 1 (or slots 1)))
+         (max-size (max 1 (or disco-gateway-send-queue-max-size 1))))
+    (<= (+ (disco-gateway--send-queue-size) required)
+        max-size)))
 
 (defun disco-gateway--intent-enabled-p (bit)
   "Return non-nil when identify intents include BIT.

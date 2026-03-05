@@ -110,6 +110,9 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--missing-preview-pending-by-guild nil
   "Hash table guild-id -> pending channel-id list for preview fetch.")
 
+(defvar-local disco-root--missing-preview-requested-last-message-id-by-channel nil
+  "Hash table channel-id -> last_message_id already requested via proactive op34.")
+
 (defvar-local disco-root--dirty-channel-ids nil
   "List of channel IDs queued for incremental live patching.")
 
@@ -251,8 +254,10 @@ Discord limits one request to at most 100 channel IDs."
   :type 'number
   :group 'disco)
 
-(defcustom disco-root-missing-preview-fetch-max-per-guild 60
-  "Maximum number of channel IDs per guild in one proactive op34 request."
+(defcustom disco-root-missing-preview-fetch-max-per-guild 100
+  "Maximum number of channel IDs per guild in one proactive op34 request.
+
+Discord allows up to 100 channel IDs per op34 request."
   :type 'integer
   :group 'disco)
 
@@ -1163,12 +1168,19 @@ if structural fallback is required."
                (let* ((ordered (disco-root--normalize-id-list pending-channel-ids))
                       (batch (seq-take ordered max-per-guild))
                       (remaining (nthcdr (length batch) ordered)))
-                 (if (and guild-id batch
-                          (disco-gateway-request-last-messages guild-id batch))
-                     (when remaining
-                       (push (cons guild-id remaining) next-pending))
-                   (when ordered
-                     (push (cons guild-id ordered) next-pending)))))
+                 (cond
+                  ((null ordered)
+                   nil)
+                  ((not guild-id)
+                   (push (cons guild-id ordered) next-pending))
+                  ((not (disco-gateway-send-queue-slot-available-p))
+                   (push (cons guild-id ordered) next-pending))
+                  ((and batch
+                        (disco-gateway-request-last-messages guild-id batch))
+                   (when remaining
+                     (push (cons guild-id remaining) next-pending)))
+                  (t
+                   (push (cons guild-id ordered) next-pending)))))
              disco-root--missing-preview-pending-by-guild)
             (clrhash disco-root--missing-preview-pending-by-guild)
             (dolist (entry next-pending)
@@ -1179,7 +1191,9 @@ if structural fallback is required."
               (disco-root--schedule-missing-preview-fetch))))))))
 
 (defun disco-root--queue-missing-preview-fetch (channel)
-  "Queue proactive op34 fetch when CHANNEL lacks cached preview message."
+  "Queue proactive op34 fetch for CHANNEL missing cached preview message.
+
+Each channel `last_message_id' is only requested once per root session."
   (when (and disco-root-missing-preview-fetch-enabled
              (listp channel)
              (disco-gateway-running-p))
@@ -1187,15 +1201,26 @@ if structural fallback is required."
                           (format "%s" (alist-get 'guild_id channel))))
            (channel-id (and (alist-get 'id channel)
                             (format "%s" (alist-get 'id channel))))
-           (last-message-id (alist-get 'last_message_id channel))
+           (last-message-id (and (alist-get 'last_message_id channel)
+                                 (format "%s" (alist-get 'last_message_id channel))))
            (pending-by-guild
             (or disco-root--missing-preview-pending-by-guild
                 (setq-local disco-root--missing-preview-pending-by-guild
-                            (make-hash-table :test #'equal)))))
+                            (make-hash-table :test #'equal))))
+           (requested-by-channel
+            (or disco-root--missing-preview-requested-last-message-id-by-channel
+                (setq-local
+                 disco-root--missing-preview-requested-last-message-id-by-channel
+                 (make-hash-table :test #'equal))))
+           (requested-last-message-id
+            (and channel-id
+                 (gethash channel-id requested-by-channel))))
       (when (and guild-id
                  channel-id
                  (stringp last-message-id)
+                 (not (equal requested-last-message-id last-message-id))
                  (not (disco-msg-channel-last-cached-message channel)))
+        (puthash channel-id last-message-id requested-by-channel)
         (let ((pending (copy-sequence (or (gethash guild-id pending-by-guild)
                                           '()))))
           (cl-pushnew channel-id pending :test #'equal)
@@ -1309,6 +1334,8 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
   (setq disco-root--dirty-header-p nil)
   (when (hash-table-p disco-root--missing-preview-pending-by-guild)
     (clrhash disco-root--missing-preview-pending-by-guild))
+  (when (hash-table-p disco-root--missing-preview-requested-last-message-id-by-channel)
+    (clrhash disco-root--missing-preview-requested-last-message-id-by-channel))
   (let ((root-buffer (current-buffer)))
     (setq disco-root--gateway-handler
           (lambda (event)
@@ -1328,6 +1355,8 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
   (setq disco-root--dirty-header-p nil)
   (when (hash-table-p disco-root--missing-preview-pending-by-guild)
     (clrhash disco-root--missing-preview-pending-by-guild))
+  (when (hash-table-p disco-root--missing-preview-requested-last-message-id-by-channel)
+    (clrhash disco-root--missing-preview-requested-last-message-id-by-channel))
   (when disco-root--gateway-handler
     (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
     (setq disco-root--gateway-handler nil))
@@ -3706,6 +3735,8 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq-local disco-root--live-update-timer nil)
   (setq-local disco-root--missing-preview-fetch-timer nil)
   (setq-local disco-root--missing-preview-pending-by-guild
+              (make-hash-table :test #'equal))
+  (setq-local disco-root--missing-preview-requested-last-message-id-by-channel
               (make-hash-table :test #'equal))
   (setq-local disco-root--dirty-channel-ids nil)
   (setq-local disco-root--dirty-structure-p nil)
