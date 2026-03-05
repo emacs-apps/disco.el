@@ -428,6 +428,16 @@ between current view mode and unread-only filter."
   (or noninteractive
       (window-live-p (get-buffer-window (or buffer (current-buffer)) t))))
 
+(defun disco-root--update-window-points (&optional point)
+  "Update window points for current buffer to POINT.
+
+Mirrors telega's root buffer behavior for keeping window points aligned
+after incremental EWOC updates."
+  (let ((pos (or point (point))))
+    (dolist (win (get-buffer-window-list (current-buffer)))
+      (when (window-live-p win)
+        (set-window-point win pos)))))
+
 (defun disco-root--buffer-corrupted-p ()
   "Return non-nil when root buffer appears to have duplicated header artifacts."
   (and (eq major-mode 'disco-root-mode)
@@ -1306,32 +1316,33 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
               (let ((inhibit-read-only t)
                     (buffer-undo-list t)
                     (position-snapshot
-                     (and (disco-root--buffer-visible-p root-buffer)
-                          (disco-view-capture-position
-                           :anchor-property 'disco-channel-id
-                           :preserve-window-start t))))
-                (dolist (channel-id dirty-channel-ids)
-                  (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
-                    (setq needs-structural t)))
-                (when (and (not needs-structural)
-                           dirty-channel-ids
-                           (eq layout 'activity))
-                  (when (disco-root--activity-reorder-visible-nodes dirty-channel-ids)
-                    (setq needs-structural t)))
-                (when dirty-channel-ids
-                  (disco-root--refresh-active-layout-headings dirty-channel-ids))
-                (cond
-                 (needs-header
-                  (disco-root--refresh-header-line))
-                 ((and dirty-channel-ids
-                       (eq layout 'activity))
-                  (disco-root--maybe-refresh-activity-header-line)))
-                (when (and (not needs-structural)
-                           (disco-root--buffer-corrupted-p))
-                  (setq needs-structural t))
-                (when (and (not needs-structural)
-                           position-snapshot)
-                  (disco-view-restore-position position-snapshot)))
+                     (disco-view-capture-position
+                      :anchor-property 'disco-channel-id
+                      :preserve-window-start t)))
+                (with-silent-modifications
+                  (dolist (channel-id dirty-channel-ids)
+                    (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
+                      (setq needs-structural t)))
+                  (when (and (not needs-structural)
+                             dirty-channel-ids
+                             (eq layout 'activity))
+                    (when (disco-root--activity-reorder-visible-nodes dirty-channel-ids)
+                      (setq needs-structural t)))
+                  (when dirty-channel-ids
+                    (disco-root--refresh-active-layout-headings dirty-channel-ids))
+                  (cond
+                   (needs-header
+                    (disco-root--refresh-header-line))
+                   ((and dirty-channel-ids
+                         (eq layout 'activity))
+                    (disco-root--maybe-refresh-activity-header-line)))
+                  (when (and (not needs-structural)
+                             (disco-root--buffer-corrupted-p))
+                    (setq needs-structural t))
+                  (when (and (not needs-structural)
+                             position-snapshot)
+                    (disco-view-restore-position position-snapshot)
+                    (disco-root--update-window-points))))
               (when needs-structural
                 (disco-root--render-preserving-position))))))))))
 
