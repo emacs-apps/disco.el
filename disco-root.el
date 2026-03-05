@@ -145,6 +145,15 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defvar-local disco-root--category-expanded nil
   "Hash table category-channel-id -> expansion state for category rows.")
 
+(defvar-local disco-root--debug-log-enabled nil
+  "Non-nil when root debug logging is enabled in this buffer.")
+
+(defvar-local disco-root--debug-log-changes nil
+  "Non-nil when root change logging is enabled in this buffer.")
+
+(defvar-local disco-root--debug-log-verbose nil
+  "Non-nil when verbose root debug logging is enabled in this buffer.")
+
 (defcustom disco-root-show-guild-icons t
   "When non-nil, show guild icons in root guild rows when available."
   :type 'boolean
@@ -220,6 +229,26 @@ by default to keep root refresh and resize reflow responsive."
 This throttle applies only to implicit header refresh caused by dirty activity
 rows. Explicit header-dirty events bypass the throttle."
   :type 'number
+  :group 'disco)
+
+(defcustom disco-root-debug-log-enabled nil
+  "When non-nil, log root buffer operations to a debug buffer."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-debug-log-changes nil
+  "When non-nil, log every buffer change applied to the root buffer."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-debug-log-verbose nil
+  "When non-nil, include verbose per-channel operations in debug logs."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-debug-log-buffer-name "*disco-root-debug*"
+  "Buffer name used to store root debug logs."
+  :type 'string
   :group 'disco)
 
 (defcustom disco-root-gateway-context-sync-on-refresh t
@@ -437,6 +466,115 @@ after incremental EWOC updates."
     (dolist (win (get-buffer-window-list (current-buffer)))
       (when (window-live-p win)
         (set-window-point win pos)))))
+
+(defun disco-root--debug-log-enabled-p ()
+  "Return non-nil when root debug logging is enabled."
+  (or disco-root--debug-log-enabled
+      disco-root-debug-log-enabled))
+
+(defun disco-root--debug-log-changes-p ()
+  "Return non-nil when root change logging is enabled."
+  (and (disco-root--debug-log-enabled-p)
+       (or disco-root--debug-log-changes
+           disco-root-debug-log-changes)))
+
+(defun disco-root--debug-log-verbose-p ()
+  "Return non-nil when verbose root debug logging is enabled."
+  (and (disco-root--debug-log-enabled-p)
+       (or disco-root--debug-log-verbose
+           disco-root-debug-log-verbose)))
+
+(defun disco-root--debug-log (format-string &rest args)
+  "Append one debug entry formatted with FORMAT-STRING and ARGS."
+  (when (disco-root--debug-log-enabled-p)
+    (let ((buf (get-buffer-create disco-root-debug-log-buffer-name))
+          (message-log-max nil))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t))
+          (goto-char (point-max))
+          (unless (derived-mode-p 'special-mode)
+            (special-mode))
+          (insert (format-time-string "%Y-%m-%d %H:%M:%S"))
+          (insert " ")
+          (insert (apply #'format format-string args))
+          (insert "\n"))))))
+
+(defun disco-root--debug-before-change (beg end)
+  "Log root buffer modifications before change from BEG to END."
+  (when (and (eq major-mode 'disco-root-mode)
+             (disco-root--debug-log-changes-p))
+    (disco-root--debug-log
+     "before-change %d..%d len=%d"
+     beg
+     end
+     (max 0 (- end beg)))))
+
+(defun disco-root--debug-after-change (beg end len-before)
+  "Log root buffer modifications after change from BEG to END."
+  (when (and (eq major-mode 'disco-root-mode)
+             (disco-root--debug-log-changes-p))
+    (disco-root--debug-log
+     "after-change %d..%d len-before=%d len-after=%d"
+     beg
+     end
+     (max 0 len-before)
+     (max 0 (- end beg)))))
+
+(defun disco-root-debug-log-toggle (&optional enable)
+  "Toggle root debug logging in current buffer.
+
+With prefix ENABLE, turn logging on when positive, otherwise off."
+  (interactive "P")
+  (setq-local disco-root--debug-log-enabled
+              (if enable
+                  (> (prefix-numeric-value enable) 0)
+                (not disco-root--debug-log-enabled)))
+  (disco-root--debug-log "debug-log %s"
+                         (if disco-root--debug-log-enabled "enabled" "disabled"))
+  (message "disco: root debug log %s"
+           (if disco-root--debug-log-enabled "enabled" "disabled")))
+
+(defun disco-root-debug-log-changes-toggle (&optional enable)
+  "Toggle root change logging in current buffer.
+
+With prefix ENABLE, turn logging on when positive, otherwise off."
+  (interactive "P")
+  (setq-local disco-root--debug-log-changes
+              (if enable
+                  (> (prefix-numeric-value enable) 0)
+                (not disco-root--debug-log-changes)))
+  (disco-root--debug-log "debug-change-log %s"
+                         (if disco-root--debug-log-changes "enabled" "disabled"))
+  (message "disco: root change log %s"
+           (if disco-root--debug-log-changes "enabled" "disabled")))
+
+(defun disco-root-debug-log-verbose-toggle (&optional enable)
+  "Toggle verbose root debug logging in current buffer.
+
+With prefix ENABLE, turn logging on when positive, otherwise off."
+  (interactive "P")
+  (setq-local disco-root--debug-log-verbose
+              (if enable
+                  (> (prefix-numeric-value enable) 0)
+                (not disco-root--debug-log-verbose)))
+  (disco-root--debug-log "debug-log verbose %s"
+                         (if disco-root--debug-log-verbose "enabled" "disabled"))
+  (message "disco: root debug log verbose %s"
+           (if disco-root--debug-log-verbose "enabled" "disabled")))
+
+(defun disco-root-debug-log-open ()
+  "Open the root debug log buffer."
+  (interactive)
+  (pop-to-buffer (get-buffer-create disco-root-debug-log-buffer-name)))
+
+(defun disco-root-debug-log-clear ()
+  "Clear the root debug log buffer."
+  (interactive)
+  (with-current-buffer (get-buffer-create disco-root-debug-log-buffer-name)
+    (let ((inhibit-read-only t))
+      (erase-buffer)))
+  (message "disco: root debug log cleared"))
 
 (defun disco-root--buffer-corrupted-p ()
   "Return non-nil when root buffer appears to have duplicated header artifacts."
@@ -852,28 +990,32 @@ Return one of symbols:
 - `updated' when at least one visible row was patched.
 - `missing' when CHANNEL-ID has no visible EWOC nodes.
 - `stale' when node exists but backing state can no longer patch it."
-  (let ((nodes (and channel-id
-                    disco-root--channel-node-table
-                    (gethash channel-id disco-root--channel-node-table))))
-    (cond
-     ((or (null channel-id)
-          (null disco-root--ewoc)
-          (null nodes))
-      'missing)
-     (t
-      (let ((channel (disco-state-channel channel-id))
-            updated)
-        (if (and channel (disco-root--displayable-channel-p channel))
-            (progn
-              (let ((inhibit-read-only t))
-                (dolist (node (if (listp nodes) nodes (list nodes)))
-                  (let ((entry (copy-sequence (ewoc-data node))))
-                    (setq entry (plist-put entry :channel channel))
-                    (ewoc-set-data node entry)
-                    (ewoc-invalidate disco-root--ewoc node)
-                    (setq updated t))))
-              (if updated 'updated 'missing))
-          'stale))))))
+  (let* ((nodes (and channel-id
+                     disco-root--channel-node-table
+                     (gethash channel-id disco-root--channel-node-table)))
+         (result
+          (cond
+           ((or (null channel-id)
+                (null disco-root--ewoc)
+                (null nodes))
+            'missing)
+           (t
+            (let ((channel (disco-state-channel channel-id))
+                  updated)
+              (if (and channel (disco-root--displayable-channel-p channel))
+                  (progn
+                    (let ((inhibit-read-only t))
+                      (dolist (node (if (listp nodes) nodes (list nodes)))
+                        (let ((entry (copy-sequence (ewoc-data node))))
+                          (setq entry (plist-put entry :channel channel))
+                          (ewoc-set-data node entry)
+                          (ewoc-invalidate disco-root--ewoc node)
+                          (setq updated t))))
+                    (if updated 'updated 'missing))
+                'stale))))))
+    (when (disco-root--debug-log-verbose-p)
+      (disco-root--debug-log "refresh-channel %s -> %s" channel-id result))
+    result))
 
 (defun disco-root--channel-node-list (channel-id)
   "Return normalized EWOC node list for CHANNEL-ID."
@@ -1000,11 +1142,17 @@ if structural fallback is required."
   (when (and disco-root--ewoc
              (eq (disco-root--ensure-layout) 'activity))
     (if channel-ids
-        (let (missing-visible)
-          (dolist (channel-id (seq-uniq (delq nil channel-ids) #'equal))
+        (let ((dirty-ids (seq-uniq (delq nil channel-ids) #'equal))
+              missing-visible)
+          (dolist (channel-id dirty-ids)
             (when (eq (disco-root--activity-reorder-channel-node channel-id)
                       'missing-visible)
               (setq missing-visible t)))
+          (when (disco-root--debug-log-verbose-p)
+            (disco-root--debug-log
+             "activity-reorder dirty=%s missing=%s"
+             dirty-ids
+             (and missing-visible t)))
           missing-visible)
       (let ((cursor (ewoc-nth disco-root--ewoc 0)))
         (dolist (channel (disco-root--collect-activity-channels))
@@ -1017,6 +1165,8 @@ if structural fallback is required."
                                                                  node
                                                                  cursor)))
               (setq cursor (ewoc-next disco-root--ewoc node)))))
+        (when (disco-root--debug-log-verbose-p)
+          (disco-root--debug-log "activity-reorder full"))
         nil))))
 
 (defun disco-root--count-visible-unread-channels ()
@@ -1264,6 +1414,11 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
               ((null channel-ids) nil)
               ((listp channel-ids) channel-ids)
               (t (list channel-ids)))))
+    (disco-root--debug-log
+     "queue-live-update ids=%s structural=%s header=%s"
+     ids
+     (and structural-p t)
+     (and header-p t))
     (dolist (channel-id ids)
       (when channel-id
         (cl-pushnew channel-id disco-root--dirty-channel-ids :test #'equal))))
@@ -1298,21 +1453,32 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                  (layout (disco-root--ensure-layout))
                  (layout-update-mode
                   (disco-root-layout-update-mode layout)))
+            (disco-root--debug-log
+             "flush-live-updates layout=%s view=%s dirty=%d structural=%s header=%s"
+             layout
+             disco-root--view-mode
+             (length dirty-channel-ids)
+             (and needs-structural t)
+             (and needs-header t))
             (setq disco-root--dirty-channel-ids nil)
             (setq disco-root--dirty-structure-p nil)
             (setq disco-root--dirty-header-p nil)
             (cond
              (needs-structural
+              (disco-root--debug-log "flush-live-updates -> structural")
               (disco-root--render-preserving-position))
              ((and (eq layout-update-mode 'full)
                    (or dirty-channel-ids needs-header))
+              (disco-root--debug-log "flush-live-updates -> full-render")
               (if (and needs-header (null dirty-channel-ids))
                   (disco-root--refresh-header-line)
                 (disco-root--render-preserving-position)))
              ((and dirty-channel-ids
                    (eq disco-root--view-mode 'unread))
+              (disco-root--debug-log "flush-live-updates -> unread-render")
               (disco-root--render-preserving-position))
              (t
+              (disco-root--debug-log "flush-live-updates -> incremental")
               (let ((inhibit-read-only t)
                     (buffer-undo-list t)
                     (position-snapshot
@@ -1344,16 +1510,23 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                     (disco-view-restore-position position-snapshot)
                     (disco-root--update-window-points))))
               (when needs-structural
+                (disco-root--debug-log "flush-live-updates -> structural(fallback)")
                 (disco-root--render-preserving-position))))))))))
 
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
   (let ((event-type (plist-get event :type)))
     (when (disco-root--live-event-p event-type)
-      (disco-root--queue-live-update
-       (disco-root--event-channel-ids event)
-       (disco-root--live-event-structural-p event-type)
-       (disco-root--live-event-header-p event-type)))))
+      (let ((channel-ids (disco-root--event-channel-ids event))
+            (structural (disco-root--live-event-structural-p event-type))
+            (header (disco-root--live-event-header-p event-type)))
+        (disco-root--debug-log
+         "gateway-event %s ids=%s structural=%s header=%s"
+         event-type
+         channel-ids
+         (and structural t)
+         (and header t))
+        (disco-root--queue-live-update channel-ids structural header)))))
 
 (defun disco-root--attach-live-updates ()
   "Attach root buffer to global gateway update stream."
@@ -3455,6 +3628,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
 
 (defun disco-root--refresh-header-line ()
   "Refresh root header block in place."
+  (disco-root--debug-log "refresh-header-line")
   (let ((inhibit-read-only t)
         (buffer-undo-list t)
         (lines (disco-root--header-lines)))
@@ -3487,6 +3661,11 @@ Return non-nil when at least one visible row is inserted for GUILD."
          (layout (disco-root--ensure-layout))
          (renderer (disco-root-layout-renderer layout)))
     (setq-local disco-root--fill-column (disco-root--render-fill-column))
+    (disco-root--debug-log
+     "render layout=%s view=%s fill=%s"
+     layout
+     disco-root--view-mode
+     disco-root--fill-column)
     (erase-buffer)
     (dolist (line (disco-root--header-lines))
       (insert line "\n"))
@@ -3748,6 +3927,11 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (setq-local switch-to-buffer-preserve-window-point nil)
+  (setq-local disco-root--debug-log-enabled disco-root-debug-log-enabled)
+  (setq-local disco-root--debug-log-changes disco-root-debug-log-changes)
+  (setq-local disco-root--debug-log-verbose disco-root-debug-log-verbose)
+  (add-hook 'before-change-functions #'disco-root--debug-before-change nil t)
+  (add-hook 'after-change-functions #'disco-root--debug-after-change nil t)
   (buffer-disable-undo)
   (setq-local buffer-undo-list t)
   (disco-root--cancel-live-update-timer)
