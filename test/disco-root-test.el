@@ -356,6 +356,37 @@
                          (disco-root--activity-primary-label channel))))
       (disco-state-reset))))
 
+(ert-deftest disco-root-activity-secondary-label-uses-message-placeholders ()
+  (disco-state-reset)
+  (let ((channel '((id . "c1")
+                   (type . 0)
+                   (last_message_id . "42")
+                   (last_pin_timestamp . "2026-03-05T01:00:00.000000+00:00"))))
+    (unwind-protect
+        (progn
+          (disco-state-upsert-channel channel)
+          (let ((label (disco-root--activity-secondary-label channel)))
+            (should (equal "(preview unavailable)" label))
+            (should-not (string-match-p "pins" label))
+            (should-not (string-match-p "unread" label))))
+      (disco-state-reset))))
+
+(ert-deftest disco-root-activity-secondary-label-prefers-conversation-summary ()
+  (disco-state-reset)
+  (let ((channel '((id . "c2")
+                   (type . 0)
+                   (last_message_id . "43"))))
+    (unwind-protect
+        (progn
+          (disco-state-upsert-channel channel)
+          (disco-state-apply-conversation-summary-update
+           "c2"
+           '(((id . "99")
+              (summ_short . "summary-preview"))))
+          (should (equal "summary-preview"
+                         (disco-root--activity-secondary-label channel))))
+      (disco-state-reset))))
+
 (ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
   (disco-state-reset)
   (unwind-protect

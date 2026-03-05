@@ -1653,14 +1653,15 @@ Discord channel position can arrive as integer or numeric string."
       (disco-root--channel-display-name channel))))
 
 (defun disco-root--activity-secondary-label (channel)
-  "Return fallback activity preview label for CHANNEL."
+  "Return fallback activity preview label for CHANNEL.
+
+Fallback stays message-oriented and avoids status-tag placeholders."
   (let ((channel-id (alist-get 'id channel)))
     (or (and channel-id
              (disco-state-channel-conversation-summary-preview channel-id))
-        (disco-root--format-trail-tags
-         (append (disco-root--channel-dynamic-trail-tags channel)
-                 (disco-root--channel-static-trail-tags channel)))
-        "(message)")))
+        (and (alist-get 'last_message_id channel)
+             "(last message unavailable)")
+        "(no messages)")))
 
 (defun disco-root--canonicalize-number (spec base)
   "Resolve SPEC against BASE columns.
