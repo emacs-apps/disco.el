@@ -537,6 +537,35 @@
         (should (equal "123" (plist-get parsed :max-id)))
         (should (equal "456" (plist-get parsed :min-id)))))))
 
+(ert-deftest disco-root-search-current-domain-at-point-prefers-channel ()
+  (disco-state-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-root-mode)
+        (disco-state-upsert-channel '((id . "c1")
+                                      (guild_id . "g1")
+                                      (type . 0)
+                                      (name . "general")))
+        (let ((inhibit-read-only t))
+          (insert "hit\n")
+          (add-text-properties (point-min) (point-max)
+                               '(disco-channel-id "c1")))
+        (goto-char (point-min))
+        (let ((domain (disco-root--search-current-domain-at-point)))
+          (should (eq 'channel (plist-get domain :kind)))
+          (should (equal "c1" (plist-get domain :id)))
+          (should (equal "g1" (plist-get domain :guild-id)))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-search-parse-query-rejects-in-filter-for-channel-domain ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (should-error
+     (disco-root--search-parse-query
+      "in:general"
+      '(:kind channel :id "c1" :guild-id "g1" :label "general"))
+     :type 'error)))
+
 (ert-deftest disco-root-search-transient-boundary-use-org-read-date ()
   (with-temp-buffer
     (disco-root-mode)
@@ -624,6 +653,21 @@
          '(:kind guild :id "g1" :label "Guild"))
         (should (equal '("g1" :query "ali" :limit 50) requested))))))
 
+(ert-deftest disco-root-search-member-completion-requests-guild-members-for-channel-domain ()
+  (let (requested)
+    (with-temp-buffer
+      (setq-local disco-root--search-completion-requested-prefixes nil)
+      (cl-letf (((symbol-function 'disco-gateway-running-p)
+                 (lambda () t))
+                ((symbol-function 'disco-gateway-request-guild-members)
+                 (lambda (guild-id &rest args)
+                   (setq requested (cons guild-id args)))))
+        (disco-root--search-maybe-request-member-completion
+         "mentions"
+         "ali"
+         '(:kind channel :id "c1" :guild-id "g1" :label "general"))
+        (should (equal '("g1" :query "ali" :limit 50) requested))))))
+
 (ert-deftest disco-root-search-format-user-and-channel-ids-show_labels ()
   (disco-state-reset)
   (unwind-protect
@@ -664,6 +708,13 @@
             (should refreshed)))
       (kill-buffer mini-buffer))))
 
+(ert-deftest disco-root-search-transient-format-channel-ids-shows-fixed-by-domain ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (setq-local disco-root--search-domain '(:kind channel :id "c1" :guild-id "g1" :label "general"))
+    (should (equal "fixed by domain"
+                   (disco-root--search-transient-format-channel-ids nil)))))
+
 (ert-deftest disco-root-render-layout-search-renders-sections ()
   (with-temp-buffer
     (disco-root-mode)
@@ -701,6 +752,45 @@
         (should (string-match-p "Show more" (buffer-string)))
         (should (string-match-p "(loading...)" (buffer-string)))
         (should (string-match-p "(boom)" (buffer-string)))))))
+
+(ert-deftest disco-root-search-dispatch-channel-domain-uses-guild-tabs-for-guild-channel ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (captured)
+      (setq-local disco-root--search-domain '(:kind channel :id "c1" :guild-id "g1" :label "general"))
+      (setq-local disco-root--search-query-spec '(:content "foo" :sort-by timestamp :sort-order desc))
+      (disco-root--search-reset-tab-states)
+      (cl-letf (((symbol-function 'disco-root--search-render-if-visible)
+                 (lambda () nil))
+                ((symbol-function 'disco-api-guild-search-messages-tabs-async)
+                 (lambda (guild-id &rest args)
+                   (setq captured (cons guild-id args))))
+                ((symbol-function 'disco-api-channel-search-messages-tabs-async)
+                 (lambda (&rest _args)
+                   (ert-fail "channel endpoint should not be used for guild channel"))))
+        (disco-root--search-dispatch 1 (disco-root--search-request-tabs nil))
+        (should (equal "g1" (car captured)))
+        (should (equal '("c1") (plist-get (cdr captured) :channel-ids)))))))
+
+(ert-deftest disco-root-search-dispatch-channel-domain-uses-channel-tabs-for-private-channel ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (captured)
+      (setq-local disco-root--search-domain '(:kind channel :id "c1" :guild-id nil :label "dm"))
+      (setq-local disco-root--search-query-spec '(:content "foo" :sort-by timestamp :sort-order desc))
+      (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
+      (puthash "c1" '((id . "c1") (type . 1) (name . "dm")) disco-root--search-channel-table)
+      (disco-root--search-reset-tab-states)
+      (cl-letf (((symbol-function 'disco-root--search-render-if-visible)
+                 (lambda () nil))
+                ((symbol-function 'disco-api-channel-search-messages-tabs-async)
+                 (lambda (channel-id &rest args)
+                   (setq captured (cons channel-id args))))
+                ((symbol-function 'disco-api-guild-search-messages-tabs-async)
+                 (lambda (&rest _args)
+                   (ert-fail "guild endpoint should not be used for private channel"))))
+        (disco-root--search-dispatch 1 (disco-root--search-request-tabs nil))
+        (should (equal "c1" (car captured)))))))
 
 (ert-deftest disco-root-toggle-section-at-point-activity-falls-forward ()
   (with-temp-buffer

@@ -86,6 +86,19 @@
         (disco-room--resolve-pending-jump)
         (should fetched)))))
 
+(ert-deftest disco-room-search-channel-opens-root-search-transient ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (let ((disco-room--channel-id "c1")
+          passed-channel)
+      (disco-state-reset)
+      (disco-state-upsert-channel '((id . "c1") (type . 1) (name . "dm")))
+      (cl-letf (((symbol-function 'disco-root-search-channel-transient)
+                 (lambda (channel)
+                   (setq passed-channel channel))))
+        (disco-room-search-channel)
+        (should (equal "c1" (alist-get 'id passed-channel)))))))
+
 (ert-deftest disco-room-fetch-around-pending-jump-replaces-cache-and-jumps ()
   (with-temp-buffer
     (disco-room-mode)

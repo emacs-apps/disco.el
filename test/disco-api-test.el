@@ -91,6 +91,28 @@
                  nil nil nil nil)
                captured)))))
 
+(ert-deftest disco-api-channel-search-messages-tabs-builds-endpoint-and-payload ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query unauthenticated raw-body extra-headers body-type)
+                 (setq captured (list method endpoint payload query unauthenticated raw-body extra-headers body-type))
+                 'ok)))
+      (should (eq 'ok
+                  (disco-api-channel-search-messages-tabs
+                   "c1"
+                   :tabs '((messages :limit 5 :content "foo" :sort-by timestamp :sort-order desc))
+                   :track-exact-total-hits t)))
+      (should (equal
+               '("POST"
+                 "/channels/c1/messages/search/tabs"
+                 ((tabs (messages (limit . 5)
+                                  (content . "foo")
+                                  (sort_by . "timestamp")
+                                  (sort_order . "desc")))
+                  (track_exact_total_hits . t))
+                 nil nil nil nil nil)
+               captured)))))
+
 (provide 'disco-api-test)
 
 ;;; disco-api-test.el ends here

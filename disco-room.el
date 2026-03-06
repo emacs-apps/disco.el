@@ -6663,6 +6663,15 @@ When called interactively, empty input clears slowmode (sets to 0)."
 
 (declare-function disco-root-list-archived-threads "disco-root" (&optional parent-channel-id))
 
+(declare-function disco-root-search-channel-transient "disco-root" (&optional channel))
+
+(defun disco-room-search-channel ()
+  "Open root search transient scoped to the current room channel."
+  (interactive)
+  (let ((channel (or (disco-room--channel-object)
+                     (user-error "disco: unknown current room channel"))))
+    (disco-root-search-channel-transient channel)))
+
 (defun disco-room-open-parent-archived-threads ()
   "Open archived thread browser for current room's parent channel."
   (interactive)
@@ -6716,6 +6725,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("a" "Toggle archived" disco-room-toggle-thread-archived)
     ("A" "Parent archived threads..." disco-room-open-parent-archived-threads)]
    ["Inspect"
+    ("/" "Search channel..." disco-room-search-channel)
     ("H" "HTTP queue" disco-http-describe-queue)
     ("R" "Rate limits" disco-api-describe-rate-limits)
     ("G" "Gateway status" disco-gateway-describe-status)]
@@ -6733,6 +6743,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "s") #'disco-room-search)
     (define-key map (kbd "n") #'disco-room-search-next)
     (define-key map (kbd "p") #'disco-room-search-prev)
+    (define-key map (kbd "C-c /") #'disco-room-search-channel)
     (define-key map (kbd "r") #'disco-room-reply-to-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
     (define-key map (kbd "d") #'disco-room-delete-message)

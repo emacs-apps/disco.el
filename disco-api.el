@@ -612,6 +612,32 @@ Uses `/channels/{channel.id}/threads/search' with `archived=false'."
    :on-success on-success
    :on-error on-error))
 
+(cl-defun disco-api-channel-search-messages-tabs
+    (channel-id &key tabs include-nsfw track-exact-total-hits)
+  "Search messages in CHANNEL-ID using Discord channel tabs search endpoint."
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/messages/search/tabs" channel-id)
+   (disco-api--message-search-tabs-payload
+    :tabs tabs
+    :include-nsfw include-nsfw
+    :track-exact-total-hits track-exact-total-hits)
+   nil
+   nil))
+
+(cl-defun disco-api-channel-search-messages-tabs-async
+    (channel-id &key tabs include-nsfw track-exact-total-hits on-success on-error)
+  "Search messages in CHANNEL-ID asynchronously using Discord channel tabs search endpoint."
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/messages/search/tabs" channel-id)
+   :payload (disco-api--message-search-tabs-payload
+             :tabs tabs
+             :include-nsfw include-nsfw
+             :track-exact-total-hits track-exact-total-hits)
+   :on-success on-success
+   :on-error on-error))
+
 (cl-defun disco-api-user-search-messages-tabs
     (&key tabs include-nsfw track-exact-total-hits)
   "Search messages across private channels using Discord user tabs search endpoint."

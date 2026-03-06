@@ -598,6 +598,52 @@ after passive EWOC and full-buffer updates."
   "Return identifier from root search DOMAIN plist."
   (plist-get domain :id))
 
+(defun disco-root--search-domain-channel-id (domain)
+  "Return fixed channel id from root search DOMAIN when it is channel-scoped."
+  (when (eq (disco-root--search-domain-kind domain) 'channel)
+    (disco-root--search-domain-id domain)))
+
+(defun disco-root--search-domain-guild-id (domain)
+  "Return guild id associated with root search DOMAIN, or nil."
+  (pcase (disco-root--search-domain-kind domain)
+    ('guild
+     (disco-root--search-domain-id domain))
+    ('channel
+     (plist-get domain :guild-id))
+    (_ nil)))
+
+(defun disco-root--search-domain-channel-object (domain)
+  "Return fixed channel object for root search DOMAIN, or nil."
+  (when-let* ((channel-id (disco-root--search-domain-channel-id domain)))
+    (or (disco-state-channel channel-id)
+        (and (hash-table-p disco-root--search-channel-table)
+             (gethash channel-id disco-root--search-channel-table))
+        (and (hash-table-p disco-root--search-thread-table)
+             (gethash channel-id disco-root--search-thread-table)))))
+
+(defun disco-root--search-channel-domain (channel)
+  "Return channel-scoped search domain plist for CHANNEL."
+  (when-let* ((channel-id (and (listp channel) (alist-get 'id channel))))
+    (let ((label (or (disco-root--channel-display-name channel)
+                     channel-id)))
+      (list :kind 'channel
+            :id channel-id
+            :guild-id (alist-get 'guild_id channel)
+            :label label))))
+
+(defun disco-root--search-current-channel-domain ()
+  "Return current channel-scoped search domain inferred from point, or nil."
+  (or (when (and (eq (disco-root--ensure-layout) 'search)
+                 (eq (disco-root--search-domain-kind disco-root--search-domain) 'channel))
+        disco-root--search-domain)
+      (when-let* ((channel-id (disco-root--line-channel-id))
+                  (channel (or (disco-state-channel channel-id)
+                               (and (hash-table-p disco-root--search-channel-table)
+                                    (gethash channel-id disco-root--search-channel-table))
+                               (and (hash-table-p disco-root--search-thread-table)
+                                    (gethash channel-id disco-root--search-thread-table)))))
+        (disco-root--search-channel-domain channel))))
+
 (defun disco-root--search-domain-label (domain)
   "Return display label from root search DOMAIN plist."
   (or (plist-get domain :label)
@@ -606,6 +652,10 @@ after passive EWOC and full-buffer updates."
         ('guild (or (disco-root--guild-name-by-id (disco-root--search-domain-id domain))
                     (disco-root--search-domain-id domain)
                     "Guild"))
+        ('channel (let ((channel (disco-root--search-domain-channel-object domain)))
+                    (or (and channel (disco-root--channel-display-name channel))
+                        (disco-root--search-domain-channel-id domain)
+                        "Channel")))
         (_ "Search"))))
 
 (defun disco-root--search-domain-equal-p (left right)
@@ -618,6 +668,10 @@ after passive EWOC and full-buffer updates."
 (defun disco-root--search-domain-candidates ()
   "Return completion candidates for root search domains."
   (append
+   (when-let* ((channel-domain (disco-root--search-current-channel-domain)))
+     (list (cons (format "Channel: %s"
+                         (disco-root--search-domain-label channel-domain))
+                 channel-domain)))
    (list (cons "DMs"
                '(:kind dms :id nil :label "DMs")))
    (mapcar (lambda (guild)
@@ -632,6 +686,7 @@ after passive EWOC and full-buffer updates."
   (or (when (and (eq (disco-root--ensure-layout) 'search)
                  disco-root--search-domain)
         disco-root--search-domain)
+      (disco-root--search-current-channel-domain)
       (when-let* ((guild-id (disco-root--line-guild-id)))
         (list :kind 'guild
               :id guild-id
@@ -642,17 +697,6 @@ after passive EWOC and full-buffer updates."
         (list :kind 'guild
               :id guild-id
               :label (or (disco-root--guild-name-by-id guild-id) guild-id)))
-      (when-let* ((channel-id (disco-root--line-channel-id))
-                  (channel (or (disco-state-channel channel-id)
-                               (and (hash-table-p disco-root--search-channel-table)
-                                    (gethash channel-id disco-root--search-channel-table))
-                               (and (hash-table-p disco-root--search-thread-table)
-                                    (gethash channel-id disco-root--search-thread-table)))))
-        (if-let* ((guild-id (alist-get 'guild_id channel)))
-            (list :kind 'guild
-                  :id guild-id
-                  :label (or (disco-root--guild-name-by-id guild-id) guild-id))
-          (list :kind 'dms :id nil :label "DMs")))
       (when (eq disco-root--view-mode 'dms)
         '(:kind dms :id nil :label "DMs"))
       (cdr (car (disco-root--search-domain-candidates)))))
@@ -713,6 +757,10 @@ after passive EWOC and full-buffer updates."
      (let ((guild-id (disco-root--search-domain-id domain)))
        (append (or (disco-state-guild-channels guild-id) '())
                (or (disco-state-guild-threads guild-id) '()))))
+    ('channel
+     (if-let* ((channel (disco-root--search-domain-channel-object domain)))
+         (list channel)
+       '()))
     (_
      (or (disco-state-private-channels) '()))))
 
@@ -804,13 +852,12 @@ after passive EWOC and full-buffer updates."
       (dolist (label (list "me" current-user-id))
         (setq result
               (disco-root--search--register-candidate label current-user-id seen result))))
-    (when (eq (disco-root--search-domain-kind domain) 'guild)
-      (dolist (member (disco-state-guild-members (disco-root--search-domain-id domain)))
+    (when-let* ((guild-id (disco-root--search-domain-guild-id domain)))
+      (dolist (member (disco-state-guild-members guild-id))
         (setq result
               (disco-root--search-user-candidates-from-guild-member member seen result))))
     (dolist (presence (disco-state-presences
-                       (and (eq (disco-root--search-domain-kind domain) 'guild)
-                            (disco-root--search-domain-id domain))))
+                       (disco-root--search-domain-guild-id domain)))
       (setq result
             (disco-root--search-user-candidates-from-presence presence seen result)))
     (dolist (channel (disco-root--search-domain-channel-objects domain))
@@ -840,7 +887,7 @@ after passive EWOC and full-buffer updates."
 
 (defun disco-root--search-should-request-member-completion-p (domain filter prefix)
   "Return non-nil when member completion should request remote data."
-  (and (eq (disco-root--search-domain-kind domain) 'guild)
+  (and (disco-root--search-domain-guild-id domain)
        (member filter '("from" "mentions"))
        (>= (length prefix)
            (max 1 (or disco-root-search-member-completion-min-prefix 1)))
@@ -855,7 +902,7 @@ after passive EWOC and full-buffer updates."
                (not (member request-key disco-root--search-completion-requested-prefixes)))
       (cl-pushnew request-key disco-root--search-completion-requested-prefixes :test #'equal)
       (disco-gateway-request-guild-members
-       (disco-root--search-domain-id domain)
+       (disco-root--search-domain-guild-id domain)
        :query prefix
        :limit disco-root-search-member-completion-limit))))
 
@@ -897,6 +944,8 @@ after passive EWOC and full-buffer updates."
 
 (defun disco-root--search-resolve-channel (raw-value domain)
   "Resolve RAW-VALUE to a channel id within root search DOMAIN."
+  (when (eq (disco-root--search-domain-kind domain) 'channel)
+    (user-error "disco: in: is unavailable in channel search; switch domain instead"))
   (let* ((trimmed (string-trim (or raw-value "")))
          (normalized (replace-regexp-in-string "\\`#" "" trimmed)))
     (cond
@@ -1058,7 +1107,11 @@ after passive EWOC and full-buffer updates."
 
 (defun disco-root--search-capf-filter-candidates ()
   "Return completion candidates for root search filter names."
-  (mapcar (lambda (name) (concat name ":")) disco-root--search-filter-names))
+  (let ((filters (if (eq (disco-root--search-domain-kind disco-root--search-completion-domain)
+                         'channel)
+                     (delete "in" (copy-sequence disco-root--search-filter-names))
+                   disco-root--search-filter-names)))
+    (mapcar (lambda (name) (concat name ":")) filters)))
 
 (defun disco-root--search-capf-value-candidates (filter domain)
   "Return completion candidates for FILTER values within DOMAIN."
@@ -1070,9 +1123,10 @@ after passive EWOC and full-buffer updates."
     ("author-type"
      disco-root--search-author-type-values)
     ("in"
-     (mapcar (lambda (cell)
-               (disco-root--search-quote-completion-candidate (car cell)))
-             (disco-root--search-channel-candidates domain)))
+     (unless (eq (disco-root--search-domain-kind domain) 'channel)
+       (mapcar (lambda (cell)
+                 (disco-root--search-quote-completion-candidate (car cell)))
+               (disco-root--search-channel-candidates domain))))
     ("has"
      disco-root--search-has-values)
     ("sort"
@@ -1211,7 +1265,8 @@ after passive EWOC and full-buffer updates."
 (defun disco-root--search-user-label (user-id &optional domain)
   "Return best human-readable label for USER-ID in DOMAIN."
   (let* ((normalized (and user-id (format "%s" user-id)))
-         (search-domain (or domain disco-root--search-domain)))
+         (search-domain (or domain disco-root--search-domain))
+         (guild-id (disco-root--search-domain-guild-id search-domain)))
     (cond
      ((null normalized)
       nil)
@@ -1219,18 +1274,13 @@ after passive EWOC and full-buffer updates."
              (and (fboundp 'disco-gateway-current-user-id)
                   (disco-gateway-current-user-id)))
       "me")
-     ((and (eq (disco-root--search-domain-kind search-domain) 'guild)
-           (when-let* ((member (disco-state-guild-member
-                                (disco-root--search-domain-id search-domain)
-                                normalized)))
+     ((and guild-id
+           (when-let* ((member (disco-state-guild-member guild-id normalized)))
              (or (alist-get 'nick member)
                  (let ((user (alist-get 'user member)))
                    (or (alist-get 'global_name user)
                        (alist-get 'username user)))))))
-     ((when-let* ((presence (disco-state-presence
-                             normalized
-                             (and (eq (disco-root--search-domain-kind search-domain) 'guild)
-                                  (disco-root--search-domain-id search-domain))))
+     ((when-let* ((presence (disco-state-presence normalized guild-id))
                   (user (alist-get 'user presence)))
         (or (alist-get 'global_name user)
             (alist-get 'username user))))
@@ -1307,15 +1357,15 @@ after passive EWOC and full-buffer updates."
 
 When GUILD-ID is nil, refresh any active root search completion session."
   (when-let* ((miniwin (active-minibuffer-window))
-              (completions-win (get-buffer-window "*Completions*" t))
               (minibuf (window-buffer miniwin)))
-    (with-current-buffer minibuf
-      (when (and disco-root--search-completion-domain
-                 (or (null guild-id)
-                     (equal (disco-root--search-domain-id disco-root--search-completion-domain)
-                            guild-id)))
-        (ignore-errors
-          (minibuffer-completion-help))))))
+    (when (get-buffer-window "*Completions*" t)
+      (with-current-buffer minibuf
+        (when (and disco-root--search-completion-domain
+                   (or (null guild-id)
+                       (equal (disco-root--search-domain-guild-id disco-root--search-completion-domain)
+                              guild-id)))
+          (ignore-errors
+            (minibuffer-completion-help)))))))
 
 (defun disco-root--search-user-completion-table (domain filter)
   "Return completion table for root search users in DOMAIN for FILTER."
@@ -1541,7 +1591,7 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   "Set transient root search domain to VALUE."
   (setq-local disco-root--search-domain value)
   (setq-local disco-root--search-query-spec
-              (plist-put disco-root--search-query-spec :channel-ids nil))
+              (disco-root--search-plist-remove disco-root--search-query-spec :channel-ids))
   (disco-root--search-sync-query-display))
 
 (defun disco-root--search-transient-spec-getter (property)
@@ -1615,6 +1665,8 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   "Read channel filters for the search transient."
   (disco-root--search-transient-with-buffer
    (lambda ()
+     (when (eq (disco-root--search-domain-kind disco-root--search-domain) 'channel)
+       (user-error "disco: in: is unavailable in channel search; switch domain instead"))
      (let ((ids (disco-root--search-read-channel-ids
                  "In channels: "
                  disco-root--search-domain
@@ -1739,7 +1791,9 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   "Format root search channel id VALUE list for transient display."
   (disco-root--search-transient-with-buffer
    (lambda ()
-     (disco-root--search-format-channel-ids value))))
+     (if (eq (disco-root--search-domain-kind disco-root--search-domain) 'channel)
+         "fixed by domain"
+       (disco-root--search-format-channel-ids value)))))
 
 (defun disco-root--search-transient-format-has (value)
   "Format root search `has' VALUE list for transient display."
@@ -2016,6 +2070,11 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   (and (listp body)
        (= (or (alist-get 'code body) 0) 110000)))
 
+(defun disco-root--search-domain-fixed-channel-ids (domain)
+  "Return fixed channel-id list implied by channel-scoped DOMAIN, or nil." 
+  (when-let* ((channel-id (disco-root--search-domain-channel-id domain)))
+    (list channel-id)))
+
 (defun disco-root--search-tab-base-spec (tab query-spec &optional cursor)
   "Return internal request plist for search TAB using QUERY-SPEC and CURSOR."
   (let ((spec (list :limit disco-root-search-tab-limit
@@ -2154,7 +2213,9 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
 (defun disco-root--search-dispatch (generation tabs-alist)
   "Dispatch async root search request for GENERATION using TABS-ALIST."
   (let ((root-buffer (current-buffer))
-        (domain disco-root--search-domain))
+        (domain disco-root--search-domain)
+        (channel-ids (or (disco-root--search-domain-fixed-channel-ids disco-root--search-domain)
+                         (plist-get disco-root--search-query-spec :channel-ids))))
     (setq-local disco-root--search-in-flight t)
     (disco-root--search-apply-request-state tabs-alist t)
     (disco-root--search-render-if-visible)
@@ -2163,7 +2224,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
        (disco-api-guild-search-messages-tabs-async
         (disco-root--search-domain-id domain)
         :tabs tabs-alist
-        :channel-ids (plist-get disco-root--search-query-spec :channel-ids)
+        :channel-ids channel-ids
         :include-nsfw disco-root-search-include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
@@ -2174,6 +2235,35 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
                     (when (buffer-live-p root-buffer)
                       (with-current-buffer root-buffer
                         (disco-root--search-handle-error generation tabs-alist err))))))
+      ('channel
+       (if-let* ((guild-id (disco-root--search-domain-guild-id domain)))
+           (disco-api-guild-search-messages-tabs-async
+            guild-id
+            :tabs tabs-alist
+            :channel-ids channel-ids
+            :include-nsfw disco-root-search-include-nsfw
+            :track-exact-total-hits disco-root-search-track-exact-total-hits
+            :on-success (lambda (body)
+                          (when (buffer-live-p root-buffer)
+                            (with-current-buffer root-buffer
+                              (disco-root--search-handle-success generation tabs-alist body))))
+            :on-error (lambda (err)
+                        (when (buffer-live-p root-buffer)
+                          (with-current-buffer root-buffer
+                            (disco-root--search-handle-error generation tabs-alist err)))))
+         (disco-api-channel-search-messages-tabs-async
+          (disco-root--search-domain-channel-id domain)
+          :tabs tabs-alist
+          :include-nsfw disco-root-search-include-nsfw
+          :track-exact-total-hits disco-root-search-track-exact-total-hits
+          :on-success (lambda (body)
+                        (when (buffer-live-p root-buffer)
+                          (with-current-buffer root-buffer
+                            (disco-root--search-handle-success generation tabs-alist body))))
+          :on-error (lambda (err)
+                      (when (buffer-live-p root-buffer)
+                        (with-current-buffer root-buffer
+                          (disco-root--search-handle-error generation tabs-alist err)))))))
       (_
        (disco-api-user-search-messages-tabs-async
         :tabs tabs-alist
@@ -2251,6 +2341,41 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
     (message "disco: searching %s in %s"
              normalized-query
              (disco-root--search-domain-label domain))))
+
+(defun disco-root-search-channel-transient (&optional channel)
+  "Open root search transient scoped to CHANNEL.
+
+CHANNEL can be a channel object or channel id. When called from the root
+buffer without CHANNEL, use the channel at point."
+  (interactive)
+  (let* ((resolved-channel
+          (cond
+           ((and (listp channel) (alist-get 'id channel))
+            channel)
+           ((and channel (disco-state-channel channel))
+            (disco-state-channel channel))
+           ((derived-mode-p 'disco-root-mode)
+            (when-let* ((channel-id (disco-root--line-channel-id)))
+              (or (disco-state-channel channel-id)
+                  (disco-root--search-channel channel-id))))
+           (t nil))))
+    (unless resolved-channel
+      (user-error "disco: no channel available for channel search"))
+    (let ((buf (get-buffer-create disco-root-buffer-name))
+          (domain (disco-root--search-channel-domain resolved-channel)))
+      (with-current-buffer buf
+        (unless (derived-mode-p 'disco-root-mode)
+          (disco-root-mode))
+        (disco-root--attach-live-updates)
+        (unless (and disco-root--search-domain
+                     (disco-root--search-domain-equal-p disco-root--search-domain domain))
+          (setq-local disco-root--search-domain domain)
+          (setq-local disco-root--search-query-spec (disco-root--search-default-spec))
+          (setq-local disco-root--search-query "")
+          (disco-root--search-sync-query-display)))
+      (pop-to-buffer buf)
+      (with-current-buffer buf
+        (disco-root-search-transient)))))
 
 (defun disco-root--ensure-markers ()
   "Ensure header and ewoc markers exist for the current buffer."
