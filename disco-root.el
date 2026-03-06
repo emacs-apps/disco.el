@@ -216,6 +216,16 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-root-search-member-completion-min-prefix 2
+  "Minimum prefix length before root search requests remote guild members."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-root-search-member-completion-limit 50
+  "Maximum number of guild members to request for root search completion."
+  :type 'integer
+  :group 'disco)
+
 (defconst disco-root--search-filter-names
   '("from" "mentions" "has" "in" "before" "after" "pinned" "sort" "order")
   "Supported Discord-style root search filter names.")
@@ -235,6 +245,9 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 
 (defvar-local disco-root--search-completion-domain nil
   "Minibuffer-local root search domain used by search query completion.")
+
+(defvar-local disco-root--search-completion-requested-prefixes nil
+  "Minibuffer-local set of remote member completion prefixes already requested.")
 
 (defcustom disco-root-show-guild-icons t
   "When non-nil, show guild icons in root guild rows when available."
@@ -738,6 +751,38 @@ after passive EWOC and full-buffer updates."
               (disco-root--search--register-candidate label user-id seen result)))))
   result)
 
+(defun disco-root--search-user-candidates-from-guild-member (member seen result)
+  "Add cached guild MEMBER user candidates to RESULT."
+  (let* ((user (alist-get 'user member))
+         (user-id (or (and (listp user) (alist-get 'id user))
+                      (alist-get 'user_id member)))
+         (nick (alist-get 'nick member)))
+    (when user-id
+      (dolist (label (delq nil (list nick
+                                     (and (listp user) (alist-get 'global_name user))
+                                     (and (listp user) (alist-get 'username user))
+                                     (and (listp user)
+                                          (alist-get 'username user)
+                                          (format "@%s" (alist-get 'username user)))
+                                     user-id)))
+        (setq result
+              (disco-root--search--register-candidate label user-id seen result)))))
+  result)
+
+(defun disco-root--search-user-candidates-from-presence (presence seen result)
+  "Add presence-derived user candidates from PRESENCE to RESULT."
+  (let* ((user (alist-get 'user presence))
+         (user-id (and (listp user) (alist-get 'id user))))
+    (when user-id
+      (dolist (label (delq nil (list (alist-get 'global_name user)
+                                     (alist-get 'username user)
+                                     (and (alist-get 'username user)
+                                          (format "@%s" (alist-get 'username user)))
+                                     user-id)))
+        (setq result
+              (disco-root--search--register-candidate label user-id seen result)))))
+  result)
+
 (defun disco-root--search-user-candidates (domain)
   "Return alist of display label to user id candidates for DOMAIN."
   (let ((seen (make-hash-table :test #'equal))
@@ -747,6 +792,15 @@ after passive EWOC and full-buffer updates."
       (dolist (label (list "me" current-user-id))
         (setq result
               (disco-root--search--register-candidate label current-user-id seen result))))
+    (when (eq (disco-root--search-domain-kind domain) 'guild)
+      (dolist (member (disco-state-guild-members (disco-root--search-domain-id domain)))
+        (setq result
+              (disco-root--search-user-candidates-from-guild-member member seen result))))
+    (dolist (presence (disco-state-presences
+                       (and (eq (disco-root--search-domain-kind domain) 'guild)
+                            (disco-root--search-domain-id domain))))
+      (setq result
+            (disco-root--search-user-candidates-from-presence presence seen result)))
     (dolist (channel (disco-root--search-domain-channel-objects domain))
       (when (disco-state-private-channel-p channel)
         (setq result
@@ -762,6 +816,36 @@ after passive EWOC and full-buffer updates."
     (cdr (seq-find (lambda (cell)
                      (equal (downcase (car cell)) downcased))
                    candidates))))
+
+(defun disco-root--search-normalize-member-completion-prefix (value)
+  "Normalize search completion VALUE into a guild member prefix query."
+  (let* ((text (string-trim (or value "")))
+         (unquoted (string-trim text "\""))
+         (no-at (if (string-prefix-p "@" unquoted)
+                    (substring unquoted 1)
+                  unquoted)))
+    (string-trim no-at)))
+
+(defun disco-root--search-should-request-member-completion-p (domain filter prefix)
+  "Return non-nil when member completion should request remote data."
+  (and (eq (disco-root--search-domain-kind domain) 'guild)
+       (member filter '("from" "mentions"))
+       (>= (length prefix)
+           (max 1 (or disco-root-search-member-completion-min-prefix 1)))
+       (not (string-match-p "\\`[0-9]+\\'" prefix))
+       (disco-gateway-running-p)))
+
+(defun disco-root--search-maybe-request-member-completion (filter raw-value domain)
+  "Request guild member completions for FILTER and RAW-VALUE in DOMAIN."
+  (let* ((prefix (disco-root--search-normalize-member-completion-prefix raw-value))
+         (request-key (cons (disco-root--search-domain-id domain) (downcase prefix))))
+    (when (and (disco-root--search-should-request-member-completion-p domain filter prefix)
+               (not (member request-key disco-root--search-completion-requested-prefixes)))
+      (cl-pushnew request-key disco-root--search-completion-requested-prefixes :test #'equal)
+      (disco-gateway-request-guild-members
+       (disco-root--search-domain-id domain)
+       :query prefix
+       :limit disco-root-search-member-completion-limit))))
 
 (defun disco-root--search-parse-bool (raw-value field-name)
   "Parse RAW-VALUE as boolean for FIELD-NAME and return t or :false."
@@ -981,6 +1065,7 @@ after passive EWOC and full-buffer updates."
        ((string-match "\\`\\([^:[:space:]]+\\):\\(.*\\)\\'" token)
         (let* ((filter (downcase (match-string 1 token)))
                (raw-value (match-string 2 token))
+               (_request (disco-root--search-maybe-request-member-completion filter raw-value domain))
                (value-candidates (disco-root--search-capf-value-candidates filter domain)))
           (when value-candidates
             (let* ((comma-pos (or (cl-position ?, raw-value :from-end t) -1))
@@ -1005,6 +1090,7 @@ after passive EWOC and full-buffer updates."
     (minibuffer-with-setup-hook
         (lambda ()
           (setq-local disco-root--search-completion-domain domain)
+          (setq-local disco-root--search-completion-requested-prefixes nil)
           (setq-local completion-at-point-functions
                       '(disco-root--search-query-complete-at-point))
           (setq-local completion-ignore-case t))

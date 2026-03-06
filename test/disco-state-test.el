@@ -481,6 +481,39 @@
   (should (= 3
              (length (disco-state-channel-conversation-summaries "c1")))))
 
+(ert-deftest disco-state-presences-returns-scoped-and-global-lists ()
+  (disco-state-reset)
+  (disco-state-apply-presence-update
+   '((guild_id . "g1")
+     (user (id . "u1")
+           (username . "alice"))))
+  (disco-state-apply-presence-update
+   '((guild_id . "g2")
+     (user (id . "u2")
+           (username . "bob"))))
+  (should (= 2 (length (disco-state-presences))))
+  (should (= 1 (length (disco-state-presences "g1"))))
+  (should (equal "u1"
+                 (alist-get 'id
+                            (alist-get 'user
+                                       (car (disco-state-presences "g1")))))))
+
+(ert-deftest disco-state-apply-guild-members-chunk-caches-members ()
+  (disco-state-reset)
+  (disco-state-apply-guild-members-chunk
+   "g1"
+   '(((nick . "Ali")
+      (user (id . "u1")
+            (username . "alice")))))
+  (should (= 1 (length (disco-state-guild-members "g1"))))
+  (should (equal "Ali"
+                 (alist-get 'nick
+                            (car (disco-state-guild-members "g1")))))
+  (should (equal "alice"
+                 (alist-get 'username
+                            (alist-get 'user
+                                       (disco-state-guild-member "g1" "u1"))))))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

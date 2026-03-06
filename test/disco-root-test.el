@@ -552,6 +552,54 @@
                          (buffer-substring-no-properties start end)
                          table)))))))
 
+(ert-deftest disco-root-search-user-candidates-include-guild-presences ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-apply-presence-update
+         '((guild_id . "g1")
+           (user (id . "u1")
+                 (username . "alice")
+                 (global_name . "Alice"))))
+        (let ((candidates (disco-root--search-user-candidates
+                           '(:kind guild :id "g1" :label "Guild"))))
+          (should (equal "u1"
+                         (cdr (assoc "alice" candidates))))
+          (should (equal "u1"
+                         (cdr (assoc "Alice" candidates))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-search-user-candidates-include-guild-members ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-apply-guild-members-chunk
+         "g1"
+         '(((nick . "Ali")
+            (user (id . "u1")
+                  (username . "alice")
+                  (global_name . "Alice")))))
+        (let ((candidates (disco-root--search-user-candidates
+                           '(:kind guild :id "g1" :label "Guild"))))
+          (should (equal "u1" (cdr (assoc "Ali" candidates))))
+          (should (equal "u1" (cdr (assoc "alice" candidates))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-search-member-completion-requests-guild-members ()
+  (let (requested)
+    (with-temp-buffer
+      (setq-local disco-root--search-completion-requested-prefixes nil)
+      (cl-letf (((symbol-function 'disco-gateway-running-p)
+                 (lambda () t))
+                ((symbol-function 'disco-gateway-request-guild-members)
+                 (lambda (guild-id &rest args)
+                   (setq requested (cons guild-id args)))))
+        (disco-root--search-maybe-request-member-completion
+         "from"
+         "ali"
+         '(:kind guild :id "g1" :label "Guild"))
+        (should (equal '("g1" :query "ali" :limit 50) requested))))))
+
 (ert-deftest disco-root-render-layout-search-renders-sections ()
   (with-temp-buffer
     (disco-root-mode)

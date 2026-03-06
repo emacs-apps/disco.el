@@ -51,6 +51,12 @@
 (defvar disco-state--presences-by-guild-user (make-hash-table :test #'equal)
   "Hash table (guild-id . user-id) -> latest guild-scoped presence object.")
 
+(defvar disco-state--guild-members-by-guild-user (make-hash-table :test #'equal)
+  "Hash table (guild-id . user-id) -> cached guild member object.")
+
+(defvar disco-state--guild-member-ids-by-guild (make-hash-table :test #'equal)
+  "Hash table guild-id -> list of cached guild member user IDs.")
+
 (defvar disco-state--sessions nil
   "List of gateway session objects from SESSIONS_REPLACE.")
 
@@ -155,6 +161,8 @@
   (clrhash disco-state--thread-member-count-by-thread)
   (clrhash disco-state--presences-by-user)
   (clrhash disco-state--presences-by-guild-user)
+  (clrhash disco-state--guild-members-by-guild-user)
+  (clrhash disco-state--guild-member-ids-by-guild)
   (clrhash disco-state--voice-states-by-key)
   (clrhash disco-state--voice-state-keys-by-channel)
   (clrhash disco-state--channel-member-counts-by-channel)
@@ -570,6 +578,70 @@ Otherwise, replace threads only under the provided parent IDs."
   (cons (disco-state--normalize-id guild-id)
         (disco-state--normalize-id user-id)))
 
+(defun disco-state--guild-member-key (guild-id user-id)
+  "Return key for GUILD-ID and USER-ID guild member cache entry."
+  (cons (disco-state--normalize-id guild-id)
+        (disco-state--normalize-id user-id)))
+
+(defun disco-state--guild-member-user-id (member)
+  "Extract normalized user id from guild MEMBER object."
+  (let ((user (and (listp member) (alist-get 'user member))))
+    (disco-state--normalize-id
+     (or (and (listp user) (alist-get 'id user))
+         (and (listp member) (alist-get 'user_id member))))))
+
+(defun disco-state-guild-member (guild-id user-id)
+  "Return copied cached guild member for GUILD-ID and USER-ID."
+  (let ((key (disco-state--guild-member-key guild-id user-id)))
+    (when (and (consp key)
+               (cdr key))
+      (copy-tree (gethash key disco-state--guild-members-by-guild-user)))))
+
+(defun disco-state-guild-members (guild-id)
+  "Return copied cached guild member list for GUILD-ID."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id))
+        result)
+    (when normalized-guild-id
+      (dolist (user-id (or (gethash normalized-guild-id disco-state--guild-member-ids-by-guild)
+                           '()))
+        (when-let* ((member (disco-state-guild-member normalized-guild-id user-id)))
+          (push member result))))
+    (nreverse result)))
+
+(defun disco-state-upsert-guild-member (guild-id member)
+  "Cache guild MEMBER object for GUILD-ID and return copied member."
+  (let* ((normalized-guild-id (disco-state--normalize-id guild-id))
+         (user-id (disco-state--guild-member-user-id member))
+         (key (and normalized-guild-id user-id
+                   (disco-state--guild-member-key normalized-guild-id user-id))))
+    (when key
+      (puthash key (copy-tree member) disco-state--guild-members-by-guild-user)
+      (let ((existing (copy-sequence (or (gethash normalized-guild-id
+                                                  disco-state--guild-member-ids-by-guild)
+                                         '()))))
+        (unless (member user-id existing)
+          (puthash normalized-guild-id
+                   (append existing (list user-id))
+                   disco-state--guild-member-ids-by-guild)))
+      (copy-tree member))))
+
+(defun disco-state-apply-guild-members-chunk (guild-id members &optional presences)
+  "Apply cached guild MEMBERS chunk and optional PRESENCES for GUILD-ID.
+
+Return list of cached member user IDs."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id))
+        result)
+    (when normalized-guild-id
+      (dolist (member (or members '()))
+        (when-let* ((cached (disco-state-upsert-guild-member normalized-guild-id member))
+                    (user-id (disco-state--guild-member-user-id cached)))
+          (push user-id result)))
+      (dolist (presence (or presences '()))
+        (disco-state-apply-presence-update
+         (append `((guild_id . ,normalized-guild-id))
+                 (copy-tree (or presence '())))))
+      (nreverse result))))
+
 (defun disco-state-presence (user-id &optional guild-id)
   "Return copied presence for USER-ID, optionally scoped to GUILD-ID."
   (let ((normalized-user-id (disco-state--normalize-id user-id))
@@ -580,6 +652,23 @@ Otherwise, replace threads only under the provided parent IDs."
            (gethash (disco-state--presence-key normalized-guild-id normalized-user-id)
                     disco-state--presences-by-guild-user)
          (gethash normalized-user-id disco-state--presences-by-user))))))
+
+(defun disco-state-presences (&optional guild-id)
+  "Return copied list of tracked presences, optionally scoped to GUILD-ID."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id))
+        result)
+    (if normalized-guild-id
+        (maphash
+         (lambda (key presence)
+           (when (and (consp key)
+                      (equal (car key) normalized-guild-id))
+             (push (copy-tree presence) result)))
+         disco-state--presences-by-guild-user)
+      (maphash
+       (lambda (_user-id presence)
+         (push (copy-tree presence) result))
+       disco-state--presences-by-user))
+    (nreverse result)))
 
 (defun disco-state-apply-presence-update (presence)
   "Apply PRESENCE_UPDATE payload PRESENCE and return non-nil when stored."

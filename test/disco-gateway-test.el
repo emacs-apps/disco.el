@@ -400,6 +400,56 @@
                         (fields "status" "voice_start_time")))
                      captured)))))
 
+(ert-deftest disco-gateway-request-guild-members-sends-op8 ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-gateway--send-op)
+               (lambda (op d)
+                 (setq captured (list op d))
+                 t)))
+      (should (disco-gateway-request-guild-members
+               "guild1"
+               :query "ali"
+               :limit 25
+               :nonce "n1"))
+      (should (equal '(8
+                       ((guild_id . "guild1")
+                        (query . "ali")
+                        (limit . 25)
+                        (nonce . "n1")))
+                     captured)))))
+
+(ert-deftest disco-gateway-dispatch-guild-members-chunk-applies-state-and-emits ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-guild-members-chunk)
+               (lambda (guild-id members presences)
+                 (setq captured (list guild-id members presences))
+                 '("u1")))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-guild-members-chunk
+       '((guild_id . "g1")
+         (members . (((user (id . "u1")
+                            (username . "alice")))))
+         (presences . (((user (id . "u1")))))
+         (chunk_index . 0)
+         (chunk_count . 1)
+         (nonce . "n1")))
+      (should (equal '("g1"
+                       (((user (id . "u1")
+                               (username . "alice"))))
+                       (((user (id . "u1")))))
+                     captured))
+      (should (equal '(:type guild-members-chunk
+                       :guild-id "g1"
+                       :members (((user (id . "u1")
+                                         (username . "alice"))))
+                       :presences (((user (id . "u1"))))
+                       :chunk-index 0
+                       :chunk-count 1
+                       :nonce "n1")
+                     emitted)))))
+
 (ert-deftest disco-gateway-send-op-now-handles-write-errors ()
   (let ((disco-gateway--ws 'ws)
         (disco-gateway--stopping nil)

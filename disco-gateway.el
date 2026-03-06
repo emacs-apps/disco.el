@@ -12,6 +12,7 @@
 ;; - `disco-gateway-watch-global'
 ;; - `disco-gateway-unwatch-global'
 ;; - `disco-gateway-request-last-messages'
+;; - `disco-gateway-request-guild-members'
 ;; - `disco-gateway-request-channel-statuses'
 ;; - `disco-gateway-request-channel-member-count'
 ;; - `disco-gateway-request-channel-info'
@@ -42,6 +43,7 @@ Event schema:
   `message-reaction-add' `message-reaction-remove'
   `message-reaction-remove-all' `message-reaction-remove-emoji'
   `message-poll-vote-add' `message-poll-vote-remove'
+  `guild-members-chunk'
   `channel-create' `channel-update' `channel-delete'
   `channel-update-partial' `channel-unread-update'
   `channel-pins-update' `channel-pins-ack'
@@ -68,6 +70,8 @@ Event schema:
 - :last-viewed integer for message ack when present
 - :timestamp integer for typing-start when present
 - :member guild member object for typing-start in guild channels
+- :members array of guild member objects for `guild-members-chunk'
+- :nonce string for `guild-members-chunk' when present
 - :emoji reaction emoji object/string for reaction events when present
 - :answer-id integer for poll vote events when present
 - :watched non-nil for message-create when channel has active room watcher
@@ -266,6 +270,32 @@ CHANNEL-IDS is limited to 100 IDs per request by Discord."
        34
        `((guild_id . ,normalized-guild-id)
          (channel_ids . ,normalized-channel-ids))))))
+
+(cl-defun disco-gateway-request-guild-members
+    (guild-id &key query limit presences user-ids nonce)
+  "Request guild members for GUILD-ID via Gateway op 8.
+
+QUERY performs prefix search on username/nickname. LIMIT defaults to 25 when
+QUERY is non-nil. USER-IDS requests exact members and is limited to 100 IDs."
+  (let* ((normalized-guild-id (and guild-id (format "%s" guild-id)))
+         (normalized-query (and (stringp query) (string-trim query)))
+         (normalized-user-ids (disco-gateway--normalize-id-list user-ids 100))
+         (payload `((guild_id . ,normalized-guild-id))))
+    (unless normalized-guild-id
+      (user-error "disco: guild id is required for member request"))
+    (unless (or (and normalized-query (not (string-empty-p normalized-query)))
+                normalized-user-ids)
+      (user-error "disco: either query or user-ids is required for member request"))
+    (if normalized-user-ids
+        (push `(user_ids . ,normalized-user-ids) payload)
+      (push `(query . ,normalized-query) payload)
+      (push `(limit . ,(max 1 (min 100 (or limit 25)))) payload))
+    (when (not (null presences))
+      (push `(presences . ,(if presences t :false)) payload))
+    (when (and (stringp nonce)
+               (not (string-empty-p nonce)))
+      (push `(nonce . ,nonce) payload))
+    (disco-gateway--send-op 8 (nreverse payload))))
 
 (defun disco-gateway-request-channel-statuses (guild-id)
   "Request voice channel statuses for GUILD-ID via Gateway op 36."
@@ -1479,10 +1509,30 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     (when user-id
       (setq disco-gateway--current-user-id user-id))))
 
+(defun disco-gateway--dispatch-guild-members-chunk (payload)
+  "Handle GUILD_MEMBERS_CHUNK dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (members (or (alist-get 'members payload) '()))
+        (presences (or (alist-get 'presences payload) '()))
+        (chunk-index (alist-get 'chunk_index payload))
+        (chunk-count (alist-get 'chunk_count payload))
+        (nonce (alist-get 'nonce payload)))
+    (when guild-id
+      (disco-state-apply-guild-members-chunk guild-id members presences))
+    (disco-gateway--emit
+     (list :type 'guild-members-chunk
+           :guild-id guild-id
+           :members members
+           :presences presences
+           :chunk-index chunk-index
+           :chunk-count chunk-count
+           :nonce nonce))))
+
 ;; Gateway dispatch event names are UPPER_CASE in Discord docs.
 (defconst disco-gateway--dispatch-handler-alist
   '(("READY" . disco-gateway--dispatch-ready)
     ("RESUMED" . disco-gateway--dispatch-resumed)
+    ("GUILD_MEMBERS_CHUNK" . disco-gateway--dispatch-guild-members-chunk)
     ("GUILD_CREATE" . disco-gateway--dispatch-guild-create)
     ("GUILD_UPDATE" . disco-gateway--dispatch-guild-update)
     ("GUILD_DELETE" . disco-gateway--dispatch-guild-delete)
