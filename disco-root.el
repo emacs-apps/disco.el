@@ -247,6 +247,9 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defvar-local disco-root--search-completion-domain nil
   "Minibuffer-local root search domain used by search query completion.")
 
+(defvar-local disco-root--search-completion-filter nil
+  "Minibuffer-local root search filter currently being completed.")
+
 (defvar-local disco-root--search-completion-requested-prefixes nil
   "Minibuffer-local set of remote member completion prefixes already requested.")
 
@@ -1091,6 +1094,7 @@ after passive EWOC and full-buffer updates."
     (minibuffer-with-setup-hook
         (lambda ()
           (setq-local disco-root--search-completion-domain domain)
+          (setq-local disco-root--search-completion-filter 'query)
           (setq-local disco-root--search-completion-requested-prefixes nil)
           (setq-local completion-at-point-functions
                       '(disco-root--search-query-complete-at-point))
@@ -1154,6 +1158,70 @@ after passive EWOC and full-buffer updates."
    ((eq value :false) "no")
    (t (format "%s" value))))
 
+(defun disco-root--search-shorten-list (items &optional max-items)
+  "Return one concise string for ITEMS, truncated to MAX-ITEMS labels."
+  (let* ((labels (delq nil (copy-sequence (or items '()))))
+         (limit (max 1 (or max-items 3)))
+         (total (length labels)))
+    (cond
+     ((zerop total)
+      "none")
+     ((<= total limit)
+      (string-join labels ", "))
+     (t
+      (format "%s +%d"
+              (string-join (seq-take labels limit) ", ")
+              (- total limit))))))
+
+(defun disco-root--search-user-label (user-id &optional domain)
+  "Return best human-readable label for USER-ID in DOMAIN."
+  (let* ((normalized (and user-id (format "%s" user-id)))
+         (search-domain (or domain disco-root--search-domain)))
+    (cond
+     ((null normalized)
+      nil)
+     ((equal normalized
+             (and (fboundp 'disco-gateway-current-user-id)
+                  (disco-gateway-current-user-id)))
+      "me")
+     ((and (eq (disco-root--search-domain-kind search-domain) 'guild)
+           (when-let* ((member (disco-state-guild-member
+                                (disco-root--search-domain-id search-domain)
+                                normalized)))
+             (or (alist-get 'nick member)
+                 (let ((user (alist-get 'user member)))
+                   (or (alist-get 'global_name user)
+                       (alist-get 'username user)))))))
+     ((when-let* ((presence (disco-state-presence
+                             normalized
+                             (and (eq (disco-root--search-domain-kind search-domain) 'guild)
+                                  (disco-root--search-domain-id search-domain))))
+                  (user (alist-get 'user presence)))
+        (or (alist-get 'global_name user)
+            (alist-get 'username user))))
+     (t normalized))))
+
+(defun disco-root--search-channel-label (channel-id)
+  "Return best human-readable label for CHANNEL-ID."
+  (let* ((normalized (and channel-id (format "%s" channel-id)))
+         (channel (and normalized (disco-root--search-channel normalized))))
+    (or (and channel
+             (or (disco-root--channel-display-name channel)
+                 (disco-root--search-context-label channel)))
+        normalized)))
+
+(defun disco-root--search-format-user-ids (ids &optional domain)
+  "Return concise display string for user IDS in DOMAIN."
+  (disco-root--search-shorten-list
+   (mapcar (lambda (user-id)
+             (disco-root--search-user-label user-id domain))
+           (or ids '()))))
+
+(defun disco-root--search-format-channel-ids (ids)
+  "Return concise display string for channel IDS."
+  (disco-root--search-shorten-list
+   (mapcar #'disco-root--search-channel-label (or ids '()))))
+
 (defun disco-root--search-summary-chips ()
   "Return list of summary chips for current root search spec."
   (let ((spec (disco-root--search-normalize-spec disco-root--search-query-spec))
@@ -1163,13 +1231,19 @@ after passive EWOC and full-buffer updates."
                 ((not (string-empty-p content))))
       (push (format "[text:%s]" content) chips))
     (when-let* ((authors (plist-get spec :author-ids)))
-      (push (format "[from:%s]" (disco-root--search-value-summary authors)) chips))
+      (push (format "[from:%s]"
+                    (disco-root--search-format-user-ids authors disco-root--search-domain))
+            chips))
     (when-let* ((mentions (plist-get spec :mentions)))
-      (push (format "[mentions:%s]" (disco-root--search-value-summary mentions)) chips))
+      (push (format "[mentions:%s]"
+                    (disco-root--search-format-user-ids mentions disco-root--search-domain))
+            chips))
     (when (plist-get spec :mention-everyone)
       (push "[mentions:everyone]" chips))
     (when-let* ((channels (plist-get spec :channel-ids)))
-      (push (format "[where:%s]" (disco-root--search-value-summary channels)) chips))
+      (push (format "[where:%s]"
+                    (disco-root--search-format-channel-ids channels))
+            chips))
     (when-let* ((has (plist-get spec :has)))
       (push (format "[has:%s]" (string-join has ",")) chips))
     (when (plist-member spec :pinned)
@@ -1188,6 +1262,21 @@ after passive EWOC and full-buffer updates."
   "Synchronize display query string from current structured search spec."
   (setq-local disco-root--search-query
               (string-join (disco-root--search-summary-chips) "  ")))
+
+(defun disco-root--search-refresh-active-completions (&optional guild-id)
+  "Refresh active root search completion UI when it matches GUILD-ID.
+
+When GUILD-ID is nil, refresh any active root search completion session."
+  (when-let* ((miniwin (active-minibuffer-window))
+              (completions-win (get-buffer-window "*Completions*" t))
+              (minibuf (window-buffer miniwin)))
+    (with-current-buffer minibuf
+      (when (and disco-root--search-completion-domain
+                 (or (null guild-id)
+                     (equal (disco-root--search-domain-id disco-root--search-completion-domain)
+                            guild-id)))
+        (ignore-errors
+          (minibuffer-completion-help))))))
 
 (defun disco-root--search-user-completion-table (domain filter)
   "Return completion table for root search users in DOMAIN for FILTER."
@@ -1215,9 +1304,16 @@ after passive EWOC and full-buffer updates."
   "Read user ids with PROMPT within DOMAIN, defaulting to CURRENT-IDS."
   (let* ((candidates (disco-root--search-user-candidates domain))
          (defaults (disco-root--search-default-multi-input current-ids candidates))
-         (picked (completing-read-multiple prompt
-                                           (disco-root--search-user-completion-table domain "from")
-                                           nil t defaults)))
+         (picked
+          (minibuffer-with-setup-hook
+              (lambda ()
+                (setq-local disco-root--search-completion-domain domain)
+                (setq-local disco-root--search-completion-filter "from")
+                (setq-local disco-root--search-completion-requested-prefixes nil)
+                (setq-local completion-ignore-case t))
+            (completing-read-multiple prompt
+                                      (disco-root--search-user-completion-table domain "from")
+                                      nil t defaults))))
     (mapcar (lambda (value)
               (or (disco-root--search-find-candidate-id value candidates)
                   value))
@@ -1234,14 +1330,21 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
                     (append (or current-ids '())
                             (when include-everyone (list :everyone)))
                     candidates))
-         (picked (completing-read-multiple
-                  prompt
-                  (completion-table-dynamic
-                   (lambda (input)
-                     (disco-root--search-maybe-request-member-completion
-                      "mentions" input domain)
-                     (mapcar #'car candidates)))
-                  nil t defaults)))
+         (picked
+          (minibuffer-with-setup-hook
+              (lambda ()
+                (setq-local disco-root--search-completion-domain domain)
+                (setq-local disco-root--search-completion-filter "mentions")
+                (setq-local disco-root--search-completion-requested-prefixes nil)
+                (setq-local completion-ignore-case t))
+            (completing-read-multiple
+             prompt
+             (completion-table-dynamic
+              (lambda (input)
+                (disco-root--search-maybe-request-member-completion
+                 "mentions" input domain)
+                (mapcar #'car candidates)))
+             nil t defaults))))
     (list :mentions (delq nil
                           (mapcar (lambda (value)
                                     (let ((resolved (disco-root--search-find-candidate-id
@@ -1532,12 +1635,32 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
       (disco-root--search-domain-label domain)
     "none"))
 
+(defun disco-root--search-transient-format-user-ids (value)
+  "Format root search user id VALUE list for transient display."
+  (disco-root--search-transient-with-buffer
+   (lambda ()
+     (disco-root--search-format-user-ids value disco-root--search-domain))))
+
 (defun disco-root--search-transient-format-mentions (value)
   "Format root search mention VALUE plist for transient display."
-  (let ((mentions (plist-get value :mentions))
-        (everyone (plist-get value :mention-everyone)))
-    (concat (disco-root--search-value-summary mentions)
-            (if everyone " +everyone" ""))))
+  (disco-root--search-transient-with-buffer
+   (lambda ()
+     (let ((mentions (plist-get value :mentions))
+           (everyone (plist-get value :mention-everyone)))
+       (concat (disco-root--search-format-user-ids mentions disco-root--search-domain)
+               (if everyone " +everyone" ""))))))
+
+(defun disco-root--search-transient-format-channel-ids (value)
+  "Format root search channel id VALUE list for transient display."
+  (disco-root--search-transient-with-buffer
+   (lambda ()
+     (disco-root--search-format-channel-ids value))))
+
+(defun disco-root--search-transient-format-has (value)
+  "Format root search `has' VALUE list for transient display."
+  (if value
+      (string-join value ", ")
+    "none"))
 
 (defun disco-root--search-transient-format-pinned (value)
   "Format root search pinned VALUE for transient display."
@@ -1569,7 +1692,8 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   :prompt "From: "
   :reader #'disco-root--search-transient-from-value
   :getter (lambda () (disco-root--search-transient-spec-getter :author-ids))
-  :setter (lambda (value) (disco-root--search-transient-spec-setter :author-ids value)))
+  :setter (lambda (value) (disco-root--search-transient-spec-setter :author-ids value))
+  :value-formatter #'disco-root--search-transient-format-user-ids)
 
 (transient-define-infix disco-root-search--infix-mentions ()
   :description "Mentions"
@@ -1586,7 +1710,8 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   :prompt "In channels: "
   :reader #'disco-root--search-transient-channels-value
   :getter (lambda () (disco-root--search-transient-spec-getter :channel-ids))
-  :setter (lambda (value) (disco-root--search-transient-spec-setter :channel-ids value)))
+  :setter (lambda (value) (disco-root--search-transient-spec-setter :channel-ids value))
+  :value-formatter #'disco-root--search-transient-format-channel-ids)
 
 (transient-define-infix disco-root-search--infix-has ()
   :description "Has"
@@ -1594,7 +1719,8 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   :prompt "Has: "
   :reader #'disco-root--search-transient-has-value
   :getter (lambda () (disco-root--search-transient-spec-getter :has))
-  :setter (lambda (value) (disco-root--search-transient-spec-setter :has value)))
+  :setter (lambda (value) (disco-root--search-transient-spec-setter :has value))
+  :value-formatter #'disco-root--search-transient-format-has)
 
 (transient-define-infix disco-root-search--infix-pinned ()
   :description "Pinned"
@@ -3152,6 +3278,8 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
   (let ((event-type (plist-get event :type)))
+    (when (eq event-type 'guild-members-chunk)
+      (disco-root--search-refresh-active-completions (plist-get event :guild-id)))
     (when (disco-root--live-event-p event-type)
       (let ((channel-ids (disco-root--event-channel-ids event))
             (structural (disco-root--live-event-structural-p event-type))

@@ -600,6 +600,46 @@
          '(:kind guild :id "g1" :label "Guild"))
         (should (equal '("g1" :query "ali" :limit 50) requested))))))
 
+(ert-deftest disco-root-search-format-user-and-channel-ids-show_labels ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-apply-guild-members-chunk
+         "g1"
+         '(((nick . "Ali")
+            (user (id . "u1")
+                  (username . "alice")))))
+        (disco-state-upsert-channel '((id . "c1") (guild_id . "g1") (type . 0) (name . "general")))
+        (with-temp-buffer
+          (disco-root-mode)
+          (setq-local disco-root--search-domain '(:kind guild :id "g1" :label "Guild"))
+          (should (equal "Ali"
+                         (disco-root--search-format-user-ids '("u1") disco-root--search-domain)))
+          (should (equal "general"
+                         (disco-root--search-format-channel-ids '("c1"))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-search-refresh-active-completions-refreshes_minibuffer_help ()
+  (let ((mini-buffer (generate-new-buffer " *mini*"))
+        refreshed)
+    (unwind-protect
+        (cl-letf (((symbol-function 'active-minibuffer-window)
+                   (lambda () 'miniwin))
+                  ((symbol-function 'get-buffer-window)
+                   (lambda (buffer &optional _all-frames)
+                     (and (equal buffer "*Completions*") 'compwin)))
+                  ((symbol-function 'window-buffer)
+                   (lambda (_win) mini-buffer))
+                  ((symbol-function 'minibuffer-completion-help)
+                   (lambda ()
+                     (setq refreshed t))))
+          (with-current-buffer mini-buffer
+            (setq-local disco-root--search-completion-domain
+                        '(:kind guild :id "g1" :label "Guild"))
+            (disco-root--search-refresh-active-completions "g1")
+            (should refreshed)))
+      (kill-buffer mini-buffer))))
+
 (ert-deftest disco-root-render-layout-search-renders-sections ()
   (with-temp-buffer
     (disco-root-mode)
