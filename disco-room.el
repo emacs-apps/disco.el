@@ -1981,9 +1981,43 @@ currently rendered room messages."
           (push message result))))
     (nreverse result)))
 
+(defun disco-room--searchable-channel-type-p (&optional channel)
+  "Return non-nil when CHANNEL supports server-side room message search."
+  (let ((type (alist-get 'type (or channel (disco-room--channel-object)))))
+    (or (null type)
+        (memq type '(0 1 3 5 10 11 12)))))
+
+(defun disco-room--searchable-channel-type-name (&optional channel)
+  "Return descriptive channel type name for CHANNEL."
+  (let ((type (alist-get 'type (or channel (disco-room--channel-object)))))
+    (pcase type
+      (0 "text")
+      (1 "dm")
+      (3 "group-dm")
+      (5 "announcement")
+      (10 "announcement-thread")
+      (11 "public-thread")
+      (12 "private-thread")
+      (2 "voice")
+      (13 "stage")
+      (15 "forum")
+      (16 "media")
+      (_ (format "type-%s" type)))))
+
+(defun disco-room--ensure-searchable-channel (&optional action)
+  "Signal user error when current room channel cannot be searched remotely.
+
+ACTION is optional text describing the attempted search action."
+  (unless (disco-room--searchable-channel-type-p)
+    (user-error
+     "disco: %s is not supported for %s channels"
+     (or action "server-side room search")
+     (disco-room--searchable-channel-type-name))))
+
 (cl-defun disco-room--search-current-channel-async
     (&key query author-id limit offset max-id min-id sort-order on-success on-error)
   "Search the current room channel asynchronously."
+  (disco-room--ensure-searchable-channel "server-side room search")
   (if disco-room--guild-id
       (disco-api-guild-search-messages-async
        disco-room--guild-id
@@ -2132,6 +2166,7 @@ With BY-SENDER-P, also prompt for a sender and restrict matches to that user."
    (list (read-string (format "Filter messages%s: "
                               (if current-prefix-arg " by sender" "")))
          current-prefix-arg))
+  (disco-room--ensure-searchable-channel "filter search")
   (let ((sender-id (when by-sender-p
                      (disco-room--read-search-user-id "Sent by: ")))
         (trimmed (string-trim (or query ""))))
@@ -2153,11 +2188,13 @@ With BY-SENDER-P, also prompt for a sender and restrict matches to that user."
   (interactive)
   (unless (disco-room--msg-filter-active-p)
     (user-error "disco: no active message filter"))
+  (disco-room--ensure-searchable-channel "filter search")
   (disco-room--run-msg-filter disco-room--msg-filter nil))
 
 (defun disco-room-filter-load-more ()
   "Load the next page of results for the current room message filter."
   (interactive)
+  (disco-room--ensure-searchable-channel "filter search")
   (cond
    ((not (disco-room--msg-filter-active-p))
     (user-error "disco: no active message filter"))
@@ -2232,40 +2269,44 @@ non-nil, overrides the message id at point as the search boundary."
              (cursor-id (or from-message-id (disco-room--inplace-search-current-message-id forward))))
         (unless cursor-id
           (user-error "disco: no message anchor available for search"))
-        (setq-local disco-room--inplace-search-generation generation)
-        (setq-local disco-room--inplace-search-filter filter)
-        (when-let* ((query (plist-get filter :query)))
-          (setq-local disco-room--last-search-query query))
-        (unless (equal old-query (disco-room--active-highlight-query))
-          (disco-room--render-preserving-point))
-        (message "disco: searching %s..." title)
-        (disco-room--search-current-channel-async
-         :query (plist-get filter :query)
-         :author-id (plist-get filter :author-id)
-         :limit 2
-         :max-id (unless forward cursor-id)
-         :min-id (when forward cursor-id)
-         :sort-order (if forward 'asc 'desc)
-         :on-success
-         (lambda (body)
-           (when (disco-room--inplace-search-callback-active-p room-buffer channel-id generation)
-             (with-current-buffer room-buffer
-               (let* ((messages (disco-room--search-flatten-messages (alist-get 'messages body)))
-                      (match (seq-find (lambda (msg)
-                                         (not (equal (alist-get 'id msg) cursor-id)))
-                                       messages)))
-                 (if-let* ((message-id (and (listp match) (alist-get 'id match))))
-                     (progn
-                       (message "")
-                       (disco-room-jump-to-message message-id channel-id)
-                       (message "disco: %s" title))
-                   (message "disco: no message matches '%s'" title))))))
-         :on-error
-         (lambda (err)
-           (when (disco-room--inplace-search-callback-active-p room-buffer channel-id generation)
-             (with-current-buffer room-buffer
-               (message "disco: inplace search failed: %s"
-                        (disco-room--async-error-message err))))))))))
+        (if (not (disco-room--searchable-channel-type-p))
+            (message "disco: no loaded message matches '%s' and remote search is not supported for %s channels"
+                     title
+                     (disco-room--searchable-channel-type-name))
+          (setq-local disco-room--inplace-search-generation generation)
+          (setq-local disco-room--inplace-search-filter filter)
+          (when-let* ((query (plist-get filter :query)))
+            (setq-local disco-room--last-search-query query))
+          (unless (equal old-query (disco-room--active-highlight-query))
+            (disco-room--render-preserving-point))
+          (message "disco: searching %s..." title)
+          (disco-room--search-current-channel-async
+           :query (plist-get filter :query)
+           :author-id (plist-get filter :author-id)
+           :limit 2
+           :max-id (unless forward cursor-id)
+           :min-id (when forward cursor-id)
+           :sort-order (if forward 'asc 'desc)
+           :on-success
+           (lambda (body)
+             (when (disco-room--inplace-search-callback-active-p room-buffer channel-id generation)
+               (with-current-buffer room-buffer
+                 (let* ((messages (disco-room--search-flatten-messages (alist-get 'messages body)))
+                        (match (seq-find (lambda (msg)
+                                           (not (equal (alist-get 'id msg) cursor-id)))
+                                         messages)))
+                   (if-let* ((message-id (and (listp match) (alist-get 'id match))))
+                       (progn
+                         (message "")
+                         (disco-room-jump-to-message message-id channel-id)
+                         (message "disco: %s" title))
+                     (message "disco: no message matches '%s'" title))))))
+           :on-error
+           (lambda (err)
+             (when (disco-room--inplace-search-callback-active-p room-buffer channel-id generation)
+               (with-current-buffer room-buffer
+                 (message "disco: inplace search failed: %s"
+                          (disco-room--async-error-message err)))))))))))
 
 (defun disco-room-inplace-search ()
   "Prompt for a room inplace search flavor and start searching."

@@ -183,6 +183,14 @@
                        (mapcar (lambda (msg) (alist-get 'id msg))
                                (plist-get disco-room--msg-filter :items))))))))
 
+(ert-deftest disco-room-filter-search-rejects-unsupported-channel-types ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "voice")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "voice") (type . 2) (name . "Voice")))
+    (should-error (disco-room-filter-search "hello") :type 'error)))
+
 (ert-deftest disco-room-refresh-reruns-active-filter ()
   (with-temp-buffer
     (disco-room-mode)
@@ -276,6 +284,22 @@
                  (lambda (&rest _args) nil)))
         (disco-room--inplace-search-dispatch '(:query "match") nil "m9")
         (should (equal '("m5" "chan") jumped))))))
+
+(ert-deftest disco-room-inplace-search-unsupported-channel-skips-remote-fallback ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "voice")
+    (setq-local disco-room--newest-message-id "m9")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "voice") (type . 2) (name . "Voice")))
+    (let (api-called)
+      (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
+                 (lambda (&rest _args)
+                   (setq api-called t)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (should-not (disco-room--inplace-search-dispatch '(:query "match") nil "m9"))
+        (should-not api-called)))))
 
 (provide 'disco-room-test)
 
