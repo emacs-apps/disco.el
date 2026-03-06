@@ -34,6 +34,30 @@
   (should (equal '((token . :null)) (disco-api--token-payload :null)))
   (should-error (disco-api--token-payload 42) :type 'error))
 
+(ert-deftest disco-api-normalize-message-search-query ()
+  (should
+   (equal '(("limit" . "10")
+            ("max_id" . "99")
+            ("content" . "openclaw")
+            ("author_type" . "user")
+            ("author_id" . "u1")
+            ("mentions" . "u2")
+            ("pinned" . "true")
+            ("sort_by" . "relevance")
+            ("sort_order" . "asc")
+            ("channel_id" . "c1"))
+          (disco-api--message-search-query
+           :limit 10
+           :max-id "99"
+           :content "openclaw"
+           :author-types '("user")
+           :author-ids '("u1")
+           :mentions '("u2")
+           :pinned t
+           :sort-by 'relevance
+           :sort-order 'asc
+           :channel-ids '("c1")))))
+
 (ert-deftest disco-api-normalize-message-search-tab-payload ()
   (should
    (equal '((limit . 10)

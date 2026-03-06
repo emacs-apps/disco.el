@@ -113,6 +113,56 @@
                  nil nil nil nil nil)
                captured)))))
 
+(ert-deftest disco-api-guild-search-messages-builds-query ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query unauthenticated raw-body extra-headers body-type)
+                 (setq captured (list method endpoint payload query unauthenticated raw-body extra-headers body-type))
+                 'ok)))
+      (should (eq 'ok
+                  (disco-api-guild-search-messages
+                   "g1"
+                   :channel-ids '("c1")
+                   :content "foo"
+                   :author-ids '("u1")
+                   :limit 10
+                   :max-id "99"
+                   :sort-order 'asc)))
+      (should (equal
+               '("GET" "/guilds/g1/messages/search" nil
+                 (("limit" . "10")
+                  ("max_id" . "99")
+                  ("content" . "foo")
+                  ("author_id" . "u1")
+                  ("sort_order" . "asc")
+                  ("channel_id" . "c1"))
+                 nil nil nil nil)
+               captured)))))
+
+(ert-deftest disco-api-channel-search-messages-builds-query ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query unauthenticated raw-body extra-headers body-type)
+                 (setq captured (list method endpoint payload query unauthenticated raw-body extra-headers body-type))
+                 'ok)))
+      (should (eq 'ok
+                  (disco-api-channel-search-messages
+                   "c1"
+                   :content "foo"
+                   :author-ids '("u1")
+                   :limit 5
+                   :min-id "10"
+                   :sort-order 'desc)))
+      (should (equal
+               '("GET" "/channels/c1/messages/search" nil
+                 (("limit" . "5")
+                  ("min_id" . "10")
+                  ("content" . "foo")
+                  ("author_id" . "u1")
+                  ("sort_order" . "desc"))
+                 nil nil nil nil)
+               captured)))))
+
 (provide 'disco-api-test)
 
 ;;; disco-api-test.el ends here

@@ -583,6 +583,111 @@ Uses `/channels/{channel.id}/threads/search' with `archived=false'."
    :on-success on-success
    :on-error on-error))
 
+(cl-defun disco-api-guild-search-messages
+    (guild-id &key limit offset max-id min-id slop content author-types author-ids mentions
+              mention-everyone has pinned sort-by sort-order channel-ids include-nsfw)
+  "Search messages in GUILD-ID using Discord guild message search endpoint."
+  (disco-api--request
+   "GET"
+   (format "/guilds/%s/messages/search" guild-id)
+   nil
+   (disco-api--message-search-query
+    :limit limit
+    :offset offset
+    :max-id max-id
+    :min-id min-id
+    :slop slop
+    :content content
+    :author-types author-types
+    :author-ids author-ids
+    :mentions mentions
+    :mention-everyone mention-everyone
+    :has has
+    :pinned pinned
+    :sort-by sort-by
+    :sort-order sort-order
+    :channel-ids channel-ids
+    :include-nsfw include-nsfw)
+   nil))
+
+(cl-defun disco-api-guild-search-messages-async
+    (guild-id &key limit offset max-id min-id slop content author-types author-ids mentions
+              mention-everyone has pinned sort-by sort-order channel-ids include-nsfw
+              on-success on-error)
+  "Search messages in GUILD-ID asynchronously using Discord guild message search endpoint."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/messages/search" guild-id)
+   :query (disco-api--message-search-query
+           :limit limit
+           :offset offset
+           :max-id max-id
+           :min-id min-id
+           :slop slop
+           :content content
+           :author-types author-types
+           :author-ids author-ids
+           :mentions mentions
+           :mention-everyone mention-everyone
+           :has has
+           :pinned pinned
+           :sort-by sort-by
+           :sort-order sort-order
+           :channel-ids channel-ids
+           :include-nsfw include-nsfw)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-channel-search-messages
+    (channel-id &key limit offset max-id min-id slop content author-types author-ids mentions
+                mention-everyone has pinned sort-by sort-order)
+  "Search messages in private CHANNEL-ID using Discord channel message search endpoint."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/messages/search" channel-id)
+   nil
+   (disco-api--message-search-query
+    :limit limit
+    :offset offset
+    :max-id max-id
+    :min-id min-id
+    :slop slop
+    :content content
+    :author-types author-types
+    :author-ids author-ids
+    :mentions mentions
+    :mention-everyone mention-everyone
+    :has has
+    :pinned pinned
+    :sort-by sort-by
+    :sort-order sort-order)
+   nil))
+
+(cl-defun disco-api-channel-search-messages-async
+    (channel-id &key limit offset max-id min-id slop content author-types author-ids mentions
+                mention-everyone has pinned sort-by sort-order on-success on-error)
+  "Search messages in private CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s/messages/search" channel-id)
+   :query (disco-api--message-search-query
+           :limit limit
+           :offset offset
+           :max-id max-id
+           :min-id min-id
+           :slop slop
+           :content content
+           :author-types author-types
+           :author-ids author-ids
+           :mentions mentions
+           :mention-everyone mention-everyone
+           :has has
+           :pinned pinned
+           :sort-by sort-by
+           :sort-order sort-order)
+   :on-success on-success
+   :on-error on-error))
+
 (cl-defun disco-api-guild-search-messages-tabs
     (guild-id &key tabs channel-ids include-nsfw track-exact-total-hits)
   "Search messages in GUILD-ID using Discord tabs search endpoint."

@@ -107,6 +107,52 @@ the false string."
                   source)))
     (vconcat normalized)))
 
+(defun disco-api--normalize-string-list (value field-name)
+  "Normalize VALUE into a list of non-empty strings for FIELD-NAME."
+  (append (disco-api--normalize-string-sequence value field-name) nil))
+
+(cl-defun disco-api--message-search-query
+    (&key limit offset max-id min-id slop content author-types author-ids mentions
+          mention-everyone has pinned sort-by sort-order channel-ids include-nsfw)
+  "Build query alist for Discord message search GET endpoints."
+  (let (query)
+    (when (numberp limit)
+      (push `("limit" . ,(number-to-string (max 1 (min 25 limit)))) query))
+    (when (numberp offset)
+      (push `("offset" . ,(number-to-string (max 0 (min 9975 offset)))) query))
+    (when max-id
+      (push `("max_id" . ,(format "%s" max-id)) query))
+    (when min-id
+      (push `("min_id" . ,(format "%s" min-id)) query))
+    (when (numberp slop)
+      (push `("slop" . ,(number-to-string (max 0 (min 100 slop)))) query))
+    (when (and (stringp content)
+               (not (string-empty-p (string-trim content))))
+      (push `("content" . ,(string-trim content)) query))
+    (dolist (value (disco-api--normalize-string-list author-types "message search author_type"))
+      (push `("author_type" . ,value) query))
+    (dolist (value (append (disco-api--normalize-id-sequence author-ids "message search author_id") nil))
+      (push `("author_id" . ,value) query))
+    (dolist (value (append (disco-api--normalize-id-sequence mentions "message search mentions") nil))
+      (push `("mentions" . ,value) query))
+    (when (not (null mention-everyone))
+      (push `("mention_everyone" . ,(disco-api--query-bool-string mention-everyone)) query))
+    (dolist (value (disco-api--normalize-string-list has "message search has"))
+      (push `("has" . ,value) query))
+    (when (not (null pinned))
+      (push `("pinned" . ,(disco-api--query-bool-string pinned)) query))
+    (let ((sort-by-value (disco-api--message-search-sort-by-value sort-by)))
+      (when sort-by-value
+        (push `("sort_by" . ,sort-by-value) query)))
+    (let ((sort-order-value (disco-api--thread-search-sort-order-value sort-order)))
+      (when sort-order-value
+        (push `("sort_order" . ,sort-order-value) query)))
+    (dolist (value (append (disco-api--normalize-id-sequence channel-ids "message search channel_id") nil))
+      (push `("channel_id" . ,value) query))
+    (when (not (null include-nsfw))
+      (push `("include_nsfw" . ,(disco-api--query-bool-string include-nsfw)) query))
+    (nreverse query)))
+
 (cl-defun disco-api--message-search-tab-payload
     (&key limit offset cursor max-id min-id slop content author-types author-ids mentions
           mention-everyone has pinned sort-by sort-order)
