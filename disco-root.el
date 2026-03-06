@@ -464,12 +464,27 @@ between current view mode and unread-only filter."
   (or noninteractive
       (window-live-p (get-buffer-window (or buffer (current-buffer)) t))))
 
+(defun disco-root--hack-window-points (&optional point)
+  "Update stored previous-buffer markers for current buffer to POINT.
+
+This mirrors telega's workaround for Emacs not fully honoring buffer-local
+nil `switch-to-buffer-preserve-window-point' in passive windows."
+  (unless switch-to-buffer-preserve-window-point
+    (let ((pos (or point (point))))
+      (dolist (win (get-buffer-window-list (current-buffer) nil t))
+        (when (window-live-p win)
+          (when-let* ((entry (assq (current-buffer) (window-prev-buffers win))))
+            (setf (nth 2 entry)
+                  (copy-marker pos
+                               (marker-insertion-type (nth 2 entry))))))))))
+
 (defun disco-root--update-window-points (&optional point)
   "Update window points for current buffer to POINT.
 
 Mirrors telega's root buffer behavior for keeping window points aligned
 after passive EWOC and full-buffer updates."
   (let ((pos (or point (point))))
+    (disco-root--hack-window-points pos)
     (dolist (win (get-buffer-window-list (current-buffer) nil t))
       (when (window-live-p win)
         (set-window-point win pos)))))
@@ -1540,13 +1555,6 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                    (eq disco-root--view-mode 'unread))
               (disco-root--debug-log "flush-live-updates -> unread-render")
               (disco-root--render-preserving-position))
-             ((and dirty-channel-ids
-                   (eq layout 'activity)
-                   (disco-root--buffer-visible-p)
-                   (not (disco-root--selected-window-for-buffer (current-buffer))))
-              (disco-root--debug-log
-               "flush-live-updates -> passive-activity-render")
-              (disco-root--render-preserving-position))
              (t
               (disco-root--debug-log "flush-live-updates -> incremental")
               (let ((inhibit-read-only t)
@@ -1803,12 +1811,12 @@ This prevents noisy permission errors for sources that require elevated access."
        (fboundp 'plz)))
 
 (defun disco-root--rerender-open-root-buffers ()
-  "Rerender all live root buffers to refresh async guild icon updates."
+  "Schedule debounced rerender for live root buffers after icon updates."
   (dolist (buffer (buffer-list))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (when (eq major-mode 'disco-root-mode)
-          (disco-root--render-preserving-position))))))
+          (disco-root--queue-live-update nil t nil))))))
 
 (defun disco-root--start-guild-icon-fetch (cache-key url)
   "Start asynchronous guild icon fetch for CACHE-KEY from URL."

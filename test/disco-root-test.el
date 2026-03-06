@@ -190,7 +190,7 @@
         (should patched)
         (should-not rendered)))))
 
-(ert-deftest disco-root-flush-live-updates-unfocused-activity-renders-structurally ()
+(ert-deftest disco-root-flush-live-updates-unfocused-activity-keeps-incremental-path ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--layout 'activity)
@@ -225,9 +225,9 @@
                  (lambda ()
                    (setq rendered t))))
         (disco-root--flush-live-updates (current-buffer))
-        (should rendered)
-        (should-not patched)
-        (should-not restored)))))
+        (should patched)
+        (should restored)
+        (should-not rendered)))))
 
 (ert-deftest disco-root-flush-live-updates-corruption-falls-back-to-structural-render ()
   (with-temp-buffer
@@ -334,6 +334,23 @@
         (should (disco-root--maybe-refresh-activity-header-line))
         (should refreshed)))))
 
+(ert-deftest disco-root-rerender-open-root-buffers-debounces-via-live-update-queue ()
+  (let (queued)
+    (with-temp-buffer
+      (disco-root-mode)
+      (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                 (lambda (channel-ids &optional structural-p header-p)
+                   (push (list (current-buffer) channel-ids structural-p header-p)
+                         queued))))
+        (disco-root--rerender-open-root-buffers)
+        (should (= 1 (length queued)))
+        (pcase-let ((`(,buffer ,channel-ids ,structural-p ,header-p)
+                     (car queued)))
+          (should (buffer-live-p buffer))
+          (should-not channel-ids)
+          (should structural-p)
+          (should-not header-p))))))
+
 (ert-deftest disco-root-render-fill-column-hidden-buffer-reuses-last-width ()
   (with-temp-buffer
     (disco-root-mode)
@@ -381,6 +398,22 @@
                    42)))
         (should (= 42 (disco-root--render-fill-column)))
         (should (= 1 calls))))))
+
+(ert-deftest disco-root-hack-window-points-updates-prev-buffer-marker ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let* ((marker (copy-marker (point-min)))
+           (entry (list (current-buffer) nil marker))
+           (prev-buffers (list entry)))
+      (goto-char (point-max))
+      (cl-letf (((symbol-function 'get-buffer-window-list)
+                 (lambda (&rest _args) '(fake-win)))
+                ((symbol-function 'window-live-p)
+                 (lambda (_win) t))
+                ((symbol-function 'window-prev-buffers)
+                 (lambda (_win) prev-buffers)))
+        (disco-root--hack-window-points)
+        (should (= (point-max) (marker-position (nth 2 entry))))))))
 
 (ert-deftest disco-root-render-preserving-position-syncs-window-points ()
   (with-temp-buffer
