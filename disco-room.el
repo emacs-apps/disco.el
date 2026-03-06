@@ -11,6 +11,7 @@
 (require 'subr-x)
 (require 'time-date)
 (require 'seq)
+(require 'transient)
 (require 'ring)
 (require 'cl-lib)
 (require 'ewoc)
@@ -32,7 +33,6 @@
 (require 'disco-gateway)
 (require 'disco-state)
 (require 'disco-permission)
-(require 'disco-transient)
 (require 'disco-company)
 
 (defvar-local disco-room--channel-id nil)
@@ -6660,6 +6660,67 @@ When called interactively, empty input clears slowmode (sets to 0)."
       (disco-room--resolve-thread-update updated fallback)
       (disco-room--render-preserving-point)
       (message "disco: updated thread settings"))))
+
+(declare-function disco-root-list-archived-threads "disco-root" (&optional parent-channel-id))
+
+(defun disco-room-open-parent-archived-threads ()
+  "Open archived thread browser for current room's parent channel."
+  (interactive)
+  (let* ((channel (and disco-room--channel-id
+                       (disco-state-channel disco-room--channel-id)))
+         (parent-id (and channel (alist-get 'parent_id channel))))
+    (unless parent-id
+      (user-error "disco: current room has no parent channel"))
+    (disco-root-list-archived-threads parent-id)))
+
+(transient-define-prefix disco-room-transient ()
+  "Room command menu for disco.el."
+  [["Timeline"
+    ("g" "Refresh room" disco-room-refresh)
+    ("o" "Load older" disco-room-load-older-messages)
+    ("c" "Send message" disco-room-send-message)
+    ("f" "Attach file" disco-room-attach-file)
+    ("D" "Remove attach token" disco-room-remove-attachment-token-at-point)
+    ("x" "Clear attachments" disco-room-clear-attachments)
+    ("v" "List attachments" disco-room-list-attachments)
+    ("V" "Edit attach desc" disco-room-edit-attachment-description)
+    ("O" "Reorder attachments" disco-room-reorder-attachments)
+    ("r" "Reply to message" disco-room-reply-to-message)
+    ("F" "Forward message" disco-room-forward-message)
+    ("k" "Cancel reply" disco-room-cancel-reply)
+    ("e" "Edit at point" disco-room-edit-message)
+    ("d" "Delete at point" disco-room-delete-message)
+    ("!" "Toggle reaction" disco-room-toggle-reaction)
+    ("+" "Add reaction" disco-room-add-reaction)
+    ("-" "Remove reaction" disco-room-remove-reaction)
+    ("p" "Send poll" disco-room-send-poll)
+    ("w" "Select answer" disco-room-vote-poll-answer)
+    ("u" "Unselect answer" disco-room-remove-poll-vote)
+    ("t" "Toggle staged answer" disco-room-toggle-poll-answer)
+    ("W" "Submit staged vote" disco-room-submit-poll-vote)
+    ("C" "Remove my vote" disco-room-clear-poll-votes)
+    ("X" "End poll" disco-room-expire-poll)
+    ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
+   ["Thread"
+    ("m" "Create from message" disco-room-create-thread-from-message)
+    ("o" "Open msg thread" disco-room-open-thread-from-message-at-point)
+    ("n" "Create detached" disco-room-create-thread)
+    ("R" "Rename thread" disco-room-rename-thread)
+    ("L" "Toggle locked" disco-room-toggle-thread-locked)
+    ("S" "Set slowmode" disco-room-set-thread-slowmode)
+    ("U" "Set auto-archive" disco-room-set-thread-auto-archive-duration)
+    ("E" "Edit thread settings" disco-room-edit-thread-settings)
+    ("M" "Set muted" disco-room-set-thread-muted)
+    ("j" "Join thread" disco-room-join-thread)
+    ("l" "Leave thread" disco-room-leave-thread)
+    ("a" "Toggle archived" disco-room-toggle-thread-archived)
+    ("A" "Parent archived threads..." disco-room-open-parent-archived-threads)]
+   ["Inspect"
+    ("H" "HTTP queue" disco-http-describe-queue)
+    ("R" "Rate limits" disco-api-describe-rate-limits)
+    ("G" "Gateway status" disco-gateway-describe-status)]
+   ["Window"
+    ("q" "Quit window" quit-window)]])
 
 (defvar disco-room-mode-map
   (let ((map (make-sparse-keymap)))
