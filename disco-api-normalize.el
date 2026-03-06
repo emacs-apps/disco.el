@@ -108,7 +108,7 @@ the false string."
     (vconcat normalized)))
 
 (cl-defun disco-api--message-search-tab-payload
-    (&key limit offset cursor max-id min-id slop content author-ids mentions
+    (&key limit offset cursor max-id min-id slop content author-types author-ids mentions
           mention-everyone has pinned sort-by sort-order)
   "Build one message search tab payload object."
   (when (and cursor (numberp offset))
@@ -129,6 +129,11 @@ the false string."
     (when (and (stringp content)
                (not (string-empty-p (string-trim content))))
       (push `(content . ,(string-trim content)) payload))
+    (when author-types
+      (push `(author_type . ,(disco-api--normalize-string-sequence
+                              author-types
+                              "message search author_type"))
+            payload))
     (when author-ids
       (push `(author_id . ,(disco-api--normalize-id-sequence
                             author-ids

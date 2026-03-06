@@ -39,6 +39,7 @@
    (equal '((limit . 10)
             (slop . 2)
             (content . "openclaw")
+            (author_type . ["user" "bot"])
             (has . ["link" "file"])
             (pinned . t)
             (sort_by . "timestamp")
@@ -47,6 +48,7 @@
            :limit 10
            :slop 2
            :content "openclaw"
+           :author-types '("user" "bot")
            :has '("link" "file")
            :pinned t
            :sort-by 'timestamp

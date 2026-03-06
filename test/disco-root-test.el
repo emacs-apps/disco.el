@@ -522,18 +522,30 @@
                (lambda (_domain)
                  '(("general" . "c1")))))
       (let ((parsed (disco-root--search-parse-query
-                     "hello world from:alice mentions:bob has:link,file in:general pinned:true sort:relevance order:asc before:123 after:456"
+                     "hello world from:alice author-type:user,bot mentions:bob has:link,file in:general pinned:true sort:relevance order:asc slop:3 before:123 after:456"
                      '(:kind guild :id "g1" :label "Guild"))))
         (should (equal "hello world" (plist-get parsed :content)))
         (should (equal '("u1") (plist-get parsed :author-ids)))
+        (should (equal '("user" "bot") (plist-get parsed :author-types)))
         (should (equal '("u2") (plist-get parsed :mentions)))
         (should (equal '("link" "file") (plist-get parsed :has)))
         (should (equal '("c1") (plist-get parsed :channel-ids)))
         (should (eq t (plist-get parsed :pinned)))
+        (should (= 3 (plist-get parsed :slop)))
         (should (eq 'relevance (plist-get parsed :sort-by)))
         (should (eq 'asc (plist-get parsed :sort-order)))
         (should (equal "123" (plist-get parsed :max-id)))
         (should (equal "456" (plist-get parsed :min-id)))))))
+
+(ert-deftest disco-root-search-parse-query-supports-during-date-sugar ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((parsed (disco-root--search-parse-query
+                   "during:2026-03-01"
+                   '(:kind guild :id "g1" :label "Guild"))))
+      (should (plist-get parsed :min-id))
+      (should (plist-get parsed :max-id))
+      (should (equal "2026-03-01" (plist-get parsed :during-label))))))
 
 (ert-deftest disco-root-search-query-capf-completes-filter-values ()
   (with-temp-buffer

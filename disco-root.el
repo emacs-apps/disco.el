@@ -11,6 +11,7 @@
 
 (require 'cl-lib)
 (require 'ewoc)
+(require 'calendar)
 (require 'transient)
 (require 'seq)
 (require 'subr-x)
@@ -228,8 +229,12 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
   :group 'disco)
 
 (defconst disco-root--search-filter-names
-  '("from" "mentions" "has" "in" "before" "after" "pinned" "sort" "order")
+  '("from" "mentions" "author-type" "has" "in" "before" "after" "during"
+    "pinned" "sort" "order" "slop")
   "Supported Discord-style root search filter names.")
+
+(defconst disco-root--search-author-type-values '("user" "bot" "webhook")
+  "Supported values for Discord-style `author-type:' root search filter.")
 
 (defconst disco-root--search-has-values
   '("image" "sound" "video" "file" "sticker" "embed" "link" "poll" "snapshot")
@@ -238,11 +243,17 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defconst disco-root--search-sort-values '("timestamp" "relevance")
   "Supported values for Discord-style `sort:' root search filter.")
 
+(defconst disco-root--search-author-type-values '("user" "bot" "webhook")
+  "Supported values for Discord-style `author-type:' root search filter.")
+
 (defconst disco-root--search-order-values '("asc" "desc")
   "Supported values for Discord-style `order:' root search filter.")
 
 (defconst disco-root--search-bool-values '("true" "false")
   "Supported boolean values for Discord-style root search filters.")
+
+(defconst disco-root--search-slop-values '("0" "1" "2" "3" "5" "10")
+  "Suggested values for Discord-style `slop:' root search filter.")
 
 (defvar-local disco-root--search-completion-domain nil
   "Minibuffer-local root search domain used by search query completion.")
@@ -933,6 +944,79 @@ after passive EWOC and full-buffer updates."
       (user-error "disco: unsupported has: value %s" raw-value))
     (concat (if negative "-" "") downcased)))
 
+(defun disco-root--search-normalize-author-type (raw-value)
+  "Normalize RAW-VALUE for the Discord-style `author-type:' search filter."
+  (let ((downcased (downcase (string-trim (or raw-value "")))))
+    (unless (member downcased disco-root--search-author-type-values)
+      (user-error "disco: unsupported author-type: value %s" raw-value))
+    downcased))
+
+(defun disco-root--search-parse-slop (raw-value)
+  "Parse RAW-VALUE as integer slop for root search."
+  (let ((trimmed (string-trim (or raw-value ""))))
+    (unless (string-match-p "\\`[0-9]+\\'" trimmed)
+      (user-error "disco: slop expects a number"))
+    (max 0 (min 100 (string-to-number trimmed)))))
+
+(defun disco-root--search-date-only-string-p (value)
+  "Return non-nil when VALUE looks like a calendar date without time."
+  (string-match-p "\\`[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\\'"
+                  (string-trim (or value ""))))
+
+(defun disco-root--search-calendar-date-to-time (date &optional end-of-day)
+  "Convert calendar DATE list to Emacs time, optionally using END-OF-DAY."
+  (pcase-let ((`(,month ,day ,year) date))
+    (encode-time (if end-of-day 59 0)
+                 (if end-of-day 59 0)
+                 (if end-of-day 23 0)
+                 day month year)))
+
+(defun disco-root--search-parse-iso-date (value)
+  "Parse YYYY-MM-DD VALUE into calendar-style (MONTH DAY YEAR) list."
+  (unless (string-match "\\`\\([0-9][0-9][0-9][0-9]\\)-\\([0-9][0-9]\\)-\\([0-9][0-9]\\)\\'"
+                        (string-trim (or value "")))
+    (user-error "disco: invalid date %s" value))
+  (list (string-to-number (match-string 2 value))
+        (string-to-number (match-string 3 value))
+        (string-to-number (match-string 1 value))))
+
+(defun disco-root--search-parse-during-boundary (raw-value &optional end-of-day)
+  "Parse RAW-VALUE into a root search boundary, honoring END-OF-DAY for dates."
+  (let ((trimmed (string-trim (or raw-value ""))))
+    (cond
+     ((string-empty-p trimmed)
+      (user-error "disco: during expects a non-empty date or range"))
+     ((or (string-match-p "\\`[0-9]+\\'" trimmed)
+          (string-match-p "<[!@#]*\\([0-9]+\\)>" trimmed))
+      (disco-root--search-parse-boundary-id trimmed "during:"))
+     ((disco-root--search-date-only-string-p trimmed)
+      (disco-root--search-time-to-snowflake
+       (disco-root--search-calendar-date-to-time
+        (disco-root--search-parse-iso-date trimmed)
+        end-of-day)))
+     (t
+      (disco-root--search-time-to-snowflake (date-to-time trimmed))))))
+
+(defun disco-root--search-parse-during-value (raw-value)
+  "Parse RAW-VALUE into root search `during' boundaries.
+
+Accept `START..END' ranges or a single `YYYY-MM-DD' date."
+  (let* ((trimmed (string-trim (or raw-value "")))
+         (parts (split-string trimmed "\\.\\." t "[[:space:]]*")))
+    (pcase parts
+      (`(,single)
+       (if (disco-root--search-date-only-string-p single)
+           (list :min-id (disco-root--search-parse-during-boundary single nil)
+                 :max-id (disco-root--search-parse-during-boundary single t)
+                 :during-label single)
+         (user-error "disco: during expects START..END or a YYYY-MM-DD date")))
+      (`(,start ,end)
+       (list :min-id (disco-root--search-parse-during-boundary start nil)
+             :max-id (disco-root--search-parse-during-boundary end t)
+             :during-label (format "%s..%s" (string-trim start) (string-trim end))))
+      (_
+       (user-error "disco: during expects START..END or a YYYY-MM-DD date")))))
+
 (defun disco-root--search-parse-filter-token (key raw-value domain spec)
   "Apply one Discord-style filter KEY with RAW-VALUE in DOMAIN to SPEC plist."
   (pcase key
@@ -941,6 +1025,11 @@ after passive EWOC and full-buffer updates."
                 (append (plist-get spec :author-ids)
                         (mapcar (lambda (value)
                                   (disco-root--search-resolve-user value domain "from:"))
+                                (disco-root--search-split-filter-values raw-value)))))
+    ("author-type"
+     (plist-put spec :author-types
+                (append (plist-get spec :author-types)
+                        (mapcar #'disco-root--search-normalize-author-type
                                 (disco-root--search-split-filter-values raw-value)))))
     ("mentions"
      (let ((values (disco-root--search-split-filter-values raw-value))
@@ -969,6 +1058,13 @@ after passive EWOC and full-buffer updates."
     ("after"
      (plist-put spec :min-id
                 (disco-root--search-parse-boundary-id raw-value "after:")))
+    ("during"
+     (let ((range (disco-root--search-parse-during-value raw-value)))
+       (setq spec (plist-put spec :min-id (plist-get range :min-id)))
+       (setq spec (plist-put spec :max-id (plist-get range :max-id)))
+       (plist-put spec :during-label (plist-get range :during-label))))
+    ("slop"
+     (plist-put spec :slop (disco-root--search-parse-slop raw-value)))
     ("pinned"
      (plist-put spec :pinned
                 (disco-root--search-parse-bool raw-value "pinned:")))
@@ -1000,7 +1096,7 @@ after passive EWOC and full-buffer updates."
     (setq spec (plist-put spec :content
                           (when content-parts
                             (string-join (nreverse content-parts) " "))))
-    (dolist (field '(:author-ids :mentions :has :channel-ids))
+    (dolist (field '(:author-ids :author-types :mentions :has :channel-ids))
       (when-let* ((value (plist-get spec field)))
         (setq spec (plist-put spec field (seq-uniq value #'equal)))))
     spec))
@@ -1038,6 +1134,8 @@ after passive EWOC and full-buffer updates."
      (mapcar (lambda (cell)
                (disco-root--search-quote-completion-candidate (car cell)))
              (disco-root--search-user-candidates domain)))
+    ("author-type"
+     disco-root--search-author-type-values)
     ("in"
      (mapcar (lambda (cell)
                (disco-root--search-quote-completion-candidate (car cell)))
@@ -1048,6 +1146,8 @@ after passive EWOC and full-buffer updates."
      disco-root--search-sort-values)
     ("order"
      disco-root--search-order-values)
+    ("slop"
+     disco-root--search-slop-values)
     ("pinned"
      disco-root--search-bool-values)
     (_ nil)))
@@ -1125,9 +1225,11 @@ after passive EWOC and full-buffer updates."
           (and (stringp content)
                (not (string-empty-p content))))
         (plist-get it :author-ids)
+        (plist-get it :author-types)
         (plist-get it :mentions)
         (plist-get it :mention-everyone)
         (plist-get it :has)
+        (plist-get it :slop)
         (plist-member it :pinned)
         (plist-get it :channel-ids)
         (plist-get it :max-id)
@@ -1234,6 +1336,8 @@ after passive EWOC and full-buffer updates."
       (push (format "[from:%s]"
                     (disco-root--search-format-user-ids authors disco-root--search-domain))
             chips))
+    (when-let* ((author-types (plist-get spec :author-types)))
+      (push (format "[author:%s]" (string-join author-types ",")) chips))
     (when-let* ((mentions (plist-get spec :mentions)))
       (push (format "[mentions:%s]"
                     (disco-root--search-format-user-ids mentions disco-root--search-domain))
@@ -1248,10 +1352,15 @@ after passive EWOC and full-buffer updates."
       (push (format "[has:%s]" (string-join has ",")) chips))
     (when (plist-member spec :pinned)
       (push (format "[pinned:%s]" (disco-root--search-value-summary (plist-get spec :pinned))) chips))
-    (when-let* ((before (plist-get spec :max-id)))
-      (push (format "[before:%s]" before) chips))
-    (when-let* ((after (plist-get spec :min-id)))
-      (push (format "[after:%s]" after) chips))
+    (if-let* ((during-label (plist-get spec :during-label)))
+        (push (format "[during:%s]" during-label) chips)
+      (progn
+        (when-let* ((before (plist-get spec :max-id)))
+          (push (format "[before:%s]" before) chips))
+        (when-let* ((after (plist-get spec :min-id)))
+          (push (format "[after:%s]" after) chips))))
+    (when-let* ((slop (plist-get spec :slop)))
+      (push (format "[slop:%s]" slop) chips))
     (unless (eq (plist-get spec :sort-by) 'timestamp)
       (push (format "[sort:%s]" (plist-get spec :sort-by)) chips))
     (unless (eq (plist-get spec :sort-order) 'desc)
@@ -1511,12 +1620,17 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
 
 (defun disco-root--search-transient-spec-setter (property value)
   "Set transient root search PROPERTY to VALUE, removing nil values when needed."
-  (setq-local disco-root--search-query-spec
-              (if (or (null value)
-                      (and (stringp value) (string-empty-p value))
-                      (and (listp value) (null value)))
-                  (disco-root--search-plist-remove disco-root--search-query-spec property)
-                (plist-put disco-root--search-query-spec property value)))
+  (let ((empty-p (or (null value)
+                     (and (stringp value) (string-empty-p value))
+                     (and (listp value) (null value)))))
+    (setq-local disco-root--search-query-spec
+                (if empty-p
+                    (disco-root--search-plist-remove disco-root--search-query-spec property)
+                  (plist-put disco-root--search-query-spec property value)))
+    (when (memq property '(:min-id :max-id))
+      (setq-local disco-root--search-query-spec
+                  (disco-root--search-plist-remove disco-root--search-query-spec
+                                                   :during-label))))
   (disco-root--search-sync-query-display))
 
 (defun disco-root--search-transient-mentions-getter ()
@@ -1537,7 +1651,25 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
                                                  :mention-everyone)))
   (disco-root--search-sync-query-display))
 
-(defun disco-root--search-transient-domain-value ()
+(defun disco-root--search-transient-during-getter ()
+  "Return current transient `during' value as plist."
+  (list :min-id (plist-get disco-root--search-query-spec :min-id)
+        :max-id (plist-get disco-root--search-query-spec :max-id)
+        :during-label (plist-get disco-root--search-query-spec :during-label)))
+
+(defun disco-root--search-transient-during-setter (value)
+  "Set transient `during' filter from VALUE plist."
+  (setq-local disco-root--search-query-spec
+              (plist-put disco-root--search-query-spec :min-id (plist-get value :min-id)))
+  (setq-local disco-root--search-query-spec
+              (plist-put disco-root--search-query-spec :max-id (plist-get value :max-id)))
+  (setq-local disco-root--search-query-spec
+              (if-let* ((label (plist-get value :during-label)))
+                  (plist-put disco-root--search-query-spec :during-label label)
+                (disco-root--search-plist-remove disco-root--search-query-spec :during-label)))
+  (disco-root--search-sync-query-display))
+
+(defun disco-root--search-transient-domain-value (_prompt _initial _history)
   "Read a root search domain value for the transient."
   (disco-root--search-transient-with-buffer
    (lambda ()
@@ -1588,6 +1720,47 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
      (let* ((current (string-join (or (plist-get disco-root--search-query-spec :has) '()) ","))
             (picked (completing-read-multiple "Has: " disco-root--search-has-values nil t current)))
        (and picked (seq-uniq picked #'equal))))))
+
+(defun disco-root--search-transient-author-types-value (_prompt _initial _history)
+  "Read `author-type' filters for the search transient."
+  (disco-root--search-transient-with-buffer
+   (lambda ()
+     (let* ((current (string-join (or (plist-get disco-root--search-query-spec :author-types) '()) ","))
+            (picked (completing-read-multiple "Author type: "
+                                              disco-root--search-author-type-values
+                                              nil t current)))
+       (and picked (seq-uniq picked #'equal))))))
+
+(defun disco-root--search-transient-slop-value (_prompt _initial _history)
+  "Read `slop' value for the search transient."
+  (disco-root--search-transient-with-buffer
+   (lambda ()
+     (let* ((current (if (numberp (plist-get disco-root--search-query-spec :slop))
+                         (number-to-string (plist-get disco-root--search-query-spec :slop))
+                       ""))
+            (value (completing-read "Slop: " disco-root--search-slop-values nil nil current)))
+       (unless (string-empty-p (string-trim value))
+         (disco-root--search-parse-slop value))))))
+
+(defun disco-root--search-read-during-range ()
+  "Read a calendar date range and return plist with min/max ids and label."
+  (let* ((start-date (calendar-read-date nil))
+         (end-date (calendar-read-date nil start-date))
+         (start-time (disco-root--search-calendar-date-to-time start-date nil))
+         (end-time (disco-root--search-calendar-date-to-time end-date t))
+         (start-label (calendar-date-string start-date nil t))
+         (end-label (calendar-date-string end-date nil t)))
+    (list :min-id (disco-root--search-time-to-snowflake start-time)
+          :max-id (disco-root--search-time-to-snowflake end-time)
+          :during-label (if (equal start-label end-label)
+                            start-label
+                          (format "%s..%s" start-label end-label)))))
+
+(defun disco-root--search-transient-during-value (_prompt _initial _history)
+  "Read `during' value for the search transient using calendar dates." 
+  (disco-root--search-transient-with-buffer
+   (lambda ()
+     (disco-root--search-read-during-range))))
 
 (defun disco-root--search-transient-boundary-value (prompt property field-name)
   "Read message boundary PROPERTY using PROMPT and FIELD-NAME."
@@ -1662,6 +1835,24 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
       (string-join value ", ")
     "none"))
 
+(defun disco-root--search-transient-format-author-types (value)
+  "Format root search author-type VALUE list for transient display."
+  (if value
+      (string-join value ", ")
+    "none"))
+
+(defun disco-root--search-transient-format-during (value)
+  "Format root search during VALUE plist for transient display."
+  (or (plist-get value :during-label)
+      (let ((min-id (plist-get value :min-id))
+            (max-id (plist-get value :max-id)))
+        (cond
+         ((and min-id max-id)
+          (format "%s..%s" min-id max-id))
+         ((or min-id max-id)
+          "partial")
+         (t "none")))))
+
 (defun disco-root--search-transient-format-pinned (value)
   "Format root search pinned VALUE for transient display."
   (cond
@@ -1722,6 +1913,15 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   :setter (lambda (value) (disco-root--search-transient-spec-setter :has value))
   :value-formatter #'disco-root--search-transient-format-has)
 
+(transient-define-infix disco-root-search--infix-author-type ()
+  :description "Author"
+  :class 'disco-root-search--field
+  :prompt "Author type: "
+  :reader #'disco-root--search-transient-author-types-value
+  :getter (lambda () (disco-root--search-transient-spec-getter :author-types))
+  :setter (lambda (value) (disco-root--search-transient-spec-setter :author-types value))
+  :value-formatter #'disco-root--search-transient-format-author-types)
+
 (transient-define-infix disco-root-search--infix-pinned ()
   :description "Pinned"
   :class 'disco-root-search--cycle-field
@@ -1754,6 +1954,23 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   :getter (lambda () (disco-root--search-transient-spec-getter :min-id))
   :setter (lambda (value) (disco-root--search-transient-spec-setter :min-id value)))
 
+(transient-define-infix disco-root-search--infix-during ()
+  :description "During"
+  :class 'disco-root-search--field
+  :prompt "During: "
+  :reader #'disco-root--search-transient-during-value
+  :getter #'disco-root--search-transient-during-getter
+  :setter #'disco-root--search-transient-during-setter
+  :value-formatter #'disco-root--search-transient-format-during)
+
+(transient-define-infix disco-root-search--infix-slop ()
+  :description "Slop"
+  :class 'disco-root-search--field
+  :prompt "Slop: "
+  :reader #'disco-root--search-transient-slop-value
+  :getter (lambda () (disco-root--search-transient-spec-getter :slop))
+  :setter (lambda (value) (disco-root--search-transient-spec-setter :slop value)))
+
 (transient-define-infix disco-root-search--infix-sort ()
   :description "Sort"
   :class 'disco-root-search--field
@@ -1778,14 +1995,17 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
     ("e" "Edit raw query..." disco-root-search-edit-raw-query :transient t)]
    ["People"
     ("f" disco-root-search--infix-from)
-    ("m" disco-root-search--infix-mentions)]
+    ("m" disco-root-search--infix-mentions)
+    ("A" disco-root-search--infix-author-type)]
    ["Place"
     ("i" disco-root-search--infix-channels)
     ("a" disco-root-search--infix-after)
-    ("b" disco-root-search--infix-before)]
+    ("b" disco-root-search--infix-before)
+    ("D" disco-root-search--infix-during)]
    ["Flags"
     ("h" disco-root-search--infix-has)
     ("p" disco-root-search--infix-pinned)
+    ("l" disco-root-search--infix-slop)
     ("s" disco-root-search--infix-sort)
     ("o" disco-root-search--infix-order)]
    ["Actions"
@@ -1910,6 +2130,7 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   "Return internal request plist for search TAB using QUERY-SPEC and CURSOR."
   (let ((spec (list :limit disco-root-search-tab-limit
                     :content (plist-get query-spec :content)
+                    :author-types (plist-get query-spec :author-types)
                     :author-ids (plist-get query-spec :author-ids)
                     :mentions (plist-get query-spec :mentions)
                     :mention-everyone (plist-get query-spec :mention-everyone)
