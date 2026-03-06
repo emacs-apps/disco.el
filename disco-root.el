@@ -1540,6 +1540,13 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                    (eq disco-root--view-mode 'unread))
               (disco-root--debug-log "flush-live-updates -> unread-render")
               (disco-root--render-preserving-position))
+             ((and dirty-channel-ids
+                   (eq layout 'activity)
+                   (disco-root--buffer-visible-p)
+                   (not (disco-root--selected-window-for-buffer (current-buffer))))
+              (disco-root--debug-log
+               "flush-live-updates -> passive-activity-render")
+              (disco-root--render-preserving-position))
              (t
               (disco-root--debug-log "flush-live-updates -> incremental")
               (let ((inhibit-read-only t)
