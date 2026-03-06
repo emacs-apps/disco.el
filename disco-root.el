@@ -180,6 +180,9 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defvar-local disco-root--search-domain nil
   "Current root search domain plist.")
 
+(defvar-local disco-root--search-query-spec nil
+  "Parsed root search query plist for the active search session.")
+
 (defvar-local disco-root--search-tabs nil
   "Alist of search tab symbol to tab-state plist for root search view.")
 
@@ -212,6 +215,26 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
   "When non-nil, request exact total hit counts in root search results."
   :type 'boolean
   :group 'disco)
+
+(defconst disco-root--search-filter-names
+  '("from" "mentions" "has" "in" "before" "after" "pinned" "sort" "order")
+  "Supported Discord-style root search filter names.")
+
+(defconst disco-root--search-has-values
+  '("image" "sound" "video" "file" "sticker" "embed" "link" "poll" "snapshot")
+  "Supported values for Discord-style `has:' root search filter.")
+
+(defconst disco-root--search-sort-values '("timestamp" "relevance")
+  "Supported values for Discord-style `sort:' root search filter.")
+
+(defconst disco-root--search-order-values '("asc" "desc")
+  "Supported values for Discord-style `order:' root search filter.")
+
+(defconst disco-root--search-bool-values '("true" "false")
+  "Supported boolean values for Discord-style root search filters.")
+
+(defvar-local disco-root--search-completion-domain nil
+  "Minibuffer-local root search domain used by search query completion.")
 
 (defcustom disco-root-show-guild-icons t
   "When non-nil, show guild icons in root guild rows when available."
@@ -624,6 +647,372 @@ after passive EWOC and full-buffer updates."
     (copy-tree (or (cdr (assoc choice candidates))
                    (cdr (car candidates))))))
 
+(defun disco-root--search-split-query-tokens (query)
+  "Split root search QUERY into shell-like tokens."
+  (condition-case err
+      (split-string-and-unquote (or query ""))
+    (error
+     (user-error "disco: invalid search query syntax: %s"
+                 (error-message-string err)))))
+
+(defun disco-root--search-split-filter-values (raw-value)
+  "Split RAW-VALUE on commas, trimming whitespace and dropping empties."
+  (let (result)
+    (dolist (part (split-string (or raw-value "") "," t))
+      (let ((trimmed (string-trim part)))
+        (when (not (string-empty-p trimmed))
+          (push trimmed result))))
+    (nreverse result)))
+
+(defun disco-root--search-quote-completion-candidate (value)
+  "Return VALUE quoted for root search completion when needed."
+  (let ((text (format "%s" value)))
+    (if (string-match-p "[[:space:]]" text)
+        (format "\"%s\"" (replace-regexp-in-string "[\\\"]" "\\\\&" text))
+      text)))
+
+(defun disco-root--search--register-candidate (label value seen result)
+  "Helper to register LABEL -> VALUE in RESULT, deduped by SEEN hash table."
+  (let ((text (and label (string-trim (format "%s" label)))))
+    (when (and (stringp text)
+               (not (string-empty-p text))
+               (not (gethash text seen)))
+      (puthash text t seen)
+      (push (cons text value) result)))
+  result)
+
+(defun disco-root--search-domain-channel-objects (domain)
+  "Return channel objects that belong to root search DOMAIN."
+  (pcase (disco-root--search-domain-kind domain)
+    ('guild
+     (let ((guild-id (disco-root--search-domain-id domain)))
+       (append (or (disco-state-guild-channels guild-id) '())
+               (or (disco-state-guild-threads guild-id) '()))))
+    (_
+     (or (disco-state-private-channels) '()))))
+
+(defun disco-root--search-channel-candidates (domain)
+  "Return alist of display label to channel id candidates for DOMAIN."
+  (let ((seen (make-hash-table :test #'equal))
+        result)
+    (dolist (channel (disco-root--search-domain-channel-objects domain))
+      (when-let* ((channel-id (alist-get 'id channel)))
+        (let* ((name (disco-root--channel-display-name channel))
+               (context (disco-root--search-context-label channel))
+               (aliases (delq nil
+                              (list context
+                                    name
+                                    (and name (format "#%s" name))
+                                    channel-id))))
+          (dolist (label aliases)
+            (setq result
+                  (disco-root--search--register-candidate label channel-id seen result))))))
+    (nreverse result)))
+
+(defun disco-root--search-user-candidates-from-message (message seen result)
+  "Add search user candidates from MESSAGE to RESULT using SEEN hash table."
+  (let* ((author (alist-get 'author message))
+         (member (alist-get 'member message))
+         (author-id (and (listp author) (alist-get 'id author)))
+         (nick (and (listp member) (alist-get 'nick member)))
+         (global-name (and (listp author) (alist-get 'global_name author)))
+         (username (and (listp author) (alist-get 'username author))))
+    (when author-id
+      (dolist (label (delq nil (list nick global-name username
+                                     (and username (format "@%s" username))
+                                     author-id)))
+        (setq result
+              (disco-root--search--register-candidate label author-id seen result)))))
+  result)
+
+(defun disco-root--search-user-candidates-from-private-channel (channel seen result)
+  "Add private-channel recipient user candidates from CHANNEL to RESULT."
+  (dolist (recipient (or (alist-get 'recipients channel) '()))
+    (when-let* ((user-id (alist-get 'id recipient)))
+      (dolist (label (delq nil (list (alist-get 'global_name recipient)
+                                     (alist-get 'username recipient)
+                                     (and (alist-get 'username recipient)
+                                          (format "@%s" (alist-get 'username recipient)))
+                                     user-id)))
+        (setq result
+              (disco-root--search--register-candidate label user-id seen result)))))
+  result)
+
+(defun disco-root--search-user-candidates (domain)
+  "Return alist of display label to user id candidates for DOMAIN."
+  (let ((seen (make-hash-table :test #'equal))
+        result)
+    (when-let* ((current-user-id (and (fboundp 'disco-gateway-current-user-id)
+                                      (disco-gateway-current-user-id))))
+      (dolist (label (list "me" current-user-id))
+        (setq result
+              (disco-root--search--register-candidate label current-user-id seen result))))
+    (dolist (channel (disco-root--search-domain-channel-objects domain))
+      (when (disco-state-private-channel-p channel)
+        (setq result
+              (disco-root--search-user-candidates-from-private-channel channel seen result)))
+      (dolist (message (or (disco-state-messages (alist-get 'id channel)) '()))
+        (setq result
+              (disco-root--search-user-candidates-from-message message seen result))))
+    (nreverse result)))
+
+(defun disco-root--search-find-candidate-id (needle candidates)
+  "Resolve NEEDLE using CANDIDATES alist and return the matching id, or nil."
+  (let ((downcased (downcase (string-trim (format "%s" needle)))))
+    (cdr (seq-find (lambda (cell)
+                     (equal (downcase (car cell)) downcased))
+                   candidates))))
+
+(defun disco-root--search-parse-bool (raw-value field-name)
+  "Parse RAW-VALUE as boolean for FIELD-NAME and return t or :false."
+  (pcase (downcase (string-trim (or raw-value "")))
+    ((or "true" "t" "yes" "y" "1") t)
+    ((or "false" "nil" "no" "n" "0") :false)
+    (_
+     (user-error "disco: %s expects true/false" field-name))))
+
+(defun disco-root--search-time-to-snowflake (time-value)
+  "Return Discord snowflake boundary string for TIME-VALUE."
+  (let* ((unix-ms (truncate (* 1000.0 (float-time time-value))))
+         (discord-ms (- unix-ms (* 1000 disco-state-discord-epoch-seconds))))
+    (when (< discord-ms 0)
+      (user-error "disco: search timestamp precedes Discord epoch"))
+    (format "%d" (ash discord-ms 22))))
+
+(defun disco-root--search-parse-boundary-id (raw-value field-name)
+  "Parse RAW-VALUE into a message-id boundary string for FIELD-NAME."
+  (let ((trimmed (string-trim (or raw-value ""))))
+    (cond
+     ((string-empty-p trimmed)
+      (user-error "disco: %s cannot be empty" field-name))
+     ((string-match "<#[0-9]+>" trimmed)
+      (replace-regexp-in-string "[^0-9]" "" trimmed))
+     ((string-match "<[!@#]*\\([0-9]+\\)>" trimmed)
+      (match-string 1 trimmed))
+     ((string-match-p "\\`[0-9]+\\'" trimmed)
+      trimmed)
+     (t
+      (condition-case _err
+          (disco-root--search-time-to-snowflake (date-to-time trimmed))
+        (error
+         (user-error "disco: %s expects a message id or parseable date/time (%s)"
+                     field-name
+                     trimmed)))))))
+
+(defun disco-root--search-resolve-channel (raw-value domain)
+  "Resolve RAW-VALUE to a channel id within root search DOMAIN."
+  (let* ((trimmed (string-trim (or raw-value "")))
+         (normalized (replace-regexp-in-string "\\`#" "" trimmed)))
+    (cond
+     ((string-empty-p normalized)
+      (user-error "disco: in: expects a channel name or id"))
+     ((string-match "<#\\([0-9]+\\)>" normalized)
+      (match-string 1 normalized))
+     ((string-match-p "\\`[0-9]+\\'" normalized)
+      normalized)
+     ((disco-root--search-find-candidate-id normalized
+                                            (disco-root--search-channel-candidates domain)))
+     (t
+      (user-error "disco: unknown channel in: %s" raw-value)))))
+
+(defun disco-root--search-resolve-user (raw-value domain field-name)
+  "Resolve RAW-VALUE to a user id within root search DOMAIN for FIELD-NAME."
+  (let* ((trimmed (string-trim (or raw-value "")))
+         (normalized (replace-regexp-in-string "\\`@" "" trimmed)))
+    (cond
+     ((string-empty-p normalized)
+      (user-error "disco: %s expects a user or id" field-name))
+     ((string-match "<@!?\\([0-9]+\\)>" normalized)
+      (match-string 1 normalized))
+     ((string-match-p "\\`[0-9]+\\'" normalized)
+      normalized)
+     ((equal (downcase normalized) "me")
+      (or (and (fboundp 'disco-gateway-current-user-id)
+               (disco-gateway-current-user-id))
+          (user-error "disco: current user id is unavailable")))
+     ((disco-root--search-find-candidate-id normalized
+                                            (disco-root--search-user-candidates domain)))
+     (t
+      (user-error "disco: unknown user for %s: %s" field-name raw-value)))))
+
+(defun disco-root--search-normalize-has-value (raw-value)
+  "Normalize RAW-VALUE for the Discord-style `has:' search filter."
+  (let* ((trimmed (string-trim (or raw-value "")))
+         (negative (string-prefix-p "-" trimmed))
+         (value (if negative (substring trimmed 1) trimmed))
+         (downcased (downcase value)))
+    (unless (member downcased disco-root--search-has-values)
+      (user-error "disco: unsupported has: value %s" raw-value))
+    (concat (if negative "-" "") downcased)))
+
+(defun disco-root--search-parse-filter-token (key raw-value domain spec)
+  "Apply one Discord-style filter KEY with RAW-VALUE in DOMAIN to SPEC plist."
+  (pcase key
+    ("from"
+     (plist-put spec :author-ids
+                (append (plist-get spec :author-ids)
+                        (mapcar (lambda (value)
+                                  (disco-root--search-resolve-user value domain "from:"))
+                                (disco-root--search-split-filter-values raw-value)))))
+    ("mentions"
+     (let ((values (disco-root--search-split-filter-values raw-value))
+           mentions)
+       (setq mentions (plist-get spec :mentions))
+       (dolist (value values)
+         (if (member (downcase value) '("everyone" "@everyone"))
+             (setq spec (plist-put spec :mention-everyone t))
+           (push (disco-root--search-resolve-user value domain "mentions:")
+                 mentions)))
+       (plist-put spec :mentions (nreverse mentions))))
+    ("has"
+     (plist-put spec :has
+                (append (plist-get spec :has)
+                        (mapcar #'disco-root--search-normalize-has-value
+                                (disco-root--search-split-filter-values raw-value)))))
+    ("in"
+     (plist-put spec :channel-ids
+                (append (plist-get spec :channel-ids)
+                        (mapcar (lambda (value)
+                                  (disco-root--search-resolve-channel value domain))
+                                (disco-root--search-split-filter-values raw-value)))))
+    ("before"
+     (plist-put spec :max-id
+                (disco-root--search-parse-boundary-id raw-value "before:")))
+    ("after"
+     (plist-put spec :min-id
+                (disco-root--search-parse-boundary-id raw-value "after:")))
+    ("pinned"
+     (plist-put spec :pinned
+                (disco-root--search-parse-bool raw-value "pinned:")))
+    ("sort"
+     (let ((value (downcase (string-trim raw-value))))
+       (unless (member value disco-root--search-sort-values)
+         (user-error "disco: unsupported sort: value %s" raw-value))
+       (plist-put spec :sort-by (intern value))))
+    ("order"
+     (let ((value (downcase (string-trim raw-value))))
+       (unless (member value disco-root--search-order-values)
+         (user-error "disco: unsupported order: value %s" raw-value))
+       (plist-put spec :sort-order (intern value))))
+    (_ spec)))
+
+(defun disco-root--search-parse-query (query domain)
+  "Parse Discord-style root search QUERY for DOMAIN into a plist spec."
+  (let ((tokens (disco-root--search-split-query-tokens query))
+        (content-parts nil)
+        (spec (list :sort-by 'timestamp :sort-order 'desc)))
+    (dolist (token tokens)
+      (if (string-match "\\`\\([^:[:space:]]+\\):\\(.*\\)\\'" token)
+          (let ((key (downcase (match-string 1 token)))
+                (raw-value (match-string 2 token)))
+            (if (member key disco-root--search-filter-names)
+                (setq spec (disco-root--search-parse-filter-token key raw-value domain spec))
+              (push token content-parts)))
+        (push token content-parts)))
+    (setq spec (plist-put spec :content
+                          (when content-parts
+                            (string-join (nreverse content-parts) " "))))
+    (dolist (field '(:author-ids :mentions :has :channel-ids))
+      (when-let* ((value (plist-get spec field)))
+        (setq spec (plist-put spec field (seq-uniq value #'equal)))))
+    spec))
+
+(defun disco-root--search-capf-bounds ()
+  "Return (START . END) bounds for the current root search minibuffer token."
+  (let ((scan (minibuffer-prompt-end))
+        (limit (point))
+        (start (minibuffer-prompt-end))
+        (quoted nil)
+        (escaped nil))
+    (while (< scan limit)
+      (let ((char (char-after scan)))
+        (cond
+         (escaped
+          (setq escaped nil))
+         ((eq char ?\\)
+          (setq escaped t))
+         ((eq char ?\")
+          (setq quoted (not quoted)))
+         ((and (not quoted)
+               (memq char '(9 10 13 32)))
+          (setq start (1+ scan)))))
+      (setq scan (1+ scan)))
+    (cons start limit)))
+
+(defun disco-root--search-capf-filter-candidates ()
+  "Return completion candidates for root search filter names."
+  (mapcar (lambda (name) (concat name ":")) disco-root--search-filter-names))
+
+(defun disco-root--search-capf-value-candidates (filter domain)
+  "Return completion candidates for FILTER values within DOMAIN."
+  (pcase filter
+    ((or "from" "mentions")
+     (mapcar (lambda (cell)
+               (disco-root--search-quote-completion-candidate (car cell)))
+             (disco-root--search-user-candidates domain)))
+    ("in"
+     (mapcar (lambda (cell)
+               (disco-root--search-quote-completion-candidate (car cell)))
+             (disco-root--search-channel-candidates domain)))
+    ("has"
+     disco-root--search-has-values)
+    ("sort"
+     disco-root--search-sort-values)
+    ("order"
+     disco-root--search-order-values)
+    ("pinned"
+     disco-root--search-bool-values)
+    (_ nil)))
+
+(defun disco-root--search-query-complete-at-point ()
+  "Completion-at-point function for Discord-style root search queries."
+  (when-let* ((domain disco-root--search-completion-domain)
+              (bounds (disco-root--search-capf-bounds)))
+    (let* ((start (car bounds))
+           (end (cdr bounds))
+           (token (buffer-substring-no-properties start end)))
+      (cond
+       ((string-match "\\`\\([^:[:space:]]*\\)\\'" token)
+        (let ((candidates (seq-filter (lambda (candidate)
+                                        (string-prefix-p token candidate))
+                                      (disco-root--search-capf-filter-candidates))))
+          (when candidates
+            (list start end candidates :exclusive 'no))))
+       ((string-match "\\`\\([^:[:space:]]+\\):\\(.*\\)\\'" token)
+        (let* ((filter (downcase (match-string 1 token)))
+               (raw-value (match-string 2 token))
+               (value-candidates (disco-root--search-capf-value-candidates filter domain)))
+          (when value-candidates
+            (let* ((comma-pos (or (cl-position ?, raw-value :from-end t) -1))
+                   (value-start (+ start (length filter) 1
+                                   (if (>= comma-pos 0)
+                                       (1+ comma-pos)
+                                     0)))
+                   (prefix (buffer-substring-no-properties value-start end)))
+              (list value-start
+                    end
+                    (seq-filter (lambda (candidate)
+                                  (string-prefix-p prefix candidate))
+                                value-candidates)
+                    :exclusive 'no)))))))))
+
+(defun disco-root--read-search-query (domain &optional initial-input)
+  "Prompt for a Discord-style root search query within DOMAIN."
+  (let ((map (copy-keymap minibuffer-local-map)))
+    (define-key map (kbd "TAB") #'completion-at-point)
+    (define-key map (kbd "<tab>") #'completion-at-point)
+    (define-key map (kbd "M-TAB") #'completion-at-point)
+    (minibuffer-with-setup-hook
+        (lambda ()
+          (setq-local disco-root--search-completion-domain domain)
+          (setq-local completion-at-point-functions
+                      '(disco-root--search-query-complete-at-point))
+          (setq-local completion-ignore-case t))
+      (read-from-minibuffer
+       (format "Search %s: " (disco-root--search-domain-label domain))
+       initial-input
+       map nil 'disco-root-search-history))))
+
 (defun disco-root--search-empty-tab-state ()
   "Return freshly initialized root search tab state plist."
   (list :items nil
@@ -732,30 +1121,44 @@ after passive EWOC and full-buffer updates."
   (and (listp body)
        (= (or (alist-get 'code body) 0) 110000)))
 
-(defun disco-root--search-tab-base-spec (tab query &optional cursor)
-  "Return internal request plist for search TAB using QUERY and CURSOR."
+(defun disco-root--search-tab-base-spec (tab query-spec &optional cursor)
+  "Return internal request plist for search TAB using QUERY-SPEC and CURSOR."
   (let ((spec (list :limit disco-root-search-tab-limit
-                    :content query
-                    :sort-by 'timestamp
-                    :sort-order 'desc)))
+                    :content (plist-get query-spec :content)
+                    :author-ids (plist-get query-spec :author-ids)
+                    :mentions (plist-get query-spec :mentions)
+                    :mention-everyone (plist-get query-spec :mention-everyone)
+                    :has (copy-sequence (or (plist-get query-spec :has) '()))
+                    :pinned (plist-get query-spec :pinned)
+                    :sort-by (or (plist-get query-spec :sort-by) 'timestamp)
+                    :sort-order (or (plist-get query-spec :sort-order) 'desc)
+                    :max-id (plist-get query-spec :max-id)
+                    :min-id (plist-get query-spec :min-id)
+                    :slop (plist-get query-spec :slop))))
     (when cursor
       (setq spec (plist-put spec :cursor cursor)))
     (pcase tab
       ('links
-       (setq spec (plist-put spec :has '("link"))))
+       (setq spec (plist-put spec :has (seq-uniq (append (plist-get spec :has)
+                                                         '("link"))
+                                                 #'equal))))
       ('media
-       (setq spec (plist-put spec :has '("image" "video"))))
+       (setq spec (plist-put spec :has (seq-uniq (append (plist-get spec :has)
+                                                         '("image" "video"))
+                                                 #'equal))))
       ('files
-       (setq spec (plist-put spec :has '("file"))))
+       (setq spec (plist-put spec :has (seq-uniq (append (plist-get spec :has)
+                                                         '("file"))
+                                                 #'equal))))
       ('pins
        (setq spec (plist-put spec :pinned t))))
     spec))
 
 (defun disco-root--search-request-tabs (&optional load-more-tab)
-  "Return tabs alist for current root search query.
+  "Return tabs alist for current parsed root search query.
 
 When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
-  (let ((query disco-root--search-query))
+  (let ((query-spec disco-root--search-query-spec))
     (if load-more-tab
         (let* ((state (disco-root--search-tab-state load-more-tab))
                (cursor (plist-get state :cursor)))
@@ -763,9 +1166,9 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
             (user-error "disco: no more search results in %s"
                         (downcase (disco-root--search-tab-label load-more-tab))))
           (list (cons load-more-tab
-                      (disco-root--search-tab-base-spec load-more-tab query cursor))))
+                      (disco-root--search-tab-base-spec load-more-tab query-spec cursor))))
       (mapcar (lambda (tab)
-                (cons tab (disco-root--search-tab-base-spec tab query nil)))
+                (cons tab (disco-root--search-tab-base-spec tab query-spec nil)))
               disco-root--search-tab-order))))
 
 (defun disco-root--search-tab-requested-p (tab tabs-alist)
@@ -777,6 +1180,15 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   (when (and (eq major-mode 'disco-root-mode)
              (eq (disco-root--ensure-layout) 'search))
     (disco-root--render-preserving-position)))
+
+(defun disco-root--search-filter-messages (messages)
+  "Apply client-side root search filters to MESSAGES list."
+  (let ((channel-ids (plist-get disco-root--search-query-spec :channel-ids)))
+    (if (not channel-ids)
+        messages
+      (seq-filter (lambda (message)
+                    (member (alist-get 'channel_id message) channel-ids))
+                  messages))))
 
 (defun disco-root--search-apply-request-state (tabs-alist loading)
   "Mark TABS-ALIST as LOADING state in current search session."
@@ -811,8 +1223,9 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
         (dolist (entry tabs-alist)
           (let* ((tab (car entry))
                  (result (alist-get tab tabs-body nil nil #'eq))
-                 (messages (disco-root--search-flatten-messages
-                            (alist-get 'messages result)))
+                 (messages (disco-root--search-filter-messages
+                            (disco-root--search-flatten-messages
+                             (alist-get 'messages result))))
                  (state (copy-sequence (disco-root--search-tab-state tab)))
                  (existing (plist-get state :items)))
             (disco-root--search-store-channels (alist-get 'channels result))
@@ -854,6 +1267,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
        (disco-api-guild-search-messages-tabs-async
         (disco-root--search-domain-id domain)
         :tabs tabs-alist
+        :channel-ids (plist-get disco-root--search-query-spec :channel-ids)
         :include-nsfw disco-root-search-include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
@@ -885,6 +1299,10 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
                (not (string-empty-p disco-root--search-query))
                disco-root--search-domain)
     (user-error "disco: no active root search"))
+  (setq-local disco-root--search-query-spec
+              (or disco-root--search-query-spec
+                  (disco-root--search-parse-query disco-root--search-query
+                                                  disco-root--search-domain)))
   (setq-local disco-root--search-generation (1+ disco-root--search-generation))
   (disco-root--search-reset-tab-states)
   (disco-root--search-dispatch disco-root--search-generation
@@ -912,15 +1330,19 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   "Search root buffer DOMAIN for QUERY and show results in search layout."
   (interactive
    (let* ((domain (disco-root--read-search-domain))
-          (prompt (format "Search %s: "
-                          (disco-root--search-domain-label domain))))
-     (list (read-string prompt nil 'disco-root-search-history)
+          (initial (and (eq (disco-root--ensure-layout) 'search)
+                        disco-root--search-query
+                        (disco-root--search-domain-equal-p domain disco-root--search-domain)
+                        disco-root--search-query)))
+     (list (disco-root--read-search-query domain initial)
            domain)))
   (let ((normalized-query (string-trim (or query ""))))
     (when (string-empty-p normalized-query)
       (user-error "disco: search query cannot be empty"))
     (setq-local disco-root--search-query normalized-query)
     (setq-local disco-root--search-domain (copy-tree domain))
+    (setq-local disco-root--search-query-spec
+                (disco-root--search-parse-query normalized-query domain))
     (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
     (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
     (setq-local disco-root--search-generation (1+ disco-root--search-generation))
@@ -4794,6 +5216,7 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq-local disco-root--ewoc-marker nil)
   (setq-local disco-root--search-query nil)
   (setq-local disco-root--search-domain nil)
+  (setq-local disco-root--search-query-spec nil)
   (setq-local disco-root--search-tabs nil)
   (setq-local disco-root--search-generation 0)
   (setq-local disco-root--search-in-flight nil)

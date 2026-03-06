@@ -511,6 +511,47 @@
         (disco-root-open-at-point)
         (should (equal '("m1" "c1") jumped))))))
 
+(ert-deftest disco-root-search-parse-query-supports-discord-style-filters ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (cl-letf (((symbol-function 'disco-root--search-user-candidates)
+               (lambda (_domain)
+                 '(("alice" . "u1")
+                   ("bob" . "u2"))))
+              ((symbol-function 'disco-root--search-channel-candidates)
+               (lambda (_domain)
+                 '(("general" . "c1")))))
+      (let ((parsed (disco-root--search-parse-query
+                     "hello world from:alice mentions:bob has:link,file in:general pinned:true sort:relevance order:asc before:123 after:456"
+                     '(:kind guild :id "g1" :label "Guild"))))
+        (should (equal "hello world" (plist-get parsed :content)))
+        (should (equal '("u1") (plist-get parsed :author-ids)))
+        (should (equal '("u2") (plist-get parsed :mentions)))
+        (should (equal '("link" "file") (plist-get parsed :has)))
+        (should (equal '("c1") (plist-get parsed :channel-ids)))
+        (should (eq t (plist-get parsed :pinned)))
+        (should (eq 'relevance (plist-get parsed :sort-by)))
+        (should (eq 'asc (plist-get parsed :sort-order)))
+        (should (equal "123" (plist-get parsed :max-id)))
+        (should (equal "456" (plist-get parsed :min-id)))))))
+
+(ert-deftest disco-root-search-query-capf-completes-filter-values ()
+  (with-temp-buffer
+    (insert "has:vi")
+    (goto-char (point-max))
+    (setq-local disco-root--search-completion-domain
+                '(:kind guild :id "g1" :label "Guild"))
+    (cl-letf (((symbol-function 'minibuffer-prompt-end)
+               (lambda () (point-min))))
+      (pcase-let ((`(,start ,end ,table . ,_props)
+                   (disco-root--search-query-complete-at-point)))
+        (should (= 5 start))
+        (should (= (point-max) end))
+        (should (member "video"
+                        (all-completions
+                         (buffer-substring-no-properties start end)
+                         table)))))))
+
 (ert-deftest disco-root-render-layout-search-renders-sections ()
   (with-temp-buffer
     (disco-root-mode)

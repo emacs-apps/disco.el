@@ -108,8 +108,8 @@ the false string."
     (vconcat normalized)))
 
 (cl-defun disco-api--message-search-tab-payload
-    (&key limit offset cursor max-id min-id slop content has pinned
-          sort-by sort-order)
+    (&key limit offset cursor max-id min-id slop content author-ids mentions
+          mention-everyone has pinned sort-by sort-order)
   "Build one message search tab payload object."
   (when (and cursor (numberp offset))
     (user-error "disco: message search tab cannot use both cursor and offset"))
@@ -129,6 +129,20 @@ the false string."
     (when (and (stringp content)
                (not (string-empty-p (string-trim content))))
       (push `(content . ,(string-trim content)) payload))
+    (when author-ids
+      (push `(author_id . ,(disco-api--normalize-id-sequence
+                            author-ids
+                            "message search author_id"))
+            payload))
+    (when mentions
+      (push `(mentions . ,(disco-api--normalize-id-sequence
+                           mentions
+                           "message search mentions"))
+            payload))
+    (when (not (null mention-everyone))
+      (push `(mention_everyone
+              . ,(if (disco-api--json-true-p mention-everyone) t :false))
+            payload))
     (when has
       (push `(has . ,(disco-api--normalize-string-sequence has "message search has"))
             payload))
