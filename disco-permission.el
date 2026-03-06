@@ -131,6 +131,23 @@ VALUE may be an integer or decimal string."
     (string-to-number value))
    (t nil)))
 
+(defun disco-permission-display-name (permission)
+  "Return human-readable display name for PERMISSION designator."
+  (let* ((raw (cond
+               ((keywordp permission) (substring (symbol-name permission) 1))
+               ((symbolp permission) (symbol-name permission))
+               ((stringp permission) permission)
+               ((integerp permission) (format "0x%X" permission))
+               (t (format "%s" permission))))
+         (trimmed (replace-regexp-in-string "\\`:+" "" raw))
+         (snake (replace-regexp-in-string "[[:space:]-]+" "_" trimmed)))
+    (upcase snake)))
+
+(defun disco-permission-channel-known-p (channel)
+  "Return non-nil when CHANNEL has a parseable computed permissions field."
+  (let ((raw (and (listp channel) (alist-get 'permissions channel))))
+    (not (null (disco-permission-parse-bitfield raw)))))
+
 (cl-defun disco-permission-has-p (bitfield permission &optional (unknown-value t))
   "Return non-nil when BITFIELD includes PERMISSION.
 
@@ -188,6 +205,39 @@ permissions are treated as satisfied."
         (push (or (disco-permission--normalize-name permission)
                   permission)
               missing)))))
+
+(cl-defun disco-permission-ensure-channel (channel permissions &key action (unknown-value t))
+  "Signal `user-error' when CHANNEL misses PERMISSIONS.
+
+ACTION is optional human-readable text appended as \\='for ACTION\\='.
+When UNKNOWN-VALUE is non-nil, missing or unparsable channel permissions are
+considered satisfied. Return t when the permission check succeeds."
+  (let ((missing (disco-permission-channel-missing channel permissions unknown-value)))
+    (when missing
+      (user-error
+       "disco: missing permission%s %s%s"
+       (if (> (length missing) 1) "s" "")
+       (mapconcat #'disco-permission-display-name missing ", ")
+       (if (and (stringp action) (not (string-empty-p action)))
+           (format " for %s" action)
+         ""))))
+  t)
+
+(defun disco-permission-error-missing-access-p (err)
+  "Return non-nil when ERR is a Discord missing-access response.
+
+This matches common REST failures such as HTTP 403 with Discord error code
+`50001' or message text \\='Missing Access\\='."
+  (and (consp err)
+       (eq (car err) 'disco-api-error)
+       (let* ((data (cdr err))
+              (status (nth 1 data))
+              (body (nth 2 data))
+              (code (and (listp body) (alist-get 'code body)))
+              (message (and (listp body) (alist-get 'message body))))
+         (and (equal status 403)
+              (or (equal code 50001)
+                  (equal message "Missing Access"))))))
 
 (cl-defun disco-permission-channel-viewable-p (channel &optional (unknown-value t))
   "Return non-nil when CHANNEL should be treated as visible.

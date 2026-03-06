@@ -791,18 +791,6 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   (when (disco-room--thread-channel-p)
     (user-error "disco: open a parent channel room to create a new thread")))
 
-(defun disco-room--permission-display-name (permission)
-  "Return human-readable display name for PERMISSION symbol/designator."
-  (let* ((raw (cond
-               ((keywordp permission) (substring (symbol-name permission) 1))
-               ((symbolp permission) (symbol-name permission))
-               ((stringp permission) permission)
-               ((integerp permission) (format "0x%X" permission))
-               (t (format "%s" permission))))
-         (trimmed (replace-regexp-in-string "\\`:+" "" raw))
-         (snake (replace-regexp-in-string "[[:space:]-]+" "_" trimmed)))
-    (upcase snake)))
-
 (defun disco-room--required-send-permissions (&optional channel)
   "Return permission list required to send message in CHANNEL.
 
@@ -820,16 +808,6 @@ When CHANNEL is nil, use current room channel."
   (append (disco-room--required-send-permissions channel)
           '(send-polls)))
 
-(cl-defun disco-room--channel-has-permissions-p (permissions &optional channel (unknown-value t))
-  "Return non-nil when CHANNEL has all PERMISSIONS.
-
-CHANNEL defaults to current room channel. UNKNOWN-VALUE controls fallback when
-computed permissions are unavailable."
-  (disco-permission-channel-has-all-p
-   (or channel (disco-room--channel-object))
-   permissions
-   unknown-value))
-
 (cl-defun disco-room--poll-owned-by-current-user-p (msg &optional (unknown-value t))
   "Return non-nil when poll in MSG is owned by current user.
 
@@ -845,7 +823,8 @@ If current user identity is unknown, return UNKNOWN-VALUE."
   (let ((poll (disco-room--message-poll msg)))
     (and poll
          (not (disco-room--poll-expired-p poll))
-         (disco-room--channel-has-permissions-p
+         (disco-permission-channel-has-all-p
+          (disco-room--channel-object)
           (disco-room--poll-vote-required-permissions)))))
 
 (defun disco-room--poll-can-expire-p (msg)
@@ -854,25 +833,9 @@ If current user identity is unknown, return UNKNOWN-VALUE."
     (and poll
          (not (disco-room--poll-expired-p poll))
          (disco-room--poll-owned-by-current-user-p msg t)
-         (disco-room--channel-has-permissions-p
+         (disco-permission-channel-has-all-p
+          (disco-room--channel-object)
           (disco-room--poll-expire-required-permissions)))))
-
-(cl-defun disco-room--ensure-channel-permissions (permissions &key action (unknown-value t))
-  "Signal user error when current room channel misses PERMISSIONS.
-
-ACTION is optional text appended to error message.
-When UNKNOWN-VALUE is non-nil, missing/unparseable channel permissions are
-treated as allowed."
-  (let* ((channel (disco-room--channel-object))
-         (missing (disco-permission-channel-missing channel permissions unknown-value)))
-    (when missing
-      (user-error
-       "disco: missing permission%s %s%s"
-       (if (> (length missing) 1) "s" "")
-       (mapconcat #'disco-room--permission-display-name missing ", ")
-       (if (and (stringp action) (not (string-empty-p action)))
-           (format " for %s" action)
-         "")))))
 
 (defun disco-room--typing-timeout-seconds ()
   "Return normalized typing indicator timeout in seconds."
@@ -1652,13 +1615,6 @@ Return non-nil when jump succeeds without fetching older history."
       (unless disco-room--jump-in-flight
         (disco-room--fetch-around-pending-jump)))))
 
-(defun disco-room--channel-permissions-known-p (channel)
-  "Return non-nil when CHANNEL has a parseable computed permissions field."
-  (let ((raw (and (listp channel) (alist-get 'permissions channel))))
-    (or (integerp raw)
-        (and (stringp raw)
-             (string-match-p "\\`[0-9]+\\'" raw)))))
-
 (defun disco-room--jump-required-permissions (channel)
   "Return channel permissions required to jump into CHANNEL.
 
@@ -1689,14 +1645,12 @@ Guild channels require both visibility and read-history access."
     (user-error "disco: cannot resolve jump target channel %s" channel-id))
   (let ((required (disco-room--jump-required-permissions channel)))
     (when required
-      (if (disco-room--channel-permissions-known-p channel)
-          (let ((missing (disco-permission-channel-missing channel required nil)))
-            (when missing
-              (user-error
-               "disco: missing permission%s %s for jump target channel %s"
-               (if (> (length missing) 1) "s" "")
-               (mapconcat #'disco-room--permission-display-name missing ", ")
-               channel-id)))
+      (if (disco-permission-channel-known-p channel)
+          (disco-permission-ensure-channel
+           channel
+           required
+           :unknown-value nil
+           :action (format "jump target channel %s" channel-id))
         ;; Fallback probe: if computed permissions are missing, a 1-message fetch
         ;; verifies effective read access before opening the target room.
         (condition-case err
@@ -6180,7 +6134,8 @@ Each item is (LABEL . ANSWER-ID)."
          (normalized (disco-room--poll-normalize-answer-id-list selected-answer-ids)))
     (when (disco-room--poll-expired-p poll)
       (user-error "disco: poll is closed"))
-    (disco-room--ensure-channel-permissions
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
      (disco-room--poll-vote-required-permissions)
      :action "poll voting")
     (disco-api-create-poll-vote-async
@@ -6303,7 +6258,8 @@ send votes to Discord."
       (user-error "disco: poll is already closed"))
     (unless (disco-room--poll-owned-by-current-user-p msg nil)
       (user-error "disco: only poll author can end this poll"))
-    (disco-room--ensure-channel-permissions
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
      (disco-room--poll-expire-required-permissions)
      :action "ending polls")
     (when (or (not disco-room-poll-confirm-expire)
@@ -6541,7 +6497,8 @@ CONTENT is optional extra text sent alongside the poll."
          (required-permissions
           (append (disco-room--required-send-permissions)
                   '(send-polls))))
-    (disco-room--ensure-channel-permissions
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
      required-permissions
      :action "sending poll")
     (setq disco-room--send-in-flight t)
@@ -6637,7 +6594,8 @@ When called with prefix argument, force draft edit in minibuffer first."
                    '(attach-files))
                  (when reply-to
                    '(read-message-history)))))
-          (disco-room--ensure-channel-permissions
+          (disco-permission-ensure-channel
+           (disco-room--channel-object)
            required-permissions
            :action "sending messages")
           (unless (string-empty-p normalized)
@@ -6820,7 +6778,8 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
     (unless (and source-channel-id
                  (not (string-empty-p (format "%s" source-channel-id))))
       (user-error "disco: source channel id cannot be empty"))
-    (disco-room--ensure-channel-permissions
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
      (disco-room--required-send-permissions)
      :action "forwarding messages")
     (disco-room--ensure-jump-permissions source-channel-id source-channel)

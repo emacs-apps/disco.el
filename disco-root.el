@@ -3597,13 +3597,6 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
           (seq-take ordered max-items)
         ordered))))
 
-(defun disco-root--channel-viewable-p (channel)
-  "Return non-nil when CHANNEL should be visible to current user.
-
-For guild channels, computed `permissions' is used when available.
-Channels lacking this field are treated as visible to avoid false negatives."
-  (disco-permission-channel-viewable-p channel t))
-
 (defun disco-root--archived-source-fetch-allowed-p (source-name parent-channel)
   "Return non-nil when archived SOURCE-NAME is expected to be fetchable.
 
@@ -3614,23 +3607,10 @@ This prevents noisy permission errors for sources that require elevated access."
     (disco-permission-channel-has-p parent-channel 'manage-threads nil))
    (t t)))
 
-(defun disco-root--archived-missing-access-error-p (err)
-  "Return non-nil when ERR is a Discord missing-access response."
-  (and (consp err)
-       (eq (car err) 'disco-api-error)
-       (let* ((data (cdr err))
-              (status (nth 1 data))
-              (body (nth 2 data))
-              (code (and (listp body) (alist-get 'code body)))
-              (message (and (listp body) (alist-get 'message body))))
-         (and (equal status 403)
-              (or (equal code 50001)
-                  (equal message "Missing Access"))))))
-
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
   (and (memq (alist-get 'type channel) '(0 1 2 3 5 10 11 12 13 15 16))
-       (disco-root--channel-viewable-p channel)))
+       (disco-permission-channel-viewable-p channel t)))
 
 (defun disco-root--openable-channel-p (channel)
   "Return non-nil when CHANNEL can be opened as a room timeline."
@@ -4958,7 +4938,7 @@ Higher score means channel should appear earlier in activity mode."
              (guild-name (or (alist-get 'name guild) guild-id "unknown-guild")))
         (dolist (channel (disco-state-guild-channels guild-id))
           (when (and (disco-root--thread-parent-channel-p channel)
-                     (disco-root--channel-viewable-p channel))
+                     (disco-permission-channel-viewable-p channel t))
             (push (cons (format "%s / %s (%s)"
                                 guild-name
                                 (disco-root--channel-label channel)
@@ -5061,7 +5041,7 @@ Return plist with keys:
               :has-more has-more
               :next-before next-before))
     (error
-     (if (disco-root--archived-missing-access-error-p err)
+     (if (disco-permission-error-missing-access-p err)
          (list :missing-access t)
        (list :error (error-message-string err))))))
 
@@ -5511,7 +5491,7 @@ INDENT controls child-thread row indentation and defaults to 8 spaces."
   (let (categories)
     (dolist (channel (or (disco-state-guild-channels guild-id) '()))
       (when (and (disco-root--channel-category-p channel)
-                 (disco-root--channel-viewable-p channel))
+                 (disco-permission-channel-viewable-p channel t))
         (push channel categories)))
     (disco-root--sort-categories (nreverse categories))))
 
@@ -5965,7 +5945,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   "Return non-nil when CHANNEL should be included in op34 last-message sync."
   (and (listp channel)
        (alist-get 'guild_id channel)
-       (disco-root--channel-viewable-p channel)
+       (disco-permission-channel-viewable-p channel t)
        (memq (alist-get 'type channel) '(0 2 5 10 11 12 13 15 16))))
 
 (defun disco-root--gateway-last-message-channel-ids (guild-id)
