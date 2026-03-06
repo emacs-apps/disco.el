@@ -76,6 +76,111 @@ the false string."
     (alist-get value disco-api--thread-search-sort-order-alist))
    (t nil)))
 
+(defconst disco-api--message-search-sort-by-alist
+  '((timestamp . "timestamp")
+    (relevance . "relevance"))
+  "Declarative map for message search sort-by values.")
+
+(defun disco-api--message-search-sort-by-value (value)
+  "Normalize message search sort-by VALUE to API representation."
+  (cond
+   ((and (stringp value)
+         (member value '("timestamp" "relevance")))
+    value)
+   ((symbolp value)
+    (alist-get value disco-api--message-search-sort-by-alist))
+   (t nil)))
+
+(defun disco-api--normalize-string-sequence (value field-name)
+  "Normalize VALUE into vector of non-empty strings for FIELD-NAME."
+  (let* ((source (cond
+                  ((null value) nil)
+                  ((vectorp value) (append value nil))
+                  ((listp value) value)
+                  (t (list value))))
+         (normalized
+          (mapcar (lambda (item)
+                    (let ((text (string-trim (format "%s" item))))
+                      (unless (not (string-empty-p text))
+                        (user-error "disco: %s cannot contain empty entries" field-name))
+                      text))
+                  source)))
+    (vconcat normalized)))
+
+(cl-defun disco-api--message-search-tab-payload
+    (&key limit offset cursor max-id min-id slop content has pinned
+          sort-by sort-order)
+  "Build one message search tab payload object."
+  (when (and cursor (numberp offset))
+    (user-error "disco: message search tab cannot use both cursor and offset"))
+  (let (payload)
+    (when (numberp limit)
+      (push `(limit . ,(max 1 (min 25 limit))) payload))
+    (when (numberp offset)
+      (push `(offset . ,(max 0 (min 9975 offset))) payload))
+    (when cursor
+      (push `(cursor . ,cursor) payload))
+    (when max-id
+      (push `(max_id . ,(format "%s" max-id)) payload))
+    (when min-id
+      (push `(min_id . ,(format "%s" min-id)) payload))
+    (when (numberp slop)
+      (push `(slop . ,(max 0 (min 100 slop))) payload))
+    (when (and (stringp content)
+               (not (string-empty-p (string-trim content))))
+      (push `(content . ,(string-trim content)) payload))
+    (when has
+      (push `(has . ,(disco-api--normalize-string-sequence has "message search has"))
+            payload))
+    (when (not (null pinned))
+      (push `(pinned . ,(if (disco-api--json-true-p pinned) t :false)) payload))
+    (let ((sort-by-value (disco-api--message-search-sort-by-value sort-by)))
+      (when sort-by-value
+        (push `(sort_by . ,sort-by-value) payload)))
+    (let ((sort-order-value (disco-api--thread-search-sort-order-value sort-order)))
+      (when sort-order-value
+        (push `(sort_order . ,sort-order-value) payload)))
+    (nreverse payload)))
+
+(cl-defun disco-api--message-search-tabs-payload
+    (&key tabs channel-ids include-nsfw track-exact-total-hits)
+  "Build payload for Discord message search tabs endpoints."
+  (unless (listp tabs)
+    (user-error "disco: message search tabs must be an alist"))
+  (let ((payload nil)
+        (tab-payloads nil))
+    (dolist (tab tabs)
+      (let* ((name (car tab))
+             (spec (cdr tab))
+             (payload-value
+              (apply #'disco-api--message-search-tab-payload
+                     (cond
+                      ((null spec) nil)
+                      ((and (listp spec)
+                            (keywordp (car spec)))
+                       spec)
+                      ((listp spec)
+                       spec)
+                      (t
+                       (user-error
+                        "disco: message search tab `%s' spec must be a plist"
+                        name))))))
+        (push (cons name payload-value) tab-payloads)))
+    (push (cons 'tabs (nreverse tab-payloads)) payload)
+    (when channel-ids
+      (push `(channel_ids . ,(disco-api--normalize-id-sequence
+                              channel-ids
+                              "message search channel_ids"))
+            payload))
+    (when (not (null include-nsfw))
+      (push `(include_nsfw . ,(if (disco-api--json-true-p include-nsfw) t :false))
+            payload))
+    (when (not (null track-exact-total-hits))
+      (push `(track_exact_total_hits
+              . ,(if (disco-api--json-true-p track-exact-total-hits) t :false))
+            payload))
+    (nreverse payload)))
+
 (cl-defun disco-api--thread-search-query (&key name slop tags tag-setting archived
                                                sort-by sort-order limit offset
                                                max-id min-id)

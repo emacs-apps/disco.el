@@ -21,6 +21,7 @@
 (declare-function disco-root-cycle-layout "disco-root")
 (declare-function disco-root-set-layout "disco-root")
 (declare-function disco-root-toggle-unread-lens "disco-root")
+(declare-function disco-root-search "disco-root")
 
 (declare-function disco-room-refresh "disco-room")
 (declare-function disco-room-load-older-messages "disco-room")
@@ -107,6 +108,7 @@
    ["View"
     ("l" "Cycle layout" disco-root-cycle-layout)
     ("V" "Set layout..." disco-root-set-layout)
+    ("s" "Search..." disco-root-search)
     ("U" "Toggle unread lens" disco-root-toggle-unread-lens)]
    ["Inspect"
     ("H" "HTTP queue" disco-http-describe-queue)

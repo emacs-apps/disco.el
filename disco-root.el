@@ -160,6 +160,59 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 (defvar-local disco-root--debug-log-verbose nil
   "Non-nil when verbose root debug logging is enabled in this buffer.")
 
+(defvar disco-root-search-history nil
+  "Minibuffer history for root search queries.")
+
+(defconst disco-root--search-tab-order '(messages links media files pins)
+  "Display order for root search result tabs.")
+
+(defconst disco-root--search-tab-label-alist
+  '((messages . "Messages")
+    (links . "Links")
+    (media . "Media")
+    (files . "Files")
+    (pins . "Pins"))
+  "Display labels for root search result tabs.")
+
+(defvar-local disco-root--search-query nil
+  "Current root search query string, or nil when search view is inactive.")
+
+(defvar-local disco-root--search-domain nil
+  "Current root search domain plist.")
+
+(defvar-local disco-root--search-tabs nil
+  "Alist of search tab symbol to tab-state plist for root search view.")
+
+(defvar-local disco-root--search-generation 0
+  "Monotonic generation counter for async root search callbacks.")
+
+(defvar-local disco-root--search-in-flight nil
+  "Non-nil while a root search request is in flight.")
+
+(defvar-local disco-root--search-channel-table nil
+  "Hash table channel-id -> channel object from the active search session.")
+
+(defvar-local disco-root--search-thread-table nil
+  "Hash table thread-id -> thread object from the active search session.")
+
+(defvar-local disco-root--search-prev-layout nil
+  "Most recent non-search layout before activating root search view.")
+
+(defcustom disco-root-search-tab-limit 10
+  "Default number of search results to request per root search tab."
+  :type 'integer
+  :group 'disco)
+
+(defcustom disco-root-search-include-nsfw nil
+  "When non-nil, include NSFW channels in root search requests when allowed."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-root-search-track-exact-total-hits nil
+  "When non-nil, request exact total hit counts in root search results."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-root-show-guild-icons t
   "When non-nil, show guild icons in root guild rows when available."
   :type 'boolean
@@ -488,6 +541,400 @@ after passive EWOC and full-buffer updates."
     (dolist (win (get-buffer-window-list (current-buffer) nil t))
       (when (window-live-p win)
         (set-window-point win pos)))))
+
+(defun disco-root--search-domain-kind (domain)
+  "Return kind symbol from root search DOMAIN plist."
+  (plist-get domain :kind))
+
+(defun disco-root--search-domain-id (domain)
+  "Return identifier from root search DOMAIN plist."
+  (plist-get domain :id))
+
+(defun disco-root--search-domain-label (domain)
+  "Return display label from root search DOMAIN plist."
+  (or (plist-get domain :label)
+      (pcase (disco-root--search-domain-kind domain)
+        ('dms "DMs")
+        ('guild (or (disco-root--guild-name-by-id (disco-root--search-domain-id domain))
+                    (disco-root--search-domain-id domain)
+                    "Guild"))
+        (_ "Search"))))
+
+(defun disco-root--search-domain-equal-p (left right)
+  "Return non-nil when LEFT and RIGHT describe the same search domain."
+  (and (eq (disco-root--search-domain-kind left)
+           (disco-root--search-domain-kind right))
+       (equal (disco-root--search-domain-id left)
+              (disco-root--search-domain-id right))))
+
+(defun disco-root--search-domain-candidates ()
+  "Return completion candidates for root search domains."
+  (append
+   (list (cons "DMs"
+               '(:kind dms :id nil :label "DMs")))
+   (mapcar (lambda (guild)
+             (let ((guild-id (alist-get 'id guild))
+                   (guild-name (or (alist-get 'name guild) "Guild")))
+               (cons (format "Guild: %s" guild-name)
+                     (list :kind 'guild :id guild-id :label guild-name))))
+           (or (disco-state-guilds) '()))))
+
+(defun disco-root--search-current-domain-at-point ()
+  "Infer the most relevant root search domain from point context."
+  (or (when (and (eq (disco-root--ensure-layout) 'search)
+                 disco-root--search-domain)
+        disco-root--search-domain)
+      (when-let* ((guild-id (disco-root--line-guild-id)))
+        (list :kind 'guild
+              :id guild-id
+              :label (or (disco-root--guild-name-by-id guild-id) guild-id)))
+      (when-let* ((category-id (disco-root--line-category-id))
+                  (category (disco-state-channel category-id))
+                  (guild-id (alist-get 'guild_id category)))
+        (list :kind 'guild
+              :id guild-id
+              :label (or (disco-root--guild-name-by-id guild-id) guild-id)))
+      (when-let* ((channel-id (disco-root--line-channel-id))
+                  (channel (or (disco-state-channel channel-id)
+                               (and (hash-table-p disco-root--search-channel-table)
+                                    (gethash channel-id disco-root--search-channel-table))
+                               (and (hash-table-p disco-root--search-thread-table)
+                                    (gethash channel-id disco-root--search-thread-table)))))
+        (if-let* ((guild-id (alist-get 'guild_id channel)))
+            (list :kind 'guild
+                  :id guild-id
+                  :label (or (disco-root--guild-name-by-id guild-id) guild-id))
+          (list :kind 'dms :id nil :label "DMs")))
+      (when (eq disco-root--view-mode 'dms)
+        '(:kind dms :id nil :label "DMs"))
+      (cdr (car (disco-root--search-domain-candidates)))))
+
+(defun disco-root--read-search-domain ()
+  "Prompt for root search domain and return its plist descriptor."
+  (let* ((candidates (disco-root--search-domain-candidates))
+         (default-domain (disco-root--search-current-domain-at-point))
+         (default-choice
+          (car (seq-find (lambda (cell)
+                           (disco-root--search-domain-equal-p (cdr cell)
+                                                              default-domain))
+                         candidates)))
+         (choice (completing-read "Search domain: "
+                                  (mapcar #'car candidates)
+                                  nil t nil nil default-choice)))
+    (copy-tree (or (cdr (assoc choice candidates))
+                   (cdr (car candidates))))))
+
+(defun disco-root--search-empty-tab-state ()
+  "Return freshly initialized root search tab state plist."
+  (list :items nil
+        :loading nil
+        :error nil
+        :cursor nil
+        :total-results nil
+        :time-spent-ms nil))
+
+(defun disco-root--search-reset-tab-states ()
+  "Reset root search tab state alist for the current buffer."
+  (setq-local disco-root--search-tabs
+              (mapcar (lambda (tab)
+                        (cons tab (disco-root--search-empty-tab-state)))
+                      disco-root--search-tab-order)))
+
+(defun disco-root--search-tab-state (tab)
+  "Return root search TAB state plist, initializing when needed."
+  (or (alist-get tab disco-root--search-tabs nil nil #'eq)
+      (let ((state (disco-root--search-empty-tab-state)))
+        (push (cons tab state) disco-root--search-tabs)
+        state)))
+
+(defun disco-root--search-set-tab-state (tab state)
+  "Set root search TAB STATE plist and return STATE."
+  (if-let* ((cell (assq tab disco-root--search-tabs)))
+      (setcdr cell state)
+    (push (cons tab state) disco-root--search-tabs))
+  state)
+
+(defun disco-root--search-tab-label (tab)
+  "Return display label for root search TAB symbol."
+  (or (alist-get tab disco-root--search-tab-label-alist nil nil #'eq)
+      (capitalize (symbol-name tab))))
+
+(defun disco-root--search-tab-summary-chip (tab)
+  "Return one summary chip string for root search TAB."
+  (let* ((state (disco-root--search-tab-state tab))
+         (loaded (length (or (plist-get state :items) '())))
+         (total (plist-get state :total-results))
+         (loading (plist-get state :loading))
+         (suffix (cond
+                  ((numberp total)
+                   (format "%d/%d" loaded total))
+                  ((> loaded 0)
+                   (number-to-string loaded))
+                  (loading
+                   "…")
+                  (t "0"))))
+    (format "[%s %s]"
+            (downcase (disco-root--search-tab-label tab))
+            suffix)))
+
+(defun disco-root--search-channel (channel-id)
+  "Return best-effort channel object for CHANNEL-ID in search results."
+  (or (and channel-id (disco-state-channel channel-id))
+      (and channel-id
+           (hash-table-p disco-root--search-thread-table)
+           (gethash channel-id disco-root--search-thread-table))
+      (and channel-id
+           (hash-table-p disco-root--search-channel-table)
+           (gethash channel-id disco-root--search-channel-table))))
+
+(defun disco-root--search-store-channels (channels)
+  "Merge CHANNELS into current root search channel cache."
+  (unless (hash-table-p disco-root--search-channel-table)
+    (setq-local disco-root--search-channel-table (make-hash-table :test #'equal)))
+  (dolist (channel (or channels '()))
+    (when-let* ((channel-id (alist-get 'id channel)))
+      (puthash channel-id channel disco-root--search-channel-table))))
+
+(defun disco-root--search-store-threads (threads)
+  "Merge THREADS into current root search thread cache."
+  (unless (hash-table-p disco-root--search-thread-table)
+    (setq-local disco-root--search-thread-table (make-hash-table :test #'equal)))
+  (dolist (thread (or threads '()))
+    (when-let* ((thread-id (alist-get 'id thread)))
+      (puthash thread-id thread disco-root--search-thread-table))))
+
+(defun disco-root--search-flatten-messages (messages)
+  "Flatten nested search result MESSAGES array into a message list."
+  (let (result)
+    (dolist (group (or messages '()))
+      (if (listp group)
+          (dolist (message group)
+            (when (listp message)
+              (push message result)))
+        (when (listp group)
+          (push group result))))
+    (nreverse result)))
+
+(defun disco-root--search-merge-message-lists (existing new-items)
+  "Append NEW-ITEMS to EXISTING, deduping by message id while preserving order."
+  (let ((seen (make-hash-table :test #'equal))
+        result)
+    (dolist (message (append (or existing '()) (or new-items '())))
+      (let ((message-id (alist-get 'id message)))
+        (unless (and message-id (gethash message-id seen))
+          (when message-id
+            (puthash message-id t seen))
+          (push message result))))
+    (nreverse result)))
+
+(defun disco-root--search-index-pending-p (body)
+  "Return non-nil when BODY is a search index-not-ready response."
+  (and (listp body)
+       (= (or (alist-get 'code body) 0) 110000)))
+
+(defun disco-root--search-tab-base-spec (tab query &optional cursor)
+  "Return internal request plist for search TAB using QUERY and CURSOR."
+  (let ((spec (list :limit disco-root-search-tab-limit
+                    :content query
+                    :sort-by 'timestamp
+                    :sort-order 'desc)))
+    (when cursor
+      (setq spec (plist-put spec :cursor cursor)))
+    (pcase tab
+      ('links
+       (setq spec (plist-put spec :has '("link"))))
+      ('media
+       (setq spec (plist-put spec :has '("image" "video"))))
+      ('files
+       (setq spec (plist-put spec :has '("file"))))
+      ('pins
+       (setq spec (plist-put spec :pinned t))))
+    spec))
+
+(defun disco-root--search-request-tabs (&optional load-more-tab)
+  "Return tabs alist for current root search query.
+
+When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
+  (let ((query disco-root--search-query))
+    (if load-more-tab
+        (let* ((state (disco-root--search-tab-state load-more-tab))
+               (cursor (plist-get state :cursor)))
+          (unless cursor
+            (user-error "disco: no more search results in %s"
+                        (downcase (disco-root--search-tab-label load-more-tab))))
+          (list (cons load-more-tab
+                      (disco-root--search-tab-base-spec load-more-tab query cursor))))
+      (mapcar (lambda (tab)
+                (cons tab (disco-root--search-tab-base-spec tab query nil)))
+              disco-root--search-tab-order))))
+
+(defun disco-root--search-tab-requested-p (tab tabs-alist)
+  "Return non-nil when TAB is present in TABS-ALIST."
+  (and tab (assq tab tabs-alist)))
+
+(defun disco-root--search-render-if-visible ()
+  "Rerender root buffer when currently in search layout."
+  (when (and (eq major-mode 'disco-root-mode)
+             (eq (disco-root--ensure-layout) 'search))
+    (disco-root--render-preserving-position)))
+
+(defun disco-root--search-apply-request-state (tabs-alist loading)
+  "Mark TABS-ALIST as LOADING state in current search session."
+  (dolist (entry tabs-alist)
+    (let* ((tab (car entry))
+           (state (copy-sequence (disco-root--search-tab-state tab))))
+      (setq state (plist-put state :loading (and loading t)))
+      (when loading
+        (setq state (plist-put state :error nil)))
+      (disco-root--search-set-tab-state tab state))))
+
+(defun disco-root--search-handle-success (generation tabs-alist body)
+  "Apply successful search BODY for GENERATION and requested TABS-ALIST."
+  (when (and (= generation disco-root--search-generation)
+             (eq major-mode 'disco-root-mode))
+    (setq-local disco-root--search-in-flight nil)
+    (if (disco-root--search-index-pending-p body)
+        (let ((message (or (alist-get 'message body)
+                           "Index not yet available. Try again later"))
+              (retry-after (alist-get 'retry_after body)))
+          (dolist (entry tabs-alist)
+            (let* ((tab (car entry))
+                   (state (copy-sequence (disco-root--search-tab-state tab))))
+              (setq state (plist-put state :loading nil))
+              (setq state (plist-put state :error
+                                     (if retry-after
+                                         (format "%s (retry after %ss)" message retry-after)
+                                       message)))
+              (disco-root--search-set-tab-state tab state)))
+          (disco-root--search-render-if-visible))
+      (let ((tabs-body (alist-get 'tabs body)))
+        (dolist (entry tabs-alist)
+          (let* ((tab (car entry))
+                 (result (alist-get tab tabs-body nil nil #'eq))
+                 (messages (disco-root--search-flatten-messages
+                            (alist-get 'messages result)))
+                 (state (copy-sequence (disco-root--search-tab-state tab)))
+                 (existing (plist-get state :items)))
+            (disco-root--search-store-channels (alist-get 'channels result))
+            (disco-root--search-store-threads (alist-get 'threads result))
+            (setq state (plist-put state :items
+                                   (if (plist-get (cdr entry) :cursor)
+                                       (disco-root--search-merge-message-lists existing messages)
+                                     messages)))
+            (setq state (plist-put state :loading nil))
+            (setq state (plist-put state :error nil))
+            (setq state (plist-put state :cursor (alist-get 'cursor result)))
+            (setq state (plist-put state :total-results (alist-get 'total_results result)))
+            (setq state (plist-put state :time-spent-ms (alist-get 'time_spent_ms result)))
+            (disco-root--search-set-tab-state tab state))))
+      (disco-root--search-render-if-visible))))
+
+(defun disco-root--search-handle-error (generation tabs-alist err)
+  "Apply async search ERR for GENERATION and requested TABS-ALIST."
+  (when (and (= generation disco-root--search-generation)
+             (eq major-mode 'disco-root-mode))
+    (setq-local disco-root--search-in-flight nil)
+    (dolist (entry tabs-alist)
+      (let* ((tab (car entry))
+             (state (copy-sequence (disco-root--search-tab-state tab))))
+        (setq state (plist-put state :loading nil))
+        (setq state (plist-put state :error (disco-root--async-error-message err)))
+        (disco-root--search-set-tab-state tab state)))
+    (disco-root--search-render-if-visible)))
+
+(defun disco-root--search-dispatch (generation tabs-alist)
+  "Dispatch async root search request for GENERATION using TABS-ALIST."
+  (let ((root-buffer (current-buffer))
+        (domain disco-root--search-domain))
+    (setq-local disco-root--search-in-flight t)
+    (disco-root--search-apply-request-state tabs-alist t)
+    (disco-root--search-render-if-visible)
+    (pcase (disco-root--search-domain-kind domain)
+      ('guild
+       (disco-api-guild-search-messages-tabs-async
+        (disco-root--search-domain-id domain)
+        :tabs tabs-alist
+        :include-nsfw disco-root-search-include-nsfw
+        :track-exact-total-hits disco-root-search-track-exact-total-hits
+        :on-success (lambda (body)
+                      (when (buffer-live-p root-buffer)
+                        (with-current-buffer root-buffer
+                          (disco-root--search-handle-success generation tabs-alist body))))
+        :on-error (lambda (err)
+                    (when (buffer-live-p root-buffer)
+                      (with-current-buffer root-buffer
+                        (disco-root--search-handle-error generation tabs-alist err))))))
+      (_
+       (disco-api-user-search-messages-tabs-async
+        :tabs tabs-alist
+        :include-nsfw disco-root-search-include-nsfw
+        :track-exact-total-hits disco-root-search-track-exact-total-hits
+        :on-success (lambda (body)
+                      (when (buffer-live-p root-buffer)
+                        (with-current-buffer root-buffer
+                          (disco-root--search-handle-success generation tabs-alist body))))
+        :on-error (lambda (err)
+                    (when (buffer-live-p root-buffer)
+                      (with-current-buffer root-buffer
+                        (disco-root--search-handle-error generation tabs-alist err)))))))))
+
+(defun disco-root-search-refresh ()
+  "Rerun current root search query in the active search domain."
+  (interactive)
+  (unless (and (stringp disco-root--search-query)
+               (not (string-empty-p disco-root--search-query))
+               disco-root--search-domain)
+    (user-error "disco: no active root search"))
+  (setq-local disco-root--search-generation (1+ disco-root--search-generation))
+  (disco-root--search-reset-tab-states)
+  (disco-root--search-dispatch disco-root--search-generation
+                               (disco-root--search-request-tabs nil))
+  (disco-root--search-render-if-visible)
+  (message "disco: searching %s in %s"
+           disco-root--search-query
+           (disco-root--search-domain-label disco-root--search-domain)))
+
+(defun disco-root-search-load-more-at-point ()
+  "Load the next page of results for the search tab at point."
+  (interactive)
+  (let ((tab (disco-root--line-search-tab)))
+    (unless tab
+      (user-error "disco: no search tab at point"))
+    (unless (and (eq (disco-root--ensure-layout) 'search)
+                 disco-root--search-domain)
+      (user-error "disco: no active root search"))
+    (disco-root--search-dispatch (or disco-root--search-generation 0)
+                                 (disco-root--search-request-tabs tab))
+    (message "disco: loading more %s results"
+             (downcase (disco-root--search-tab-label tab)))))
+
+(defun disco-root-search (query domain)
+  "Search root buffer DOMAIN for QUERY and show results in search layout."
+  (interactive
+   (let* ((domain (disco-root--read-search-domain))
+          (prompt (format "Search %s: "
+                          (disco-root--search-domain-label domain))))
+     (list (read-string prompt nil 'disco-root-search-history)
+           domain)))
+  (let ((normalized-query (string-trim (or query ""))))
+    (when (string-empty-p normalized-query)
+      (user-error "disco: search query cannot be empty"))
+    (setq-local disco-root--search-query normalized-query)
+    (setq-local disco-root--search-domain (copy-tree domain))
+    (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
+    (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
+    (setq-local disco-root--search-generation (1+ disco-root--search-generation))
+    (setq-local disco-root--search-prev-layout
+                (unless (eq disco-root--layout 'search)
+                  disco-root--layout))
+    (disco-root--search-reset-tab-states)
+    (setq disco-root--layout 'search)
+    (disco-root--search-render-if-visible)
+    (disco-root--search-dispatch disco-root--search-generation
+                                 (disco-root--search-request-tabs nil))
+    (message "disco: searching %s in %s"
+             normalized-query
+             (disco-root--search-domain-label domain))))
 
 (defun disco-root--ensure-markers ()
   "Ensure header and ewoc markers exist for the current buffer."
@@ -968,6 +1415,18 @@ When SECTIONS is nil, use `disco-root--section-order'."
 (defun disco-root--line-channel-id (&optional pos)
   "Return channel id for row at POS when row is channel/thread row."
   (disco-root--line-property 'disco-channel-id pos))
+(defun disco-root--line-search-message-id (&optional pos)
+  "Return root search message id for row at POS, or nil."
+  (disco-root--line-property 'disco-root-search-message-id pos))
+
+(defun disco-root--line-search-action (&optional pos)
+  "Return root search row action symbol for row at POS, or nil."
+  (disco-root--line-property 'disco-root-search-action pos))
+
+(defun disco-root--line-search-tab (&optional pos)
+  "Return root search tab symbol for row at POS, or nil."
+  (disco-root--line-property 'disco-root-search-tab pos))
+
 
 (defun disco-root--line-unread-count (&optional pos)
   "Return mention badge count for row at POS, defaulting to 0."
@@ -1555,6 +2014,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
              (needs-structural
               (disco-root--debug-log "flush-live-updates -> structural")
               (disco-root--render-preserving-position))
+             ((eq layout 'search)
+              (disco-root--debug-log "flush-live-updates -> search-static")
+              (when needs-header
+                (disco-root--refresh-header-line)))
              ((and (eq layout-update-mode 'full)
                    (or dirty-channel-ids needs-header))
               (disco-root--debug-log "flush-live-updates -> full-render")
@@ -2452,6 +2915,110 @@ Guild rows use real guild icons when available, with fixed text fallback."
                             (format "Open threads under channel %s" channel-id)
                           (format "Open channel %s" channel-id)))))))
 
+(defun disco-root--search-message-seconds (message)
+  "Return MESSAGE timestamp as float seconds, or nil on parse failure."
+  (when-let* ((timestamp (alist-get 'timestamp message)))
+    (ignore-errors
+      (float-time (date-to-time timestamp)))))
+
+(defun disco-root--search-message-time-label (message)
+  "Return formatted time label for search result MESSAGE."
+  (when-let* ((seconds (disco-root--search-message-seconds message)))
+    (disco-root--activity-time-string seconds)))
+
+(defun disco-root--search-context-label (channel)
+  "Return context label for search hit CHANNEL."
+  (cond
+   ((null channel)
+    (disco-root--search-domain-label disco-root--search-domain))
+   ((and (disco-state-private-channel-p channel)
+         (not (alist-get 'guild_id channel)))
+    (or (disco-root--channel-display-name channel)
+        (disco-root--search-domain-label disco-root--search-domain)))
+   (t
+    (or (disco-root--activity-primary-label channel)
+        (disco-root--channel-display-name channel)
+        (disco-root--search-domain-label disco-root--search-domain)))))
+
+(defun disco-root--insert-search-message-line (message indent &optional tab)
+  "Insert one root search result MESSAGE row with INDENT for TAB."
+  (let* ((message-id (alist-get 'id message))
+         (channel-id (alist-get 'channel_id message))
+         (channel (disco-root--search-channel channel-id))
+         (padding (make-string (max 0 (or indent 0)) ?\s))
+         (context-text (disco-root--search-context-label channel))
+         (preview-text (or (disco-msg-preview-line message)
+                           (disco-msg-preview-content message)
+                           "(message)"))
+         (time-text (or (disco-root--search-message-time-label message) ""))
+         (line-width (max 60 (or disco-root--fill-column
+                                 (disco-root--compute-fill-column))))
+         (time-width (if (string-empty-p time-text) 0 (max 6 (string-width time-text))))
+         (line-start (point)))
+    (insert padding)
+    (let* ((icon-start (disco-root--current-column))
+           (icon-slot-width
+            (max 2
+                 (ceiling (* disco-root--activity-icon-slot-width
+                             (disco-root--text-scale-factor)))))
+           (slot-target (max icon-start
+                             (1- (+ icon-start icon-slot-width)))))
+      (if channel
+          (disco-root--insert-activity-icon channel)
+        (insert "[?]"))
+      (disco-root--move-to-column slot-target)
+      (insert " "))
+    (let* ((content-start (disco-root--current-column))
+           (content-width (max 20 (- line-width content-start time-width 1)))
+           (widths (disco-root--activity-column-widths content-width))
+           (context-inner-width (or (plist-get widths :context-inner-width) 8))
+           (preview-width (or (plist-get widths :preview-width) 0))
+           (separator-width (or (plist-get widths :separator-width) 0)))
+      (let ((context-start (disco-root--current-column)))
+        (insert "[")
+        (insert (disco-root--elide-string context-text context-inner-width 'default))
+        (disco-root--move-to-column (+ context-start 1 context-inner-width))
+        (insert "]"))
+      (when (> preview-width 0)
+        (when (> separator-width 0)
+          (insert " "))
+        (let* ((preview-start (point))
+               (preview-value (or preview-text "")))
+          (insert (disco-root--elide-string preview-value preview-width 'shadow))
+          (add-text-properties preview-start (point) (list 'face 'shadow))
+          (let ((author (disco-msg-author-display-name message)))
+            (when (and author
+                       (string-match (format "\`%s>" (regexp-quote author))
+                                     preview-value))
+              (add-text-properties
+               preview-start
+               (+ preview-start (length author) 1)
+               (list 'face 'font-lock-keyword-face))))))
+      (when (> time-width 0)
+        (let ((target-time-col (- line-width time-width)))
+          (disco-root--move-to-column target-time-col)
+          (let ((time-start (point)))
+            (insert (disco-root--truncate-fill time-text time-width t))
+            (add-text-properties time-start (point) (list 'face 'shadow))))))
+    (insert "
+")
+    (add-text-properties
+     line-start
+     (point)
+     (list 'disco-root-row-type 'search-message
+           'disco-root-search-tab tab
+           'disco-root-search-message-id message-id
+           'disco-channel-id channel-id
+           'disco-unread-count 0
+           'disco-has-unread nil))
+    (when (and channel-id message-id)
+      (add-text-properties
+       line-start
+       (point)
+       (list 'mouse-face 'highlight
+             'help-echo (format "Open channel %s and jump to message %s"
+                                channel-id message-id))))))
+
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
 
@@ -2773,6 +3340,51 @@ Higher score means channel should appear earlier in activity mode."
               'help-echo "RET/TAB/t toggles this category"
               'disco-root-row-type 'category
               'disco-root-category-id category-id))))
+    ('search-section
+     (let* ((title (or (plist-get entry :title) "Results"))
+            (loaded (or (plist-get entry :loaded-count) 0))
+            (total (plist-get entry :total-count))
+            (loading (plist-get entry :loading))
+            (suffix (cond
+                     ((numberp total)
+                      (format " (%d/%d)" loaded total))
+                     (loading
+                      (format " (%d loaded, loading...)" loaded))
+                     (t
+                      (format " (%d)" loaded))))
+            (start (point)))
+       (insert (format "%s%s\n" title suffix))
+       (add-text-properties start (point)
+                            (list 'face 'font-lock-keyword-face
+                                  'disco-root-row-type 'search-section))))
+    ('search-note
+     (let ((start (point))
+           (text (or (plist-get entry :text) ""))
+           (face (or (plist-get entry :face) 'shadow)))
+       (insert text "\n")
+       (add-text-properties start (point)
+                            (list 'face face
+                                  'disco-root-row-type 'search-note))))
+    ('search-action
+     (let* ((label (or (plist-get entry :label) "Action"))
+            (action (plist-get entry :action))
+            (tab (plist-get entry :tab))
+            (start (point)))
+       (insert (format "  [%s]\n" label))
+       (add-text-properties
+        start
+        (point)
+        (list 'face 'link
+              'mouse-face 'highlight
+              'help-echo label
+              'disco-root-row-type 'search-action
+              'disco-root-search-action action
+              'disco-root-search-tab tab))))
+    ('search-message
+     (disco-root--insert-search-message-line
+      (plist-get entry :message)
+      (or (plist-get entry :indent) 2)
+      (plist-get entry :tab)))
     ('text
      (insert (or (plist-get entry :text) "") "\n"))
     ('blank
@@ -2845,6 +3457,39 @@ Higher score means channel should appear earlier in activity mode."
                               (and existing (list existing))))
                  disco-root--channel-node-table)))
     node))
+
+(defun disco-root--ewoc-insert-search-section (tab title loaded-count &optional total-count loading)
+  "Insert one root search TAB section TITLE row."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'search-section
+                         :tab tab
+                         :title title
+                         :loaded-count loaded-count
+                         :total-count total-count
+                         :loading loading)))
+
+(defun disco-root--ewoc-insert-search-message (message &optional indent tab)
+  "Insert one root search result MESSAGE row."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'search-message
+                         :message message
+                         :indent (or indent 2)
+                         :tab tab)))
+
+(defun disco-root--ewoc-insert-search-note (text &optional face)
+  "Insert one root search informational TEXT row."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'search-note
+                         :text text
+                         :face face)))
+
+(defun disco-root--ewoc-insert-search-action (label action tab)
+  "Insert one actionable root search row with LABEL, ACTION and TAB."
+  (ewoc-enter-last disco-root--ewoc
+                   (list :entry-type 'search-action
+                         :label label
+                         :action action
+                         :tab tab)))
 
 (defun disco-root--insert-private-channels ()
   "Insert visible private-channel (DM/group DM) rows into root buffer."
@@ -3351,9 +3996,15 @@ SCOPE is forwarded to extra-info providers."
 
 If point is not on actionable row, jump to next channel row and open it."
   (interactive)
-  (let ((channel-id (disco-root--line-channel-id)))
+  (let ((search-action (disco-root--line-search-action))
+        (search-message-id (disco-root--line-search-message-id))
+        (channel-id (disco-root--line-channel-id)))
     (cond
      ((disco-root--toggle-node-at-point))
+     ((eq search-action 'load-more)
+      (disco-root-search-load-more-at-point))
+     ((and search-message-id channel-id)
+      (disco-room-jump-to-message search-message-id channel-id))
      (channel-id
       (disco-root--open-channel channel-id))
      (t
@@ -3364,7 +4015,10 @@ If point is not on actionable row, jump to next channel row and open it."
         (if next
             (progn
               (goto-char next)
-              (disco-root--open-channel (disco-root--line-channel-id next)))
+              (if-let* ((next-message-id (disco-root--line-search-message-id next)))
+                  (disco-room-jump-to-message next-message-id
+                                              (disco-root--line-channel-id next))
+                (disco-root--open-channel (disco-root--line-channel-id next))))
           (user-error "disco: no openable channel at point")))))))
 
 (defun disco-root-next-unread ()
@@ -3567,6 +4221,47 @@ Return non-nil when at least one visible row is inserted for GUILD."
           (disco-root--ewoc-insert-channel channel 2 'activity))
       (disco-root--ewoc-insert-text "  (no visible channels)"))))
 
+(defun disco-root--render-layout-search ()
+  "Render root search results layout from current search session state."
+  (if (not (and (stringp disco-root--search-query)
+                (not (string-empty-p disco-root--search-query))
+                disco-root--search-domain))
+      (progn
+        (disco-root--ewoc-insert-text "Search root with s")
+        (disco-root--ewoc-insert-text "  (no active search)"))
+    (disco-root--ewoc-insert-text
+     (format "Searching \"%s\" in %s"
+             disco-root--search-query
+             (disco-root--search-domain-label disco-root--search-domain)))
+    (disco-root--ewoc-insert-blank)
+    (dolist (tab disco-root--search-tab-order)
+      (let* ((state (disco-root--search-tab-state tab))
+             (items (or (plist-get state :items) '()))
+             (loading (plist-get state :loading))
+             (error (plist-get state :error))
+             (cursor (plist-get state :cursor))
+             (total (plist-get state :total-results)))
+        (disco-root--ewoc-insert-search-section
+         tab
+         (disco-root--search-tab-label tab)
+         (length items)
+         total
+         loading)
+        (cond
+         (items
+          (dolist (message items)
+            (disco-root--ewoc-insert-search-message message 2 tab)))
+         (loading
+          (disco-root--ewoc-insert-search-note "  (loading...)" 'shadow))
+         (error
+          (disco-root--ewoc-insert-search-note (format "  (%s)" error)
+                                               'font-lock-warning-face))
+         (t
+          (disco-root--ewoc-insert-search-note "  (no results)" 'shadow)))
+        (when cursor
+          (disco-root--ewoc-insert-search-action "Show more" 'load-more tab))
+        (disco-root--ewoc-insert-blank)))))
+
 (defun disco-root--refresh-active-layout-headings (channel-ids)
   "Patch heading rows for current layout using CHANNEL-IDS context."
   (if-let* ((refresh-fn (disco-root-layout-refresh-headings-function
@@ -3679,17 +4374,31 @@ Return non-nil when at least one visible row is inserted for GUILD."
             label
             (disco-root--human-count unread))))
 
+(defun disco-root--search-summary-line ()
+  "Return summary line for active root search session."
+  (if (not (and (stringp disco-root--search-query)
+                (not (string-empty-p disco-root--search-query))))
+      "[search inactive]"
+    (string-join
+     (append
+      (list (format "[search \"%s\"]" disco-root--search-query)
+            (format "[in:%s]" (disco-root--search-domain-label disco-root--search-domain)))
+      (mapcar #'disco-root--search-tab-summary-chip disco-root--search-tab-order))
+     "  ")))
+
 (defun disco-root--filters-line ()
   "Return filter-chip line inspired by telega root view."
-  (let* ((layout-label
-          (downcase (disco-root-layout-label (disco-root--ensure-layout))))
-         (metrics (disco-root--activity-metrics-by-view)))
-    (string-join
-     (list (disco-root--filter-chip 'all "Main" metrics)
-           (disco-root--filter-chip 'unread "Important" metrics)
-           (disco-root--filter-chip 'dms "DMs" metrics)
-           (format "[%s sort:%s]" layout-label disco-root--sort-mode))
-     "  ")))
+  (if (eq (disco-root--ensure-layout) 'search)
+      (disco-root--search-summary-line)
+    (let* ((layout-label
+            (downcase (disco-root-layout-label (disco-root--ensure-layout))))
+           (metrics (disco-root--activity-metrics-by-view)))
+      (string-join
+       (list (disco-root--filter-chip 'all "Main" metrics)
+             (disco-root--filter-chip 'unread "Important" metrics)
+             (disco-root--filter-chip 'dms "DMs" metrics)
+             (format "[%s sort:%s]" layout-label disco-root--sort-mode))
+       "  "))))
 
 (defun disco-root--mode-divider-line ()
   "Return divider line with active mode marker like telega root."
@@ -3884,134 +4593,139 @@ When QUIET is non-nil, suppress minibuffer status messages."
 (defun disco-root-refresh ()
   "Fetch guild/channel data asynchronously and redraw root buffer."
   (interactive)
-  (let* ((root-buffer (current-buffer))
-         (generation (1+ disco-root--refresh-generation))
-         (guild-count 0)
-         (channel-count 0)
-         (pending 0)
-         (last-render-at 0.0)
-         (render-throttle-sec 0.08)
-         errors)
-    (setq disco-root--refresh-generation generation)
-    (setq disco-root--refresh-in-flight t)
-    (message "disco: refreshing...")
-    (cl-labels
-        ((callback-active-p ()
-           (and (buffer-live-p root-buffer)
-                (with-current-buffer root-buffer
-                  (and (eq major-mode 'disco-root-mode)
-                       (= disco-root--refresh-generation generation)))))
-         (maybe-render-incremental (&optional force)
-           (when (callback-active-p)
-             (with-current-buffer root-buffer
-               (let ((now (float-time)))
-                 (when (or force
-                           (>= (- now last-render-at) render-throttle-sec))
-                   (setq last-render-at now)
-                   (disco-root--render-preserving-position))))))
-         (record-error (label err)
-           (push (format "%s: %s" label (disco-root--async-error-message err))
-                 errors))
-         (finalize-when-done ()
-           (when (and (<= pending 0) (callback-active-p))
-             (with-current-buffer root-buffer
-               (let ((thread-count 0))
-                 (dolist (guild (or (disco-state-guilds) '()))
-                   (let ((guild-id (alist-get 'id guild)))
-                     (setq thread-count (+ thread-count
-                                           (length (disco-state-guild-threads guild-id))))))
-                 (setq disco-root--refresh-in-flight nil)
-                 (disco-root-render)
-                 (when (or disco-root--dirty-structure-p
-                           disco-root--dirty-header-p
-                           disco-root--dirty-channel-ids)
-                   (disco-root--queue-live-update nil nil nil))
-                 (when disco-root-gateway-context-sync-on-refresh
-                   (ignore-errors
-                     (disco-root-sync-gateway-context t)))
-                 (if errors
-                     (message
-                      "disco: loaded %d guilds, %d channels (%d threads), %d DMs (%d errors)"
-                      guild-count
-                      channel-count
-                      thread-count
-                      (length (disco-state-private-channels))
-                      (length errors))
-                   (message "disco: loaded %d guilds, %d channels (%d threads), %d DMs"
-                            guild-count
-                            channel-count
-                            thread-count
-                            (length (disco-state-private-channels))))))))
-         (dec-pending ()
-           (setq pending (1- pending))
-           (finalize-when-done))
-         (inc-pending ()
-           (setq pending (1+ pending)))
-         (fetch-guild-channels-and-threads (guild)
-           (let ((guild-id (alist-get 'id guild)))
-             (inc-pending)
-             (disco-api-guild-channels-async
-              guild-id
-              :on-success
-              (lambda (channels)
-                (when (callback-active-p)
-                  (setq channel-count (+ channel-count (length channels)))
-                  (disco-state-put-channels guild-id channels)
-                  (maybe-render-incremental))
-                (dec-pending))
-              :on-error
-              (lambda (err)
-                (when (callback-active-p)
-                  (record-error (format "guild %s channels" guild-id) err))
-                (dec-pending)))
-             (when disco-fetch-guild-active-threads
+  (if (and (eq (disco-root--ensure-layout) 'search)
+           (stringp disco-root--search-query)
+           (not (string-empty-p disco-root--search-query))
+           disco-root--search-domain)
+      (disco-root-search-refresh)
+    (let* ((root-buffer (current-buffer))
+           (generation (1+ disco-root--refresh-generation))
+           (guild-count 0)
+           (channel-count 0)
+           (pending 0)
+           (last-render-at 0.0)
+           (render-throttle-sec 0.08)
+           errors)
+      (setq disco-root--refresh-generation generation)
+      (setq disco-root--refresh-in-flight t)
+      (message "disco: refreshing...")
+      (cl-labels
+          ((callback-active-p ()
+             (and (buffer-live-p root-buffer)
+                  (with-current-buffer root-buffer
+                    (and (eq major-mode 'disco-root-mode)
+                         (= disco-root--refresh-generation generation)))))
+           (maybe-render-incremental (&optional force)
+             (when (callback-active-p)
+               (with-current-buffer root-buffer
+                 (let ((now (float-time)))
+                   (when (or force
+                             (>= (- now last-render-at) render-throttle-sec))
+                     (setq last-render-at now)
+                     (disco-root--render-preserving-position))))))
+           (record-error (label err)
+             (push (format "%s: %s" label (disco-root--async-error-message err))
+                   errors))
+           (finalize-when-done ()
+             (when (and (<= pending 0) (callback-active-p))
+               (with-current-buffer root-buffer
+                 (let ((thread-count 0))
+                   (dolist (guild (or (disco-state-guilds) '()))
+                     (let ((guild-id (alist-get 'id guild)))
+                       (setq thread-count (+ thread-count
+                                             (length (disco-state-guild-threads guild-id))))))
+                   (setq disco-root--refresh-in-flight nil)
+                   (disco-root-render)
+                   (when (or disco-root--dirty-structure-p
+                             disco-root--dirty-header-p
+                             disco-root--dirty-channel-ids)
+                     (disco-root--queue-live-update nil nil nil))
+                   (when disco-root-gateway-context-sync-on-refresh
+                     (ignore-errors
+                       (disco-root-sync-gateway-context t)))
+                   (if errors
+                       (message
+                        "disco: loaded %d guilds, %d channels (%d threads), %d DMs (%d errors)"
+                        guild-count
+                        channel-count
+                        thread-count
+                        (length (disco-state-private-channels))
+                        (length errors))
+                     (message "disco: loaded %d guilds, %d channels (%d threads), %d DMs"
+                              guild-count
+                              channel-count
+                              thread-count
+                              (length (disco-state-private-channels))))))))
+           (dec-pending ()
+             (setq pending (1- pending))
+             (finalize-when-done))
+           (inc-pending ()
+             (setq pending (1+ pending)))
+           (fetch-guild-channels-and-threads (guild)
+             (let ((guild-id (alist-get 'id guild)))
                (inc-pending)
-               (disco-api-guild-active-threads-async
+               (disco-api-guild-channels-async
                 guild-id
                 :on-success
-                (lambda (active)
+                (lambda (channels)
                   (when (callback-active-p)
-                    (dolist (thread (or (alist-get 'threads active) '()))
-                      (disco-state-upsert-channel thread))
+                    (setq channel-count (+ channel-count (length channels)))
+                    (disco-state-put-channels guild-id channels)
                     (maybe-render-incremental))
                   (dec-pending))
                 :on-error
                 (lambda (err)
                   (when (callback-active-p)
-                    (record-error (format "guild %s active threads" guild-id) err))
-                  (dec-pending)))))))
-      (inc-pending)
-      (disco-api-user-guilds-async
-       :on-success
-       (lambda (guilds)
-         (when (callback-active-p)
-           (setq guild-count (length guilds))
-           (disco-state-set-guilds guilds)
-           (maybe-render-incremental)
+                    (record-error (format "guild %s channels" guild-id) err))
+                  (dec-pending)))
+               (when disco-fetch-guild-active-threads
+                 (inc-pending)
+                 (disco-api-guild-active-threads-async
+                  guild-id
+                  :on-success
+                  (lambda (active)
+                    (when (callback-active-p)
+                      (dolist (thread (or (alist-get 'threads active) '()))
+                        (disco-state-upsert-channel thread))
+                      (maybe-render-incremental))
+                    (dec-pending))
+                  :on-error
+                  (lambda (err)
+                    (when (callback-active-p)
+                      (record-error (format "guild %s active threads" guild-id) err))
+                    (dec-pending)))))))
+        (inc-pending)
+        (disco-api-user-guilds-async
+         :on-success
+         (lambda (guilds)
+           (when (callback-active-p)
+             (setq guild-count (length guilds))
+             (disco-state-set-guilds guilds)
+             (maybe-render-incremental)
 
-           (inc-pending)
-           (disco-api-user-private-channels-async
-            :on-success
-            (lambda (private-channels)
-              (when (callback-active-p)
-                (disco-state-set-private-channels private-channels)
-                (maybe-render-incremental))
-              (dec-pending))
-            :on-error
-            (lambda (err)
-              (when (callback-active-p)
-                (record-error "private channels" err))
-              (dec-pending)))
+             (inc-pending)
+             (disco-api-user-private-channels-async
+              :on-success
+              (lambda (private-channels)
+                (when (callback-active-p)
+                  (disco-state-set-private-channels private-channels)
+                  (maybe-render-incremental))
+                (dec-pending))
+              :on-error
+              (lambda (err)
+                (when (callback-active-p)
+                  (record-error "private channels" err))
+                (dec-pending)))
 
-           (dolist (guild guilds)
-             (fetch-guild-channels-and-threads guild)))
-         (dec-pending))
-       :on-error
-       (lambda (err)
-         (when (callback-active-p)
-           (record-error "guild list" err))
-         (dec-pending)))
-      (maybe-render-incremental t))))
+             (dolist (guild guilds)
+               (fetch-guild-channels-and-threads guild)))
+           (dec-pending))
+         :on-error
+         (lambda (err)
+           (when (callback-active-p)
+             (record-error "guild list" err))
+           (dec-pending)))
+        (maybe-render-incremental t)))))
 
 (defvar disco-root-mode-map
   (let ((map (make-sparse-keymap)))
@@ -4023,6 +4737,7 @@ When QUIET is non-nil, suppress minibuffer status messages."
     (define-key map (kbd "\\") #'disco-root-toggle-sort-mode)
     (define-key map (kbd "v") #'disco-root-cycle-view-mode)
     (define-key map (kbd "U") #'disco-root-toggle-unread-lens)
+    (define-key map (kbd "s") #'disco-root-search)
     (define-key map (kbd "t") #'disco-root-toggle-section-at-point)
     (define-key map (kbd "RET") #'disco-root-open-at-point)
     (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
@@ -4077,6 +4792,14 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq-local disco-root--fill-column nil)
   (setq-local disco-root--header-marker nil)
   (setq-local disco-root--ewoc-marker nil)
+  (setq-local disco-root--search-query nil)
+  (setq-local disco-root--search-domain nil)
+  (setq-local disco-root--search-tabs nil)
+  (setq-local disco-root--search-generation 0)
+  (setq-local disco-root--search-in-flight nil)
+  (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-prev-layout nil)
   (setq-local disco-root--guild-expanded (make-hash-table :test #'equal))
   (setq-local disco-root--category-expanded (make-hash-table :test #'equal)))
 

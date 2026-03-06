@@ -4,10 +4,6 @@
 (require 'cl-lib)
 (require 'seq)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-root)
 
 (ert-deftest disco-root-event-channel-ids-aggregates-and-dedupes ()
@@ -498,6 +494,60 @@
     (disco-root-mode)
     (should (eq buffer-undo-list t))
     (should-not switch-to-buffer-preserve-window-point)))
+
+(ert-deftest disco-root-open-at-point-jumps-to-search-message ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((inhibit-read-only t))
+      (insert "hit\n")
+      (add-text-properties (point-min) (point-max)
+                           '(disco-root-search-message-id "m1"
+                             disco-channel-id "c1")))
+    (goto-char (point-min))
+    (let (jumped)
+      (cl-letf (((symbol-function 'disco-room-jump-to-message)
+                 (lambda (message-id channel-id)
+                   (setq jumped (list message-id channel-id)))))
+        (disco-root-open-at-point)
+        (should (equal '("m1" "c1") jumped))))))
+
+(ert-deftest disco-root-render-layout-search-renders-sections ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (setq-local disco-root--layout 'search)
+    (setq-local disco-root--search-query "foo")
+    (setq-local disco-root--search-domain '(:kind dms :id nil :label "DMs"))
+    (setq-local disco-root--search-tabs
+                '((messages :items (((id . "m1")
+                                     (channel_id . "c1")
+                                     (content . "hello")))
+                   :loading nil
+                   :error nil
+                   :cursor ((type . "timestamp")
+                            (timestamp . "1"))
+                   :total-results 1)
+                  (links :items nil
+                         :loading nil
+                         :error nil
+                         :cursor nil
+                         :total-results 0)
+                  (media :items nil :loading t :error nil :cursor nil :total-results nil)
+                  (files :items nil :loading nil :error "boom" :cursor nil :total-results nil)
+                  (pins :items nil :loading nil :error nil :cursor nil :total-results 0)))
+    (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
+    (puthash "c1" '((id . "c1") (type . 1) (name . "dm"))
+             disco-root--search-channel-table)
+    (let ((disco-root--fill-column 80))
+      (cl-letf (((symbol-function 'disco-root--insert-search-message-line)
+                 (lambda (_message _indent _tab)
+                   (insert "  result-row\n"))))
+        (disco-root--prepare-ewoc-state)
+        (disco-root--render-layout-search)
+        (should (string-match-p "Searching \"foo\" in DMs" (buffer-string)))
+        (should (string-match-p "Messages (1/1)" (buffer-string)))
+        (should (string-match-p "Show more" (buffer-string)))
+        (should (string-match-p "(loading...)" (buffer-string)))
+        (should (string-match-p "(boom)" (buffer-string)))))))
 
 (ert-deftest disco-root-toggle-section-at-point-activity-falls-forward ()
   (with-temp-buffer

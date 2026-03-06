@@ -583,6 +583,61 @@ Uses `/channels/{channel.id}/threads/search' with `archived=false'."
    :on-success on-success
    :on-error on-error))
 
+(cl-defun disco-api-guild-search-messages-tabs
+    (guild-id &key tabs channel-ids include-nsfw track-exact-total-hits)
+  "Search messages in GUILD-ID using Discord tabs search endpoint."
+  (disco-api--request
+   "POST"
+   (format "/guilds/%s/messages/search/tabs" guild-id)
+   (disco-api--message-search-tabs-payload
+    :tabs tabs
+    :channel-ids channel-ids
+    :include-nsfw include-nsfw
+    :track-exact-total-hits track-exact-total-hits)
+   nil
+   nil))
+
+(cl-defun disco-api-guild-search-messages-tabs-async
+    (guild-id &key tabs channel-ids include-nsfw track-exact-total-hits
+              on-success on-error)
+  "Search messages in GUILD-ID asynchronously using Discord tabs search endpoint."
+  (disco-api--request-async
+   "POST"
+   (format "/guilds/%s/messages/search/tabs" guild-id)
+   :payload (disco-api--message-search-tabs-payload
+             :tabs tabs
+             :channel-ids channel-ids
+             :include-nsfw include-nsfw
+             :track-exact-total-hits track-exact-total-hits)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-user-search-messages-tabs
+    (&key tabs include-nsfw track-exact-total-hits)
+  "Search messages across private channels using Discord user tabs search endpoint."
+  (disco-api--request
+   "POST"
+   "/users/@me/messages/search/tabs"
+   (disco-api--message-search-tabs-payload
+    :tabs tabs
+    :include-nsfw include-nsfw
+    :track-exact-total-hits track-exact-total-hits)
+   nil
+   nil))
+
+(cl-defun disco-api-user-search-messages-tabs-async
+    (&key tabs include-nsfw track-exact-total-hits on-success on-error)
+  "Search messages across private channels asynchronously."
+  (disco-api--request-async
+   "POST"
+   "/users/@me/messages/search/tabs"
+   :payload (disco-api--message-search-tabs-payload
+             :tabs tabs
+             :include-nsfw include-nsfw
+             :track-exact-total-hits track-exact-total-hits)
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-channel-archived-public-threads (channel-id &optional before limit)
   "Fetch archived public threads under CHANNEL-ID.
 

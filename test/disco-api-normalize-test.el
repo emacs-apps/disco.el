@@ -34,6 +34,45 @@
   (should (equal '((token . :null)) (disco-api--token-payload :null)))
   (should-error (disco-api--token-payload 42) :type 'error))
 
+(ert-deftest disco-api-normalize-message-search-tab-payload ()
+  (should
+   (equal '((limit . 10)
+            (slop . 2)
+            (content . "openclaw")
+            (has . ["link" "file"])
+            (pinned . t)
+            (sort_by . "timestamp")
+            (sort_order . "desc"))
+          (disco-api--message-search-tab-payload
+           :limit 10
+           :slop 2
+           :content "openclaw"
+           :has '("link" "file")
+           :pinned t
+           :sort-by 'timestamp
+           :sort-order 'desc))))
+
+(ert-deftest disco-api-normalize-message-search-tabs-payload ()
+  (should
+   (equal '((tabs (messages (limit . 5)
+                            (content . "foo")
+                            (sort_by . "timestamp")
+                            (sort_order . "desc"))
+                  (links (limit . 5)
+                         (content . "foo")
+                         (has . ["link"]) 
+                         (sort_by . "timestamp")
+                         (sort_order . "desc")))
+            (channel_ids . ["1" "2"])
+            (track_exact_total_hits . t))
+          (disco-api--message-search-tabs-payload
+           :tabs '((messages :limit 5 :content "foo" :sort-by timestamp :sort-order desc)
+                   (links :limit 5 :content "foo" :has ("link")
+                          :sort-by timestamp :sort-order desc))
+           :channel-ids '("1" "2")
+           :include-nsfw nil
+           :track-exact-total-hits t))))
+
 (ert-deftest disco-api-normalize-read-state-type ()
   (should (= 0 (disco-api--normalize-read-state-type nil "read_state_type" 0)))
   (should (= 1 (disco-api--normalize-read-state-type 'guild-event "read_state_type" nil)))
