@@ -456,7 +456,8 @@ between current view mode and unread-only filter."
   "Render root tree and keep point near previous line/column."
   (disco-view-render-preserving-position
    #'disco-root-render
-   :preserve-window-start t))
+   :preserve-window-start t)
+  (disco-root--update-window-points))
 
 (defun disco-root--buffer-visible-p (&optional buffer)
   "Return non-nil when BUFFER is currently displayed in any live window."
@@ -467,9 +468,9 @@ between current view mode and unread-only filter."
   "Update window points for current buffer to POINT.
 
 Mirrors telega's root buffer behavior for keeping window points aligned
-after incremental EWOC updates."
+after passive EWOC and full-buffer updates."
   (let ((pos (or point (point))))
-    (dolist (win (get-buffer-window-list (current-buffer)))
+    (dolist (win (get-buffer-window-list (current-buffer) nil t))
       (when (window-live-p win)
         (set-window-point win pos)))))
 
@@ -674,7 +675,8 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
   "Reflow root layout and keep point near previous line/column."
   (disco-view-render-preserving-position
    #'disco-root--reflow-layout
-   :preserve-window-start t))
+   :preserve-window-start t)
+  (disco-root--update-window-points))
 
 (defun disco-root--display-window (&optional buffer)
   "Return preferred live window displaying BUFFER."
@@ -764,23 +766,37 @@ When WINDOW is non-nil, compute using WINDOW directly."
                                      line-number-columns)))
              adjusted-width)))))
 
+(defun disco-root--selected-window-for-buffer (&optional buffer)
+  "Return selected window when it displays BUFFER, otherwise nil."
+  (let* ((buf (or buffer (current-buffer)))
+         (win (selected-window)))
+    (when (and (window-live-p win)
+               (eq (window-buffer win) buf))
+      win)))
+
 (defun disco-root--render-fill-column (&optional buffer)
   "Return stable fill width for BUFFER before one render pass.
 
-Prefer width from a live BUFFER window. Hidden buffers keep previous
-`disco-root--fill-column' to avoid background width jitter."
+Mirror telega's root autofill behavior: prefer the selected BUFFER
+window, otherwise reuse the last width so passive background rerenders do
+not jump between windows or reflow unpredictably."
   (with-current-buffer (or buffer (current-buffer))
-    (let* ((win (disco-root--display-window (current-buffer)))
+    (let* ((buf (current-buffer))
+           (selected-win (disco-root--selected-window-for-buffer buf))
+           (fallback-win (or selected-win
+                             (disco-root--display-window buf)))
            (computed-width
-            (and (window-live-p win)
-                 (disco-root--compute-fill-column (current-buffer) win))))
+            (and (window-live-p selected-win)
+                 (disco-root--compute-fill-column buf selected-win))))
       (or (and (integerp computed-width)
                (> computed-width 0)
                computed-width)
           (and (integerp disco-root--fill-column)
                (> disco-root--fill-column 0)
                disco-root--fill-column)
-          (disco-root--compute-fill-column (current-buffer) win)))))
+          (and (window-live-p fallback-win)
+               (disco-root--compute-fill-column buf fallback-win))
+          (disco-root--compute-fill-column buf fallback-win)))))
 
 (defun disco-root--auto-fill-to-width (width &optional force)
   "Reflow root buffer using WIDTH when it changed.
