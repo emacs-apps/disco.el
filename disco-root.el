@@ -1099,6 +1099,464 @@ after passive EWOC and full-buffer updates."
        initial-input
        map nil 'disco-root-search-history))))
 
+(defun disco-root--search-default-spec ()
+  "Return default structured root search spec."
+  (list :sort-by 'timestamp
+        :sort-order 'desc))
+
+(defun disco-root--search-normalize-spec (spec)
+  "Return normalized copy of root search SPEC with default sort fields."
+  (let ((copy (copy-tree (or spec '()))))
+    (unless (plist-member copy :sort-by)
+      (setq copy (plist-put copy :sort-by 'timestamp)))
+    (unless (plist-member copy :sort-order)
+      (setq copy (plist-put copy :sort-order 'desc)))
+    copy))
+
+(defun disco-root--search-effective-spec-p (&optional spec)
+  "Return non-nil when root search SPEC contains an actual query/filter."
+  (let ((it (or spec disco-root--search-query-spec)))
+    (or (let ((content (plist-get it :content)))
+          (and (stringp content)
+               (not (string-empty-p content))))
+        (plist-get it :author-ids)
+        (plist-get it :mentions)
+        (plist-get it :mention-everyone)
+        (plist-get it :has)
+        (plist-member it :pinned)
+        (plist-get it :channel-ids)
+        (plist-get it :max-id)
+        (plist-get it :min-id))))
+
+(defun disco-root--search-ensure-draft ()
+  "Ensure current root buffer has initialized draft search state."
+  (unless disco-root--search-domain
+    (setq-local disco-root--search-domain
+                (copy-tree (or (disco-root--search-current-domain-at-point)
+                               '(:kind dms :id nil :label "DMs")))))
+  (setq-local disco-root--search-query-spec
+              (disco-root--search-normalize-spec disco-root--search-query-spec))
+  (unless (stringp disco-root--search-query)
+    (setq-local disco-root--search-query "")))
+
+(defun disco-root--search-value-summary (value)
+  "Return concise string summary for VALUE."
+  (cond
+   ((null value) "none")
+   ((and (listp value) (= (length value) 1))
+    (format "%s" (car value)))
+   ((listp value)
+    (format "%d" (length value)))
+   ((stringp value)
+    (if (string-empty-p value) "none" value))
+   ((eq value t) "yes")
+   ((eq value :false) "no")
+   (t (format "%s" value))))
+
+(defun disco-root--search-summary-chips ()
+  "Return list of summary chips for current root search spec."
+  (let ((spec (disco-root--search-normalize-spec disco-root--search-query-spec))
+        chips)
+    (push (format "[in:%s]" (disco-root--search-domain-label disco-root--search-domain)) chips)
+    (when-let* ((content (plist-get spec :content))
+                ((not (string-empty-p content))))
+      (push (format "[text:%s]" content) chips))
+    (when-let* ((authors (plist-get spec :author-ids)))
+      (push (format "[from:%s]" (disco-root--search-value-summary authors)) chips))
+    (when-let* ((mentions (plist-get spec :mentions)))
+      (push (format "[mentions:%s]" (disco-root--search-value-summary mentions)) chips))
+    (when (plist-get spec :mention-everyone)
+      (push "[mentions:everyone]" chips))
+    (when-let* ((channels (plist-get spec :channel-ids)))
+      (push (format "[where:%s]" (disco-root--search-value-summary channels)) chips))
+    (when-let* ((has (plist-get spec :has)))
+      (push (format "[has:%s]" (string-join has ",")) chips))
+    (when (plist-member spec :pinned)
+      (push (format "[pinned:%s]" (disco-root--search-value-summary (plist-get spec :pinned))) chips))
+    (when-let* ((before (plist-get spec :max-id)))
+      (push (format "[before:%s]" before) chips))
+    (when-let* ((after (plist-get spec :min-id)))
+      (push (format "[after:%s]" after) chips))
+    (unless (eq (plist-get spec :sort-by) 'timestamp)
+      (push (format "[sort:%s]" (plist-get spec :sort-by)) chips))
+    (unless (eq (plist-get spec :sort-order) 'desc)
+      (push (format "[order:%s]" (plist-get spec :sort-order)) chips))
+    (nreverse chips)))
+
+(defun disco-root--search-sync-query-display ()
+  "Synchronize display query string from current structured search spec."
+  (setq-local disco-root--search-query
+              (string-join (disco-root--search-summary-chips) "  ")))
+
+(defun disco-root--search-user-completion-table (domain filter)
+  "Return completion table for root search users in DOMAIN for FILTER."
+  (completion-table-dynamic
+   (lambda (input)
+     (disco-root--search-maybe-request-member-completion filter input domain)
+     (mapcar #'car (disco-root--search-user-candidates domain)))))
+
+(defun disco-root--search-channel-completion-table (domain)
+  "Return completion table for root search channels in DOMAIN."
+  (completion-table-dynamic
+   (lambda (_input)
+     (mapcar #'car (disco-root--search-channel-candidates domain)))))
+
+(defun disco-root--search-default-multi-input (ids candidates)
+  "Return comma-separated default input for IDS using CANDIDATES."
+  (string-join
+   (mapcar (lambda (id)
+             (or (car (seq-find (lambda (cell) (equal (cdr cell) id)) candidates))
+                 id))
+           (or ids '()))
+   ","))
+
+(defun disco-root--search-read-user-ids (prompt domain current-ids)
+  "Read user ids with PROMPT within DOMAIN, defaulting to CURRENT-IDS."
+  (let* ((candidates (disco-root--search-user-candidates domain))
+         (defaults (disco-root--search-default-multi-input current-ids candidates))
+         (picked (completing-read-multiple prompt
+                                           (disco-root--search-user-completion-table domain "from")
+                                           nil t defaults)))
+    (mapcar (lambda (value)
+              (or (disco-root--search-find-candidate-id value candidates)
+                  value))
+            picked)))
+
+(defun disco-root--search-read-mentioned-ids (prompt domain current-ids include-everyone)
+  "Read mention ids with PROMPT within DOMAIN.
+
+Return plist fragment with `:mentions' and optional `:mention-everyone'."
+  (let* ((candidates (append '(("everyone" . :everyone)
+                               ("@everyone" . :everyone))
+                             (disco-root--search-user-candidates domain)))
+         (defaults (disco-root--search-default-multi-input
+                    (append (or current-ids '())
+                            (when include-everyone (list :everyone)))
+                    candidates))
+         (picked (completing-read-multiple
+                  prompt
+                  (completion-table-dynamic
+                   (lambda (input)
+                     (disco-root--search-maybe-request-member-completion
+                      "mentions" input domain)
+                     (mapcar #'car candidates)))
+                  nil t defaults)))
+    (list :mentions (delq nil
+                          (mapcar (lambda (value)
+                                    (let ((resolved (disco-root--search-find-candidate-id
+                                                     value candidates)))
+                                      (unless (eq resolved :everyone)
+                                        (or resolved value))))
+                                  picked))
+          :mention-everyone (and (seq-some (lambda (value)
+                                             (eq (disco-root--search-find-candidate-id
+                                                  value candidates)
+                                                 :everyone))
+                                           picked)
+                                 t))))
+
+(defun disco-root--search-read-channel-ids (prompt domain current-ids)
+  "Read channel ids with PROMPT within DOMAIN, defaulting to CURRENT-IDS."
+  (let* ((candidates (disco-root--search-channel-candidates domain))
+         (defaults (disco-root--search-default-multi-input current-ids candidates))
+         (picked (completing-read-multiple prompt
+                                           (disco-root--search-channel-completion-table domain)
+                                           nil t defaults)))
+    (mapcar (lambda (value)
+              (or (disco-root--search-find-candidate-id value candidates)
+                  value))
+            picked)))
+
+(defun disco-root--search-plist-remove (plist property)
+  "Return copy of PLIST without PROPERTY pair."
+  (let (result)
+    (while plist
+      (let ((key (pop plist))
+            (value (pop plist)))
+        (unless (eq key property)
+          (setq result (append result (list key value))))))
+    result))
+
+(defun disco-root--search-set-spec-and-sync (spec)
+  "Store root search SPEC and refresh derived display state."
+  (setq-local disco-root--search-query-spec (disco-root--search-normalize-spec spec))
+  (disco-root--search-sync-query-display)
+  disco-root--search-query-spec)
+
+(defun disco-root--search-start-current-draft ()
+  "Execute root search using the current draft domain and spec."
+  (disco-root--search-ensure-draft)
+  (unless (disco-root--search-effective-spec-p disco-root--search-query-spec)
+    (user-error "disco: set a search query or filter first"))
+  (disco-root--search-sync-query-display)
+  (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-generation (1+ disco-root--search-generation))
+  (setq-local disco-root--search-prev-layout
+              (unless (eq disco-root--layout 'search)
+                disco-root--layout))
+  (disco-root--search-reset-tab-states)
+  (setq disco-root--layout 'search)
+  (disco-root--search-render-if-visible)
+  (disco-root--search-dispatch disco-root--search-generation
+                               (disco-root--search-request-tabs nil))
+  (message "disco: searching in %s"
+           (disco-root--search-domain-label disco-root--search-domain)))
+
+(defun disco-root-search-set-domain ()
+  "Set root search domain using minibuffer completion."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (setq-local disco-root--search-domain (disco-root--read-search-domain))
+  (setq-local disco-root--search-query-spec
+              (plist-put disco-root--search-query-spec :channel-ids nil))
+  (disco-root--search-sync-query-display)
+  (message "disco: search domain -> %s"
+           (disco-root--search-domain-label disco-root--search-domain)))
+
+(defun disco-root-search-set-content ()
+  "Set free-text root search content filter."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let* ((current (or (plist-get disco-root--search-query-spec :content) ""))
+         (value (read-string "Search text: " current)))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :content (unless (string-empty-p (string-trim value))
+                                      (string-trim value))))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-edit-raw-query ()
+  "Edit the raw Discord-style query string and import it into search draft state."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let* ((domain disco-root--search-domain)
+         (raw (disco-root--read-search-query domain (or disco-root--search-query ""))))
+    (setq-local disco-root--search-query raw)
+    (setq-local disco-root--search-query-spec
+                (disco-root--search-normalize-spec
+                 (disco-root--search-parse-query raw domain)))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-set-from ()
+  "Set root search `from' filter using member completion."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let ((ids (disco-root--search-read-user-ids
+              "From: "
+              disco-root--search-domain
+              (plist-get disco-root--search-query-spec :author-ids))))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :author-ids (and ids (seq-uniq ids #'equal))))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-set-mentions ()
+  "Set root search `mentions' filter using member completion."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let* ((current-ids (plist-get disco-root--search-query-spec :mentions))
+         (include-everyone (plist-get disco-root--search-query-spec :mention-everyone))
+         (result (disco-root--search-read-mentioned-ids
+                  "Mentions: "
+                  disco-root--search-domain
+                  current-ids
+                  include-everyone)))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :mentions (and (plist-get result :mentions)
+                                          (seq-uniq (plist-get result :mentions) #'equal))))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :mention-everyone (plist-get result :mention-everyone)))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-set-channels ()
+  "Set root search channel filter using domain channel completion."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let ((ids (disco-root--search-read-channel-ids
+              "In channels: "
+              disco-root--search-domain
+              (plist-get disco-root--search-query-spec :channel-ids))))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :channel-ids (and ids (seq-uniq ids #'equal))))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-set-has ()
+  "Set root search `has' filter using static completion."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let* ((current (string-join (or (plist-get disco-root--search-query-spec :has) '()) ","))
+         (picked (completing-read-multiple "Has: " disco-root--search-has-values nil t current)))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :has (and picked (seq-uniq picked #'equal))))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-toggle-pinned ()
+  "Cycle root search pinned filter among any, yes and no."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let ((current (if (plist-member disco-root--search-query-spec :pinned)
+                     (plist-get disco-root--search-query-spec :pinned)
+                   nil)))
+    (setq-local disco-root--search-query-spec
+                (cond
+                 ((null current)
+                  (plist-put disco-root--search-query-spec :pinned t))
+                 ((eq current t)
+                  (plist-put disco-root--search-query-spec :pinned :false))
+                 (t
+                  (disco-root--search-plist-remove
+                   disco-root--search-query-spec
+                   :pinned))))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-set-before ()
+  "Set root search `before' boundary filter."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let* ((current (or (plist-get disco-root--search-query-spec :max-id) ""))
+         (value (read-string "Before (message id or time): " current)))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :max-id (unless (string-empty-p (string-trim value))
+                                     (disco-root--search-parse-boundary-id value "before:"))))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-set-after ()
+  "Set root search `after' boundary filter."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (let* ((current (or (plist-get disco-root--search-query-spec :min-id) ""))
+         (value (read-string "After (message id or time): " current)))
+    (setq-local disco-root--search-query-spec
+                (plist-put disco-root--search-query-spec
+                           :min-id (unless (string-empty-p (string-trim value))
+                                     (disco-root--search-parse-boundary-id value "after:"))))
+    (disco-root--search-sync-query-display)))
+
+(defun disco-root-search-set-sort ()
+  "Set root search sort algorithm."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (setq-local disco-root--search-query-spec
+              (plist-put disco-root--search-query-spec
+                         :sort-by
+                         (intern (completing-read "Sort by: "
+                                                  disco-root--search-sort-values
+                                                  nil t nil nil
+                                                  (symbol-name (or (plist-get disco-root--search-query-spec :sort-by)
+                                                                   'timestamp))))))
+  (disco-root--search-sync-query-display))
+
+(defun disco-root-search-set-order ()
+  "Set root search sort order."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (setq-local disco-root--search-query-spec
+              (plist-put disco-root--search-query-spec
+                         :sort-order
+                         (intern (completing-read "Order: "
+                                                  disco-root--search-order-values
+                                                  nil t nil nil
+                                                  (symbol-name (or (plist-get disco-root--search-query-spec :sort-order)
+                                                                   'desc))))))
+  (disco-root--search-sync-query-display))
+
+(defun disco-root-search-clear ()
+  "Reset the current root search draft spec to defaults."
+  (interactive)
+  (disco-root--search-ensure-draft)
+  (setq-local disco-root--search-query-spec (disco-root--search-default-spec))
+  (setq-local disco-root--search-query "")
+  (disco-root--search-sync-query-display)
+  (message "disco: search filters cleared"))
+
+(defun disco-root-search-execute ()
+  "Execute root search using the current transient-managed draft state."
+  (interactive)
+  (disco-root--search-start-current-draft))
+
+(defun disco-root--search-domain-description ()
+  "Return transient label for the current root search domain."
+  (disco-root--search-ensure-draft)
+  (format "Domain: %s" (disco-root--search-domain-label disco-root--search-domain)))
+
+(defun disco-root--search-content-description ()
+  "Return transient label for current root search content filter."
+  (disco-root--search-ensure-draft)
+  (format "Text: %s"
+          (disco-root--search-value-summary
+           (plist-get disco-root--search-query-spec :content))))
+
+(defun disco-root--search-from-description ()
+  "Return transient label for current root search `from' filter."
+  (disco-root--search-ensure-draft)
+  (format "From: %s"
+          (disco-root--search-value-summary
+           (plist-get disco-root--search-query-spec :author-ids))))
+
+(defun disco-root--search-mentions-description ()
+  "Return transient label for current root search `mentions' filter."
+  (disco-root--search-ensure-draft)
+  (let ((mentions (plist-get disco-root--search-query-spec :mentions))
+        (everyone (plist-get disco-root--search-query-spec :mention-everyone)))
+    (format "Mentions: %s%s"
+            (disco-root--search-value-summary mentions)
+            (if everyone " +everyone" ""))))
+
+(defun disco-root--search-channels-description ()
+  "Return transient label for current root search `in' filter."
+  (disco-root--search-ensure-draft)
+  (format "In: %s"
+          (disco-root--search-value-summary
+           (plist-get disco-root--search-query-spec :channel-ids))))
+
+(defun disco-root--search-has-description ()
+  "Return transient label for current root search `has' filter."
+  (disco-root--search-ensure-draft)
+  (format "Has: %s"
+          (disco-root--search-value-summary
+           (plist-get disco-root--search-query-spec :has))))
+
+(defun disco-root--search-pinned-description ()
+  "Return transient label for current root search pinned filter."
+  (disco-root--search-ensure-draft)
+  (format "Pinned: %s"
+          (if (plist-member disco-root--search-query-spec :pinned)
+              (disco-root--search-value-summary
+               (plist-get disco-root--search-query-spec :pinned))
+            "any")))
+
+(defun disco-root--search-before-description ()
+  "Return transient label for current root search `before' filter."
+  (disco-root--search-ensure-draft)
+  (format "Before: %s"
+          (disco-root--search-value-summary
+           (plist-get disco-root--search-query-spec :max-id))))
+
+(defun disco-root--search-after-description ()
+  "Return transient label for current root search `after' filter."
+  (disco-root--search-ensure-draft)
+  (format "After: %s"
+          (disco-root--search-value-summary
+           (plist-get disco-root--search-query-spec :min-id))))
+
+(defun disco-root--search-sort-description ()
+  "Return transient label for current root search sort mode."
+  (disco-root--search-ensure-draft)
+  (format "Sort: %s"
+          (or (plist-get disco-root--search-query-spec :sort-by) 'timestamp)))
+
+(defun disco-root--search-order-description ()
+  "Return transient label for current root search sort order."
+  (disco-root--search-ensure-draft)
+  (format "Order: %s"
+          (or (plist-get disco-root--search-query-spec :sort-order) 'desc)))
+
 (defun disco-root--search-empty-tab-state ()
   "Return freshly initialized root search tab state plist."
   (list :items nil
@@ -1381,9 +1839,8 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
 (defun disco-root-search-refresh ()
   "Rerun current root search query in the active search domain."
   (interactive)
-  (unless (and (stringp disco-root--search-query)
-               (not (string-empty-p disco-root--search-query))
-               disco-root--search-domain)
+  (unless (and disco-root--search-domain
+               (disco-root--search-effective-spec-p disco-root--search-query-spec))
     (user-error "disco: no active root search"))
   (setq-local disco-root--search-query-spec
               (or disco-root--search-query-spec
@@ -1394,8 +1851,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   (disco-root--search-dispatch disco-root--search-generation
                                (disco-root--search-request-tabs nil))
   (disco-root--search-render-if-visible)
-  (message "disco: searching %s in %s"
-           disco-root--search-query
+  (message "disco: searching in %s"
            (disco-root--search-domain-label disco-root--search-domain)))
 
 (defun disco-root-search-load-more-at-point ()
@@ -4731,15 +5187,13 @@ Return non-nil when at least one visible row is inserted for GUILD."
 
 (defun disco-root--render-layout-search ()
   "Render root search results layout from current search session state."
-  (if (not (and (stringp disco-root--search-query)
-                (not (string-empty-p disco-root--search-query))
-                disco-root--search-domain))
+  (if (not (and disco-root--search-domain
+                (disco-root--search-effective-spec-p disco-root--search-query-spec)))
       (progn
         (disco-root--ewoc-insert-text "Search root with s")
         (disco-root--ewoc-insert-text "  (no active search)"))
     (disco-root--ewoc-insert-text
-     (format "Searching \"%s\" in %s"
-             disco-root--search-query
+     (format "Search results in %s"
              (disco-root--search-domain-label disco-root--search-domain)))
     (disco-root--ewoc-insert-blank)
     (dolist (tab disco-root--search-tab-order)
@@ -4884,14 +5338,12 @@ Return non-nil when at least one visible row is inserted for GUILD."
 
 (defun disco-root--search-summary-line ()
   "Return summary line for active root search session."
-  (if (not (and (stringp disco-root--search-query)
-                (not (string-empty-p disco-root--search-query))))
+  (if (not (and disco-root--search-domain
+                (disco-root--search-effective-spec-p disco-root--search-query-spec)))
       "[search inactive]"
     (string-join
-     (append
-      (list (format "[search \"%s\"]" disco-root--search-query)
-            (format "[in:%s]" (disco-root--search-domain-label disco-root--search-domain)))
-      (mapcar #'disco-root--search-tab-summary-chip disco-root--search-tab-order))
+     (append (disco-root--search-summary-chips)
+             (mapcar #'disco-root--search-tab-summary-chip disco-root--search-tab-order))
      "  ")))
 
 (defun disco-root--filters-line ()
@@ -5102,9 +5554,8 @@ When QUIET is non-nil, suppress minibuffer status messages."
   "Fetch guild/channel data asynchronously and redraw root buffer."
   (interactive)
   (if (and (eq (disco-root--ensure-layout) 'search)
-           (stringp disco-root--search-query)
-           (not (string-empty-p disco-root--search-query))
-           disco-root--search-domain)
+           disco-root--search-domain
+           (disco-root--search-effective-spec-p disco-root--search-query-spec))
       (disco-root-search-refresh)
     (let* ((root-buffer (current-buffer))
            (generation (1+ disco-root--refresh-generation))
@@ -5245,7 +5696,7 @@ When QUIET is non-nil, suppress minibuffer status messages."
     (define-key map (kbd "\\") #'disco-root-toggle-sort-mode)
     (define-key map (kbd "v") #'disco-root-cycle-view-mode)
     (define-key map (kbd "U") #'disco-root-toggle-unread-lens)
-    (define-key map (kbd "s") #'disco-root-search)
+    (define-key map (kbd "s") #'disco-root-search-transient)
     (define-key map (kbd "t") #'disco-root-toggle-section-at-point)
     (define-key map (kbd "RET") #'disco-root-open-at-point)
     (define-key map [mouse-1] #'disco-root-mouse-open-at-point)

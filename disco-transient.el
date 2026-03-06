@@ -22,6 +22,31 @@
 (declare-function disco-root-set-layout "disco-root")
 (declare-function disco-root-toggle-unread-lens "disco-root")
 (declare-function disco-root-search "disco-root")
+(declare-function disco-root-search-execute "disco-root")
+(declare-function disco-root-search-set-domain "disco-root")
+(declare-function disco-root-search-set-content "disco-root")
+(declare-function disco-root-search-edit-raw-query "disco-root")
+(declare-function disco-root-search-set-from "disco-root")
+(declare-function disco-root-search-set-mentions "disco-root")
+(declare-function disco-root-search-set-channels "disco-root")
+(declare-function disco-root-search-set-has "disco-root")
+(declare-function disco-root-search-toggle-pinned "disco-root")
+(declare-function disco-root-search-set-before "disco-root")
+(declare-function disco-root-search-set-after "disco-root")
+(declare-function disco-root-search-set-sort "disco-root")
+(declare-function disco-root-search-set-order "disco-root")
+(declare-function disco-root-search-clear "disco-root")
+(declare-function disco-root--search-domain-description "disco-root")
+(declare-function disco-root--search-content-description "disco-root")
+(declare-function disco-root--search-from-description "disco-root")
+(declare-function disco-root--search-mentions-description "disco-root")
+(declare-function disco-root--search-channels-description "disco-root")
+(declare-function disco-root--search-has-description "disco-root")
+(declare-function disco-root--search-pinned-description "disco-root")
+(declare-function disco-root--search-before-description "disco-root")
+(declare-function disco-root--search-after-description "disco-root")
+(declare-function disco-root--search-sort-description "disco-root")
+(declare-function disco-root--search-order-description "disco-root")
 
 (declare-function disco-room-refresh "disco-room")
 (declare-function disco-room-load-older-messages "disco-room")
@@ -98,6 +123,29 @@
       (user-error "disco: current room has no parent channel"))
     (disco-root-list-archived-threads parent-id)))
 
+(transient-define-prefix disco-root-search-transient ()
+  "Structured root search editor for disco.el."
+  [["Scope"
+    ("d" (lambda () (disco-root--search-domain-description)) disco-root-search-set-domain :transient t)
+    ("q" (lambda () (disco-root--search-content-description)) disco-root-search-set-content :transient t)
+    ("e" "Edit raw query..." disco-root-search-edit-raw-query :transient t)]
+   ["People"
+    ("f" (lambda () (disco-root--search-from-description)) disco-root-search-set-from :transient t)
+    ("m" (lambda () (disco-root--search-mentions-description)) disco-root-search-set-mentions :transient t)]
+   ["Place"
+    ("i" (lambda () (disco-root--search-channels-description)) disco-root-search-set-channels :transient t)
+    ("a" (lambda () (disco-root--search-after-description)) disco-root-search-set-after :transient t)
+    ("b" (lambda () (disco-root--search-before-description)) disco-root-search-set-before :transient t)]
+   ["Flags"
+    ("h" (lambda () (disco-root--search-has-description)) disco-root-search-set-has :transient t)
+    ("p" (lambda () (disco-root--search-pinned-description)) disco-root-search-toggle-pinned :transient t)
+    ("s" (lambda () (disco-root--search-sort-description)) disco-root-search-set-sort :transient t)
+    ("o" (lambda () (disco-root--search-order-description)) disco-root-search-set-order :transient t)]
+   ["Actions"
+    ("g" "Run search" disco-root-search-execute)
+    ("x" "Clear filters" disco-root-search-clear :transient t)
+    ("q" "Quit" transient-quit-one)]])
+
 (transient-define-prefix disco-root-transient ()
   "Root command menu for disco.el."
   [["Refresh"
@@ -108,7 +156,7 @@
    ["View"
     ("l" "Cycle layout" disco-root-cycle-layout)
     ("V" "Set layout..." disco-root-set-layout)
-    ("s" "Search..." disco-root-search)
+    ("s" "Search..." disco-root-search-transient)
     ("U" "Toggle unread lens" disco-root-toggle-unread-lens)]
    ["Inspect"
     ("H" "HTTP queue" disco-http-describe-queue)
@@ -121,31 +169,31 @@
 (transient-define-prefix disco-room-transient ()
   "Room command menu for disco.el."
   [["Timeline"
-   ("g" "Refresh room" disco-room-refresh)
-   ("o" "Load older" disco-room-load-older-messages)
-   ("c" "Send message" disco-room-send-message)
-   ("f" "Attach file" disco-room-attach-file)
-   ("D" "Remove attach token" disco-room-remove-attachment-token-at-point)
-   ("x" "Clear attachments" disco-room-clear-attachments)
-   ("v" "List attachments" disco-room-list-attachments)
-   ("V" "Edit attach desc" disco-room-edit-attachment-description)
-   ("O" "Reorder attachments" disco-room-reorder-attachments)
-   ("r" "Reply to message" disco-room-reply-to-message)
-   ("F" "Forward message" disco-room-forward-message)
-   ("k" "Cancel reply" disco-room-cancel-reply)
-   ("e" "Edit at point" disco-room-edit-message)
-   ("d" "Delete at point" disco-room-delete-message)
-   ("!" "Toggle reaction" disco-room-toggle-reaction)
-   ("+" "Add reaction" disco-room-add-reaction)
-   ("-" "Remove reaction" disco-room-remove-reaction)
-   ("p" "Send poll" disco-room-send-poll)
-   ("w" "Select answer" disco-room-vote-poll-answer)
-   ("u" "Unselect answer" disco-room-remove-poll-vote)
-   ("t" "Toggle staged answer" disco-room-toggle-poll-answer)
-   ("W" "Submit staged vote" disco-room-submit-poll-vote)
-   ("C" "Remove my vote" disco-room-clear-poll-votes)
-   ("X" "End poll" disco-room-expire-poll)
-   ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
+    ("g" "Refresh room" disco-room-refresh)
+    ("o" "Load older" disco-room-load-older-messages)
+    ("c" "Send message" disco-room-send-message)
+    ("f" "Attach file" disco-room-attach-file)
+    ("D" "Remove attach token" disco-room-remove-attachment-token-at-point)
+    ("x" "Clear attachments" disco-room-clear-attachments)
+    ("v" "List attachments" disco-room-list-attachments)
+    ("V" "Edit attach desc" disco-room-edit-attachment-description)
+    ("O" "Reorder attachments" disco-room-reorder-attachments)
+    ("r" "Reply to message" disco-room-reply-to-message)
+    ("F" "Forward message" disco-room-forward-message)
+    ("k" "Cancel reply" disco-room-cancel-reply)
+    ("e" "Edit at point" disco-room-edit-message)
+    ("d" "Delete at point" disco-room-delete-message)
+    ("!" "Toggle reaction" disco-room-toggle-reaction)
+    ("+" "Add reaction" disco-room-add-reaction)
+    ("-" "Remove reaction" disco-room-remove-reaction)
+    ("p" "Send poll" disco-room-send-poll)
+    ("w" "Select answer" disco-room-vote-poll-answer)
+    ("u" "Unselect answer" disco-room-remove-poll-vote)
+    ("t" "Toggle staged answer" disco-room-toggle-poll-answer)
+    ("W" "Submit staged vote" disco-room-submit-poll-vote)
+    ("C" "Remove my vote" disco-room-clear-poll-votes)
+    ("X" "End poll" disco-room-expire-poll)
+    ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message)
     ("o" "Open msg thread" disco-room-open-thread-from-message-at-point)

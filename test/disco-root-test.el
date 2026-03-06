@@ -604,8 +604,8 @@
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--layout 'search)
-    (setq-local disco-root--search-query "foo")
     (setq-local disco-root--search-domain '(:kind dms :id nil :label "DMs"))
+    (setq-local disco-root--search-query-spec '(:content "foo" :sort-by timestamp :sort-order desc))
     (setq-local disco-root--search-tabs
                 '((messages :items (((id . "m1")
                                      (channel_id . "c1")
@@ -632,7 +632,7 @@
                    (insert "  result-row\n"))))
         (disco-root--prepare-ewoc-state)
         (disco-root--render-layout-search)
-        (should (string-match-p "Searching \"foo\" in DMs" (buffer-string)))
+        (should (string-match-p "Search results in DMs" (buffer-string)))
         (should (string-match-p "Messages (1/1)" (buffer-string)))
         (should (string-match-p "Show more" (buffer-string)))
         (should (string-match-p "(loading...)" (buffer-string)))
