@@ -191,6 +191,70 @@
     (disco-state-upsert-channel '((id . "voice") (type . 2) (name . "Voice")))
     (should-error (disco-room-filter-search "hello") :type 'error)))
 
+(ert-deftest disco-room-composer-visible-p-hides-read-only-guild-channel ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "readonly")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "readonly")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "0")))
+    (should-not (disco-room--composer-visible-p))
+    (should (equal '(send-messages)
+                   (disco-room--composer-missing-permissions)))))
+
+(ert-deftest disco-room-composer-visible-p-uses-thread-send-permission ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "thread")
+       (type . 11)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (should-not (disco-room--composer-visible-p))
+    (should (equal '(send-messages-in-threads)
+                   (disco-room--composer-missing-permissions)))))
+
+(ert-deftest disco-room-render-hides-composer-when-send-permission-missing ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "readonly")
+    (setq-local disco-room--channel-name "readonly")
+    (setq-local disco-room--draft-input "hello")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "readonly")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "0")))
+    (disco-room-render)
+    (should-not (text-property-any (point-min) (point-max) 'disco-room-input t))
+    (should-not (markerp disco-room--input-marker))
+    (should (string-match-p "composer hidden: missing SEND_MESSAGES"
+                            (buffer-string)))
+    (should-not (string-match-p "type at >>>" (buffer-string)))))
+
+(ert-deftest disco-room-render-shows-composer-when-send-permission-present ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (setq-local disco-room--draft-input "hello")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (should (text-property-any (point-min) (point-max) 'disco-room-input t))
+    (should (markerp disco-room--input-marker))
+    (should (string-match-p "type at >>>" (buffer-string)))))
+
 (ert-deftest disco-room-refresh-reruns-active-filter ()
   (with-temp-buffer
     (disco-room-mode)

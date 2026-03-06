@@ -808,6 +808,30 @@ When CHANNEL is nil, use current room channel."
   (append (disco-room--required-send-permissions channel)
           '(send-polls)))
 
+(defun disco-room--composer-missing-permissions (&optional channel)
+  "Return missing send permissions that should hide room composer for CHANNEL.
+
+When computed permissions are unavailable, return nil to avoid false
+negatives."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (and channel
+         (disco-permission-channel-known-p channel)
+         (disco-permission-channel-missing
+          channel
+          (disco-room--required-send-permissions channel)
+          nil))))
+
+(defun disco-room--composer-visible-p (&optional channel)
+  "Return non-nil when room composer should be shown for CHANNEL."
+  (not (disco-room--composer-missing-permissions channel)))
+
+(defun disco-room--composer-hidden-status-line (&optional channel)
+  "Return read-only status line when room composer is hidden for CHANNEL."
+  (let ((missing (disco-room--composer-missing-permissions channel)))
+    (when missing
+      (format "(read-only room; composer hidden: missing %s)"
+              (mapconcat #'disco-permission-display-name missing ", ")))))
+
 (cl-defun disco-room--poll-owned-by-current-user-p (msg &optional (unknown-value t))
   "Return non-nil when poll in MSG is owned by current user.
 
@@ -5419,35 +5443,52 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   "EWOC pretty-printer for one room message MSG."
   (disco-room--insert-message msg))
 
+(defun disco-room--header-help-text (&optional channel)
+  "Return header help text for room actions in CHANNEL."
+  (concat
+   "g: refresh   M-<: older/more   s/n/p: inplace search   C-c /: filter search"
+   "   C-c C-r/C-s: inplace query back/forward   C-c C-/: cancel filter"
+   "   C-c C-g: jump msg-id   r/e/d: reply/edit/delete   C-c C-w: toggle breakline"
+   "   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end"
+   "   C-c C-P: ack pins   C-c C-f/C-F: attach/forward   C-c C-d: remove token"
+   "   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments"
+   "   C-c C-t o: open message thread   C-c C-t: thread ops"
+   (if (disco-room--composer-visible-p channel)
+       "   RET/C-c C-c: send   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit"
+     "   C-c C-v: refetch avatars   [composer hidden]   q: quit")))
+
 (defun disco-room--input-footer-text (draft)
   "Build EWOC footer text containing room prompt with DRAFT.
 
-Footer marks the editable input tail using `disco-room-input' property."
-  (let ((typing-text (disco-room--typing-indicator-text))
-        (prompt (propertize ">>> "
-                            'read-only t
-                            'field 'disco-room-prompt
-                            'cursor-intangible t
-                            'disco-room-prompt t
-                            'front-sticky '(read-only field cursor-intangible)
-                            'rear-nonsticky
-                            '(read-only field cursor-intangible disco-room-input)))
-        (input (if (string-empty-p draft)
-                   "\n"
-                 draft)))
-    (concat "\n"
-            (if (and (stringp typing-text)
-                     (not (string-empty-p typing-text)))
-                (propertize (concat typing-text "\n")
-                            'read-only t
-                            'face 'disco-room-typing-indicator
-                            'front-sticky '(read-only)
-                            'rear-nonsticky '(read-only))
-              "")
-            prompt
-            (propertize input
-                        'disco-room-input t
-                        'read-only nil))))
+Return an empty string when the room composer should be hidden. Otherwise the
+footer marks the editable input tail using `disco-room-input' property."
+  (if (not (disco-room--composer-visible-p))
+      ""
+    (let ((typing-text (disco-room--typing-indicator-text))
+          (prompt (propertize ">>> "
+                              'read-only t
+                              'field 'disco-room-prompt
+                              'cursor-intangible t
+                              'disco-room-prompt t
+                              'front-sticky '(read-only field cursor-intangible)
+                              'rear-nonsticky
+                              '(read-only field cursor-intangible disco-room-input)))
+          (input (if (string-empty-p draft)
+                     "\n"
+                   draft)))
+      (concat "\n"
+              (if (and (stringp typing-text)
+                       (not (string-empty-p typing-text)))
+                  (propertize (concat typing-text "\n")
+                              'read-only t
+                              'face 'disco-room-typing-indicator
+                              'front-sticky '(read-only)
+                              'rear-nonsticky '(read-only))
+                "")
+              prompt
+              (propertize input
+                          'disco-room-input t
+                          'read-only nil)))))
 
 (defun disco-room--bind-input-region-from-footer ()
   "Locate and bind editable input region from EWOC footer properties."
@@ -5543,8 +5584,10 @@ Return non-nil when handled without full room rerender."
         ;; Timeline redraws can be large (many image previews); do not
         ;; accumulate undo entries for background rendering.
         (buffer-undo-list t)
+        (channel (disco-room--channel-object))
         (messages (disco-room--display-messages))
         (draft (disco-room--current-draft))
+        (composer-status-line (disco-room--composer-hidden-status-line))
         header-end
         (disco-room--avatar-fetch-budget
          (when (numberp disco-room-avatar-max-fetches-per-render)
@@ -5560,7 +5603,7 @@ Return non-nil when handled without full room rerender."
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
                           (disco-room--thread-header-suffix)))
-          (insert "g: refresh   M-<: older/more   s/n/p: inplace search   C-c /: filter search   C-c C-r/C-s: inplace query back/forward   C-c C-/: cancel filter   C-c C-g: jump msg-id   r/e/d: reply/edit/delete   C-c C-w: toggle breakline   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end   C-c C-P: ack pins   C-c C-f/C-F: attach/forward   C-c C-d: remove token   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments   C-c C-t o: open message thread   C-c C-t: thread ops   RET/C-c C-c: send   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit")
+          (insert (disco-room--header-help-text channel))
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))
           (when disco-room--older-in-flight
@@ -5580,6 +5623,8 @@ Return non-nil when handled without full room rerender."
             (insert "(older history exhausted)\n"))
           (when-let* ((filter-line (disco-room--msg-filter-status-line)))
             (insert filter-line "\n"))
+          (when (stringp composer-status-line)
+            (insert composer-status-line "\n"))
           (insert "\n")
           (setq header-end (point))
           (put-text-property (point-min) header-end 'read-only t)
