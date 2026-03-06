@@ -11,7 +11,7 @@
 
 (require 'cl-lib)
 (require 'ewoc)
-(require 'calendar)
+(autoload 'org-read-date "org" nil nil)
 (require 'transient)
 (require 'seq)
 (require 'subr-x)
@@ -242,9 +242,6 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 
 (defconst disco-root--search-sort-values '("timestamp" "relevance")
   "Supported values for Discord-style `sort:' root search filter.")
-
-(defconst disco-root--search-author-type-values '("user" "bot" "webhook")
-  "Supported values for Discord-style `author-type:' root search filter.")
 
 (defconst disco-root--search-order-values '("asc" "desc")
   "Supported values for Discord-style `order:' root search filter.")
@@ -1742,14 +1739,51 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
        (unless (string-empty-p (string-trim value))
          (disco-root--search-parse-slop value))))))
 
+(defun disco-root--search-boundary-default-time (property &optional end-of-day)
+  "Return default Emacs time for boundary PROPERTY, optionally END-OF-DAY."
+  (let ((existing (plist-get disco-root--search-query-spec property)))
+    (cond
+     ((and (stringp existing)
+           (string-match-p "\\`[0-9]+\\'" existing))
+      (seconds-to-time (or (disco-root--snowflake-epoch-seconds existing)
+                           (float-time))))
+     (t
+      (let* ((now (decode-time (current-time)))
+             (day (nth 3 now))
+             (month (nth 4 now))
+             (year (nth 5 now)))
+        (encode-time (if end-of-day 59 0)
+                     (if end-of-day 59 0)
+                     (if end-of-day 23 0)
+                     day month year))))))
+
+(defun disco-root--search-time-display-label (time-value &optional end-of-day-p)
+  "Return readable label for TIME-VALUE, optionally considering END-OF-DAY-P."
+  (let ((decoded (decode-time time-value)))
+    (if (and (= (nth 2 decoded) (if end-of-day-p 23 0))
+             (= (nth 1 decoded) (if end-of-day-p 59 0))
+             (= (nth 0 decoded) (if end-of-day-p 59 0)))
+        (format-time-string "%Y-%m-%d" time-value)
+      (format-time-string "%Y-%m-%d %H:%M" time-value))))
+
+(defun disco-root--search-read-org-date-time (prompt default-time)
+  "Read one Org-style date/time with PROMPT and DEFAULT-TIME."
+  (org-read-date t t nil prompt default-time))
+
 (defun disco-root--search-read-during-range ()
-  "Read a calendar date range and return plist with min/max ids and label."
-  (let* ((start-date (calendar-read-date nil))
-         (end-date (calendar-read-date nil start-date))
-         (start-time (disco-root--search-calendar-date-to-time start-date nil))
-         (end-time (disco-root--search-calendar-date-to-time end-date t))
-         (start-label (calendar-date-string start-date nil t))
-         (end-label (calendar-date-string end-date nil t)))
+  "Read an Org-style date range and return plist with min/max ids and label."
+  (let* ((start-default (disco-root--search-boundary-default-time :min-id nil))
+         (start-time (disco-root--search-read-org-date-time "During start: " start-default))
+         (end-default (or (and (plist-get disco-root--search-query-spec :max-id)
+                               (disco-root--search-boundary-default-time :max-id t))
+                          (let ((decoded (decode-time start-time)))
+                            (encode-time 59 59 23
+                                         (nth 3 decoded)
+                                         (nth 4 decoded)
+                                         (nth 5 decoded)))))
+         (end-time (disco-root--search-read-org-date-time "During end: " end-default))
+         (start-label (disco-root--search-time-display-label start-time nil))
+         (end-label (disco-root--search-time-display-label end-time t)))
     (list :min-id (disco-root--search-time-to-snowflake start-time)
           :max-id (disco-root--search-time-to-snowflake end-time)
           :during-label (if (equal start-label end-label)
@@ -1757,19 +1791,21 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
                           (format "%s..%s" start-label end-label)))))
 
 (defun disco-root--search-transient-during-value (_prompt _initial _history)
-  "Read `during' value for the search transient using calendar dates." 
+  "Read `during' value for the search transient using Org-style date picker."
   (disco-root--search-transient-with-buffer
    (lambda ()
      (disco-root--search-read-during-range))))
 
-(defun disco-root--search-transient-boundary-value (prompt property field-name)
-  "Read message boundary PROPERTY using PROMPT and FIELD-NAME."
+(defun disco-root--search-transient-boundary-value (prompt property _field-name)
+  "Read message boundary PROPERTY using Org-style date picker."
   (disco-root--search-transient-with-buffer
    (lambda ()
-     (let* ((current (or (plist-get disco-root--search-query-spec property) ""))
-            (value (read-string prompt current)))
-       (unless (string-empty-p (string-trim value))
-         (disco-root--search-parse-boundary-id value field-name))))))
+     (let* ((default-time (disco-root--search-boundary-default-time
+                           property
+                           (eq property :max-id)))
+            (time-value (disco-root--search-read-org-date-time prompt default-time)))
+       (and time-value
+            (disco-root--search-time-to-snowflake time-value))))))
 
 (defun disco-root--search-transient-before-value (prompt _initial _history)
   "Read `before' boundary for the search transient."
