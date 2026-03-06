@@ -553,6 +553,11 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   "Face used for room message metadata rows."
   :group 'disco)
 
+(defface disco-room-search-highlight
+  '((t :inherit isearch))
+  "Face used to highlight active room search query matches."
+  :group 'disco)
+
 (defface disco-room-typing-indicator
   '((t :inherit shadow :slant italic))
   "Face used for transient typing indicator text near the room prompt."
@@ -2211,12 +2216,15 @@ When FORWARD is non-nil, search toward newer messages. FROM-MESSAGE-ID, when
 non-nil, overrides the message id at point as the search boundary."
   (when (disco-room--msg-filter-active-p)
     (user-error "disco: can't search inplace while message filter is applied"))
-  (let ((title (disco-room--inplace-search-title filter)))
+  (let ((title (disco-room--inplace-search-title filter))
+        (old-query (disco-room--active-highlight-query)))
     (if (disco-room--inplace-search-move-local filter forward 1)
         (progn
           (setq-local disco-room--inplace-search-filter filter)
           (when-let* ((query (plist-get filter :query)))
             (setq-local disco-room--last-search-query query))
+          (unless (equal old-query (disco-room--active-highlight-query))
+            (disco-room--render-preserving-point))
           (message "disco: %s" title))
       (let* ((room-buffer (current-buffer))
              (channel-id disco-room--channel-id)
@@ -2228,6 +2236,8 @@ non-nil, overrides the message id at point as the search boundary."
         (setq-local disco-room--inplace-search-filter filter)
         (when-let* ((query (plist-get filter :query)))
           (setq-local disco-room--last-search-query query))
+        (unless (equal old-query (disco-room--active-highlight-query))
+          (disco-room--render-preserving-point))
         (message "disco: searching %s..." title)
         (disco-room--search-current-channel-async
          :query (plist-get filter :query)
@@ -4372,12 +4382,41 @@ messages; everything else is a system event shown as a centered divider."
        "A poll result was finalized.")
       (_ nil))))
 
+(defun disco-room--active-highlight-query ()
+  "Return active room search query string to highlight, or nil."
+  (or (and (listp disco-room--inplace-search-filter)
+           (plist-get disco-room--inplace-search-filter :query))
+      (and (listp disco-room--msg-filter)
+           (plist-get disco-room--msg-filter :query))))
+
+(defun disco-room--highlight-search-query (text)
+  "Return TEXT with active room search query highlighted."
+  (let ((query (disco-room--active-highlight-query)))
+    (if (or (not (stringp text))
+            (string-empty-p text)
+            (not (stringp query))
+            (string-empty-p query))
+        text
+      (let ((copy (copy-sequence text))
+            (start 0)
+            (case-fold-search t))
+        (while (and (< start (length copy))
+                    (string-match (regexp-quote query) copy start))
+          (add-face-text-property (match-beginning 0)
+                                  (match-end 0)
+                                  'disco-room-search-highlight
+                                  'append
+                                  copy)
+          (setq start (match-end 0)))
+        copy))))
+
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
   (let* ((raw-content (or (alist-get 'content msg) ""))
-         (content (disco-markdown-render raw-content
-                                         :context 'room-message
-                                         :message msg))
+         (content (disco-room--highlight-search-query
+                   (disco-markdown-render raw-content
+                                          :context 'room-message
+                                          :message msg)))
          (attachments (disco-room--message-effective-attachments msg))
          (embeds (disco-room--message-effective-embeds msg))
          (poll (disco-room--message-poll msg))

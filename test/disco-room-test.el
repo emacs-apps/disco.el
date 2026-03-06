@@ -203,6 +203,16 @@
         (disco-room-load-older-messages)
         (should loaded-more)))))
 
+(ert-deftest disco-room-highlight-search-query-adds-face ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--inplace-search-filter '(:query "beta"))
+    (let* ((text (disco-room--highlight-search-query "alpha beta gamma"))
+           (start (string-match "beta" text)))
+      (should (integerp start))
+      (should (eq 'disco-room-search-highlight
+                  (get-text-property start 'face text))))))
+
 (ert-deftest disco-room-inplace-search-dispatch-local-hit-skips-api ()
   (with-temp-buffer
     (disco-room-mode)
@@ -222,10 +232,29 @@
       (goto-char (point-min))
       (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
                  (lambda (&rest _args)
-                   (setq api-called t))))
+                   (setq api-called t)))
+                ((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () nil)))
         (disco-room--inplace-search-dispatch '(:query "beta") t)
         (should-not api-called)
         (should (equal "m2" (get-text-property (line-beginning-position) 'disco-message-id)))))))
+
+(ert-deftest disco-room-inplace-search-dispatch-rerenders-when-highlight-query-changes ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (let ((disco-room--channel-id "chan")
+          rendered)
+      (disco-state-reset)
+      (disco-state-put-messages "chan"
+                                '(((id . "m1") (channel_id . "chan") (content . "alpha"))))
+      (let ((inhibit-read-only t))
+        (insert "alpha\n")
+        (add-text-properties (point-min) (point-max) '(disco-message-id "m1")))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () (setq rendered t))))
+        (disco-room--inplace-search-dispatch '(:query "alpha") t)
+        (should rendered)))))
 
 (ert-deftest disco-room-inplace-search-dispatch-server-hit-jumps-to-message ()
   (with-temp-buffer
