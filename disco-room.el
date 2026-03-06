@@ -45,6 +45,7 @@
 (defvar-local disco-room--history-exhausted nil)
 (defvar-local disco-room--pending-reply-to nil)
 (defvar-local disco-room--pending-jump-message-id nil)
+(defvar-local disco-room--jump-in-flight nil)
 (defvar-local disco-room--gateway-handler nil)
 (defvar-local disco-room--refresh-generation 0)
 (defvar-local disco-room--refresh-in-flight nil)
@@ -1494,6 +1495,100 @@ updates, and keep draft cursor stable when point is in the composer."
                       (point-max))))
       found)))
 
+(defcustom disco-room-jump-context-limit 50
+  "Number of messages to request around a jump target.
+
+Used by `disco-room-jump-to-message' to center the timeline around the
+requested message instead of linearly paginating backward from the latest
+page."
+  :type 'integer
+  :group 'disco)
+
+(defun disco-room--message-list-contains-id-p (messages message-id)
+  "Return non-nil when MESSAGES contains MESSAGE-ID."
+  (seq-some (lambda (message)
+              (equal (alist-get 'id message) message-id))
+            (or messages '())))
+
+(defun disco-room--sort-messages-newest-first (messages)
+  "Return MESSAGES sorted newest-first by Discord snowflake id."
+  (sort (copy-sequence (or messages '()))
+        (lambda (left right)
+          (let ((left-id (alist-get 'id left))
+                (right-id (alist-get 'id right)))
+            (cond
+             ((equal left-id right-id)
+              nil)
+             ((null left-id)
+              nil)
+             ((null right-id)
+              t)
+             (t
+              (disco-state-snowflake< right-id left-id)))))))
+
+(defun disco-room--merge-message-sets (&rest message-lists)
+  "Merge MESSAGE-LISTS into one newest-first list without duplicates."
+  (let ((seen (make-hash-table :test #'equal))
+        merged)
+    (dolist (messages message-lists)
+      (dolist (message (or messages '()))
+        (let ((message-id (alist-get 'id message)))
+          (unless (and message-id (gethash message-id seen))
+            (when message-id
+              (puthash message-id t seen))
+            (push message merged)))))
+    (disco-room--sort-messages-newest-first (nreverse merged))))
+
+(defun disco-room--replace-messages-around-target (messages)
+  "Replace current room cache with MESSAGES and refresh cursor state."
+  (let ((ordered (disco-room--sort-messages-newest-first messages)))
+    (disco-state-put-messages disco-room--channel-id ordered)
+    (disco-room--update-message-window-state ordered)
+    ordered))
+
+(defun disco-room--fetch-around-pending-jump ()
+  "Fetch one message page around current pending jump target."
+  (let* ((room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (target-id disco-room--pending-jump-message-id)
+         (generation (1+ disco-room--refresh-generation))
+         (limit (max 1 (or disco-room-jump-context-limit 50))))
+    (unless (and (stringp target-id) (not (string-empty-p target-id)))
+      (user-error "disco: pending jump target is empty"))
+    (setq disco-room--refresh-generation generation)
+    (setq disco-room--jump-in-flight t)
+    (setq disco-room--refresh-in-flight t)
+    (disco-api-channel-messages-around-async
+     channel-id
+     target-id
+     :limit limit
+     :on-success
+     (lambda (messages)
+       (when (disco-room--callback-active-p room-buffer channel-id generation)
+         (with-current-buffer room-buffer
+           (setq disco-room--jump-in-flight nil)
+           (setq disco-room--refresh-in-flight nil)
+           (setq disco-room--history-exhausted nil)
+           (if (disco-room--message-list-contains-id-p messages target-id)
+               (progn
+                 (disco-room--replace-messages-around-target messages)
+                 (disco-room-render)
+                 (setq disco-room--pending-jump-message-id nil)
+                 (if (disco-room--jump-to-visible-message target-id)
+                     (message "disco: jumped to message %s" target-id)
+                   (message "disco: failed to render jump target %s" target-id)))
+             (setq disco-room--pending-jump-message-id nil)
+             (message "disco: message %s not found in around fetch" target-id)))))
+     :on-error
+     (lambda (err)
+       (when (disco-room--callback-active-p room-buffer channel-id generation)
+         (with-current-buffer room-buffer
+           (setq disco-room--jump-in-flight nil)
+           (setq disco-room--refresh-in-flight nil)
+           (setq disco-room--pending-jump-message-id nil)
+           (message "disco: jump fetch failed: %s"
+                    (disco-room--async-error-message err))))))))
+
 (defun disco-room--jump-to-visible-message (message-id)
   "Jump to visible MESSAGE-ID in current room buffer and recenter.
 
@@ -1516,13 +1611,8 @@ Return non-nil when jump succeeds without fetching older history."
         (let ((target disco-room--pending-jump-message-id))
           (setq disco-room--pending-jump-message-id nil)
           (message "disco: jumped to message %s" target))
-      (if disco-room--history-exhausted
-          (let ((target disco-room--pending-jump-message-id))
-            (setq disco-room--pending-jump-message-id nil)
-            (message "disco: message %s not found in channel history" target))
-        (unless disco-room--older-in-flight
-          (when disco-room--oldest-message-id
-            (disco-room-load-older-messages)))))))
+      (unless disco-room--jump-in-flight
+        (disco-room--fetch-around-pending-jump)))))
 
 (defun disco-room--channel-permissions-known-p (channel)
   "Return non-nil when CHANNEL has a parseable computed permissions field."
@@ -1582,8 +1672,8 @@ Guild channels require both visibility and read-history access."
 (defun disco-room-jump-to-message (message-id &optional channel-id)
   "Jump to MESSAGE-ID, optionally in CHANNEL-ID.
 
-When MESSAGE-ID is not currently loaded in room history, fetch older pages
-incrementally until found or history is exhausted."
+When MESSAGE-ID is not currently visible, fetch one page centered around the
+message id and render that context before jumping."
   (interactive
    (list (read-string "Jump to message ID: "
                       (or (ignore-errors (disco-room--message-id-at-point))
@@ -6641,6 +6731,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--input-pending nil)
   (setq-local disco-room--send-in-flight nil)
   (setq-local disco-room--pending-jump-message-id nil)
+  (setq-local disco-room--jump-in-flight nil)
   (setq-local disco-room--last-search-query nil)
   (setq-local disco-room--input-marker nil)
   (setq-local disco-room--input-prompt-marker nil)

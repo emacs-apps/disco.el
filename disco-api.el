@@ -836,6 +836,23 @@ LIMIT defaults to `disco-message-fetch-limit'."
      :on-success on-success
      :on-error on-error)))
 
+(defun disco-api-channel-messages-around (channel-id message-id &optional limit)
+  "Fetch one message page around MESSAGE-ID in CHANNEL-ID."
+  (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit)))
+                 ("around" . ,(format "%s" message-id)))))
+    (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
+
+(cl-defun disco-api-channel-messages-around-async (channel-id message-id &key limit on-success on-error)
+  "Fetch one message page around MESSAGE-ID in CHANNEL-ID asynchronously."
+  (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit)))
+                 ("around" . ,(format "%s" message-id)))))
+    (disco-api--request-async
+     "GET"
+     (format "/channels/%s/messages" channel-id)
+     :query query
+     :on-success on-success
+     :on-error on-error)))
+
 (defun disco-api-channel-message (channel-id message-id)
   "Fetch one MESSAGE-ID from CHANNEL-ID."
   (disco-api--request

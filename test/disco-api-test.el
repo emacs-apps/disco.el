@@ -78,6 +78,19 @@
                '("POST" "/users/@me/2/456/ack" ((token . :null)) nil nil nil nil nil)
                captured)))))
 
+(ert-deftest disco-api-channel-messages-around-builds-query ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query unauthenticated raw-body extra-headers body-type)
+                 (setq captured (list method endpoint payload query unauthenticated raw-body extra-headers body-type))
+                 'ok)))
+      (should (eq 'ok (disco-api-channel-messages-around "123" "456" 50)))
+      (should (equal
+               '("GET" "/channels/123/messages" nil
+                 (("limit" . "50") ("around" . "456"))
+                 nil nil nil nil)
+               captured)))))
+
 (provide 'disco-api-test)
 
 ;;; disco-api-test.el ends here
