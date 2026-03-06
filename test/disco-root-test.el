@@ -537,17 +537,7 @@
         (should (equal "123" (plist-get parsed :max-id)))
         (should (equal "456" (plist-get parsed :min-id)))))))
 
-(ert-deftest disco-root-search-parse-query-supports-during-date-sugar ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (let ((parsed (disco-root--search-parse-query
-                   "during:2026-03-01"
-                   '(:kind guild :id "g1" :label "Guild"))))
-      (should (plist-get parsed :min-id))
-      (should (plist-get parsed :max-id))
-      (should (equal "2026-03-01" (plist-get parsed :during-label))))))
-
-(ert-deftest disco-root-search-transient-during-and-boundary-use-org-read-date ()
+(ert-deftest disco-root-search-transient-boundary-use-org-read-date ()
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--search-query-spec nil)
@@ -557,24 +547,16 @@
                    (push prompt prompts)
                    (should to-time)
                    (pcase prompt
-                     ("During start: " (encode-time 0 0 0 1 3 2026))
-                     ("During end: " (encode-time 59 59 23 5 3 2026))
                      ("Before (message id or time): " (encode-time 0 0 0 7 3 2026))
                      ("After (message id or time): " (encode-time 0 0 0 8 3 2026)))))
                 ((symbol-function 'disco-root--search-transient-buffer)
                  (lambda () (current-buffer))))
-        (let ((during (disco-root--search-transient-during-value nil nil nil))
-              (before (disco-root--search-transient-before-value "Before (message id or time): " nil nil))
+        (let ((before (disco-root--search-transient-before-value "Before (message id or time): " nil nil))
               (after (disco-root--search-transient-after-value "After (message id or time): " nil nil)))
-          (should (plist-get during :min-id))
-          (should (plist-get during :max-id))
-          (should (equal "2026-03-01..2026-03-05" (plist-get during :during-label)))
           (should (stringp before))
           (should (stringp after))
           (should (equal '("After (message id or time): "
-                           "Before (message id or time): "
-                           "During end: "
-                           "During start: ")
+                           "Before (message id or time): ")
                          prompts)))))))
 
 (ert-deftest disco-root-search-query-capf-completes-filter-values ()

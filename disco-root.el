@@ -229,7 +229,7 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
   :group 'disco)
 
 (defconst disco-root--search-filter-names
-  '("from" "mentions" "author-type" "has" "in" "before" "after" "during"
+  '("from" "mentions" "author-type" "has" "in" "before" "after"
     "pinned" "sort" "order" "slop")
   "Supported Discord-style root search filter names.")
 
@@ -955,65 +955,6 @@ after passive EWOC and full-buffer updates."
       (user-error "disco: slop expects a number"))
     (max 0 (min 100 (string-to-number trimmed)))))
 
-(defun disco-root--search-date-only-string-p (value)
-  "Return non-nil when VALUE looks like a calendar date without time."
-  (string-match-p "\\`[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\\'"
-                  (string-trim (or value ""))))
-
-(defun disco-root--search-calendar-date-to-time (date &optional end-of-day)
-  "Convert calendar DATE list to Emacs time, optionally using END-OF-DAY."
-  (pcase-let ((`(,month ,day ,year) date))
-    (encode-time (if end-of-day 59 0)
-                 (if end-of-day 59 0)
-                 (if end-of-day 23 0)
-                 day month year)))
-
-(defun disco-root--search-parse-iso-date (value)
-  "Parse YYYY-MM-DD VALUE into calendar-style (MONTH DAY YEAR) list."
-  (unless (string-match "\\`\\([0-9][0-9][0-9][0-9]\\)-\\([0-9][0-9]\\)-\\([0-9][0-9]\\)\\'"
-                        (string-trim (or value "")))
-    (user-error "disco: invalid date %s" value))
-  (list (string-to-number (match-string 2 value))
-        (string-to-number (match-string 3 value))
-        (string-to-number (match-string 1 value))))
-
-(defun disco-root--search-parse-during-boundary (raw-value &optional end-of-day)
-  "Parse RAW-VALUE into a root search boundary, honoring END-OF-DAY for dates."
-  (let ((trimmed (string-trim (or raw-value ""))))
-    (cond
-     ((string-empty-p trimmed)
-      (user-error "disco: during expects a non-empty date or range"))
-     ((or (string-match-p "\\`[0-9]+\\'" trimmed)
-          (string-match-p "<[!@#]*\\([0-9]+\\)>" trimmed))
-      (disco-root--search-parse-boundary-id trimmed "during:"))
-     ((disco-root--search-date-only-string-p trimmed)
-      (disco-root--search-time-to-snowflake
-       (disco-root--search-calendar-date-to-time
-        (disco-root--search-parse-iso-date trimmed)
-        end-of-day)))
-     (t
-      (disco-root--search-time-to-snowflake (date-to-time trimmed))))))
-
-(defun disco-root--search-parse-during-value (raw-value)
-  "Parse RAW-VALUE into root search `during' boundaries.
-
-Accept `START..END' ranges or a single `YYYY-MM-DD' date."
-  (let* ((trimmed (string-trim (or raw-value "")))
-         (parts (split-string trimmed "\\.\\." t "[[:space:]]*")))
-    (pcase parts
-      (`(,single)
-       (if (disco-root--search-date-only-string-p single)
-           (list :min-id (disco-root--search-parse-during-boundary single nil)
-                 :max-id (disco-root--search-parse-during-boundary single t)
-                 :during-label single)
-         (user-error "disco: during expects START..END or a YYYY-MM-DD date")))
-      (`(,start ,end)
-       (list :min-id (disco-root--search-parse-during-boundary start nil)
-             :max-id (disco-root--search-parse-during-boundary end t)
-             :during-label (format "%s..%s" (string-trim start) (string-trim end))))
-      (_
-       (user-error "disco: during expects START..END or a YYYY-MM-DD date")))))
-
 (defun disco-root--search-parse-filter-token (key raw-value domain spec)
   "Apply one Discord-style filter KEY with RAW-VALUE in DOMAIN to SPEC plist."
   (pcase key
@@ -1055,11 +996,6 @@ Accept `START..END' ranges or a single `YYYY-MM-DD' date."
     ("after"
      (plist-put spec :min-id
                 (disco-root--search-parse-boundary-id raw-value "after:")))
-    ("during"
-     (let ((range (disco-root--search-parse-during-value raw-value)))
-       (setq spec (plist-put spec :min-id (plist-get range :min-id)))
-       (setq spec (plist-put spec :max-id (plist-get range :max-id)))
-       (plist-put spec :during-label (plist-get range :during-label))))
     ("slop"
      (plist-put spec :slop (disco-root--search-parse-slop raw-value)))
     ("pinned"
@@ -1349,13 +1285,10 @@ Accept `START..END' ranges or a single `YYYY-MM-DD' date."
       (push (format "[has:%s]" (string-join has ",")) chips))
     (when (plist-member spec :pinned)
       (push (format "[pinned:%s]" (disco-root--search-value-summary (plist-get spec :pinned))) chips))
-    (if-let* ((during-label (plist-get spec :during-label)))
-        (push (format "[during:%s]" during-label) chips)
-      (progn
-        (when-let* ((before (plist-get spec :max-id)))
-          (push (format "[before:%s]" before) chips))
-        (when-let* ((after (plist-get spec :min-id)))
-          (push (format "[after:%s]" after) chips))))
+    (when-let* ((before (plist-get spec :max-id)))
+      (push (format "[before:%s]" before) chips))
+    (when-let* ((after (plist-get spec :min-id)))
+      (push (format "[after:%s]" after) chips))
     (when-let* ((slop (plist-get spec :slop)))
       (push (format "[slop:%s]" slop) chips))
     (unless (eq (plist-get spec :sort-by) 'timestamp)
@@ -1623,11 +1556,7 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
     (setq-local disco-root--search-query-spec
                 (if empty-p
                     (disco-root--search-plist-remove disco-root--search-query-spec property)
-                  (plist-put disco-root--search-query-spec property value)))
-    (when (memq property '(:min-id :max-id))
-      (setq-local disco-root--search-query-spec
-                  (disco-root--search-plist-remove disco-root--search-query-spec
-                                                   :during-label))))
+                  (plist-put disco-root--search-query-spec property value))))
   (disco-root--search-sync-query-display))
 
 (defun disco-root--search-transient-mentions-getter ()
@@ -1646,24 +1575,6 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
                   (plist-put disco-root--search-query-spec :mention-everyone t)
                 (disco-root--search-plist-remove disco-root--search-query-spec
                                                  :mention-everyone)))
-  (disco-root--search-sync-query-display))
-
-(defun disco-root--search-transient-during-getter ()
-  "Return current transient `during' value as plist."
-  (list :min-id (plist-get disco-root--search-query-spec :min-id)
-        :max-id (plist-get disco-root--search-query-spec :max-id)
-        :during-label (plist-get disco-root--search-query-spec :during-label)))
-
-(defun disco-root--search-transient-during-setter (value)
-  "Set transient `during' filter from VALUE plist."
-  (setq-local disco-root--search-query-spec
-              (plist-put disco-root--search-query-spec :min-id (plist-get value :min-id)))
-  (setq-local disco-root--search-query-spec
-              (plist-put disco-root--search-query-spec :max-id (plist-get value :max-id)))
-  (setq-local disco-root--search-query-spec
-              (if-let* ((label (plist-get value :during-label)))
-                  (plist-put disco-root--search-query-spec :during-label label)
-                (disco-root--search-plist-remove disco-root--search-query-spec :during-label)))
   (disco-root--search-sync-query-display))
 
 (defun disco-root--search-transient-domain-value (_prompt _initial _history)
@@ -1757,44 +1668,9 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
                      (if end-of-day 23 0)
                      day month year))))))
 
-(defun disco-root--search-time-display-label (time-value &optional end-of-day-p)
-  "Return readable label for TIME-VALUE, optionally considering END-OF-DAY-P."
-  (let ((decoded (decode-time time-value)))
-    (if (and (= (nth 2 decoded) (if end-of-day-p 23 0))
-             (= (nth 1 decoded) (if end-of-day-p 59 0))
-             (= (nth 0 decoded) (if end-of-day-p 59 0)))
-        (format-time-string "%Y-%m-%d" time-value)
-      (format-time-string "%Y-%m-%d %H:%M" time-value))))
-
 (defun disco-root--search-read-org-date-time (prompt default-time)
   "Read one Org-style date/time with PROMPT and DEFAULT-TIME."
   (org-read-date t t nil prompt default-time))
-
-(defun disco-root--search-read-during-range ()
-  "Read an Org-style date range and return plist with min/max ids and label."
-  (let* ((start-default (disco-root--search-boundary-default-time :min-id nil))
-         (start-time (disco-root--search-read-org-date-time "During start: " start-default))
-         (end-default (or (and (plist-get disco-root--search-query-spec :max-id)
-                               (disco-root--search-boundary-default-time :max-id t))
-                          (let ((decoded (decode-time start-time)))
-                            (encode-time 59 59 23
-                                         (nth 3 decoded)
-                                         (nth 4 decoded)
-                                         (nth 5 decoded)))))
-         (end-time (disco-root--search-read-org-date-time "During end: " end-default))
-         (start-label (disco-root--search-time-display-label start-time nil))
-         (end-label (disco-root--search-time-display-label end-time t)))
-    (list :min-id (disco-root--search-time-to-snowflake start-time)
-          :max-id (disco-root--search-time-to-snowflake end-time)
-          :during-label (if (equal start-label end-label)
-                            start-label
-                          (format "%s..%s" start-label end-label)))))
-
-(defun disco-root--search-transient-during-value (_prompt _initial _history)
-  "Read `during' value for the search transient using Org-style date picker."
-  (disco-root--search-transient-with-buffer
-   (lambda ()
-     (disco-root--search-read-during-range))))
 
 (defun disco-root--search-transient-boundary-value (prompt property _field-name)
   "Read message boundary PROPERTY using Org-style date picker."
@@ -1876,18 +1752,6 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   (if value
       (string-join value ", ")
     "none"))
-
-(defun disco-root--search-transient-format-during (value)
-  "Format root search during VALUE plist for transient display."
-  (or (plist-get value :during-label)
-      (let ((min-id (plist-get value :min-id))
-            (max-id (plist-get value :max-id)))
-        (cond
-         ((and min-id max-id)
-          (format "%s..%s" min-id max-id))
-         ((or min-id max-id)
-          "partial")
-         (t "none")))))
 
 (defun disco-root--search-transient-format-pinned (value)
   "Format root search pinned VALUE for transient display."
@@ -1990,15 +1854,6 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   :getter (lambda () (disco-root--search-transient-spec-getter :min-id))
   :setter (lambda (value) (disco-root--search-transient-spec-setter :min-id value)))
 
-(transient-define-infix disco-root-search--infix-during ()
-  :description "During"
-  :class 'disco-root-search--field
-  :prompt "During: "
-  :reader #'disco-root--search-transient-during-value
-  :getter #'disco-root--search-transient-during-getter
-  :setter #'disco-root--search-transient-during-setter
-  :value-formatter #'disco-root--search-transient-format-during)
-
 (transient-define-infix disco-root-search--infix-slop ()
   :description "Slop"
   :class 'disco-root-search--field
@@ -2036,8 +1891,7 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
    ["Place"
     ("i" disco-root-search--infix-channels)
     ("a" disco-root-search--infix-after)
-    ("b" disco-root-search--infix-before)
-    ("D" disco-root-search--infix-during)]
+    ("b" disco-root-search--infix-before)]
    ["Flags"
     ("h" disco-root-search--infix-has)
     ("p" disco-root-search--infix-pinned)
