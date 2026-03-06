@@ -718,11 +718,21 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
 (defun disco-root--chars-xwidth (columns &optional buffer window)
   "Return pixel width for COLUMNS in BUFFER/WINDOW metrics."
   (let* ((win (or window (disco-root--display-window buffer)))
-         (char-width (or (and (window-live-p win)
-                              (fboundp 'window-font-width)
-                              (window-font-width win))
-                         (frame-char-width)
-                         1)))
+         (frame (and (window-live-p win)
+                     (window-frame win)))
+         (char-width
+          (or (and (frame-live-p frame)
+                   (let* ((font (ignore-errors (face-font 'default frame)))
+                          (info (and font (ignore-errors (font-info font frame)))))
+                     (when info
+                       (let ((width (aref info 11)))
+                         (if (> width 0)
+                             width
+                           (aref info 10))))))
+              (and (frame-live-p frame)
+                   (frame-char-width frame))
+              (frame-char-width)
+              1)))
     (* (max 0 columns) (max 1 char-width))))
 
 (defun disco-root--chars-in-width (pixels &optional buffer window)
@@ -2199,12 +2209,17 @@ This mirrors telega's `telega-fmt-eval-eliding' behavior for right-elision."
     (or align-column (current-column))))
 
 (defun disco-root--move-to-column (column)
-  "Insert one align-to spacer for COLUMN, matching telega inserters."
+  "Insert one forward-only align-to spacer for COLUMN.
+
+Like telega's inserter, this uses one `:align-to' spacer, but never tries
+to align backwards because that can visually corrupt passive root redraws."
   (let* ((target (max 0 (or column 0)))
-         (align-to (if (display-graphic-p)
-                       (list (disco-root--chars-xwidth target))
-                     target)))
-    (insert (propertize " " 'display `(space :align-to ,align-to)))))
+         (current (disco-root--current-column)))
+    (when (>= target current)
+      (let ((align-to (if (display-graphic-p)
+                          (list (disco-root--chars-xwidth target))
+                        target)))
+        (insert (propertize " " 'display `(space :align-to ,align-to)))))))
 
 (defun disco-root--snowflake-epoch-seconds (snowflake)
   "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
@@ -2379,11 +2394,10 @@ Guild rows use real guild icons when available, with fixed text fallback."
             (max 2
                  (ceiling (* disco-root--activity-icon-slot-width
                              (disco-root--text-scale-factor)))))
-           icon-width)
+           (slot-target (max icon-start
+                             (1- (+ icon-start icon-slot-width)))))
       (disco-root--insert-activity-icon channel)
-      (setq icon-width (- (disco-root--current-column) icon-start))
-      (when (< icon-width icon-slot-width)
-        (insert (make-string (- icon-slot-width icon-width) ?\s)))
+      (disco-root--move-to-column slot-target)
       (insert " "))
     (let* ((content-start (disco-root--current-column))
            (content-width (max 20 (- line-width content-start time-width 1)))

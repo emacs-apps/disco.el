@@ -791,6 +791,32 @@
         (should ewoc-refreshed)
         (should-not full-rendered)))))
 
+(ert-deftest disco-root-chars-xwidth-avoids-window-font-width-side-effects ()
+  (cl-letf (((symbol-function 'disco-root--display-window)
+             (lambda (&optional _buffer)
+               'fake-window))
+            ((symbol-function 'window-live-p)
+             (lambda (_window)
+               t))
+            ((symbol-function 'window-frame)
+             (lambda (_window)
+               'fake-frame))
+            ((symbol-function 'frame-live-p)
+             (lambda (_frame)
+               t))
+            ((symbol-function 'face-font)
+             (lambda (_face _frame)
+               'fake-font))
+            ((symbol-function 'font-info)
+             (lambda (_font _frame)
+               (let ((info (make-vector 12 0)))
+                 (aset info 11 15)
+                 info)))
+            ((symbol-function 'window-font-width)
+             (lambda (&rest _args)
+               (ert-fail "window-font-width should not be used"))))
+    (should (= 150 (disco-root--chars-xwidth 10)))))
+
 (ert-deftest disco-root-compute-fill-column-uses-remap-margins-and-line-number-width ()
   (with-temp-buffer
     (disco-root-mode)
@@ -828,7 +854,7 @@
         (disco-root-buffer-auto-fill t)
         (should (equal '(90 t) called))))))
 
-(ert-deftest disco-root-move-to-column-always-inserts-align-spacer ()
+(ert-deftest disco-root-move-to-column-inserts-align-spacer-when-needed ()
   (with-temp-buffer
     (insert "abc")
     (let ((insert-pos (point)))
@@ -839,6 +865,15 @@
         (should (consp display-prop))
         (should (eq (car display-prop) 'space))
         (should (plist-member (cdr display-prop) :align-to))))))
+
+(ert-deftest disco-root-move-to-column-does-not-align-backwards ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((insert-pos (point)))
+      (disco-root--move-to-column 2)
+      (should (= (point) insert-pos))
+      (should-not (get-text-property (max (point-min) (1- insert-pos))
+                                     'display)))))
 
 (ert-deftest disco-root-elide-string-adds-display-ellipsis ()
   (let* ((text "abcdefghijklmnopqrstuvwxyz")
