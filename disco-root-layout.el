@@ -49,8 +49,8 @@ Custom entries can override built-in layouts when NAME matches."
                (:constructor disco-root-layout-view-spec-create))
   kind
   before-render
-  items
-  item-inserter
+  entries
+  entry-inserter
   list-spec
   after-render)
 
@@ -79,20 +79,20 @@ Custom entries can override built-in layouts when NAME matches."
 (defconst disco-root-layout-builtin-specs
   '((tree
      :label "Tree"
-     :build disco-root--render-layout-tree
+     :build disco-root--build-tree-layout-view-spec
      :update-mode incremental
      :unread-mode section
      :toggle-hint "toggle section/guild/category or next channel"
      :refresh-headings disco-root--refresh-heading-nodes)
     (activity
      :label "Activity"
-     :build disco-root--render-layout-activity
+     :build disco-root--build-activity-layout-view-spec
      :update-mode incremental
      :unread-mode filter
      :toggle-hint "next channel")
     (search
      :label "Search"
-     :build disco-root--render-layout-search
+     :build disco-root--build-search-layout-view-spec
      :update-mode full
      :unread-mode summary
      :toggle-hint "next result or load more"))
@@ -147,18 +147,18 @@ Custom entries can override built-in layouts when NAME matches."
    :list-spec list-spec
    :after-render after-render))
 
-(cl-defun disco-root-layout-ewoc-items-view-spec-create
-    (items &key before-render item-inserter after-render)
-  "Return one EWOC-backed root layout view spec for ENTRY ITEMS.
+(cl-defun disco-root-layout-ewoc-entry-view-spec-create
+    (entries &key before-render entry-inserter after-render)
+  "Return one EWOC-backed root layout view spec for ENTRY list ENTRIES.
 
-When BEFORE-RENDER or ITEM-INSERTER are omitted, use the standard root EWOC
+When BEFORE-RENDER or ENTRY-INSERTER are omitted, use the standard root EWOC
 helpers so custom `:build' layouts can reuse the built-in tree/activity entry
 pipeline without re-declaring private hooks."
   (disco-root-layout-view-spec-create
-   :kind 'items
+   :kind 'entries
    :before-render (or before-render 'disco-root--prepare-ewoc-state)
-   :items items
-   :item-inserter (or item-inserter 'disco-root--ewoc-insert-entry)
+   :entries entries
+   :entry-inserter (or entry-inserter 'disco-root--ewoc-insert-entry)
    :after-render after-render))
 
 (defun disco-root-layout-render-view-spec (view-spec)
@@ -175,11 +175,11 @@ builder."
         ('list-spec
          (when-let* ((list-spec (disco-root-layout-view-spec-list-spec view-spec)))
            (disco-view-render-list-spec list-spec)))
-        ('items
-         (when-let* ((item-inserter
-                      (disco-root-layout-view-spec-item-inserter view-spec)))
-           (dolist (item (or (disco-root-layout-view-spec-items view-spec) '()))
-             (funcall item-inserter item))))
+        ('entries
+         (when-let* ((entry-inserter
+                      (disco-root-layout-view-spec-entry-inserter view-spec)))
+           (dolist (entry (or (disco-root-layout-view-spec-entries view-spec) '()))
+             (funcall entry-inserter entry))))
         (_
          (error "Unknown root layout view spec kind: %S"
                 (disco-root-layout-view-spec-kind view-spec))))

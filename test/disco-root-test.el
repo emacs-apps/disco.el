@@ -127,7 +127,7 @@
     (let ((disco-root-custom-layouts
            '((stress-full
               :label "Stress Full"
-              :build disco-root--render-layout-activity
+              :build disco-root--build-activity-layout-view-spec
               :update-mode full)))
           (disco-root--layout 'stress-full)
           (disco-root--dirty-channel-ids '("c1"))
@@ -527,34 +527,34 @@
     (should (eq 'list-spec (disco-root-layout-view-spec-kind view-spec)))
     (should (eq list-spec (disco-root-layout-view-spec-list-spec view-spec)))))
 
-(ert-deftest disco-root-layout-ewoc-items-view-spec-create-defaults-to-root-hooks ()
-  (let* ((items (list (disco-root-layout-entry-create :type 'text :text "hello")))
-         (view-spec (disco-root-layout-ewoc-items-view-spec-create items)))
+(ert-deftest disco-root-layout-ewoc-entry-view-spec-create-defaults-to-root-hooks ()
+  (let* ((entries (list (disco-root-layout-entry-create :type 'text :text "hello")))
+         (view-spec (disco-root-layout-ewoc-entry-view-spec-create entries)))
     (should (disco-root-layout-view-spec-p view-spec))
-    (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
+    (should (eq 'entries (disco-root-layout-view-spec-kind view-spec)))
     (should (eq 'disco-root--prepare-ewoc-state
                 (disco-root-layout-view-spec-before-render view-spec)))
     (should (eq 'disco-root--ewoc-insert-entry
-                (disco-root-layout-view-spec-item-inserter view-spec)))
-    (should (equal items (disco-root-layout-view-spec-items view-spec)))))
+                (disco-root-layout-view-spec-entry-inserter view-spec)))
+    (should (equal entries (disco-root-layout-view-spec-entries view-spec)))))
 
-(ert-deftest disco-root-render-layout-activity-returns-ewoc-items-view-spec ()
+(ert-deftest disco-root-build-activity-layout-view-spec-returns-ewoc-entry-view-spec ()
   (with-temp-buffer
     (disco-root-mode)
     (cl-letf (((symbol-function 'disco-root--collect-activity-channels)
                (lambda () '(((id . "c1") (type . 0) (name . "general"))))))
-      (let* ((view-spec (disco-root--render-layout-activity))
-             (items (disco-root-layout-view-spec-items view-spec))
-             (first-item (car items)))
+      (let* ((view-spec (disco-root--build-activity-layout-view-spec))
+             (entries (disco-root-layout-view-spec-entries view-spec))
+             (first-entry (car entries)))
         (should (disco-root-layout-view-spec-p view-spec))
-        (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
+        (should (eq 'entries (disco-root-layout-view-spec-kind view-spec)))
         (should (eq 'disco-root--ewoc-insert-entry
-                    (disco-root-layout-view-spec-item-inserter view-spec)))
-        (should (eq 'channel (disco-root-layout-entry-type first-item)))
+                    (disco-root-layout-view-spec-entry-inserter view-spec)))
+        (should (eq 'channel (disco-root-layout-entry-type first-entry)))
         (should (equal "c1"
-                       (alist-get 'id (disco-root-layout-entry-channel first-item))))))))
+                       (alist-get 'id (disco-root-layout-entry-channel first-entry))))))))
 
-(ert-deftest disco-root-render-layout-tree-returns-ewoc-items-view-spec ()
+(ert-deftest disco-root-build-tree-layout-view-spec-returns-ewoc-entry-view-spec ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--view-mode 'all)
@@ -571,21 +571,21 @@
                  (lambda (_sections) nil))
                 ((symbol-function 'disco-root--section-expanded-p)
                  (lambda (_section) t)))
-        (let* ((view-spec (disco-root--render-layout-tree))
-               (items (disco-root-layout-view-spec-items view-spec)))
+        (let* ((view-spec (disco-root--build-tree-layout-view-spec))
+               (entries (disco-root-layout-view-spec-entries view-spec)))
           (should (disco-root-layout-view-spec-p view-spec))
-          (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
-          (should (eq 'section (disco-root-layout-entry-type (car items))))
-          (should (equal 'unread (disco-root-layout-entry-section (car items))))
-          (should (seq-some (lambda (item)
-                              (eq 'channel (disco-root-layout-entry-type item)))
-                            items)))))))
+          (should (eq 'entries (disco-root-layout-view-spec-kind view-spec)))
+          (should (eq 'section (disco-root-layout-entry-type (car entries))))
+          (should (equal 'unread (disco-root-layout-entry-section (car entries))))
+          (should (seq-some (lambda (entry)
+                              (eq 'channel (disco-root-layout-entry-type entry)))
+                            entries)))))))
 
-(ert-deftest disco-root-layout-render-view-spec-renders-ewoc-items ()
+(ert-deftest disco-root-layout-render-view-spec-renders-ewoc-entries ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((view-spec
-           (disco-root-layout-ewoc-items-view-spec-create
+           (disco-root-layout-ewoc-entry-view-spec-create
             (list (disco-root-layout-entry-create :type 'text :text "hello")))))
       (disco-root-layout-render-view-spec view-spec)
       (should (string-match-p "hello" (buffer-string))))))
@@ -869,7 +869,7 @@
       (should (= 1 (disco-root-layout-entry-total-count first-entry)))
       (should-not (disco-root-layout-entry-loading first-entry)))))
 
-(ert-deftest disco-root-render-layout-search-renders-sections ()
+(ert-deftest disco-root-build-search-layout-view-spec-renders-sections ()
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--layout 'search)
@@ -899,7 +899,7 @@
       (cl-letf (((symbol-function 'disco-root--insert-search-message-line)
                  (lambda (_message _indent _tab)
                    (insert "  result-row\n"))))
-        (let ((view-spec (disco-root--render-layout-search)))
+        (let ((view-spec (disco-root--build-search-layout-view-spec)))
           (should (disco-root-layout-view-spec-p view-spec))
           (should (eq 'list-spec (disco-root-layout-view-spec-kind view-spec)))
           (disco-root-layout-render-view-spec view-spec))

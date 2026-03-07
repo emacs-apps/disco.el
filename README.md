@@ -70,9 +70,10 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-permission.el`: shared Discord permission bitfield constants/parsing/check helpers.
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
-- `disco-root-layout.el`: root layout registry, view-spec composition, built-in layout specs, and user-defined layout customization.
+- `disco-root-layout.el`: root layout registry, entry/view-spec structs, and layout composition helpers.
 - `disco-view.el`: shared cursor preservation helpers plus reusable one-line/list-view rendering helpers.
-- `disco-root.el`: root dashboard buffer controllers and root/thread-browser view orchestration.
+- `disco-root-view.el`: root-specific view state, row-model helpers, inserters, EWOC/list renderers, and thread-browser/root layout builders; controller callbacks are injected from `disco-root.el`.
+- `disco-root.el`: root dashboard controllers, live updates, search commands, and buffer orchestration.
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
 - `disco-company.el`: composer completion engine (`@`/`#`, CAPF, optional company backend).
 
@@ -108,7 +109,7 @@ built-in tree/activity layouts, return an `items` view spec instead:
 
 ```elisp
 (defun my-disco-root-build-people-ewoc ()
-  (disco-root-layout-ewoc-items-view-spec-create
+  (disco-root-layout-ewoc-entry-view-spec-create
    (mapcar (lambda (channel)
              (disco-root-layout-entry-create
               :type 'channel
