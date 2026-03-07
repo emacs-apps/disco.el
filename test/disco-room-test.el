@@ -238,6 +238,46 @@
                             (buffer-string)))
     (should-not (string-match-p "type at >>>" (buffer-string)))))
 
+(ert-deftest disco-room-render-shows-reply-and-attachments-near-composer ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (setq-local disco-room--draft-input "hello")
+    (setq-local disco-room--pending-reply-to "m42")
+    (setq-local disco-room--pending-attachments
+                '((:token-id 1 :path "/tmp/a.txt")
+                  (:token-id 2 :path "/tmp/b.png" :description "preview")))
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (should (text-property-any (point-min) (point-max) 'disco-room-input t))
+    (should (string-match-p "Replying to: m42"
+                            (buffer-string)))
+    (should (string-match-p "Queued attachments: \\\[file:1\\\] a.txt, \\\[file:2\\\] b.png - preview"
+                            (buffer-string)))))
+
+(ert-deftest disco-room-render-keeps-reply-context-when-composer-hidden ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "readonly")
+    (setq-local disco-room--channel-name "readonly")
+    (setq-local disco-room--pending-reply-to "m42")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "readonly")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "0")))
+    (disco-room-render)
+    (should-not (text-property-any (point-min) (point-max) 'disco-room-input t))
+    (should (string-match-p "Replying to: m42"
+                            (buffer-string)))))
+
 (ert-deftest disco-room-render-shows-composer-when-send-permission-present ()
   (with-temp-buffer
     (disco-room-mode)

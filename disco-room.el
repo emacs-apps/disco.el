@@ -5457,14 +5457,30 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
        "   RET/C-c C-c: send   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit"
      "   C-c C-v: refetch avatars   [composer hidden]   q: quit")))
 
+(defun disco-room--input-footer-context-text ()
+  "Return extra context lines shown above the room composer."
+  (concat
+   (if disco-room--pending-reply-to
+       (format "Replying to: %s (C-c C-k to cancel)\n"
+               disco-room--pending-reply-to)
+     "")
+   (if disco-room--pending-attachments
+       (format "Queued attachments: %s\n"
+               (mapconcat #'identity
+                          (disco-room--pending-attachment-labels)
+                          ", "))
+     "")))
+
 (defun disco-room--input-footer-text (draft)
   "Build EWOC footer text containing room prompt with DRAFT.
 
 Return an empty string when the room composer should be hidden. Otherwise the
-footer marks the editable input tail using `disco-room-input' property."
+footer marks the editable input tail using `disco-room-input' property and
+shows reply/attachment context above the prompt."
   (if (not (disco-room--composer-visible-p))
       ""
     (let ((typing-text (disco-room--typing-indicator-text))
+          (context-text (disco-room--input-footer-context-text))
           (prompt (propertize ">>> "
                               'read-only t
                               'field 'disco-room-prompt
@@ -5477,6 +5493,12 @@ footer marks the editable input tail using `disco-room-input' property."
                      "\n"
                    draft)))
       (concat "\n"
+              (if (string-empty-p context-text)
+                  ""
+                (propertize context-text
+                            'read-only t
+                            'front-sticky '(read-only)
+                            'rear-nonsticky '(read-only)))
               (if (and (stringp typing-text)
                        (not (string-empty-p typing-text)))
                   (propertize (concat typing-text "\n")
@@ -5580,21 +5602,22 @@ Return non-nil when handled without full room rerender."
 
 (defun disco-room-render ()
   "Render timeline for current room buffer."
-  (let ((inhibit-read-only t)
-        ;; Timeline redraws can be large (many image previews); do not
-        ;; accumulate undo entries for background rendering.
-        (buffer-undo-list t)
-        (channel (disco-room--channel-object))
-        (messages (disco-room--display-messages))
-        (draft (disco-room--current-draft))
-        (composer-status-line (disco-room--composer-hidden-status-line))
-        header-end
-        (disco-room--avatar-fetch-budget
-         (when (numberp disco-room-avatar-max-fetches-per-render)
-           (max 0 disco-room-avatar-max-fetches-per-render)))
-        (preview-fetch-budget
-         (when (numberp disco-room-attachment-preview-max-fetches-per-render)
-           (max 0 disco-room-attachment-preview-max-fetches-per-render))))
+  (let* ((inhibit-read-only t)
+         ;; Timeline redraws can be large (many image previews); do not
+         ;; accumulate undo entries for background rendering.
+         (buffer-undo-list t)
+         (channel (disco-room--channel-object))
+         (composer-visible-p (disco-room--composer-visible-p channel))
+         (messages (disco-room--display-messages))
+         (draft (disco-room--current-draft))
+         (composer-status-line (disco-room--composer-hidden-status-line channel))
+         header-end
+         (disco-room--avatar-fetch-budget
+          (when (numberp disco-room-avatar-max-fetches-per-render)
+            (max 0 disco-room-avatar-max-fetches-per-render)))
+         (preview-fetch-budget
+          (when (numberp disco-room-attachment-preview-max-fetches-per-render)
+            (max 0 disco-room-attachment-preview-max-fetches-per-render))))
     (setq disco-room--rendering t)
     (disco-media-set-preview-fetch-budget preview-fetch-budget)
     (unwind-protect
@@ -5611,10 +5634,12 @@ Return non-nil when handled without full room rerender."
           (when disco-room--send-in-flight
             (insert "   [sending...]"))
           (insert "\n")
-          (when disco-room--pending-reply-to
+          (when (and (not composer-visible-p)
+                     disco-room--pending-reply-to)
             (insert (format "Replying to: %s (C-c C-k to cancel)\n"
                             disco-room--pending-reply-to)))
-          (when disco-room--pending-attachments
+          (when (and (not composer-visible-p)
+                     disco-room--pending-attachments)
             (insert (format "Queued attachments: %s\n"
                             (mapconcat #'identity
                                        (disco-room--pending-attachment-labels)
