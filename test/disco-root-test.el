@@ -859,6 +859,60 @@
                          (disco-root--activity-primary-label channel))))
       (disco-state-reset))))
 
+(ert-deftest disco-root-thread-browser-context-label-includes-applied-tags ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-channel
+         '((id . "forum1")
+           (guild_id . "g1")
+           (type . 15)
+           (name . "Forum")
+           (available_tags . (((id . "tag1") (name . "bug"))
+                              ((id . "tag2") (emoji_name . "🔥") (name . "hot"))))))
+        (should (equal "Thread title | bug | 🔥 hot"
+                       (disco-root--thread-browser-context-label
+                        '((id . "th1")
+                          (type . 11)
+                          (parent_id . "forum1")
+                          (name . "Thread title")
+                          (applied_tags . ("tag1" "tag2")))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-insert-channel-line-parent-thread-uses-activity-preview-layout ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--fill-column 90)
+          (inhibit-read-only t))
+      (disco-state-reset)
+      (unwind-protect
+          (progn
+            (disco-state-upsert-channel
+             '((id . "forum1")
+               (guild_id . "g1")
+               (type . 15)
+               (name . "Forum")
+               (available_tags . (((id . "tag1") (name . "bug"))))))
+            (disco-state-upsert-channel
+             '((id . "th1")
+               (guild_id . "g1")
+               (type . 11)
+               (parent_id . "forum1")
+               (name . "Thread title")
+               (applied_tags . ("tag1"))
+               (last_message_id . "m1")))
+            (disco-state-put-messages
+             "th1"
+             '(((id . "m1")
+                (channel_id . "th1")
+                (content . "hello world")
+                (author . ((username . "alice"))))))
+            (disco-root--insert-channel-line
+             (disco-state-channel "th1") 2 'parent-thread)
+            (should (string-match-p "\\[Thread title | bug *\\]" (buffer-string)))
+            (should (string-match-p "alice> hello world" (buffer-string))))
+        (disco-state-reset)))))
+
 (ert-deftest disco-root-private-channel-display-name-prefers-non-self-recipient ()
   (cl-letf (((symbol-function 'disco-gateway-current-user-id)
              (lambda () "self")))

@@ -4018,6 +4018,100 @@ Discord channel position can arrive as integer or numeric string."
   (when-let* ((guild-id (alist-get 'guild_id channel)))
     (disco-root--guild-name-by-id guild-id)))
 
+(defun disco-root--thread-parent-channel (thread)
+  "Return parent channel object for THREAD, or nil."
+  (when-let* ((parent-id (alist-get 'parent_id thread)))
+    (disco-state-channel parent-id)))
+
+(defun disco-root--thread-tag-label (tag)
+  "Return human-readable label for one forum/media TAG object."
+  (when (listp tag)
+    (let ((emoji-name (alist-get 'emoji_name tag))
+          (name (alist-get 'name tag)))
+      (string-join
+       (delq nil
+             (list (and (stringp emoji-name)
+                        (not (string-empty-p emoji-name))
+                        emoji-name)
+                   (and (stringp name)
+                        (not (string-empty-p name))
+                        name)))
+       " "))))
+
+(defun disco-root--thread-applied-tag-labels (thread)
+  "Return applied forum/media tag labels for THREAD."
+  (let* ((parent-channel (disco-root--thread-parent-channel thread))
+         (available-tags (and (listp parent-channel)
+                              (alist-get 'available_tags parent-channel)))
+         labels)
+    (dolist (tag-id (or (alist-get 'applied_tags thread) '()))
+      (let* ((normalized-tag-id (and tag-id (format "%s" tag-id)))
+             (tag (and normalized-tag-id
+                       (seq-find
+                        (lambda (candidate)
+                          (equal normalized-tag-id
+                                 (and (listp candidate)
+                                      (format "%s" (alist-get 'id candidate)))))
+                        available-tags)))
+             (label (and tag (disco-root--thread-tag-label tag))))
+        (when (and (stringp label)
+                   (not (string-empty-p label)))
+          (push label labels))))
+    (nreverse labels)))
+
+(defun disco-root--thread-browser-context-label (thread)
+  "Return one-line context label for THREAD browser rows."
+  (let* ((name (disco-root--channel-display-name thread))
+         (tag-labels (disco-root--thread-applied-tag-labels thread))
+         (parts (cons name tag-labels)))
+    (string-join (delq nil parts) " | ")))
+
+(defun disco-root--thread-browser-fallback-preview (thread)
+  "Return metadata preview fallback for THREAD browser rows, or nil."
+  (let* ((status-tags (disco-thread-status-tags thread))
+         (message-count (or (alist-get 'total_message_sent thread)
+                            (alist-get 'message_count thread)))
+         (thread-id (alist-get 'id thread))
+         (member-count (or (alist-get 'member_count thread)
+                           (and thread-id
+                                (disco-state-thread-member-count thread-id))))
+         parts)
+    (dolist (status status-tags)
+      (push status parts))
+    (when (numberp message-count)
+      (push (format "%s msg%s"
+                    (disco-root--human-count message-count)
+                    (if (= message-count 1) "" "s"))
+            parts))
+    (when (numberp member-count)
+      (push (format "%s member%s"
+                    (disco-root--human-count member-count)
+                    (if (= member-count 1) "" "s"))
+            parts))
+    (when parts
+      (string-join (nreverse parts) " · "))))
+
+(defun disco-root--thread-browser-time-label (thread scope &optional message)
+  "Return time label for THREAD browser row under SCOPE."
+  (if (eq scope 'archived-thread)
+      (let* ((archive-timestamp (or (alist-get 'archive_timestamp
+                                               (disco-root--thread-metadata thread))
+                                    (alist-get 'archive_timestamp thread)))
+             (seconds (and archive-timestamp
+                           (ignore-errors
+                             (float-time (date-to-time archive-timestamp))))))
+        (or (and seconds
+                 (ignore-errors
+                   (disco-root--activity-time-string seconds)))
+            (disco-root--channel-last-activity-time-label thread message)))
+    (disco-root--channel-last-activity-time-label thread message)))
+
+(defun disco-root--activity-context-label (channel &optional scope)
+  "Return context label for CHANNEL one-line rows under SCOPE."
+  (if (memq scope '(parent-thread archived-thread))
+      (disco-root--thread-browser-context-label channel)
+    (disco-root--activity-primary-label channel)))
+
 (defun disco-root--activity-primary-label (channel)
   "Return activity-layout primary label for CHANNEL."
   (let* ((parts (delq nil
@@ -4051,6 +4145,13 @@ Fallback stays message-oriented and avoids status-tag placeholders."
                ;; unavailable for the guild/channel.
                "(preview unavailable)"))
         "(no messages)")))
+
+(defun disco-root--activity-preview-label (channel &optional scope)
+  "Return fallback preview label for CHANNEL one-line rows under SCOPE."
+  (if (memq scope '(parent-thread archived-thread))
+      (or (disco-root--thread-browser-fallback-preview channel)
+          (disco-root--activity-secondary-label channel))
+    (disco-root--activity-secondary-label channel)))
 
 (defun disco-root--canonicalize-number (spec base)
   "Resolve SPEC against BASE columns.
@@ -4284,13 +4385,13 @@ Output includes formatted date/time and a trailing status symbol."
         (concat time-part status)
       status)))
 
-(defun disco-root--activity-preview-line (channel &optional message)
-  "Return one-line preview text for activity row CHANNEL.
+(defun disco-root--activity-preview-line (channel &optional message scope)
+  "Return one-line preview text for CHANNEL row under SCOPE.
 
 When MESSAGE is non-nil, use it as cached preview source."
   (or (and message (disco-msg-preview-line message))
       (disco-msg-channel-preview-line channel)
-      (disco-root--activity-secondary-label channel)))
+      (disco-root--activity-preview-label channel scope)))
 
 (defun disco-root--insert-activity-icon (channel)
   "Insert activity icon for CHANNEL.
@@ -4329,19 +4430,24 @@ Guild rows use real guild icons when available, with fixed text fallback."
           :preview-width preview-width
           :separator-width (if (> preview-width 0) 1 0))))
 
-(defun disco-root--insert-activity-channel-line (channel indent)
-  "Insert one activity-style CHANNEL row with INDENT."
+(defun disco-root--insert-activity-channel-line (channel indent &optional scope)
+  "Insert one activity-style CHANNEL row with INDENT under SCOPE."
   (let* ((channel-id (alist-get 'id channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
          (mention-count (disco-state-channel-effective-unread-count channel))
          (has-unread (disco-root--channel-has-unread-p channel))
          (padding (make-string indent ?\s))
-         (context-text (disco-root--activity-primary-label channel))
-         (preview-text (disco-root--activity-preview-line channel latest-message))
-         (time-text (disco-root--channel-last-activity-time-label channel latest-message))
+         (context-text (disco-root--activity-context-label channel scope))
+         (preview-text (disco-root--activity-preview-line channel latest-message scope))
+         (time-text (if (memq scope '(parent-thread archived-thread))
+                        (disco-root--thread-browser-time-label channel scope latest-message)
+                      (disco-root--channel-last-activity-time-label channel latest-message)))
+         (split-status-p (not (eq scope 'archived-thread)))
          (line-width (max 60 (or disco-root--fill-column
                                  (disco-root--compute-fill-column))))
-         (time-width (max 6 (string-width time-text)))
+         (time-width (if (string-empty-p time-text)
+                         0
+                       (max 6 (string-width time-text))))
          (line-start (point)))
     (insert padding)
     (let* ((icon-start (disco-root--current-column))
@@ -4355,7 +4461,8 @@ Guild rows use real guild icons when available, with fixed text fallback."
       (disco-root--move-to-column slot-target)
       (insert " "))
     (let* ((content-start (disco-root--current-column))
-           (content-width (max 20 (- line-width content-start time-width 1)))
+           (time-gap (if (> time-width 0) 1 0))
+           (content-width (max 20 (- line-width content-start time-width time-gap)))
            (widths (disco-root--activity-column-widths content-width))
            (context-inner-width (or (plist-get widths :context-inner-width) 8))
            (preview-width (or (plist-get widths :preview-width) 0))
@@ -4380,16 +4487,19 @@ Guild rows use real guild icons when available, with fixed text fallback."
                preview-start
                (+ preview-start (length author) 1)
                (list 'face 'font-lock-keyword-face))))))
-      (let ((target-time-col (- line-width time-width)))
-        (disco-root--move-to-column target-time-col)
-        (let ((time-start (point))
-              (status-face (disco-root--activity-time-status-face
-                            channel latest-message)))
-          (insert (disco-root--truncate-fill time-text time-width t))
-          (let ((status-pos (max time-start (1- (point)))))
-            (add-text-properties time-start status-pos (list 'face 'shadow))
-            (add-text-properties status-pos (point)
-                                 (list 'face status-face))))))
+      (when (> time-width 0)
+        (let ((target-time-col (- line-width time-width)))
+          (disco-root--move-to-column target-time-col)
+          (let ((time-start (point))
+                (status-face (disco-root--activity-time-status-face
+                              channel latest-message)))
+            (insert (disco-root--truncate-fill time-text time-width t))
+            (if split-status-p
+                (let ((status-pos (max time-start (1- (point)))))
+                  (add-text-properties time-start status-pos (list 'face 'shadow))
+                  (add-text-properties status-pos (point)
+                                       (list 'face status-face)))
+              (add-text-properties time-start (point) (list 'face 'shadow)))))))
     (insert "\n")
     (add-text-properties
      line-start
@@ -5526,8 +5636,8 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   "Insert one CHANNEL at INDENT spaces.
 
 SCOPE is forwarded to extra-info providers."
-  (if (eq scope 'activity)
-      (disco-root--insert-activity-channel-line channel indent)
+  (if (memq scope '(activity parent-thread archived-thread))
+      (disco-root--insert-activity-channel-line channel indent scope)
     (let* ((channel-id (alist-get 'id channel))
            (label (disco-root--channel-label channel scope))
            (unread-count (disco-state-channel-effective-unread-count channel))
