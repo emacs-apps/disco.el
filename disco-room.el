@@ -38,6 +38,7 @@
 
 (declare-function disco-api--validate-message-content-length "disco-api-normalize"
                   (content field-name))
+(defvar disco-api--message-content-limit)
 
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
@@ -158,6 +159,21 @@ Each value is a plist carrying :status, :path, :process, :error and
 (defcustom disco-room-send-on-return t
   "When non-nil, `RET' in room buffer sends current draft."
   :type 'boolean
+  :group 'disco)
+
+(defcustom disco-room-long-message-action 'split
+  "How `disco-room-send-message' handles content longer than one Discord message.
+
+`split' sends multiple messages by splitting near paragraph, line, or word
+boundaries. `file' sends the text as a `.txt' attachment instead."
+  :type '(choice
+          (const :tag "Split into multiple messages" split)
+          (const :tag "Send as text file attachment" file))
+  :group 'disco)
+
+(defcustom disco-room-long-message-file-name "message.txt"
+  "Filename used when long room drafts are sent as text attachments."
+  :type 'string
   :group 'disco)
 
 (defcustom disco-room-enable-company-backend t
@@ -7209,6 +7225,67 @@ DESCRIPTION is optional per-file description."
    (string-trim-right (disco-room--draft-without-attachment-tokens)))
   (message "disco: cleared queued attachments"))
 
+(defun disco-room--clear-pending-attachment-state ()
+  "Clear queued attachment state without touching the current draft text."
+  (setq disco-room--pending-attachments nil)
+  (when disco-room--attachment-token-table
+    (clrhash disco-room--attachment-token-table)))
+
+(defun disco-room--message-content-over-limit-p (content)
+  "Return non-nil when CONTENT exceeds Discord's single-message limit."
+  (and (stringp content)
+       (> (length content) disco-api--message-content-limit)))
+
+(defun disco-room--long-message-split-point (content)
+  "Return preferred split point for CONTENT.
+
+The split point is at most `disco-api--message-content-limit' and prefers
+paragraph, line, and whitespace boundaries near the end of the chunk."
+  (let* ((limit disco-api--message-content-limit)
+         (len (length content))
+         (max-end (min len limit))
+         (min-acceptable (max 1 (/ limit 2))))
+    (or (let ((pos (cl-search "\n\n" content :from-end t :end2 max-end)))
+          (when (and pos (>= pos min-acceptable))
+            (+ pos 2)))
+        (let ((pos (cl-search "\n" content :from-end t :end2 max-end)))
+          (when (and pos (>= pos min-acceptable))
+            (1+ pos)))
+        (let ((pos (cl-position-if (lambda (char)
+                                     (memq char '(?\s ?\t)))
+                                   content :from-end t :end max-end)))
+          (when (and pos (>= pos min-acceptable))
+            (1+ pos)))
+        max-end)))
+
+(defun disco-room--split-message-content (content)
+  "Split CONTENT into Discord-sized message chunks."
+  (let ((remaining (or content ""))
+        (chunks nil))
+    (while (disco-room--message-content-over-limit-p remaining)
+      (let* ((split-point (disco-room--long-message-split-point remaining))
+             (chunk (string-trim-right (substring remaining 0 split-point)))
+             (rest (string-trim-left (substring remaining split-point))))
+        (when (string-empty-p chunk)
+          (setq split-point disco-api--message-content-limit
+                chunk (substring remaining 0 split-point)
+                rest (substring remaining split-point)))
+        (push chunk chunks)
+        (setq remaining rest)))
+    (unless (string-empty-p remaining)
+      (push remaining chunks))
+    (nreverse chunks)))
+
+(defun disco-room--write-long-message-temp-attachment (content)
+  "Write CONTENT to a temporary text file attachment plist."
+  (let ((path (make-temp-file "disco-message-" nil ".txt"))
+        (coding-system-for-write 'utf-8))
+    (with-temp-file path
+      (insert (or content "")))
+    (list :path path
+          :filename disco-room-long-message-file-name
+          :content-type "text/plain; charset=utf-8")))
+
 (defun disco-room-send-message ()
   "Send current draft message to this room asynchronously.
 
@@ -7236,8 +7313,8 @@ When called with prefix argument, force draft edit in minibuffer first."
            (has-attachments (not (null token-attachments)))
            (content-without-tokens (disco-room--draft-without-attachment-tokens content))
            (normalized (string-trim-right (or content-without-tokens "")))
-           (edit-message-id (disco-room--composer-edit-message-id)))
-      (disco-api--validate-message-content-length normalized "content")
+           (edit-message-id (disco-room--composer-edit-message-id))
+           (over-limit-p (disco-room--message-content-over-limit-p normalized)))
       (if (and (string-empty-p normalized)
                (not has-attachments)
                (not edit-message-id))
@@ -7250,15 +7327,19 @@ When called with prefix argument, force draft edit in minibuffer first."
                (attachments (copy-tree token-attachments))
                (edit-message (and edit-message-id
                                   (disco-room--composer-context-message edit-message-id)))
+               (long-message-action (and over-limit-p disco-room-long-message-action))
+               (needs-attach-files-p (or has-attachments
+                                         (eq long-message-action 'file)))
                (required-permissions
                 (append
                  (disco-room--required-send-permissions)
-                 (when has-attachments
+                 (when needs-attach-files-p
                    '(attach-files))
                  (when reply-to
                    '(read-message-history)))))
           (if edit-message-id
               (progn
+                (disco-api--validate-message-content-length normalized "content")
                 (disco-room--ensure-action-available
                  (disco-room--edit-permission-reason edit-message)
                  "edit messages")
@@ -7292,7 +7373,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                                 (disco-room--async-error-message err)))))))
             (disco-room--ensure-action-available
              (disco-room--room-send-restriction-reason
-              (append (when has-attachments '(attach-files))
+              (append (when needs-attach-files-p '(attach-files))
                       (when reply-to '(read-message-history))))
              "send messages")
             (disco-permission-ensure-channel
@@ -7304,55 +7385,131 @@ When called with prefix argument, force draft edit in minibuffer first."
             (setq disco-room--draft-input "")
             (setq disco-room--send-in-flight t)
             (disco-room-render)
-            (if has-attachments
-                (disco-api-send-message-with-attachments-async
-                 channel-id
-                 :content (unless (string-empty-p normalized) normalized)
-                 :reply-to-message-id reply-to
-                 :allowed-mentions allowed-mentions
-                 :attachments attachments
-                 :on-success
-                 (lambda (_response)
-                   (when (disco-room--channel-buffer-p room-buffer channel-id)
-                     (with-current-buffer room-buffer
-                       (setq disco-room--send-in-flight nil)
-                       (setq disco-room--pending-reply-to nil)
-                       (setq disco-room--pending-attachments nil)
-                       (when disco-room--attachment-token-table
-                         (clrhash disco-room--attachment-token-table))
-                       (disco-room-refresh)
-                       (message "disco: message with attachment(s) sent"))))
-                 :on-error
-                 (lambda (err)
-                   (when (disco-room--channel-buffer-p room-buffer channel-id)
-                     (with-current-buffer room-buffer
-                       (setq disco-room--send-in-flight nil)
-                       (setq disco-room--draft-input content)
-                       (disco-room-render)
-                       (message "disco: send failed: %s"
-                                (disco-room--async-error-message err))))))
-              (disco-api-send-message-async
-               channel-id
-               normalized
-               :reply-to-message-id reply-to
-               :allowed-mentions allowed-mentions
-               :on-success
-               (lambda (_response)
-                 (when (disco-room--channel-buffer-p room-buffer channel-id)
-                   (with-current-buffer room-buffer
-                     (setq disco-room--send-in-flight nil)
-                     (setq disco-room--pending-reply-to nil)
-                     (disco-room-refresh)
-                     (message "disco: message sent"))))
-               :on-error
-               (lambda (err)
-                 (when (disco-room--channel-buffer-p room-buffer channel-id)
-                   (with-current-buffer room-buffer
-                     (setq disco-room--send-in-flight nil)
-                     (setq disco-room--draft-input normalized)
-                     (disco-room-render)
-                     (message "disco: send failed: %s"
-                              (disco-room--async-error-message err))))))))))))))
+            (cl-labels
+                ((room-active-p ()
+                   (disco-room--channel-buffer-p room-buffer channel-id))
+                 (send-one (text reply attachments-list on-success on-error)
+                   (if attachments-list
+                       (disco-api-send-message-with-attachments-async
+                        channel-id
+                        :content (and (stringp text) (not (string-empty-p text)) text)
+                        :reply-to-message-id reply
+                        :allowed-mentions (and (stringp text)
+                                               (not (string-empty-p text))
+                                               allowed-mentions)
+                        :attachments attachments-list
+                        :on-success on-success
+                        :on-error on-error)
+                     (disco-api-send-message-async
+                      channel-id
+                      text
+                      :reply-to-message-id reply
+                      :allowed-mentions (and (stringp text)
+                                             (not (string-empty-p text))
+                                             allowed-mentions)
+                      :on-success on-success
+                      :on-error on-error))))
+              (pcase long-message-action
+                ('split
+                 (let* ((chunks (disco-room--split-message-content normalized))
+                        (total (length chunks)))
+                   (cl-labels
+                       ((finish-success ()
+                          (when (room-active-p)
+                            (with-current-buffer room-buffer
+                              (setq disco-room--send-in-flight nil)
+                              (setq disco-room--pending-reply-to nil)
+                              (when has-attachments
+                                (disco-room--clear-pending-attachment-state))
+                              (disco-room-refresh)
+                              (message "disco: sent %d split messages" total))))
+                        (finish-error (remaining sent-count err)
+                          (when (room-active-p)
+                            (with-current-buffer room-buffer
+                              (setq disco-room--send-in-flight nil)
+                              (if (> sent-count 0)
+                                  (progn
+                                    (setq disco-room--draft-input
+                                          (mapconcat #'identity remaining "\n\n"))
+                                    (setq disco-room--pending-reply-to nil)
+                                    (when has-attachments
+                                      (disco-room--clear-pending-attachment-state))
+                                    (disco-room-render)
+                                    (message "disco: sent %d/%d split messages; restored remaining draft: %s"
+                                             sent-count total
+                                             (disco-room--async-error-message err)))
+                                (setq disco-room--draft-input content)
+                                (disco-room-render)
+                                (message "disco: send failed: %s"
+                                         (disco-room--async-error-message err))))))
+                        (send-next (remaining sent-count)
+                          (let ((chunk (car remaining))
+                                (rest (cdr remaining))
+                                (first-p (= sent-count 0)))
+                            (send-one
+                             chunk
+                             (and first-p reply-to)
+                             (and first-p attachments)
+                             (lambda (_response)
+                               (if rest
+                                   (send-next rest (1+ sent-count))
+                                 (finish-success)))
+                             (lambda (err)
+                               (finish-error remaining sent-count err))))))
+                     (send-next chunks 0))))
+                ('file
+                 (let* ((text-attachment
+                         (disco-room--write-long-message-temp-attachment normalized))
+                        (all-attachments (append attachments (list text-attachment))))
+                   (unwind-protect
+                       (send-one
+                        nil
+                        reply-to
+                        all-attachments
+                        (lambda (_response)
+                          (when (room-active-p)
+                            (with-current-buffer room-buffer
+                              (setq disco-room--send-in-flight nil)
+                              (setq disco-room--pending-reply-to nil)
+                              (when has-attachments
+                                (disco-room--clear-pending-attachment-state))
+                              (disco-room-refresh)
+                              (message "disco: long message sent as %s"
+                                       disco-room-long-message-file-name))))
+                        (lambda (err)
+                          (when (room-active-p)
+                            (with-current-buffer room-buffer
+                              (setq disco-room--send-in-flight nil)
+                              (setq disco-room--draft-input content)
+                              (disco-room-render)
+                              (message "disco: send failed: %s"
+                                       (disco-room--async-error-message err))))))
+                     (ignore-errors
+                       (delete-file (plist-get text-attachment :path))))))
+                (_
+                 (send-one
+                  normalized
+                  reply-to
+                  attachments
+                  (lambda (_response)
+                    (when (room-active-p)
+                      (with-current-buffer room-buffer
+                        (setq disco-room--send-in-flight nil)
+                        (setq disco-room--pending-reply-to nil)
+                        (when has-attachments
+                          (disco-room--clear-pending-attachment-state))
+                        (disco-room-refresh)
+                        (message (if has-attachments
+                                     "disco: message with attachment(s) sent"
+                                   "disco: message sent")))))
+                  (lambda (err)
+                    (when (room-active-p)
+                      (with-current-buffer room-buffer
+                        (setq disco-room--send-in-flight nil)
+                        (setq disco-room--draft-input (if has-attachments content normalized))
+                        (disco-room-render)
+                        (message "disco: send failed: %s"
+                                 (disco-room--async-error-message err))))))))))))))))
 
 (defun disco-room-load-older-messages ()
   "Load one older page for the current room view asynchronously."
