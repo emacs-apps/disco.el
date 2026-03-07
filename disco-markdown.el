@@ -24,11 +24,13 @@
 `auto' prefers markdown-mode when available, then falls back to legacy
 punctuation unescaping.
 `legacy' always uses `disco-util-unescape-markdown-punctuation'.
+`internal' uses disco's built-in Discord-focused renderer.
 `markdown-mode' enforces markdown-mode backend when available; otherwise it
 falls back to `legacy'."
   :type '(choice
           (const :tag "Auto" auto)
           (const :tag "Legacy punctuation unescape" legacy)
+          (const :tag "Internal Discord renderer" internal)
           (const :tag "markdown-mode" markdown-mode))
   :group 'disco)
 
@@ -41,8 +43,8 @@ custom emoji markers, and Discord timestamps."
   :group 'disco)
 
 (defcustom disco-markdown-enable-spoiler-render t
-  "When non-nil, render Discord spoiler syntax (`||spoiler||`) in
-markdown-mode backend."
+  "When non-nil, render Discord spoiler syntax (`||spoiler||`) in rich
+Markdown backends."
   :type 'boolean
   :group 'disco)
 
@@ -91,6 +93,11 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 (defface disco-markdown-subtitle-face
   '((t :inherit shadow :height 0.9))
   "Face used for Discord `-#` subtitle lines."
+  :group 'disco)
+
+(defface disco-markdown-link-face
+  '((t :inherit link))
+  "Face used for internal rendered links."
   :group 'disco)
 
 (defface disco-markdown-heading-1-face
@@ -158,6 +165,14 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 
 (defconst disco-markdown--regexp-heading-marker "^\\([ \t]*\\)\\(#+\\)\\(?:[ \t]+\\|$\\)"
   "Regexp matching visible ATX heading markers in rendered output.")
+
+(defconst disco-markdown--regexp-inline-link
+  "\\[\\([^][\n]+\\)\\](\\([^()\n]+\\))"
+  "Regexp matching simple inline Markdown links.")
+
+(defconst disco-markdown--regexp-angle-autolink
+  "<\\([[:alpha:]][[:alnum:]+.-]*://[^<>[:space:]]+\\)>"
+  "Regexp matching angle-bracket autolinks.")
 
 (defconst disco-markdown--spoiler-translation-table
   (let ((table (make-char-table 'translation-table))
@@ -272,6 +287,7 @@ VALUE is copied to isolate cache entries from caller mutation."
   "Return resolved backend symbol for current settings."
   (pcase disco-markdown-backend
     ('legacy 'legacy)
+    ('internal 'internal)
     ('markdown-mode
      (if (disco-markdown--markdown-mode-available-p)
          'markdown-mode
@@ -352,6 +368,24 @@ leak into room buffers."
   (or (disco-markdown--face-match-p face 'markdown-link-face)
       (disco-markdown--face-match-p face 'markdown-url-face)
       (disco-markdown--face-match-p face 'markdown-plain-url-face)))
+
+(defun disco-markdown--link-face-p (face)
+  "Return non-nil when FACE already denotes a link-like span."
+  (or (disco-markdown--face-match-p face 'disco-markdown-link-face)
+      (disco-markdown--face-match-p face 'link)
+      (disco-markdown--markdown-link-face-p face)))
+
+(defun disco-markdown--add-link-face (object start end)
+  "Add `disco-markdown-link-face' to OBJECT between START and END."
+  (when (< start end)
+    (add-face-text-property start end 'disco-markdown-link-face 'append object)))
+
+(defun disco-markdown--make-link-string (label url)
+  "Return LABEL propertized as an openable link to URL."
+  (let ((payload (copy-sequence (or label ""))))
+    (disco-markdown--add-link-face payload 0 (length payload))
+    (disco-markdown--add-open-url-properties payload 0 (length payload) url)
+    payload))
 
 (defun disco-markdown--add-action-properties (object start end keymap help-echo properties)
   "Add KEYMAP/HELP-ECHO/PROPERTIES to OBJECT between START and END."
@@ -442,17 +476,42 @@ return visible spoiler contents; otherwise return masked text."
                             (get-text-property (1- beg)
                                                'disco-markdown-url
                                                copy))
+                  (unless (disco-markdown--link-face-p
+                           (get-text-property (1- beg) 'face copy))
+                    (disco-markdown--add-link-face copy (1- beg) (1- end)))
                   (disco-markdown--add-open-url-properties
                    copy (1- beg) (1- end) url))
                 (goto-char end))
             (forward-char 1)))))
     copy))
 
+(defun disco-markdown--apply-heading-lines (text)
+  "Apply disco heading faces to ATX heading lines in plain TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (while (< (point) (point-max))
+      (let ((line-start (line-beginning-position))
+            (line-end (line-end-position)))
+        (goto-char line-start)
+        (when (looking-at disco-markdown--regexp-heading-marker)
+          (let ((level (min 6 (length (match-string-no-properties 2)))))
+            (delete-region (match-beginning 2) (match-end 0))
+            (setq line-start (line-beginning-position)
+                  line-end (line-end-position))
+            (when (< line-start line-end)
+              (add-face-text-property
+               line-start line-end
+               (disco-markdown--heading-face-for-level level)
+               'append))))
+        (forward-line 1)))
+    (buffer-string)))
+
 (defun disco-markdown--normalize-heading-lines (text)
   "Normalize heading presentation in rendered TEXT.
 
 This remaps markdown-mode heading faces to disco-local ones and strips any
-visible ATX marker fallback so all heading levels render consistently." 
+visible ATX marker fallback so all heading levels render consistently."
   (with-temp-buffer
     (insert text)
     (goto-char (point-min))
@@ -475,6 +534,28 @@ visible ATX marker fallback so all heading levels render consistently."
            'append))
         (forward-line 1)))
     (buffer-string)))
+
+(defun disco-markdown--apply-internal-link-replacements (text)
+  "Render inline links and autolinks in plain TEXT."
+  (disco-markdown--apply-regexp-replacements
+   text 'internal
+   (list
+    (cons disco-markdown--regexp-inline-link
+          (lambda ()
+            (disco-markdown--make-link-string
+             (match-string-no-properties 1)
+             (match-string-no-properties 2))))
+    (cons disco-markdown--regexp-angle-autolink
+          (lambda ()
+            (let ((url (match-string-no-properties 1)))
+              (disco-markdown--make-link-string url url)))))))
+
+(defun disco-markdown--render-internal (text)
+  "Render TEXT with disco's internal Discord-focused renderer."
+  (let ((rendered (if (stringp text) text "")))
+    (setq rendered (disco-markdown--apply-internal-link-replacements rendered))
+    (setq rendered (disco-markdown--apply-heading-lines rendered))
+    (disco-markdown--apply-visible-url-properties rendered)))
 
 (defun disco-markdown--render-with-markdown-mode (text)
   "Render TEXT through markdown-mode and return visible propertized string."
@@ -725,7 +806,7 @@ BACKEND controls whether code-face regions are protected from the transform."
 BACKEND controls code-region behavior. MESSAGE carries mention/channel context.
 SPOILER-MESSAGE-ID identifies the message used for spoiler interaction.
 REVEAL-SPOILERS controls whether spoiler contents are visible."
-  (if (not (and (eq backend 'markdown-mode)
+  (if (not (and (memq backend '(markdown-mode internal))
                 (disco-markdown--string-present-p text)))
       text
     (let* ((user-map (disco-markdown--build-user-name-map message))
@@ -842,6 +923,8 @@ When REVEAL-SPOILERS is non-nil, spoiler contents are shown instead of masked."
                     (pcase backend
                       ('markdown-mode
                        (disco-markdown--render-with-markdown-mode source))
+                      ('internal
+                       (disco-markdown--render-internal source))
                       (_
                        (disco-markdown--render-legacy source)))
                   (error
