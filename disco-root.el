@@ -4947,6 +4947,47 @@ Higher score means channel should appear earlier in activity mode."
                          :action action
                          :tab tab)))
 
+(defun disco-root--ewoc-insert-entry (entry)
+  "Insert one generic EWOC ENTRY and update node indexes as needed."
+  (pcase (plist-get entry :entry-type)
+    ('text
+     (disco-root--ewoc-insert-text (plist-get entry :text)))
+    ('section
+     (disco-root--ewoc-insert-section (plist-get entry :section)
+                                      (plist-get entry :title)
+                                      (plist-get entry :count)))
+    ('guild
+     (disco-root--ewoc-insert-guild (plist-get entry :guild)
+                                    (or (plist-get entry :unread-count) 0)))
+    ('category
+     (disco-root--ewoc-insert-category (plist-get entry :category)
+                                       (or (plist-get entry :unread-count) 0)))
+    ('blank
+     (disco-root--ewoc-insert-blank))
+    ('channel
+     (disco-root--ewoc-insert-channel (plist-get entry :channel)
+                                      (or (plist-get entry :indent) 0)
+                                      (or (plist-get entry :scope) 'root)))
+    ('search-section
+     (disco-root--ewoc-insert-search-section (plist-get entry :tab)
+                                             (plist-get entry :title)
+                                             (or (plist-get entry :loaded-count) 0)
+                                             (plist-get entry :total-count)
+                                             (plist-get entry :loading)))
+    ('search-message
+     (disco-root--ewoc-insert-search-message (plist-get entry :message)
+                                             (or (plist-get entry :indent) 2)
+                                             (plist-get entry :tab)))
+    ('search-note
+     (disco-root--ewoc-insert-search-note (plist-get entry :text)
+                                          (plist-get entry :face)))
+    ('search-action
+     (disco-root--ewoc-insert-search-action (plist-get entry :label)
+                                            (plist-get entry :action)
+                                            (plist-get entry :tab)))
+    (_
+     (error "Unknown EWOC entry type: %S" (plist-get entry :entry-type)))))
+
 (defun disco-root--insert-private-channels ()
   "Insert visible private-channel rows into root buffer."
   (let ((channels (disco-root--visible-private-channels)))
@@ -5601,18 +5642,25 @@ If point is not on actionable row, jump to next channel row and open it."
   (mouse-set-point event)
   (disco-root-open-at-point))
 
-(defun disco-root--insert-parent-threads (parent-channel rendered-thread-ids &optional indent)
-  "Insert threads under PARENT-CHANNEL and mark IDs in RENDERED-THREAD-IDS.
+(defun disco-root--parent-thread-entries (parent-channel rendered-thread-ids &optional indent)
+  "Return visible thread child entries under PARENT-CHANNEL.
 
-INDENT controls child-thread row indentation and defaults to 8 spaces."
-  (let ((parent-id (alist-get 'id parent-channel)))
+Mark rendered thread IDs in RENDERED-THREAD-IDS. INDENT controls child-thread
+row indentation and defaults to 8 spaces."
+  (let ((parent-id (alist-get 'id parent-channel))
+        entries)
     (dolist (thread (disco-state-parent-threads parent-id))
       (let ((thread-id (alist-get 'id thread)))
         (when (and thread-id
                    (disco-root--displayable-channel-p thread)
                    (disco-root--channel-visible-in-view-p thread))
           (puthash thread-id t rendered-thread-ids)
-          (disco-root--ewoc-insert-channel thread (or indent 8)))))))
+          (push (list :entry-type 'channel
+                      :channel thread
+                      :indent (or indent 8)
+                      :scope 'root)
+                entries))))
+    (nreverse entries)))
 
 (defun disco-root--guild-visible-parent-channels (guild-id)
   "Return non-thread display channels for GUILD-ID."
@@ -5640,10 +5688,8 @@ INDENT controls child-thread row indentation and defaults to 8 spaces."
       (setq total (+ total (disco-state-channel-effective-unread-count channel))))
     total))
 
-(defun disco-root--insert-guild (guild)
-  "Insert one GUILD and its visible channels in root buffer.
-
-Return non-nil when at least one visible row is inserted for GUILD."
+(defun disco-root--guild-entries (guild)
+  "Return EWOC entry list for GUILD and its visible children."
   (let* ((guild-id (alist-get 'id guild))
          (guild-unread (disco-root--guild-unread-total guild-id t))
          (parents (disco-root--guild-visible-parent-channels guild-id))
@@ -5656,7 +5702,8 @@ Return non-nil when at least one visible row is inserted for GUILD."
           (seq-some (lambda (thread)
                       (and (disco-root--displayable-channel-p thread)
                            (disco-root--channel-visible-in-view-p thread)))
-                    (or (disco-state-guild-threads guild-id) '()))))
+                    (or (disco-state-guild-threads guild-id) '())))
+         entries)
     (dolist (category categories)
       (let ((category-id (alist-get 'id category)))
         (when category-id
@@ -5677,14 +5724,23 @@ Return non-nil when at least one visible row is inserted for GUILD."
                               (gethash category-id category-children))))
                      categories)))
       (when (or uncategorized-parents has-categorized-parents has-visible-thread)
-        (disco-root--ewoc-insert-guild guild guild-unread)
-
+        (push (list :entry-type 'guild
+                    :guild guild
+                    :unread-count guild-unread)
+              entries)
         (when (disco-root--guild-expanded-p guild-id)
           (dolist (channel uncategorized-parents)
-            (disco-root--ewoc-insert-channel channel 4)
+            (push (list :entry-type 'channel
+                        :channel channel
+                        :indent 4
+                        :scope 'root)
+                  entries)
             (when (disco-root--thread-parent-channel-p channel)
-              (disco-root--insert-parent-threads channel rendered-thread-ids 8)))
-
+              (dolist (entry (disco-root--parent-thread-entries
+                              channel
+                              rendered-thread-ids
+                              8))
+                (push entry entries))))
           (dolist (category categories)
             (let* ((category-id (alist-get 'id category))
                    (children (and category-id
@@ -5692,13 +5748,23 @@ Return non-nil when at least one visible row is inserted for GUILD."
                    (category-unread (and children
                                          (disco-root--category-children-unread-total children))))
               (when children
-                (disco-root--ewoc-insert-category category (or category-unread 0))
+                (push (list :entry-type 'category
+                            :category category
+                            :unread-count (or category-unread 0))
+                      entries)
                 (when (disco-root--category-expanded-p category-id)
                   (dolist (channel children)
-                    (disco-root--ewoc-insert-channel channel 6)
+                    (push (list :entry-type 'channel
+                                :channel channel
+                                :indent 6
+                                :scope 'root)
+                          entries)
                     (when (disco-root--thread-parent-channel-p channel)
-                      (disco-root--insert-parent-threads channel rendered-thread-ids 10)))))))
-
+                      (dolist (entry (disco-root--parent-thread-entries
+                                      channel
+                                      rendered-thread-ids
+                                      10))
+                        (push entry entries))))))))
           (let (orphan-threads)
             (dolist (thread (or (disco-state-guild-threads guild-id) '()))
               (let ((thread-id (alist-get 'id thread)))
@@ -5709,12 +5775,15 @@ Return non-nil when at least one visible row is inserted for GUILD."
                   (push thread orphan-threads))))
             (setq orphan-threads (nreverse orphan-threads))
             (when orphan-threads
-              (disco-root--ewoc-insert-text "    [threads]")
+              (push (list :entry-type 'text :text "    [threads]") entries)
               (dolist (thread orphan-threads)
-                (disco-root--ewoc-insert-channel thread 8)))))
-
-        (disco-root--ewoc-insert-blank)
-        t))))
+                (push (list :entry-type 'channel
+                            :channel thread
+                            :indent 8
+                            :scope 'root)
+                      entries)))))
+        (push (list :entry-type 'blank) entries)
+        (nreverse entries)))))
 
 (defun disco-root--clear-ewoc-state ()
   "Clear root EWOC and node indexes for non-EWOC layouts."
@@ -5729,15 +5798,16 @@ Return non-nil when at least one visible row is inserted for GUILD."
   (disco-root--clear-ewoc-state)
   (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t)))
 
-(defun disco-root--ewoc-layout-view-spec (render-function)
-  "Return one EWOC-backed layout view spec for RENDER-FUNCTION."
+(defun disco-root--ewoc-items-view-spec (items)
+  "Return one EWOC-backed layout view spec for ENTRY ITEMS."
   (disco-root-layout-view-spec-create
-   :kind 'render-function
+   :kind 'items
    :before-render #'disco-root--prepare-ewoc-state
-   :render-function render-function))
+   :items items
+   :item-inserter #'disco-root--ewoc-insert-entry))
 
-(defun disco-root--render-tree-layout-view ()
-  "Render guild/category tree layout into the current EWOC."
+(defun disco-root--tree-layout-items ()
+  "Return EWOC entry items for the guild/category tree layout."
   (let* ((show-unread disco-root--tree-show-unread-section)
          (unread-channels (and show-unread
                                (disco-root--collect-visible-unread-channels)))
@@ -5748,59 +5818,98 @@ Return non-nil when at least one visible row is inserted for GUILD."
                                (length unread-visible))
                           0))
          (private-channels (disco-root--visible-private-channels))
-         (guilds (or (disco-state-guilds) '())))
+         (guilds (or (disco-state-guilds) '()))
+         items)
     (disco-root--ensure-section-state
      (append (when show-unread '(unread))
              '(private guilds)))
-
     (when show-unread
-      (disco-root--ewoc-insert-section 'unread "Unread" (length unread-channels))
+      (push (list :entry-type 'section
+                  :section 'unread
+                  :title "Unread"
+                  :count (length unread-channels))
+            items)
       (when (disco-root--section-expanded-p 'unread)
         (if unread-visible
             (dolist (channel unread-visible)
-              (disco-root--ewoc-insert-channel channel 2))
-          (disco-root--ewoc-insert-text "  (no unread channels)"))
+              (push (list :entry-type 'channel
+                          :channel channel
+                          :indent 2
+                          :scope 'root)
+                    items))
+          (push (list :entry-type 'text
+                      :text "  (no unread channels)")
+                items))
         (when (> unread-hidden 0)
-          (disco-root--ewoc-insert-text
-           (format "  (... %d more unread channels)" unread-hidden))))
-      (disco-root--ewoc-insert-blank))
-
-    (disco-root--ewoc-insert-section 'private "People" (length private-channels))
+          (push (list :entry-type 'text
+                      :text (format "  (... %d more unread channels)"
+                                    unread-hidden))
+                items)))
+      (push (list :entry-type 'blank) items))
+    (push (list :entry-type 'section
+                :section 'private
+                :title "People"
+                :count (length private-channels))
+          items)
     (when (disco-root--section-expanded-p 'private)
       (if private-channels
           (dolist (channel private-channels)
-            (disco-root--ewoc-insert-channel channel 2))
-        (disco-root--ewoc-insert-text "  (no direct messages loaded)")))
-    (disco-root--ewoc-insert-blank)
-
-    (disco-root--ewoc-insert-section 'guilds "Guilds" (length guilds))
+            (push (list :entry-type 'channel
+                        :channel channel
+                        :indent 2
+                        :scope 'root)
+                  items))
+        (push (list :entry-type 'text
+                    :text "  (no direct messages loaded)")
+              items)))
+    (push (list :entry-type 'blank) items)
+    (push (list :entry-type 'section
+                :section 'guilds
+                :title "Guilds"
+                :count (length guilds))
+          items)
     (when (disco-root--section-expanded-p 'guilds)
       (if (eq disco-root--view-mode 'dms)
-          (disco-root--ewoc-insert-text "  (guild sections hidden in dms view)")
+          (push (list :entry-type 'text
+                      :text "  (guild sections hidden in dms view)")
+                items)
         (let ((inserted 0))
-          (if guilds
-              (dolist (guild guilds)
-                (when (disco-root--insert-guild guild)
-                  (setq inserted (1+ inserted))))
-            (setq inserted 0))
+          (dolist (guild guilds)
+            (when-let* ((entries (disco-root--guild-entries guild)))
+              (setq inserted (1+ inserted))
+              (dolist (entry entries)
+                (push entry items))))
           (when (= inserted 0)
-            (disco-root--ewoc-insert-text "  (no visible guild channels)")))))))
+            (push (list :entry-type 'text
+                        :text "  (no visible guild channels)")
+                  items)))))
+    (nreverse items)))
 
 (defun disco-root--render-layout-tree ()
   "Return view spec for the guild/category tree layout."
-  (disco-root--ewoc-layout-view-spec #'disco-root--render-tree-layout-view))
+  (disco-root--ewoc-items-view-spec
+   (disco-root--tree-layout-items)))
 
-(defun disco-root--render-activity-layout-view ()
-  "Render activity-sorted channel list layout into the current EWOC."
-  (let ((channels (disco-root--collect-activity-channels)))
+(defun disco-root--activity-layout-items ()
+  "Return EWOC entry items for the activity-sorted channel list layout."
+  (let ((channels (disco-root--collect-activity-channels))
+        items)
     (if channels
         (dolist (channel channels)
-          (disco-root--ewoc-insert-channel channel 2 'activity))
-      (disco-root--ewoc-insert-text "  (no visible channels)"))))
+          (push (list :entry-type 'channel
+                      :channel channel
+                      :indent 2
+                      :scope 'activity)
+                items))
+      (push (list :entry-type 'text
+                  :text "  (no visible channels)")
+            items))
+    (nreverse items)))
 
 (defun disco-root--render-layout-activity ()
   "Return view spec for the activity-sorted channel list layout."
-  (disco-root--ewoc-layout-view-spec #'disco-root--render-activity-layout-view))
+  (disco-root--ewoc-items-view-spec
+   (disco-root--activity-layout-items)))
 
 (defun disco-root--search-section-heading (title loaded-count &optional total-count loading)
   "Return one formatted root search section heading line."

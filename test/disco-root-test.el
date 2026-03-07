@@ -504,6 +504,60 @@
   (let ((disco-root-custom-layouts nil))
     (should (eq 'incremental (disco-root-layout-update-mode 'activity)))))
 
+(ert-deftest disco-root-render-layout-activity-returns-ewoc-items-view-spec ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (cl-letf (((symbol-function 'disco-root--collect-activity-channels)
+               (lambda () '(((id . "c1") (type . 0) (name . "general"))))))
+      (let* ((view-spec (disco-root--render-layout-activity))
+             (items (disco-root-layout-view-spec-items view-spec))
+             (first-item (car items)))
+        (should (disco-root-layout-view-spec-p view-spec))
+        (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
+        (should (eq #'disco-root--ewoc-insert-entry
+                    (disco-root-layout-view-spec-item-inserter view-spec)))
+        (should (equal 'channel (plist-get first-item :entry-type)))
+        (should (equal "c1" (alist-get 'id (plist-get first-item :channel))))))))
+
+(ert-deftest disco-root-render-layout-tree-returns-ewoc-items-view-spec ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--view-mode 'all)
+          (disco-root--tree-show-unread-section t))
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 (lambda () '(((id . "u1") (type . 0) (name . "updates")))))
+                ((symbol-function 'disco-root--tree-unread-section-channels)
+                 (lambda (channels) channels))
+                ((symbol-function 'disco-root--visible-private-channels)
+                 (lambda () nil))
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () nil))
+                ((symbol-function 'disco-root--ensure-section-state)
+                 (lambda (_sections) nil))
+                ((symbol-function 'disco-root--section-expanded-p)
+                 (lambda (_section) t)))
+        (let* ((view-spec (disco-root--render-layout-tree))
+               (items (disco-root-layout-view-spec-items view-spec)))
+          (should (disco-root-layout-view-spec-p view-spec))
+          (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
+          (should (equal 'section (plist-get (car items) :entry-type)))
+          (should (equal 'unread (plist-get (car items) :section)))
+          (should (seq-some (lambda (item)
+                              (equal 'channel (plist-get item :entry-type)))
+                            items)))))))
+
+(ert-deftest disco-root-layout-render-view-spec-renders-ewoc-items ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((view-spec
+           (disco-root-layout-view-spec-create
+            :kind 'items
+            :before-render #'disco-root--prepare-ewoc-state
+            :items '((:entry-type text :text "hello"))
+            :item-inserter #'disco-root--ewoc-insert-entry)))
+      (disco-root-layout-render-view-spec view-spec)
+      (should (string-match-p "hello" (buffer-string))))))
+
 (ert-deftest disco-root-mode-disables-undo-history ()
   (with-temp-buffer
     (disco-root-mode)
