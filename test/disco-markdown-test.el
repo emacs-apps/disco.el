@@ -24,6 +24,18 @@
                      (get-text-property pos 'disco-markdown-url rendered)))
       (should (keymapp (get-text-property pos 'keymap rendered))))))
 
+(ert-deftest disco-markdown-render-bare-links-are-openable ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let ((disco-markdown-backend 'markdown-mode))
+    (let* ((rendered (disco-markdown-render
+                      "hello https://example.com"
+                      :context 'test-bare-link))
+           (pos (string-match "https://example.com" rendered)))
+      (should pos)
+      (should (equal "https://example.com"
+                     (get-text-property pos 'disco-markdown-url rendered)))
+      (should (keymapp (get-text-property pos 'keymap rendered))))))
+
 (ert-deftest disco-markdown-render-spoilers-mask-and-tag-message ()
   (skip-unless (disco-markdown--markdown-mode-available-p))
   (let* ((disco-markdown-backend 'markdown-mode)
@@ -64,6 +76,21 @@
     (should (disco-markdown--face-match-p
              (get-text-property 0 'face rendered)
              'disco-markdown-subtitle-face))))
+
+(ert-deftest disco-markdown-render-headings-strip-markers-for-all-levels ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let ((disco-markdown-backend 'markdown-mode))
+    (dolist (entry '(("# One" . disco-markdown-heading-1-face)
+                     ("## Two" . disco-markdown-heading-2-face)
+                     ("### Three" . disco-markdown-heading-3-face)
+                     ("#### Four" . disco-markdown-heading-4-face)))
+      (let* ((rendered (disco-markdown-render (car entry)
+                                              :context 'test-heading))
+             (plain (substring-no-properties rendered)))
+        (should-not (string-prefix-p "#" plain))
+        (should (disco-markdown--face-match-p
+                 (get-text-property 0 'face rendered)
+                 (cdr entry)))))))
 
 (provide 'disco-markdown-test)
 

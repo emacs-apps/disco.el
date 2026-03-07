@@ -12,9 +12,11 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'thingatpt)
 (require 'disco-util)
 
 (declare-function markdown-link-url "markdown-mode" ())
+(defvar thing-at-point-url-regexp nil)
 
 (defcustom disco-markdown-backend 'auto
   "Backend used for Markdown rendering in disco.
@@ -91,6 +93,36 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
   "Face used for Discord `-#` subtitle lines."
   :group 'disco)
 
+(defface disco-markdown-heading-1-face
+  '((t :inherit default :weight bold :height 1.30))
+  "Face used for first-level headings."
+  :group 'disco)
+
+(defface disco-markdown-heading-2-face
+  '((t :inherit default :weight bold :height 1.18))
+  "Face used for second-level headings."
+  :group 'disco)
+
+(defface disco-markdown-heading-3-face
+  '((t :inherit default :weight bold :height 1.08))
+  "Face used for third-level headings."
+  :group 'disco)
+
+(defface disco-markdown-heading-4-face
+  '((t :inherit default :weight bold))
+  "Face used for fourth-level headings."
+  :group 'disco)
+
+(defface disco-markdown-heading-5-face
+  '((t :inherit default :weight bold))
+  "Face used for fifth-level headings."
+  :group 'disco)
+
+(defface disco-markdown-heading-6-face
+  '((t :inherit default :weight bold))
+  "Face used for sixth-level headings."
+  :group 'disco)
+
 (defconst disco-markdown--regexp-user-mention "<@!?\\([0-9]+\\)>"
   "Regexp matching user mention tokens.")
 
@@ -123,6 +155,9 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 
 (defconst disco-markdown--regexp-subtitle-line "^\\([ \t]*\\)-#\\(?:[ \t]+\\|$\\)"
   "Regexp matching Discord `-#` subtitle lines.")
+
+(defconst disco-markdown--regexp-heading-marker "^\\([ \t]*\\)\\(#+\\)\\(?:[ \t]+\\|$\\)"
+  "Regexp matching visible ATX heading markers in rendered output.")
 
 (defconst disco-markdown--spoiler-translation-table
   (let ((table (make-char-table 'translation-table))
@@ -246,20 +281,23 @@ VALUE is copied to isolate cache entries from caller mutation."
          'markdown-mode
        'legacy))))
 
-(defun disco-markdown--next-face-change (text pos len)
-  "Return next position where face-related properties change.
+(defun disco-markdown--next-style-change (text pos len)
+  "Return next position where display-relevant properties change.
 
 TEXT is source string, POS is current index and LEN is text length."
   (let ((next-face (or (next-single-char-property-change pos 'face text) len))
         (next-font-lock
-         (or (next-single-char-property-change pos 'font-lock-face text) len)))
-    (min next-face next-font-lock)))
+         (or (next-single-char-property-change pos 'font-lock-face text) len))
+        (next-help-echo
+         (or (next-single-char-property-change pos 'help-echo text) len)))
+    (min next-face next-font-lock next-help-echo)))
 
 (defun disco-markdown--sanitize-face-properties (text)
-  "Return TEXT stripped to `face' properties only.
+  "Return TEXT stripped to display-relevant properties.
 
-This drops markdown-mode specific `keymap', `help-echo', and other interaction
-properties that should not leak into room buffers."
+This keeps stable presentation properties such as `face' and string-valued
+`help-echo', while dropping markdown-mode interaction state that should not
+leak into room buffers."
   (let* ((source (or text ""))
          (copy (substring-no-properties source))
          (len (length source))
@@ -267,9 +305,15 @@ properties that should not leak into room buffers."
     (while (< pos len)
       (let* ((face (or (get-text-property pos 'face source)
                        (get-text-property pos 'font-lock-face source)))
-             (next (disco-markdown--next-face-change source pos len)))
+             (help-echo (get-text-property pos 'help-echo source))
+             (next (disco-markdown--next-style-change source pos len))
+             (props nil))
         (when face
-          (add-text-properties pos next (list 'face face) copy))
+          (setq props (append props (list 'face face))))
+        (when (stringp help-echo)
+          (setq props (append props (list 'help-echo help-echo))))
+        (when props
+          (add-text-properties pos next props copy))
         (setq pos next)))
     copy))
 
@@ -279,10 +323,35 @@ properties that should not leak into room buffers."
       (memq target face)
     (eq face target)))
 
+(defun disco-markdown--heading-face-for-level (level)
+  "Return disco heading face symbol for heading LEVEL."
+  (pcase level
+    (1 'disco-markdown-heading-1-face)
+    (2 'disco-markdown-heading-2-face)
+    (3 'disco-markdown-heading-3-face)
+    (4 'disco-markdown-heading-4-face)
+    (5 'disco-markdown-heading-5-face)
+    (_ 'disco-markdown-heading-6-face)))
+
+(defun disco-markdown--heading-level-from-face (face)
+  "Return heading level encoded by FACE, or nil."
+  (cond
+   ((null face) nil)
+   ((listp face)
+    (seq-some #'disco-markdown--heading-level-from-face face))
+   ((eq face 'markdown-header-face-1) 1)
+   ((eq face 'markdown-header-face-2) 2)
+   ((eq face 'markdown-header-face-3) 3)
+   ((eq face 'markdown-header-face-4) 4)
+   ((eq face 'markdown-header-face-5) 5)
+   ((eq face 'markdown-header-face-6) 6)
+   (t nil)))
+
 (defun disco-markdown--markdown-link-face-p (face)
   "Return non-nil when FACE denotes a rendered Markdown link span."
   (or (disco-markdown--face-match-p face 'markdown-link-face)
-      (disco-markdown--face-match-p face 'markdown-url-face)))
+      (disco-markdown--face-match-p face 'markdown-url-face)
+      (disco-markdown--face-match-p face 'markdown-plain-url-face)))
 
 (defun disco-markdown--add-action-properties (object start end keymap help-echo properties)
   "Add KEYMAP/HELP-ECHO/PROPERTIES to OBJECT between START and END."
@@ -336,43 +405,76 @@ return visible spoiler contents; otherwise return masked text."
                              payload)))
     payload))
 
-(defun disco-markdown--markdown-url-at-position (position)
-  "Resolve Markdown URL at original buffer POSITION."
-  (save-excursion
-    (goto-char position)
-    (ignore-errors (markdown-link-url))))
-
 (defun disco-markdown--apply-markdown-mode-link-properties (text)
-  "Copy Markdown link open properties from current buffer into TEXT."
+  "Attach open actions to visible markdown-mode link spans in TEXT."
   (let ((copy (copy-sequence text))
-        (pos (point-min))
-        (out-pos 0)
-        link-buffer-start
-        link-output-start)
-    (cl-labels ((flush-link ()
-                  (when link-output-start
-                    (let ((url (disco-markdown--markdown-url-at-position
-                                link-buffer-start)))
-                      (when (disco-markdown--string-present-p url)
-                        (disco-markdown--add-open-url-properties
-                         copy link-output-start out-pos url)))
-                    (setq link-buffer-start nil
-                          link-output-start nil))))
-      (while (< pos (point-max))
-        (if (get-char-property pos 'invisible)
-            (flush-link)
-          (let* ((face (or (get-text-property pos 'face)
-                           (get-text-property pos 'font-lock-face)))
-                 (linkp (disco-markdown--markdown-link-face-p face)))
-            (if linkp
-                (unless link-output-start
-                  (setq link-buffer-start pos
-                        link-output-start out-pos))
-              (flush-link))
-            (setq out-pos (1+ out-pos))))
-        (setq pos (1+ pos)))
-      (flush-link))
+        (len (length text))
+        (pos 0))
+    (while (< pos len)
+      (let* ((face (get-text-property pos 'face copy))
+             (help-echo (get-text-property pos 'help-echo copy))
+             (next (or (next-single-char-property-change pos 'face copy) len)))
+        (when (and (disco-markdown--markdown-link-face-p face)
+                   (stringp help-echo)
+                   (disco-markdown--string-present-p help-echo))
+          (disco-markdown--add-open-url-properties copy pos next help-echo))
+        (setq pos next)))
     copy))
+
+(defun disco-markdown--apply-visible-url-properties (text)
+  "Attach open actions to visible URL substrings in TEXT."
+  (let ((copy (copy-sequence text)))
+    (with-temp-buffer
+      (insert copy)
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let* ((bounds (bounds-of-thing-at-point 'url))
+               (beg (and bounds (car bounds)))
+               (end (and bounds (cdr bounds)))
+               (url (and bounds (thing-at-point-url-at-point))))
+          (if (and bounds
+                   (<= (point) beg)
+                   (disco-markdown--string-present-p url))
+              (progn
+                (unless (or (get-text-property (1- beg)
+                                               'disco-markdown-spoiler-message-id
+                                               copy)
+                            (get-text-property (1- beg)
+                                               'disco-markdown-url
+                                               copy))
+                  (disco-markdown--add-open-url-properties
+                   copy (1- beg) (1- end) url))
+                (goto-char end))
+            (forward-char 1)))))
+    copy))
+
+(defun disco-markdown--normalize-heading-lines (text)
+  "Normalize heading presentation in rendered TEXT.
+
+This remaps markdown-mode heading faces to disco-local ones and strips any
+visible ATX marker fallback so all heading levels render consistently." 
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (while (< (point) (point-max))
+      (let* ((line-start (line-beginning-position))
+             (line-end (line-end-position))
+             (face (get-text-property line-start 'face))
+             (level (disco-markdown--heading-level-from-face face)))
+        (goto-char line-start)
+        (when (looking-at disco-markdown--regexp-heading-marker)
+          (setq level (or level
+                          (min 6 (length (match-string-no-properties 2)))))
+          (delete-region (match-beginning 2) (match-end 0))
+          (setq line-start (line-beginning-position)
+                line-end (line-end-position)))
+        (when (and level (< line-start line-end))
+          (add-face-text-property
+           line-start line-end
+           (disco-markdown--heading-face-for-level level)
+           'append))
+        (forward-line 1)))
+    (buffer-string)))
 
 (defun disco-markdown--render-with-markdown-mode (text)
   "Render TEXT through markdown-mode and return visible propertized string."
@@ -384,9 +486,11 @@ return visible spoiler contents; otherwise return masked text."
                'markdown-view-mode))
     (when (fboundp 'font-lock-ensure)
       (font-lock-ensure (point-min) (point-max)))
-    (disco-markdown--apply-markdown-mode-link-properties
-     (disco-markdown--sanitize-face-properties
-      (filter-buffer-substring (point-min) (point-max) nil)))))
+    (disco-markdown--apply-visible-url-properties
+     (disco-markdown--normalize-heading-lines
+      (disco-markdown--apply-markdown-mode-link-properties
+       (disco-markdown--sanitize-face-properties
+        (filter-buffer-substring (point-min) (point-max) nil)))))))
 
 (defun disco-markdown--render-legacy (text)
   "Render TEXT with legacy markdown punctuation unescape behavior."
