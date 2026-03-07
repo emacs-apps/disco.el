@@ -4196,22 +4196,8 @@ Fallback stays message-oriented and avoids status-tag placeholders."
     (disco-root--activity-secondary-label channel)))
 
 (defun disco-root--canonicalize-number (spec base)
-  "Resolve SPEC against BASE columns.
-
-SPEC can be an integer, float ratio, or list (VALUE MIN MAX)."
-  (let* ((raw (if (consp spec) (car spec) spec))
-         (min-value (when (consp spec) (nth 1 spec)))
-         (max-value (when (consp spec) (nth 2 spec)))
-         (value (cond
-                 ((integerp raw) raw)
-                 ((floatp raw) (round (* raw base)))
-                 ((numberp raw) (round raw))
-                 (t base))))
-    (when (numberp min-value)
-      (setq value (max value min-value)))
-    (when (numberp max-value)
-      (setq value (min value max-value)))
-    value))
+  "Resolve SPEC against BASE columns."
+  (disco-view-canonicalize-number spec base))
 
 (defun disco-root--human-count (value)
   "Return VALUE formatted in compact human-readable form."
@@ -4227,98 +4213,20 @@ SPEC can be an integer, float ratio, or list (VALUE MIN MAX)."
       (number-to-string n)))))
 
 (defun disco-root--truncate-fill (text width &optional right-align)
-  "Return TEXT truncated and padded to WIDTH.
-
-When RIGHT-ALIGN is non-nil, pad on the left instead of right."
-  (let* ((target (max 0 (or width 0)))
-         (trimmed (truncate-string-to-width (or text "") target nil nil ""))
-         (padding (max 0 (- target (string-width trimmed)))))
-    (if right-align
-        (concat (make-string padding ?\s) trimmed)
-      (concat trimmed (make-string padding ?\s)))))
-
-(defun disco-root--string-width (str &optional from to)
-  "Return width of STR, optionally limited to FROM..TO."
-  (string-width
-   (if (or from to)
-       (substring str (or from 0) to)
-     str)))
+  "Return TEXT truncated and padded to WIDTH."
+  (disco-view-truncate-fill text width right-align))
 
 (defun disco-root--elide-string (str max &optional face)
-  "Return STR visually elided to MAX columns using display properties.
-
-This mirrors telega's `telega-fmt-eval-eliding' behavior for right-elision."
-  (let* ((text (or str ""))
-         (str-width (disco-root--string-width text))
-         (limit (max 0 (or max 0))))
-    (if (<= str-width limit)
-        text
-      (let* ((elide-str "…")
-             (elide-width (disco-root--string-width elide-str))
-             (elide-pos 1)
-             (str-len (length text))
-             (elide-trail (floor (* limit (- 1 elide-pos))))
-             (trail-width
-              (progn
-                (while (and (> elide-trail 0)
-                            (> (disco-root--string-width text (- str-len elide-trail))
-                               (floor (* limit (- 1 elide-pos)))))
-                  (setq elide-trail (1- elide-trail)))
-                (disco-root--string-width text (- str-len elide-trail))))
-             (elide-lead (- (min limit str-len) elide-width trail-width))
-             (result (copy-sequence text)))
-        (when (< elide-lead 0)
-          (setq elide-lead 0))
-        (while (and (> elide-lead 0)
-                    (> (+ (disco-root--string-width result 0 elide-lead)
-                          elide-width trail-width)
-                       limit))
-          (setq elide-lead (1- elide-lead)))
-        (add-text-properties
-         elide-lead
-         (- str-len elide-trail)
-         (list 'display elide-str
-               'rear-nonsticky '(display)
-               'face face)
-         result)
-        result))))
+  "Return STR visually elided to MAX columns using display properties."
+  (disco-view-elide-string str max face))
 
 (defun disco-root--current-column ()
   "Like `current-column', but account for prior `:align-to' spacers."
-  (let* ((bol (line-beginning-position))
-         (point-now (point))
-         (scan point-now)
-         align-column)
-    (while (and (not align-column)
-                (> scan bol)
-                (setq scan (previous-single-char-property-change
-                            scan 'display nil bol)))
-      (let ((display (get-text-property scan 'display)))
-        (when (and (listp display)
-                   (> (length display) 2)
-                   (eq (nth 0 display) 'space)
-                   (eq (nth 1 display) :align-to))
-          (let ((align-val (nth 2 display)))
-            (setq align-column
-                  (+ (if (listp align-val)
-                         (disco-root--chars-in-width (or (car align-val) 0))
-                       (or align-val 0))
-                     (disco-root--string-width
-                      (buffer-substring scan point-now))))))))
-    (or align-column (current-column))))
+  (disco-view-current-column))
 
 (defun disco-root--move-to-column (column)
-  "Insert one forward-only align-to spacer for COLUMN.
-
-Like telega's inserter, this uses one `:align-to' spacer, but never tries
-to align backwards because that can visually corrupt passive root redraws."
-  (let* ((target (max 0 (or column 0)))
-         (current (disco-root--current-column)))
-    (when (>= target current)
-      (let ((align-to (if (display-graphic-p)
-                          (list (disco-root--chars-xwidth target))
-                        target)))
-        (insert (propertize " " 'display `(space :align-to ,align-to)))))))
+  "Insert one forward-only align-to spacer for COLUMN."
+  (disco-view-move-to-column column))
 
 (defun disco-root--snowflake-epoch-seconds (snowflake)
   "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
@@ -4462,102 +4370,59 @@ Guild rows use real guild icons when available, with fixed text fallback."
 
 (defun disco-root--activity-column-widths (content-width)
   "Return telega-like context/preview width split for CONTENT-WIDTH."
-  (let* ((max-context-inner (max 8 (- content-width 3)))
-         (context-inner-width
-          (max 8
-               (min max-context-inner
-                    (disco-root--canonicalize-number
-                     disco-root-activity-context-width
-                     content-width))))
-         (preview-width (max 0 (- content-width context-inner-width 3))))
-    (list :context-inner-width context-inner-width
-          :preview-width preview-width
-          :separator-width (if (> preview-width 0) 1 0))))
+  (disco-view-one-line-column-widths content-width
+                                     disco-root-activity-context-width))
 
-(defun disco-root--insert-activity-channel-line (channel indent &optional scope)
-  "Insert one activity-style CHANNEL row with INDENT under SCOPE."
+(defun disco-root--preview-leading-length (preview-text message)
+  "Return highlighted author-prefix length for PREVIEW-TEXT from MESSAGE."
+  (let ((author (disco-msg-author-display-name message)))
+    (when (and author
+               (string-match (format "\\`%s>" (regexp-quote author))
+                             (or preview-text "")))
+      (1+ (length author)))))
+
+(defun disco-root--channel-one-line-row (channel &optional scope)
+  "Return one-line row model for CHANNEL under SCOPE."
   (let* ((channel-id (alist-get 'id channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
          (mention-count (disco-state-channel-effective-unread-count channel))
          (has-unread (disco-root--channel-has-unread-p channel))
-         (padding (make-string indent ?\s))
-         (context-text (disco-root--activity-context-label channel scope))
          (preview-text (disco-root--activity-preview-line channel latest-message scope))
          (time-text (if (memq scope '(parent-thread archived-thread))
                         (disco-root--thread-browser-time-label channel scope latest-message)
-                      (disco-root--channel-last-activity-time-label channel latest-message)))
-         (split-status-p (not (eq scope 'archived-thread)))
-         (line-width (max 60 (or disco-root--fill-column
-                                 (disco-root--compute-fill-column))))
-         (time-width (if (string-empty-p time-text)
-                         0
-                       (max 6 (string-width time-text))))
-         (line-start (point)))
-    (insert padding)
-    (let* ((icon-start (disco-root--current-column))
-           (icon-slot-width
-            (max 2
-                 (ceiling (* disco-root--activity-icon-slot-width
-                             (disco-root--text-scale-factor)))))
-           (slot-target (max icon-start
-                             (1- (+ icon-start icon-slot-width)))))
-      (disco-root--insert-activity-icon channel)
-      (disco-root--move-to-column slot-target)
-      (insert " "))
-    (let* ((content-start (disco-root--current-column))
-           (time-gap (if (> time-width 0) 1 0))
-           (content-width (max 20 (- line-width content-start time-width time-gap)))
-           (widths (disco-root--activity-column-widths content-width))
-           (context-inner-width (or (plist-get widths :context-inner-width) 8))
-           (preview-width (or (plist-get widths :preview-width) 0))
-           (separator-width (or (plist-get widths :separator-width) 0)))
-      (let ((context-start (disco-root--current-column)))
-        (insert "[")
-        (insert (disco-root--elide-string context-text context-inner-width 'default))
-        (disco-root--move-to-column (+ context-start 1 context-inner-width))
-        (insert "]"))
-      (when (> preview-width 0)
-        (when (> separator-width 0)
-          (insert " "))
-        (let* ((preview-start (point))
-               (preview-value (or preview-text "")))
-          (insert (disco-root--elide-string preview-value preview-width 'shadow))
-          (add-text-properties preview-start (point) (list 'face 'shadow))
-          (let ((author (disco-msg-author-display-name latest-message)))
-            (when (and author
-                       (string-match (format "\\`%s>" (regexp-quote author))
-                                     preview-value))
-              (add-text-properties
-               preview-start
-               (+ preview-start (length author) 1)
-               (list 'face 'font-lock-keyword-face))))))
-      (when (> time-width 0)
-        (let ((target-time-col (- line-width time-width)))
-          (disco-root--move-to-column target-time-col)
-          (let ((time-start (point))
-                (status-face (disco-root--activity-time-status-face
-                              channel latest-message)))
-            (insert (disco-root--truncate-fill time-text time-width t))
-            (if split-status-p
-                (let ((status-pos (max time-start (1- (point)))))
-                  (add-text-properties time-start status-pos (list 'face 'shadow))
-                  (add-text-properties status-pos (point)
-                                       (list 'face status-face)))
-              (add-text-properties time-start (point) (list 'face 'shadow)))))))
-    (insert "\n")
-    (add-text-properties
-     line-start
-     (point)
+                      (disco-root--channel-last-activity-time-label channel latest-message))))
+    (disco-view-one-line-row-create
+     :icon-inserter (lambda ()
+                      (disco-root--insert-activity-icon channel))
+     :context (disco-root--activity-context-label channel scope)
+     :preview preview-text
+     :preview-leading-length
+     (disco-root--preview-leading-length preview-text latest-message)
+     :preview-leading-face 'font-lock-keyword-face
+     :time time-text
+     :time-face 'shadow
+     :time-tail-face (unless (eq scope 'archived-thread)
+                       (disco-root--activity-time-status-face channel latest-message))
+     :line-properties
      (list 'disco-root-row-type 'channel
            'disco-channel-id channel-id
            'disco-unread-count mention-count
-           'disco-has-unread (and has-unread t)))
-    (when (disco-root--openable-channel-p channel)
-      (add-text-properties
-       line-start
-       (point)
-       (list 'mouse-face 'highlight
-             'help-echo (disco-root--channel-open-help-echo channel))))))
+           'disco-has-unread (and has-unread t))
+     :help-echo (and (disco-root--openable-channel-p channel)
+                     (disco-root--channel-open-help-echo channel)))))
+
+(defun disco-root--insert-activity-channel-line (channel indent &optional scope)
+  "Insert one activity-style CHANNEL row with INDENT under SCOPE."
+  (disco-view-insert-one-line-row
+   (disco-root--channel-one-line-row channel scope)
+   :indent indent
+   :width (max 60 (or disco-root--fill-column
+                      (disco-root--compute-fill-column)))
+   :icon-slot-width
+   (max 2
+        (ceiling (* disco-root--activity-icon-slot-width
+                    (disco-root--text-scale-factor))))
+   :context-width-spec disco-root-activity-context-width))
 
 (defun disco-root--search-message-seconds (message)
   "Return MESSAGE timestamp as float seconds, or nil on parse failure."
@@ -4584,84 +4449,51 @@ Guild rows use real guild icons when available, with fixed text fallback."
         (disco-root--channel-display-name channel)
         (disco-root--search-domain-label disco-root--search-domain)))))
 
-(defun disco-root--insert-search-message-line (message indent &optional tab)
-  "Insert one root search result MESSAGE row with INDENT for TAB."
+(defun disco-root--search-message-one-line-row (message &optional tab)
+  "Return one-line row model for search result MESSAGE in TAB."
   (let* ((message-id (alist-get 'id message))
          (channel-id (alist-get 'channel_id message))
          (channel (disco-root--search-channel channel-id))
-         (padding (make-string (max 0 (or indent 0)) ?\s))
-         (context-text (disco-root--search-context-label channel))
          (preview-text (or (disco-msg-preview-line message)
                            (disco-msg-preview-content message)
-                           "(message)"))
-         (time-text (or (disco-root--search-message-time-label message) ""))
-         (line-width (max 60 (or disco-root--fill-column
-                                 (disco-root--compute-fill-column))))
-         (time-width (if (string-empty-p time-text) 0 (max 6 (string-width time-text))))
-         (line-start (point)))
-    (insert padding)
-    (let* ((icon-start (disco-root--current-column))
-           (icon-slot-width
-            (max 2
-                 (ceiling (* disco-root--activity-icon-slot-width
-                             (disco-root--text-scale-factor)))))
-           (slot-target (max icon-start
-                             (1- (+ icon-start icon-slot-width)))))
-      (if channel
-          (disco-root--insert-activity-icon channel)
-        (insert "[?]"))
-      (disco-root--move-to-column slot-target)
-      (insert " "))
-    (let* ((content-start (disco-root--current-column))
-           (content-width (max 20 (- line-width content-start time-width 1)))
-           (widths (disco-root--activity-column-widths content-width))
-           (context-inner-width (or (plist-get widths :context-inner-width) 8))
-           (preview-width (or (plist-get widths :preview-width) 0))
-           (separator-width (or (plist-get widths :separator-width) 0)))
-      (let ((context-start (disco-root--current-column)))
-        (insert "[")
-        (insert (disco-root--elide-string context-text context-inner-width 'default))
-        (disco-root--move-to-column (+ context-start 1 context-inner-width))
-        (insert "]"))
-      (when (> preview-width 0)
-        (when (> separator-width 0)
-          (insert " "))
-        (let* ((preview-start (point))
-               (preview-value (or preview-text "")))
-          (insert (disco-root--elide-string preview-value preview-width 'shadow))
-          (add-text-properties preview-start (point) (list 'face 'shadow))
-          (let ((author (disco-msg-author-display-name message)))
-            (when (and author
-                       (string-match (format "\`%s>" (regexp-quote author))
-                                     preview-value))
-              (add-text-properties
-               preview-start
-               (+ preview-start (length author) 1)
-               (list 'face 'font-lock-keyword-face))))))
-      (when (> time-width 0)
-        (let ((target-time-col (- line-width time-width)))
-          (disco-root--move-to-column target-time-col)
-          (let ((time-start (point)))
-            (insert (disco-root--truncate-fill time-text time-width t))
-            (add-text-properties time-start (point) (list 'face 'shadow))))))
-    (insert "
-")
-    (add-text-properties
-     line-start
-     (point)
+                           "(message)")))
+    (disco-view-one-line-row-create
+     :icon-inserter (lambda ()
+                      (if channel
+                          (disco-root--insert-activity-icon channel)
+                        (let ((start (point)))
+                          (insert "[?]")
+                          (add-text-properties start (point) (list 'face 'shadow)))))
+     :context (disco-root--search-context-label channel)
+     :preview preview-text
+     :preview-leading-length
+     (disco-root--preview-leading-length preview-text message)
+     :preview-leading-face 'font-lock-keyword-face
+     :time (or (disco-root--search-message-time-label message) "")
+     :time-face 'shadow
+     :line-properties
      (list 'disco-root-row-type 'search-message
            'disco-root-search-tab tab
            'disco-root-search-message-id message-id
            'disco-channel-id channel-id
            'disco-unread-count 0
-           'disco-has-unread nil))
-    (when (and channel-id message-id)
-      (add-text-properties
-       line-start
-       (point)
-       (list 'mouse-face 'highlight
-             'help-echo (format "Open channel %s and jump to message %s"
-                                channel-id message-id))))))
+           'disco-has-unread nil)
+     :help-echo (and channel-id message-id
+                     (format "Open channel %s and jump to message %s"
+                             channel-id message-id)))))
+
+(defun disco-root--insert-search-message-line (message indent &optional tab)
+  "Insert one root search result MESSAGE row with INDENT for TAB."
+  (disco-view-insert-one-line-row
+   (disco-root--search-message-one-line-row message tab)
+   :indent indent
+   :width (max 60 (or disco-root--fill-column
+                      (disco-root--compute-fill-column)))
+   :icon-slot-width
+   (max 2
+        (ceiling (* disco-root--activity-icon-slot-width
+                    (disco-root--text-scale-factor))))
+   :context-width-spec disco-root-activity-context-width))
 
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
