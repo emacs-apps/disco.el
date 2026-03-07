@@ -13,6 +13,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'disco-channel-type)
 
 (defconst disco-permission-bits
   `((create-instant-invite               . ,(ash 1 0))
@@ -242,13 +243,12 @@ This matches common REST failures such as HTTP 403 with Discord error code
 (cl-defun disco-permission-channel-viewable-p (channel &optional (unknown-value t))
   "Return non-nil when CHANNEL should be treated as visible.
 
-For guild channels this checks `view-channel'. DM/group-DM and channels
+For guild channels this checks `view-channel'. Private channels and channels
 without guild context are treated as visible. UNKNOWN-VALUE is used when
 computed permissions are missing or unparsable."
-  (let ((channel-type (and (listp channel) (alist-get 'type channel)))
-        (guild-id (and (listp channel) (alist-get 'guild_id channel))))
+  (let ((guild-id (and (listp channel) (alist-get 'guild_id channel))))
     (cond
-     ((memq channel-type '(1 3))
+     ((disco-channel-private-p channel)
       t)
      ((null guild-id)
       t)

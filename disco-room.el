@@ -30,6 +30,7 @@
 (require 'disco-embed)
 (require 'disco-view)
 (require 'disco-api)
+(require 'disco-channel-type)
 (require 'disco-gateway)
 (require 'disco-state)
 (require 'disco-permission)
@@ -2413,26 +2414,13 @@ currently rendered room messages."
 
 (defun disco-room--searchable-channel-type-p (&optional channel)
   "Return non-nil when CHANNEL supports server-side room message search."
-  (let ((type (alist-get 'type (or channel (disco-room--channel-object)))))
-    (or (null type)
-        (memq type '(0 1 3 5 10 11 12)))))
+  (let ((target (or channel (disco-room--channel-object))))
+    (or (null (disco-channel-type-value target))
+        (disco-channel-searchable-p target))))
 
 (defun disco-room--searchable-channel-type-name (&optional channel)
   "Return descriptive channel type name for CHANNEL."
-  (let ((type (alist-get 'type (or channel (disco-room--channel-object)))))
-    (pcase type
-      (0 "text")
-      (1 "dm")
-      (3 "group-dm")
-      (5 "announcement")
-      (10 "announcement-thread")
-      (11 "public-thread")
-      (12 "private-thread")
-      (2 "voice")
-      (13 "stage")
-      (15 "forum")
-      (16 "media")
-      (_ (format "type-%s" type)))))
+  (disco-channel-type-name (or channel (disco-room--channel-object))))
 
 (defun disco-room--ensure-searchable-channel (&optional action)
   "Signal user error when current room channel cannot be searched remotely.
@@ -4486,6 +4474,22 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         (alist-get 'id recipient)
         "unknown-user")))
 
+(defun disco-room--forward-private-channel-recipient-display-names (channel)
+  "Return display names for CHANNEL recipients, excluding the current user when known."
+  (let* ((self-id (disco-gateway-current-user-id))
+         (recipients (and (listp channel) (alist-get 'recipients channel)))
+         (filtered (if self-id
+                       (seq-remove
+                        (lambda (recipient)
+                          (equal (format "%s" (alist-get 'id recipient))
+                                 (format "%s" self-id)))
+                        (or recipients '()))
+                     (or recipients '())))
+         (effective-recipients (if filtered filtered (or recipients '()))))
+    (delq nil
+          (mapcar #'disco-room--forward-recipient-display-name
+                  effective-recipients))))
+
 (defun disco-room--forward-private-channel-display-name (channel)
   "Return best display name for private CHANNEL."
   (let* ((channel-type (and (listp channel) (alist-get 'type channel)))
@@ -4493,21 +4497,21 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                              (stringp (alist-get 'name channel))
                              (not (string-empty-p (alist-get 'name channel)))
                              (alist-get 'name channel)))
-         (recipients (and (listp channel) (alist-get 'recipients channel)))
          (recipient-names
-          (delq nil
-                (mapcar #'disco-room--forward-recipient-display-name
-                        (or recipients '())))))
-    (pcase channel-type
-      (1 (or (car recipient-names) explicit-name "direct-message"))
-      (3 (or explicit-name
-             (and recipient-names (mapconcat #'identity recipient-names ", "))
-             "group-dm"))
-      (_ (or explicit-name "(no-name)")))))
+          (disco-room--forward-private-channel-recipient-display-names channel)))
+    (cond
+     ((disco-channel-direct-message-p channel-type)
+      (or (car recipient-names) explicit-name "direct-message"))
+     ((disco-channel-group-dm-p channel-type)
+      (or explicit-name
+          (and recipient-names (mapconcat #'identity recipient-names ", "))
+          "group-dm"))
+     (t
+      (or explicit-name "(no-name)")))))
 
 (defun disco-room--forward-channel-name (channel)
   "Return display name for CHANNEL independent of badge prefixes."
-  (if (and channel (listp channel) (memq (alist-get 'type channel) '(1 3)))
+  (if (and channel (listp channel) (disco-channel-private-p channel))
       (disco-room--forward-private-channel-display-name channel)
     (or (and channel (listp channel) (alist-get 'name channel)) "(no-name)")))
 
@@ -4520,8 +4524,8 @@ When TARGET-PATH is nil, prompt interactively for destination path."
     (let* ((channel-type (alist-get 'type channel))
            (name (disco-room--forward-channel-name channel)))
       (cond
-       ((memq channel-type '(1 3))
-        (if (= channel-type 3)
+       ((disco-channel-private-p channel-type)
+        (if (disco-channel-group-dm-p channel-type)
             (format "group:%s" name)
           (format "@%s" name)))
        ((disco-state-channel-thread-p channel)

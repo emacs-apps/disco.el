@@ -859,6 +859,34 @@
                          (disco-root--activity-primary-label channel))))
       (disco-state-reset))))
 
+(ert-deftest disco-root-private-channel-display-name-prefers-non-self-recipient ()
+  (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+             (lambda () "self")))
+    (should (equal "Friend"
+                   (disco-root--private-channel-display-name
+                    '((type . 18)
+                      (recipients . (((id . "self") (username . "me"))
+                                     ((id . "u2") (global_name . "Friend"))))))))))
+
+(ert-deftest disco-root-channel-visible-in-dms-includes-ephemeral-dm ()
+  (should (disco-root--channel-visible-in-mode-p '((type . 18)) 'dms))
+  (should-not (disco-root--channel-visible-in-mode-p '((type . 2)) 'dms)))
+
+(ert-deftest disco-root-open-channel-opens-voice-timeline ()
+  (disco-state-reset)
+  (unwind-protect
+      (let (opened)
+        (disco-state-upsert-channel '((id . "voice1") (type . 2) (name . "Voice")))
+        (cl-letf (((symbol-function 'disco-room-open)
+                   (lambda (channel-id channel-name)
+                     (setq opened (list channel-id channel-name))))
+                  ((symbol-function 'disco-root-open-parent-threads)
+                   (lambda (&rest _args)
+                     (ert-fail "voice channels should open room timelines"))))
+          (disco-root--open-channel "voice1")
+          (should (equal '("voice1" "Voice") opened))))
+    (disco-state-reset)))
+
 (ert-deftest disco-root-activity-secondary-label-uses-message-placeholders ()
   (disco-state-reset)
   (let ((channel '((id . "c1")

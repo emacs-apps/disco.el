@@ -10,6 +10,7 @@
 
 (require 'cl-lib)
 (require 'seq)
+(require 'disco-channel-type)
 (require 'disco-read-state)
 (require 'disco-util)
 
@@ -23,7 +24,7 @@
   "Hash table channel-id -> channel object.")
 
 (defvar disco-state--private-channels nil
-  "List of private channels (DM/group DM) as channel objects.")
+  "List of private DM-like channels as channel objects.")
 
 (defvar disco-state--threads-by-parent (make-hash-table :test #'equal)
   "Hash table parent-channel-id -> list of thread channel objects.")
@@ -171,15 +172,15 @@
 
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."
-  (memq (alist-get 'type channel) '(10 11 12)))
+  (disco-channel-thread-p channel))
 
 (defun disco-state-private-channel-p (channel)
-  "Return non-nil when CHANNEL is a DM or group DM channel."
-  (memq (alist-get 'type channel) '(1 3)))
+  "Return non-nil when CHANNEL is a private DM-like channel."
+  (disco-channel-private-p channel))
 
 (defun disco-state-thread-only-parent-channel-p (channel)
   "Return non-nil when CHANNEL is a thread-only parent channel."
-  (memq (alist-get 'type channel) '(15 16)))
+  (disco-channel-thread-only-parent-p channel))
 
 (defun disco-state--channel-age-restricted-p (channel &optional seen)
   "Return non-nil when CHANNEL or an ancestor is age-restricted.

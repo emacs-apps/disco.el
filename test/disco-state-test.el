@@ -9,6 +9,12 @@
 
 (require 'disco-state)
 
+(ert-deftest disco-state-private-channel-p-includes-ephemeral-dm ()
+  (should (disco-state-private-channel-p '((type . 1))))
+  (should (disco-state-private-channel-p '((type . 3))))
+  (should (disco-state-private-channel-p '((type . 18))))
+  (should-not (disco-state-private-channel-p '((type . 0)))))
+
 (ert-deftest disco-state-apply-message-ack-retains-unread-when-mention-omitted ()
   (disco-state-reset)
   (disco-state-set-channel-unread "chan" 5)

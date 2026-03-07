@@ -191,6 +191,16 @@
     (disco-state-upsert-channel '((id . "voice") (type . 2) (name . "Voice")))
     (should-error (disco-room-filter-search "hello") :type 'error)))
 
+(ert-deftest disco-room-filter-search-supports-ephemeral-dm ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "ephemeral")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "ephemeral") (type . 18)))
+    (should (disco-room--searchable-channel-type-p))
+    (should (equal "ephemeral-dm"
+                   (disco-room--searchable-channel-type-name)))))
+
 (ert-deftest disco-room-search-current-channel-auto-includes-age-restricted-thread ()
   (with-temp-buffer
     (disco-room-mode)

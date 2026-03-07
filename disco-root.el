@@ -18,6 +18,7 @@
 (require 'disco-ui)
 (require 'disco-view)
 (require 'disco-api)
+(require 'disco-channel-type)
 (require 'disco-gateway)
 (require 'disco-msg)
 (require 'disco-room)
@@ -3632,12 +3633,12 @@ This prevents noisy permission errors for sources that require elevated access."
 
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
-  (and (memq (alist-get 'type channel) '(0 1 2 3 5 10 11 12 13 15 16))
+  (and (disco-channel-root-visible-p channel)
        (disco-permission-channel-viewable-p channel t)))
 
 (defun disco-root--openable-channel-p (channel)
-  "Return non-nil when CHANNEL can be opened as a room timeline."
-  (memq (alist-get 'type channel) '(0 1 3 5 10 11 12 15 16)))
+  "Return non-nil when CHANNEL has a supported open action."
+  (not (null (disco-channel-open-mode channel))))
 
 (defun disco-root--thread-parent-channel-p (channel)
   "Return non-nil when CHANNEL can contain visible threads in UI."
@@ -3662,28 +3663,45 @@ This prevents noisy permission errors for sources that require elevated access."
       (alist-get 'id recipient)
       "unknown-user"))
 
+(defun disco-root--private-channel-recipient-display-names (channel)
+  "Return display names for CHANNEL recipients, excluding the current user when known."
+  (let* ((current-user-id (and (fboundp 'disco-gateway-current-user-id)
+                               (disco-gateway-current-user-id)))
+         (recipients (or (alist-get 'recipients channel) '()))
+         (filtered (if current-user-id
+                       (seq-remove
+                        (lambda (recipient)
+                          (equal (format "%s" (alist-get 'id recipient))
+                                 (format "%s" current-user-id)))
+                        recipients)
+                     recipients))
+         (effective-recipients (if filtered filtered recipients)))
+    (delq nil
+          (mapcar (lambda (recipient)
+                    (when (listp recipient)
+                      (disco-root--recipient-display-name recipient)))
+                  effective-recipients))))
+
 (defun disco-root--private-channel-display-name (channel)
   "Return best display name for private CHANNEL."
   (let* ((channel-type (alist-get 'type channel))
          (explicit-name (and (stringp (alist-get 'name channel))
                              (not (string-empty-p (alist-get 'name channel)))
                              (alist-get 'name channel)))
-         (recipients (or (alist-get 'recipients channel) '()))
-         (recipient-names (delq nil
-                                (mapcar (lambda (it)
-                                          (when (listp it)
-                                            (disco-root--recipient-display-name it)))
-                                        recipients))))
-    (pcase channel-type
-      (1 (or (car recipient-names) explicit-name "direct-message"))
-      (3 (or explicit-name
-             (and recipient-names (mapconcat #'identity recipient-names ", "))
-             "group-dm"))
-      (_ (or explicit-name "(no-name)")))))
+         (recipient-names (disco-root--private-channel-recipient-display-names channel)))
+    (cond
+     ((disco-channel-direct-message-p channel-type)
+      (or (car recipient-names) explicit-name "direct-message"))
+     ((disco-channel-group-dm-p channel-type)
+      (or explicit-name
+          (and recipient-names (mapconcat #'identity recipient-names ", "))
+          "group-dm"))
+     (t
+      (or explicit-name "(no-name)")))))
 
 (defun disco-root--channel-display-name (channel)
   "Return display name for CHANNEL independent of badge suffixes."
-  (if (memq (alist-get 'type channel) '(1 3))
+  (if (disco-channel-private-p channel)
       (disco-root--private-channel-display-name channel)
     (or (alist-get 'name channel) "(no-name)")))
 
@@ -4493,30 +4511,39 @@ SCOPE is a symbol describing where the row is rendered."
                    (concat " " trail)
                  "")))))
       (setq base-label
-            (pcase channel-type
-              (1 (format "[dm] %s%s%s" name state-suffix trail-suffix))
-              (3 (format "[group] %s%s%s" name state-suffix trail-suffix))
-              ((or 10 11 12)
-               (let ((tags (disco-root--thread-status-tags channel)))
-                 (format "[thread] %s%s%s%s"
-                         name
-                         (if (string-empty-p tags)
-                             ""
-                           (format " (%s)" tags))
-                         state-suffix
-                         trail-suffix)))
-              ((or 0 5 15 16)
-               (let* ((thread-count (disco-root--thread-count-under-parent channel))
-                      (suffix (if (> thread-count 0)
-                                  (format " (%d threads)" thread-count)
-                                "")))
-                 (pcase channel-type
-                   ((or 0 5) (format "#%s%s%s%s" name suffix state-suffix trail-suffix))
-                   (15 (format "[forum] %s%s%s%s" name suffix state-suffix trail-suffix))
-                   (16 (format "[media] %s%s%s%s" name suffix state-suffix trail-suffix)))))
-              (2 (format "[voice] %s%s%s" name state-suffix trail-suffix))
-              (13 (format "[stage] %s%s%s" name state-suffix trail-suffix))
-              (_ (format "[type-%s] %s%s%s" channel-type name state-suffix trail-suffix)))))
+            (cond
+             ((disco-channel-direct-message-p channel-type)
+              (format "[dm] %s%s%s" name state-suffix trail-suffix))
+             ((disco-channel-group-dm-p channel-type)
+              (format "[group] %s%s%s" name state-suffix trail-suffix))
+             (t
+              (pcase channel-type
+                ((or 10 11 12)
+                 (let ((tags (disco-root--thread-status-tags channel)))
+                   (format "[thread] %s%s%s%s"
+                           name
+                           (if (string-empty-p tags)
+                               ""
+                             (format " (%s)" tags))
+                           state-suffix
+                           trail-suffix)))
+                ((or 0 5 15 16)
+                 (let* ((thread-count (disco-root--thread-count-under-parent channel))
+                        (suffix (if (> thread-count 0)
+                                    (format " (%d threads)" thread-count)
+                                  "")))
+                   (pcase channel-type
+                     ((or 0 5)
+                      (format "#%s%s%s%s" name suffix state-suffix trail-suffix))
+                     (15
+                      (format "[forum] %s%s%s%s" name suffix state-suffix trail-suffix))
+                     (16
+                      (format "[media] %s%s%s%s" name suffix state-suffix trail-suffix)))))
+                (2 (format "[voice] %s%s%s" name state-suffix trail-suffix))
+                (13 (format "[stage] %s%s%s" name state-suffix trail-suffix))
+                (_
+                 (format "[type-%s] %s%s%s"
+                         channel-type name state-suffix trail-suffix)))))))
     (disco-root--append-extra-info
      base-label
      'channel
@@ -4572,7 +4599,7 @@ SCOPE is a symbol describing where the row is rendered."
     ('unread
      (disco-root--channel-has-unread-p channel))
     ('dms
-     (memq (alist-get 'type channel) '(1 3)))
+     (disco-channel-private-p channel))
     (_ t)))
 
 (defun disco-root--channel-visible-in-view-p (channel)
@@ -4940,7 +4967,7 @@ Higher score means channel should appear earlier in activity mode."
                          :tab tab)))
 
 (defun disco-root--insert-private-channels ()
-  "Insert visible private-channel (DM/group DM) rows into root buffer."
+  "Insert visible private-channel rows into root buffer."
   (let ((channels (disco-root--visible-private-channels)))
     (if channels
         (dolist (channel channels)
@@ -5290,18 +5317,18 @@ When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
       (pop-to-buffer buf))))
 
 (defun disco-root--open-channel (channel-id)
-  "Open CHANNEL-ID according to channel semantics.
-
-Forum/media parent channels open the active-thread listing buffer; other
-channels open room timeline buffers."
-  (let ((channel (and channel-id (disco-state-channel channel-id))))
+  "Open CHANNEL-ID according to channel semantics."
+  (let* ((channel (and channel-id (disco-state-channel channel-id)))
+         (open-mode (and channel (disco-channel-open-mode channel))))
     (unless channel
       (user-error "disco: channel %s is unavailable" channel-id))
-    (unless (disco-root--openable-channel-p channel)
-      (user-error "disco: channel %s does not support timeline view" channel-id))
-    (if (disco-root--forum-or-media-channel-p channel)
-        (disco-root-open-parent-threads channel-id)
-      (disco-room-open channel-id (disco-root--channel-display-name channel)))))
+    (unless open-mode
+      (user-error "disco: channel %s does not support opening" channel-id))
+    (pcase open-mode
+      ('thread-list
+       (disco-root-open-parent-threads channel-id))
+      (_
+       (disco-room-open channel-id (disco-root--channel-display-name channel))))))
 
 (defun disco-root-archived-threads-refresh ()
   "Refresh archived thread list in current archived-thread buffer."

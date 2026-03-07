@@ -452,7 +452,7 @@ BODY-TYPE is forwarded to transport layer."
    :on-error on-error))
 
 (defun disco-api-user-private-channels ()
-  "Fetch current user's private channels (DM/group DM) list."
+  "Fetch current user's private channel list."
   (disco-api--request "GET" "/users/@me/channels" nil nil nil))
 
 (cl-defun disco-api-user-private-channels-async (&key on-success on-error)
