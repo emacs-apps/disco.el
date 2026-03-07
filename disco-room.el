@@ -822,16 +822,39 @@ negatives."
           (disco-room--required-send-permissions channel)
           nil))))
 
+(defun disco-room--thread-send-restriction-reason (&optional channel)
+  "Return thread-local send restriction reason for CHANNEL, or nil."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (when (disco-room--thread-channel-p channel)
+      (let ((tags (delq nil (list (and (disco-room--thread-archived-p channel) "archived")
+                                  (and (disco-room--thread-locked-p channel) "locked")))))
+        (when tags
+          (format "current thread is %s" (mapconcat #'identity tags ", ")))))))
+
+(defun disco-room--room-send-restriction-reason (&optional extra-permissions channel)
+  "Return send restriction reason for current room CHANNEL, or nil.
+
+EXTRA-PERMISSIONS augments the base send permission set for this room."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (thread-reason (disco-room--thread-send-restriction-reason channel))
+         (permissions (append (disco-room--required-send-permissions channel)
+                              (or extra-permissions '())))
+         (missing (and channel
+                       (disco-permission-channel-known-p channel)
+                       (disco-permission-channel-missing channel permissions nil))))
+    (or thread-reason
+        (when missing
+          (format "missing %s"
+                  (mapconcat #'disco-permission-display-name missing ", "))))))
+
 (defun disco-room--composer-visible-p (&optional channel)
   "Return non-nil when room composer should be shown for CHANNEL."
-  (not (disco-room--composer-missing-permissions channel)))
+  (not (disco-room--room-send-restriction-reason nil channel)))
 
 (defun disco-room--composer-hidden-status-line (&optional channel)
   "Return read-only status line when room composer is hidden for CHANNEL."
-  (let ((missing (disco-room--composer-missing-permissions channel)))
-    (when missing
-      (format "(read-only room; composer hidden: missing %s)"
-              (mapconcat #'disco-permission-display-name missing ", ")))))
+  (when-let* ((reason (disco-room--room-send-restriction-reason nil channel)))
+    (format "(read-only room; composer hidden: %s)" reason)))
 
 (defun disco-room--composer-edit-active-p ()
   "Return non-nil when room composer is editing an existing message."
@@ -842,6 +865,80 @@ negatives."
   "Return target message id for active composer edit, or nil."
   (and (disco-room--composer-edit-active-p)
        (plist-get disco-room--pending-edit :message-id)))
+
+(defun disco-room--composer-aux-active-p ()
+  "Return non-nil when room composer currently has reply/edit context."
+  (or (disco-room--composer-edit-active-p)
+      (not (null disco-room--pending-reply-to))))
+
+(defun disco-room--composer-aux-context-name ()
+  "Return human-readable name for active composer aux context, or nil."
+  (cond
+   ((disco-room--composer-edit-active-p) "editing a message")
+   (disco-room--pending-reply-to "replying to a message")
+   (t nil)))
+
+(defun disco-room--message-owned-by-current-user-p (msg &optional unknown-value)
+  "Return non-nil when MSG belongs to current user.
+
+If ownership cannot be determined, return UNKNOWN-VALUE."
+  (let* ((author-id (and (listp msg) (disco-room--message-author-id msg)))
+         (self-id (disco-gateway-current-user-id)))
+    (if (or (null author-id) (null self-id))
+        unknown-value
+      (equal (format "%s" author-id) (format "%s" self-id)))))
+
+(defun disco-room--edit-permission-reason (&optional msg)
+  "Return edit permission/restriction reason for MSG, or nil."
+  (let* ((channel (disco-room--channel-object))
+         (base-reason (disco-room--room-send-restriction-reason nil channel))
+         (missing-manage
+          (and (listp msg)
+               channel
+               (disco-permission-channel-known-p channel)
+               (not (disco-room--message-owned-by-current-user-p msg t))
+               (disco-permission-channel-missing channel '(manage-messages) nil))))
+    (or base-reason
+        (when missing-manage
+          (format "missing %s"
+                  (mapconcat #'disco-permission-display-name missing-manage ", "))))))
+
+(defun disco-room--attach-unavailable-reason ()
+  "Return reason attach-file action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason '(attach-files))
+      (when (disco-room--composer-edit-active-p)
+        "attachments are unavailable while editing a message")))
+
+(defun disco-room--reply-unavailable-reason ()
+  "Return reason reply action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason '(read-message-history))
+      (when (disco-room--composer-edit-active-p)
+        "cancel the active edit before starting a reply")))
+
+(defun disco-room--forward-unavailable-reason ()
+  "Return reason forward action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason)
+      (when-let* ((aux (disco-room--composer-aux-context-name)))
+        (format "cancel %s before forwarding" aux))))
+
+(defun disco-room--poll-unavailable-reason ()
+  "Return reason send-poll action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason '(send-polls))
+      (when-let* ((aux (disco-room--composer-aux-context-name)))
+        (format "cancel %s before sending a poll" aux))))
+
+(defun disco-room--edit-start-unavailable-reason (&optional msg)
+  "Return reason entering composer edit mode for MSG is unavailable, or nil."
+  (or (when (disco-room--composer-edit-active-p)
+        "already editing a message")
+      (when disco-room--pending-reply-to
+        "cancel the active reply before editing a message")
+      (disco-room--edit-permission-reason msg)))
+
+(defun disco-room--ensure-action-available (reason action)
+  "Signal `user-error' when ACTION is unavailable for REASON."
+  (when reason
+    (user-error "disco: cannot %s: %s" action reason)))
 
 (defun disco-room--copy-attachment-token-table ()
   "Return deep copy of current attachment token table as alist entries."
@@ -6638,33 +6735,40 @@ enabled, include `replied_user'."
 DURATION is in hours. ALLOW-MULTISELECT toggles multi-select behavior.
 CONTENT is optional extra text sent alongside the poll."
   (interactive
-   (let* ((question-input (string-trim (read-string "Poll question: ")))
-          (duration-input (read-number "Poll duration (hours): "
-                                       disco-room-poll-default-duration-hours))
-          (allow-multi (y-or-n-p "Allow multiple answers? "))
-          (content-input (string-trim (read-string "Optional message content: ")))
-          (max-options (max 2 disco-room-poll-max-options))
-          (idx 1)
-          (options nil)
-          opt)
-     (while (and (<= idx max-options)
-                 (not (string-empty-p
-                       (setq opt (string-trim
-                                  (read-string
-                                   (format "Option %d (empty to finish): " idx)))))))
-       (push opt options)
-       (setq idx (1+ idx)))
-     (unless (and (stringp question-input)
-                  (not (string-empty-p question-input)))
-       (user-error "disco: poll question cannot be empty"))
-     (unless (>= (length options) 2)
-       (user-error "disco: poll requires at least 2 options"))
-     (list question-input
-           (nreverse options)
-           duration-input
-           allow-multi
-           (unless (string-empty-p content-input)
-             content-input))))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--poll-unavailable-reason)
+      "send polls")
+     (let* ((question-input (string-trim (read-string "Poll question: ")))
+            (duration-input (read-number "Poll duration (hours): "
+                                         disco-room-poll-default-duration-hours))
+            (allow-multi (y-or-n-p "Allow multiple answers? "))
+            (content-input (string-trim (read-string "Optional message content: ")))
+            (max-options (max 2 disco-room-poll-max-options))
+            (idx 1)
+            (options nil)
+            opt)
+       (while (and (<= idx max-options)
+                   (not (string-empty-p
+                         (setq opt (string-trim
+                                    (read-string
+                                     (format "Option %d (empty to finish): " idx)))))))
+         (push opt options)
+         (setq idx (1+ idx)))
+       (unless (and (stringp question-input)
+                    (not (string-empty-p question-input)))
+         (user-error "disco: poll question cannot be empty"))
+       (unless (>= (length options) 2)
+         (user-error "disco: poll requires at least 2 options"))
+       (list question-input
+             (nreverse options)
+             duration-input
+             allow-multi
+             (unless (string-empty-p content-input)
+               content-input)))))
+  (disco-room--ensure-action-available
+   (disco-room--poll-unavailable-reason)
+   "send polls")
   (let* ((poll `((question . ((text . ,question)))
                  (answers . ,(mapcar (lambda (option)
                                        `((poll_media . ((text . ,option)))) )
@@ -6708,11 +6812,18 @@ CONTENT is optional extra text sent alongside the poll."
 
 DESCRIPTION is optional per-file description."
   (interactive
-   (let* ((path (read-file-name "Attach file: " nil nil t))
-          (description-input (string-trim (read-string "Attachment description (optional): ")))
-          (description (unless (string-empty-p description-input)
-                         description-input)))
-     (list path description)))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--attach-unavailable-reason)
+      "attach files")
+     (let* ((path (read-file-name "Attach file: " nil nil t))
+            (description-input (string-trim (read-string "Attachment description (optional): ")))
+            (description (unless (string-empty-p description-input)
+                           description-input)))
+       (list path description))))
+  (disco-room--ensure-action-available
+   (disco-room--attach-unavailable-reason)
+   "attach files")
   (unless (file-readable-p path)
     (user-error "disco: file is not readable: %s" path))
   (let* ((token-id (disco-room--next-attachment-token-id))
@@ -6768,6 +6879,8 @@ When called with prefix argument, force draft edit in minibuffer first."
                (allowed-mentions (disco-room--send-allowed-mentions
                                   (not (null reply-to))))
                (attachments (copy-tree token-attachments))
+               (edit-message (and edit-message-id
+                                  (disco-room--composer-context-message edit-message-id)))
                (required-permissions
                 (append
                  (disco-room--required-send-permissions)
@@ -6777,6 +6890,9 @@ When called with prefix argument, force draft edit in minibuffer first."
                    '(read-message-history)))))
           (if edit-message-id
               (progn
+                (disco-room--ensure-action-available
+                 (disco-room--edit-permission-reason edit-message)
+                 "edit messages")
                 (when has-attachments
                   (user-error "disco: editing via composer does not support attachments yet"))
                 (setq disco-room--draft-input "")
@@ -6805,6 +6921,11 @@ When called with prefix argument, force draft edit in minibuffer first."
                        (message "disco: edit failed for %s: %s"
                                 edit-message-id
                                 (disco-room--async-error-message err)))))))
+            (disco-room--ensure-action-available
+             (disco-room--room-send-restriction-reason
+              (append (when has-attachments '(attach-files))
+                      (when reply-to '(read-message-history))))
+             "send messages")
             (disco-permission-ensure-channel
              (disco-room--channel-object)
              required-permissions
@@ -6919,16 +7040,23 @@ When called with prefix argument, force draft edit in minibuffer first."
 
 When called interactively, defaults to message under point."
   (interactive
-   (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
-          (fallback (or at-point (disco-room--latest-message-id)))
-          (raw (read-string
-                (if fallback
-                    (format "Reply to message ID (default %s): " fallback)
-                  "Reply to message ID: "))))
-     (list (if (string-empty-p raw)
-               (or fallback
-                   (user-error "disco: no target message available"))
-             raw))))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--reply-unavailable-reason)
+      "start replies")
+     (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
+            (fallback (or at-point (disco-room--latest-message-id)))
+            (raw (read-string
+                  (if fallback
+                      (format "Reply to message ID (default %s): " fallback)
+                    "Reply to message ID: "))))
+       (list (if (string-empty-p raw)
+                 (or fallback
+                     (user-error "disco: no target message available"))
+               raw)))))
+  (disco-room--ensure-action-available
+   (disco-room--reply-unavailable-reason)
+   "start replies")
   (when (disco-room--composer-edit-active-p)
     (disco-room--composer-edit-clear t))
   (setq disco-room--pending-reply-to message-id)
@@ -6948,32 +7076,39 @@ When called interactively, defaults to message under point."
 CONTENT is optional text sent alongside the forwarded reference.
 FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
   (interactive
-   (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
-          (fallback-message (or at-point (disco-room--latest-message-id)))
-          (message-raw (read-string
-                        (if fallback-message
-                            (format "Forward message ID (default %s): " fallback-message)
-                          "Forward message ID: ")))
-          (message-id (if (string-empty-p message-raw)
-                          (or fallback-message
-                              (user-error "disco: no message id provided"))
-                        message-raw))
-          (fallback-channel (or disco-room--channel-id ""))
-          (channel-raw (read-string
-                        (if (string-empty-p fallback-channel)
-                            "Source channel ID: "
-                          (format "Source channel ID (default %s): " fallback-channel))))
-          (source-channel-id (if (string-empty-p channel-raw)
-                                 (or fallback-channel
-                                     (user-error "disco: no source channel id provided"))
-                               channel-raw))
-          (content-raw (string-trim (read-string "Optional forward comment: ")))
-          (forward-only (disco-room--read-forward-only source-channel-id message-id)))
-     (list message-id
-           source-channel-id
-           (unless (string-empty-p content-raw)
-             content-raw)
-           forward-only)))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--forward-unavailable-reason)
+      "forward messages")
+     (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
+            (fallback-message (or at-point (disco-room--latest-message-id)))
+            (message-raw (read-string
+                          (if fallback-message
+                              (format "Forward message ID (default %s): " fallback-message)
+                            "Forward message ID: ")))
+            (message-id (if (string-empty-p message-raw)
+                            (or fallback-message
+                                (user-error "disco: no message id provided"))
+                          message-raw))
+            (fallback-channel (or disco-room--channel-id ""))
+            (channel-raw (read-string
+                          (if (string-empty-p fallback-channel)
+                              "Source channel ID: "
+                            (format "Source channel ID (default %s): " fallback-channel))))
+            (source-channel-id (if (string-empty-p channel-raw)
+                                   (or fallback-channel
+                                       (user-error "disco: no source channel id provided"))
+                                 channel-raw))
+            (content-raw (string-trim (read-string "Optional forward comment: ")))
+            (forward-only (disco-room--read-forward-only source-channel-id message-id)))
+       (list message-id
+             source-channel-id
+             (unless (string-empty-p content-raw)
+               content-raw)
+             forward-only))))
+  (disco-room--ensure-action-available
+   (disco-room--forward-unavailable-reason)
+   "forward messages")
   (let* ((target-channel-id disco-room--channel-id)
          (source-channel-id (or source-channel-id disco-room--channel-id))
          (source-channel (and source-channel-id
@@ -7092,7 +7227,14 @@ Otherwise open draft editor."
 (defun disco-room-edit-message ()
   "Enter composer edit mode for message at point in current room."
   (interactive)
-  (disco-room--composer-enter-edit (disco-room--message-at-point)))
+  (disco-room--ensure-action-available
+   (disco-room--edit-start-unavailable-reason nil)
+   "edit messages")
+  (let ((msg (disco-room--message-at-point)))
+    (disco-room--ensure-action-available
+     (disco-room--edit-start-unavailable-reason msg)
+     "edit messages")
+    (disco-room--composer-enter-edit msg)))
 
 (defun disco-room-delete-message ()
   "Delete message at point in current room."
@@ -7430,21 +7572,29 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("g" "Refresh room" disco-room-refresh)
     ("o" "Load older" disco-room-load-older-messages)
     ("c" "Send message" disco-room-send-message)
-    ("f" "Attach file" disco-room-attach-file)
+    ("f" "Attach file" disco-room-attach-file
+     :inapt-if disco-room--attach-unavailable-reason)
     ("D" "Remove attach token" disco-room-remove-attachment-token-at-point)
     ("x" "Clear attachments" disco-room-clear-attachments)
     ("v" "List attachments" disco-room-list-attachments)
     ("V" "Edit attach desc" disco-room-edit-attachment-description)
     ("O" "Reorder attachments" disco-room-reorder-attachments)
-    ("r" "Reply to message" disco-room-reply-to-message)
-    ("F" "Forward message" disco-room-forward-message)
-    ("k" "Cancel reply" disco-room-cancel-reply)
-    ("e" "Edit at point" disco-room-edit-message)
+    ("r" "Reply to message" disco-room-reply-to-message
+     :inapt-if disco-room--reply-unavailable-reason)
+    ("F" "Forward message" disco-room-forward-message
+     :inapt-if disco-room--forward-unavailable-reason)
+    ("k" "Cancel reply/edit" disco-room-cancel-reply
+     :inapt-if (lambda () (not (disco-room--composer-aux-active-p))))
+    ("e" "Edit at point" disco-room-edit-message
+     :inapt-if (lambda ()
+                 (disco-room--edit-start-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
     ("d" "Delete at point" disco-room-delete-message)
     ("!" "Toggle reaction" disco-room-toggle-reaction)
     ("+" "Add reaction" disco-room-add-reaction)
     ("-" "Remove reaction" disco-room-remove-reaction)
-    ("p" "Send poll" disco-room-send-poll)
+    ("p" "Send poll" disco-room-send-poll
+     :inapt-if disco-room--poll-unavailable-reason)
     ("w" "Select answer" disco-room-vote-poll-answer)
     ("u" "Unselect answer" disco-room-remove-poll-vote)
     ("t" "Toggle staged answer" disco-room-toggle-poll-answer)
