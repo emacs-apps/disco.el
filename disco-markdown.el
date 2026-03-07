@@ -626,14 +626,18 @@ LINE-START and LINE-END delimit the line contents in the current buffer."
              line-start line-end prefix 'disco-markdown-blockquote-face))
            ((not (get-text-property line-start 'disco-markdown-protected))
             (cond
-             ((looking-at disco-markdown--regexp-blockquote-rest-line)
+             ((and (looking-at disco-markdown--regexp-blockquote-rest-line)
+                   (not (get-text-property (match-end 1)
+                                           'disco-markdown-protected)))
               (delete-region (match-end 1) (match-end 0))
               (setq line-start (line-beginning-position)
                     line-end (line-end-position)
                     quote-rest t)
               (disco-markdown--apply-line-prefix-properties
                line-start line-end prefix 'disco-markdown-blockquote-face))
-             ((looking-at disco-markdown--regexp-blockquote-line)
+             ((and (looking-at disco-markdown--regexp-blockquote-line)
+                   (not (get-text-property (match-end 1)
+                                           'disco-markdown-protected)))
               (delete-region (match-end 1) (match-end 0))
               (setq line-start (line-beginning-position)
                     line-end (line-end-position))
@@ -651,7 +655,9 @@ LINE-START and LINE-END delimit the line contents in the current buffer."
       (let ((line-start (line-beginning-position)))
         (goto-char line-start)
         (when (and (not (get-text-property line-start 'disco-markdown-protected))
-                   (looking-at disco-markdown--regexp-unordered-list-line))
+                   (looking-at disco-markdown--regexp-unordered-list-line)
+                   (not (get-text-property (match-beginning 2)
+                                           'disco-markdown-protected)))
           (delete-region (match-end 1) (match-end 0))
           (goto-char (match-end 1))
           (let ((marker-start (point)))
@@ -671,7 +677,9 @@ LINE-START and LINE-END delimit the line contents in the current buffer."
             (line-end (line-end-position)))
         (goto-char line-start)
         (when (and (not (get-text-property line-start 'disco-markdown-protected))
-                   (looking-at disco-markdown--regexp-heading-marker))
+                   (looking-at disco-markdown--regexp-heading-marker)
+                   (not (get-text-property (match-beginning 2)
+                                           'disco-markdown-protected)))
           (let ((level (min 6 (length (match-string-no-properties 2)))))
             (delete-region (match-beginning 2) (match-end 0))
             (setq line-start (line-beginning-position)
@@ -720,7 +728,7 @@ visible ATX marker fallback so all heading levels render consistently."
     (cons disco-markdown--regexp-inline-link
           (lambda ()
             (disco-markdown--make-link-string
-             (match-string-no-properties 1)
+             (buffer-substring (match-beginning 1) (match-end 1))
              (match-string-no-properties 2))))
     (cons disco-markdown--regexp-angle-autolink
           (lambda ()
@@ -732,6 +740,7 @@ visible ATX marker fallback so all heading levels render consistently."
   (let ((rendered (if (stringp text) text "")))
     (setq rendered (disco-markdown--apply-fenced-code-blocks rendered))
     (setq rendered (disco-markdown--apply-inline-code-spans rendered))
+    (setq rendered (disco-markdown--apply-escapes rendered))
     (setq rendered (disco-markdown--apply-blockquote-lines rendered))
     (setq rendered (disco-markdown--apply-unordered-list-lines rendered))
     (setq rendered (disco-markdown--apply-internal-link-replacements rendered))
@@ -957,6 +966,11 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
   (and char
        (memq (char-syntax char) '(?w ?_))))
 
+(defun disco-markdown--markdown-escapable-char-p (char)
+  "Return non-nil when CHAR can be escaped in Discord markdown text."
+  (and (characterp char)
+       (string-match-p "[[:punct:]]" (char-to-string char))))
+
 (defun disco-markdown--lang-mode-predicate (mode)
   "Return non-nil when MODE is a usable major mode for code fontification."
   (and mode
@@ -1024,6 +1038,26 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
                            '(disco-markdown-protected t)
                            payload))
     payload))
+
+(defun disco-markdown--apply-escapes (text)
+  "Remove Markdown escape backslashes from TEXT and protect escaped chars."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (while (search-forward "\\" nil t)
+      (let ((slash-pos (1- (point))))
+        (unless (disco-markdown--position-protected-p 'internal slash-pos)
+          (let ((next-char (char-after)))
+            (when (and next-char
+                       (disco-markdown--markdown-escapable-char-p next-char)
+                       (not (disco-markdown--position-protected-p 'internal
+                                                                  (point))))
+              (delete-region slash-pos (point))
+              (add-text-properties slash-pos (1+ slash-pos)
+                                   '(disco-markdown-protected t)
+                                   (current-buffer))
+              (goto-char (1+ slash-pos)))))))
+    (buffer-string)))
 
 (defun disco-markdown--inline-delimiter-content-valid-p (open-end close-start)
   "Return non-nil when delimiter span between OPEN-END and CLOSE-START is usable."

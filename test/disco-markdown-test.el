@@ -247,6 +247,45 @@
              (get-text-property (- three-pos 2) 'face rendered)
              'disco-markdown-list-marker-face))))
 
+(ert-deftest disco-markdown-render-internal-escapes-protect-inline-markup ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "\\*literal\\* \\||spoiler||"
+                    :context 'test-internal-escapes-inline
+                    :spoiler-message-id "m1"))
+         (plain (substring-no-properties rendered))
+         (literal-pos (string-match "literal" plain))
+         (spoiler-pos (string-match "spoiler" plain)))
+    (should (equal "*literal* ||spoiler||" plain))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property literal-pos 'face rendered)
+                 'disco-markdown-emphasis-face))
+    (should-not (get-text-property spoiler-pos
+                                   'disco-markdown-spoiler-message-id
+                                   rendered))))
+
+(ert-deftest disco-markdown-render-internal-escapes-protect-block-markup ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "\\> not quote\n\\- not list\n\\# not heading\n\\-# not subtitle"
+                    :context 'test-internal-escapes-block))
+         (plain (substring-no-properties rendered))
+         (list-pos (string-match "- not list" plain))
+         (heading-pos (string-match "# not heading" plain))
+         (subtitle-pos (string-match "-# not subtitle" plain)))
+    (should (equal "> not quote\n- not list\n# not heading\n-# not subtitle"
+                   plain))
+    (should-not (get-text-property 0 'line-prefix rendered))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property list-pos 'face rendered)
+                 'disco-markdown-list-marker-face))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property heading-pos 'face rendered)
+                 'disco-markdown-heading-1-face))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property subtitle-pos 'face rendered)
+                 'disco-markdown-subtitle-face))))
+
 (ert-deftest disco-markdown-render-inline-links-are-openable ()
   (skip-unless (disco-markdown--markdown-mode-available-p))
   (let ((disco-markdown-backend 'markdown-mode))
