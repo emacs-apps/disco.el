@@ -76,6 +76,20 @@ the false string."
     (alist-get value disco-api--thread-search-sort-order-alist))
    (t nil)))
 
+(defconst disco-api--message-content-limit 2000
+  "Maximum allowed Discord message content length in characters.")
+
+(defun disco-api--validate-message-content-length (content field-name)
+  "Signal `user-error' when CONTENT exceeds Discord's message limit.
+
+FIELD-NAME is used to describe the failing payload field."
+  (when (and (stringp content)
+             (> (length content) disco-api--message-content-limit))
+    (user-error "disco: %s exceeds Discord's %d character limit"
+                field-name
+                disco-api--message-content-limit))
+  content)
+
 (defconst disco-api--message-search-sort-by-alist
   '((timestamp . "timestamp")
     (relevance . "relevance"))
@@ -758,7 +772,9 @@ POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing."
           (and (stringp content)
                (let ((trimmed (string-trim-right content)))
                  (unless (string-empty-p trimmed)
-                   trimmed))))
+                   (disco-api--validate-message-content-length
+                    trimmed
+                    "content")))))
          (normalized-allowed-mentions
           (disco-api--normalize-allowed-mentions allowed-mentions))
          payload)
@@ -891,7 +907,9 @@ When TOKEN is omitted, return `:empty-object'."
   "Build payload for message edit endpoints.
 
 ALLOWED-MENTIONS is normalized using `disco-api--normalize-allowed-mentions'."
-  (let ((payload `((content . ,content))))
+  (let ((payload `((content . ,(disco-api--validate-message-content-length
+                                 content
+                                 "content")))))
     (when allowed-mentions
       (let ((normalized (disco-api--normalize-allowed-mentions allowed-mentions)))
         (when normalized

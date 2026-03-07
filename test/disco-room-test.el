@@ -803,6 +803,47 @@
         (should-not disco-room--revealed-spoiler-message-id)
         (should (equal '("m2") invalidated))))))
 
+(ert-deftest disco-room-send-message-rejects-overlong-content-before-send-state ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chan")
+    (setq-local disco-room--draft-input
+                (make-string (1+ disco-api--message-content-limit) ?a))
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "2048")))
+    (should-error (disco-room-send-message) :type 'error)
+    (should-not disco-room--send-in-flight)
+    (should (= (1+ disco-api--message-content-limit)
+               (length disco-room--draft-input)))))
+
+(ert-deftest disco-room-send-poll-rejects-overlong-content-before-send-state ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chan")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "562949953423360")))
+    (should-error
+     (disco-room-send-poll "Question" '("one" "two") 24 nil
+                           (make-string (1+ disco-api--message-content-limit) ?a))
+     :type 'error)
+    (should-not disco-room--send-in-flight)))
+
+(ert-deftest disco-room-forward-message-rejects-overlong-comment-before-send-state ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chan")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "2048")))
+    (cl-letf (((symbol-function 'disco-room--ensure-jump-permissions)
+               (lambda (&rest _args) t)))
+      (should-error
+       (disco-room-forward-message
+        "m1" "chan"
+        (make-string (1+ disco-api--message-content-limit) ?a)
+        nil)
+       :type 'error)
+      (should-not disco-room--send-in-flight))))
+
 (ert-deftest disco-room-forward-snapshot-content-uses-internal-markdown-renderer ()
   (let* ((disco-markdown-backend 'internal)
          (msg '((id . "m1")

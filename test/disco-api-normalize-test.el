@@ -28,6 +28,24 @@
                   "hi"
                   '((parse . ["users"]))))))
 
+(ert-deftest disco-api-normalize-message-content-length-limit ()
+  (let ((max (make-string disco-api--message-content-limit ?a))
+        (too-long (make-string (1+ disco-api--message-content-limit) ?a)))
+    (should (equal `((content . ,max))
+                   (disco-api--message-send-payload max nil nil nil nil nil)))
+    (should (equal `((content . ,max))
+                   (disco-api--message-edit-payload max nil)))
+    (should-error (disco-api--message-send-payload too-long nil nil nil nil nil)
+                  :type 'error)
+    (should-error (disco-api--message-edit-payload too-long nil)
+                  :type 'error)))
+
+(ert-deftest disco-api-normalize-message-send-payload-trims-before-limit-check ()
+  (let* ((trimmed (make-string disco-api--message-content-limit ?a))
+         (content (concat trimmed "   ")))
+    (should (equal `((content . ,trimmed))
+                   (disco-api--message-send-payload content nil nil nil nil nil)))))
+
 (ert-deftest disco-api-normalize-token-payload ()
   (should (eq :empty-object (disco-api--token-payload nil)))
   (should (equal '((token . "tok")) (disco-api--token-payload "tok")))

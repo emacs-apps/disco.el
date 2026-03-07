@@ -36,6 +36,9 @@
 (require 'disco-permission)
 (require 'disco-company)
 
+(declare-function disco-api--validate-message-content-length "disco-api-normalize"
+                  (content field-name))
+
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--channel-name nil)
 (defvar-local disco-room--guild-id nil)
@@ -7135,6 +7138,7 @@ CONTENT is optional extra text sent alongside the poll."
          (required-permissions
           (append (disco-room--required-send-permissions)
                   '(send-polls))))
+    (disco-api--validate-message-content-length content "content")
     (disco-permission-ensure-channel
      (disco-room--channel-object)
      required-permissions
@@ -7233,6 +7237,7 @@ When called with prefix argument, force draft edit in minibuffer first."
            (content-without-tokens (disco-room--draft-without-attachment-tokens content))
            (normalized (string-trim-right (or content-without-tokens "")))
            (edit-message-id (disco-room--composer-edit-message-id)))
+      (disco-api--validate-message-content-length normalized "content")
       (if (and (string-empty-p normalized)
                (not has-attachments)
                (not edit-message-id))
@@ -7485,6 +7490,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
          (room-buffer (current-buffer))
          (allowed-mentions (and normalized-content
                                 (disco-room--send-allowed-mentions))))
+    (disco-api--validate-message-content-length normalized-content "content")
     (unless (and message-id (not (string-empty-p (format "%s" message-id))))
       (user-error "disco: message id cannot be empty"))
     (unless (and source-channel-id
