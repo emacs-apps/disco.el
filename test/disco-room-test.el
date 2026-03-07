@@ -427,6 +427,49 @@
           (should-error (disco-room-attach-file path) :type 'user-error)
         (delete-file path)))))
 
+(ert-deftest disco-room-remove-attachment-token-errors-while-editing ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--pending-edit '(:type edit :message-id "m1" :saved-state nil))
+    (setq-local disco-room--draft-input "[file:1]")
+    (should-error (disco-room-remove-attachment-token-at-point) :type 'user-error)))
+
+(ert-deftest disco-room-delete-message-errors-without-manage-messages ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (let ((msg '((id . "m2")
+                 (channel_id . "chat")
+                 (content . "body")
+                 (author . ((id . "u2") (username . "bob"))))))
+      (disco-state-reset)
+      (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
+      (cl-letf (((symbol-function 'disco-room--message-at-point)
+                 (lambda () msg))
+                ((symbol-function 'disco-gateway-current-user-id)
+                 (lambda () "u1")))
+        (should-error (disco-room-delete-message) :type 'user-error)))))
+
+(ert-deftest disco-room-create-thread-from-message-errors-without-create-public-threads ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
+    (should-error (disco-room-create-thread-from-message "topic" "m1") :type 'user-error)))
+
+(ert-deftest disco-room-create-thread-errors-without-create-private-threads ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     `((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . ,(number-to-string (ash 1 35)))))
+    (should-error (disco-room-create-thread "topic" 12 nil nil nil) :type 'user-error)))
+
 (ert-deftest disco-room-send-poll-errors-while-replying ()
   (with-temp-buffer
     (disco-room-mode)

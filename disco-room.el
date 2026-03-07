@@ -935,6 +935,90 @@ If ownership cannot be determined, return UNKNOWN-VALUE."
         "cancel the active reply before editing a message")
       (disco-room--edit-permission-reason msg)))
 
+(defun disco-room--attachment-token-count ()
+  "Return number of queued attachment tokens in current draft."
+  (length (disco-room--attachment-token-ids-in-text (disco-room--current-draft))))
+
+(defun disco-room--attachment-token-action-unavailable-reason (&optional min-count)
+  "Return reason attachment-token actions are unavailable, or nil.
+
+MIN-COUNT optionally requires at least that many queued attachment tokens."
+  (or (when (disco-room--composer-edit-active-p)
+        "attachment tokens are unavailable while editing a message")
+      (let ((count (disco-room--attachment-token-count)))
+        (cond
+         ((<= (or min-count 1) 0)
+          nil)
+         ((zerop count)
+          "no queued attachments")
+         ((and (integerp min-count) (< count min-count))
+          (format "need at least %d queued attachments" min-count))))))
+
+(defun disco-room--send-message-unavailable-reason ()
+  "Return reason send-message action is unavailable, or nil."
+  (let* ((draft (disco-room--current-draft))
+         (has-attachments (not (null (disco-room--attachments-from-draft draft))))
+         (reply-to disco-room--pending-reply-to)
+         (edit-message-id (disco-room--composer-edit-message-id))
+         (edit-message (and edit-message-id
+                            (disco-room--composer-context-message edit-message-id))))
+    (if edit-message-id
+        (or (disco-room--edit-permission-reason edit-message)
+            (when has-attachments
+              "attachments are unavailable while editing a message"))
+      (disco-room--room-send-restriction-reason
+       (append (when has-attachments '(attach-files))
+               (when reply-to '(read-message-history)))))))
+
+(defun disco-room--delete-message-unavailable-reason (&optional msg)
+  "Return reason delete-message action is unavailable for MSG, or nil."
+  (when (listp msg)
+    (let* ((channel (disco-room--channel-object))
+           (missing-manage
+            (and channel
+                 (disco-permission-channel-known-p channel)
+                 (not (disco-room--message-owned-by-current-user-p msg t))
+                 (disco-permission-channel-missing channel '(manage-messages) nil))))
+      (when missing-manage
+        (format "missing %s"
+                (mapconcat #'disco-permission-display-name missing-manage ", "))))))
+
+(defun disco-room--thread-create-unavailable-reason (&optional type)
+  "Return reason detached thread creation is unavailable for TYPE, or nil.
+
+When TYPE is `:any', accept either public or private-thread permissions on
+regular parent channels. Forum/media parents still require public-thread
+creation permission."
+  (let ((channel (disco-room--channel-object)))
+    (cond
+     ((disco-room--thread-channel-p channel)
+      "open a parent channel room to create a new thread")
+     ((and channel (not (disco-thread-parent-channel-p channel)))
+      "current room channel does not support threads")
+     ((not (and channel (disco-permission-channel-known-p channel)))
+      nil)
+     ((and (eq type :any)
+           (not (disco-room--forum-or-media-channel-p channel)))
+      (unless (or (disco-permission-channel-has-p channel 'create-public-threads nil)
+                  (disco-permission-channel-has-p channel 'create-private-threads nil))
+        (format "missing one of %s"
+                (mapconcat #'disco-permission-display-name
+                           '(create-public-threads create-private-threads)
+                           ", "))))
+     (t
+      (let* ((permissions
+              (if (equal type 12)
+                  '(create-private-threads)
+                '(create-public-threads)))
+             (missing (disco-permission-channel-missing channel permissions nil)))
+        (when missing
+          (format "missing %s"
+                  (mapconcat #'disco-permission-display-name missing ", "))))))))
+
+(defun disco-room--thread-create-from-message-unavailable-reason ()
+  "Return reason create-thread-from-message action is unavailable, or nil."
+  (disco-room--thread-create-unavailable-reason 11))
+
 (defun disco-room--ensure-action-available (reason action)
   "Signal `user-error' when ACTION is unavailable for REASON."
   (when reason
@@ -6158,6 +6242,9 @@ markers are appended in requested order."
 (defun disco-room-remove-attachment-token-at-point ()
   "Remove attachment token at point, or prompt for one when point is outside token."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--attachment-token-action-unavailable-reason 1)
+   "remove attachment tokens")
   (let ((token-bounds (disco-room--attachment-token-bounds-at-point)))
     (cond
      (token-bounds
@@ -6186,6 +6273,10 @@ markers are appended in requested order."
 (defun disco-room-list-attachments ()
   "List queued attachment tokens for current draft."
   (interactive)
+  (disco-room--ensure-action-available
+   (when (disco-room--composer-edit-active-p)
+     "attachment tokens are unavailable while editing a message")
+   "list attachment tokens")
   (let ((choices (disco-room--attachment-token-choices)))
     (if (null choices)
         (message "disco: no queued attachments")
@@ -6194,6 +6285,9 @@ markers are appended in requested order."
 (defun disco-room-edit-attachment-description ()
   "Edit description of one queued attachment token."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--attachment-token-action-unavailable-reason 1)
+   "edit attachment descriptions")
   (let ((token-id (disco-room--choose-attachment-token-id "Edit attachment token: ")))
     (let* ((entry (copy-tree (or (disco-room--attachment-by-token-id token-id)
                                  (user-error "disco: token %s not found" token-id))))
@@ -6214,6 +6308,9 @@ markers are appended in requested order."
 (defun disco-room-reorder-attachments ()
   "Reorder one queued attachment token in the current draft."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--attachment-token-action-unavailable-reason 2)
+   "reorder attachment tokens")
   (let* ((ids (disco-room--attachment-token-ids-in-text (disco-room--current-draft)))
          (count (length ids)))
     (when (< count 2)
@@ -6839,6 +6936,10 @@ DESCRIPTION is optional per-file description."
 (defun disco-room-clear-attachments ()
   "Clear queued attachments for next send in current room."
   (interactive)
+  (disco-room--ensure-action-available
+   (when (disco-room--composer-edit-active-p)
+     "attachment tokens are unavailable while editing a message")
+   "clear attachment tokens")
   (setq disco-room--pending-attachments nil)
   (when disco-room--attachment-token-table
     (clrhash disco-room--attachment-token-table))
@@ -6851,6 +6952,11 @@ DESCRIPTION is optional per-file description."
 
 When called with prefix argument, force draft edit in minibuffer first."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--send-message-unavailable-reason)
+   (if (disco-room--composer-edit-active-p)
+       "save edits"
+     "send messages"))
   (disco-room--sync-draft-from-buffer)
   (cond
    (disco-room--send-in-flight
@@ -7239,7 +7345,11 @@ Otherwise open draft editor."
 (defun disco-room-delete-message ()
   "Delete message at point in current room."
   (interactive)
-  (let* ((message-id (disco-room--message-id-at-point)))
+  (let* ((msg (disco-room--message-at-point))
+         (message-id (alist-get 'id msg)))
+    (disco-room--ensure-action-available
+     (disco-room--delete-message-unavailable-reason msg)
+     "delete messages")
     (when (y-or-n-p (format "Delete message %s? " message-id))
       (let ((room-buffer (current-buffer))
             (channel-id disco-room--channel-id))
@@ -7266,21 +7376,28 @@ Otherwise open draft editor."
 AUTO-ARCHIVE-DURATION is optional minutes.
 RATE-LIMIT-PER-USER is optional slowmode seconds."
   (interactive
-   (let* ((name (read-string "Thread name: "))
-          (default-message-id (disco-room--latest-message-id))
-          (message-raw (read-string
-                        (if default-message-id
-                            (format "Message ID (default %s): " default-message-id)
-                          "Message ID: ")))
-          (message-id (if (string-empty-p message-raw)
-                          (or default-message-id
-                              (user-error "disco: no message id provided and no loaded messages"))
-                        message-raw))
-          (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
-          (rate-limit-per-user
-           (disco-room--read-optional-nonnegative-int
-            "Slowmode seconds (empty for none): ")))
-     (list name message-id auto-archive-duration rate-limit-per-user)))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--thread-create-from-message-unavailable-reason)
+      "create threads from messages")
+     (let* ((name (read-string "Thread name: "))
+            (default-message-id (disco-room--latest-message-id))
+            (message-raw (read-string
+                          (if default-message-id
+                              (format "Message ID (default %s): " default-message-id)
+                            "Message ID: ")))
+            (message-id (if (string-empty-p message-raw)
+                            (or default-message-id
+                                (user-error "disco: no message id provided and no loaded messages"))
+                          message-raw))
+            (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
+            (rate-limit-per-user
+             (disco-room--read-optional-nonnegative-int
+              "Slowmode seconds (empty for none): ")))
+       (list name message-id auto-archive-duration rate-limit-per-user))))
+  (disco-room--ensure-action-available
+   (disco-room--thread-create-from-message-unavailable-reason)
+   "create threads from messages")
   (disco-room--ensure-parent-channel)
   (let* ((thread (disco-api-create-thread-from-message
                   disco-room--channel-id
@@ -7304,16 +7421,23 @@ AUTO-ARCHIVE-DURATION is optional minutes.
 INVITABLE controls private-thread invites when TYPE is 12.
 RATE-LIMIT-PER-USER is optional slowmode seconds."
   (interactive
-   (let* ((name (read-string "Thread name: "))
-          (type (unless (disco-room--forum-or-media-channel-p)
-                  (disco-room--read-detached-thread-type)))
-          (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
-          (invitable (when (equal type 12)
-                       (y-or-n-p "Invitable by non-moderators? ")))
-          (rate-limit-per-user
-           (disco-room--read-optional-nonnegative-int
-            "Slowmode seconds (empty for none): ")))
-     (list name type auto-archive-duration invitable rate-limit-per-user)))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--thread-create-unavailable-reason :any)
+      "create detached threads")
+     (let* ((name (read-string "Thread name: "))
+            (type (unless (disco-room--forum-or-media-channel-p)
+                    (disco-room--read-detached-thread-type)))
+            (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
+            (invitable (when (equal type 12)
+                         (y-or-n-p "Invitable by non-moderators? ")))
+            (rate-limit-per-user
+             (disco-room--read-optional-nonnegative-int
+              "Slowmode seconds (empty for none): ")))
+       (list name type auto-archive-duration invitable rate-limit-per-user))))
+  (disco-room--ensure-action-available
+   (disco-room--thread-create-unavailable-reason (or type :any))
+   "create detached threads")
   (disco-room--ensure-parent-channel)
   (let* ((thread (disco-api-create-thread
                   disco-room--channel-id
@@ -7571,14 +7695,25 @@ When called interactively, empty input clears slowmode (sets to 0)."
   [["Timeline"
     ("g" "Refresh room" disco-room-refresh)
     ("o" "Load older" disco-room-load-older-messages)
-    ("c" "Send message" disco-room-send-message)
+    ("c" "Send message" disco-room-send-message
+     :inapt-if disco-room--send-message-unavailable-reason)
     ("f" "Attach file" disco-room-attach-file
      :inapt-if disco-room--attach-unavailable-reason)
-    ("D" "Remove attach token" disco-room-remove-attachment-token-at-point)
-    ("x" "Clear attachments" disco-room-clear-attachments)
-    ("v" "List attachments" disco-room-list-attachments)
-    ("V" "Edit attach desc" disco-room-edit-attachment-description)
-    ("O" "Reorder attachments" disco-room-reorder-attachments)
+    ("D" "Remove attach token" disco-room-remove-attachment-token-at-point
+     :inapt-if (lambda ()
+                 (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("x" "Clear attachments" disco-room-clear-attachments
+     :inapt-if (lambda ()
+                 (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("v" "List attachments" disco-room-list-attachments
+     :inapt-if (lambda ()
+                 (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("V" "Edit attach desc" disco-room-edit-attachment-description
+     :inapt-if (lambda ()
+                 (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("O" "Reorder attachments" disco-room-reorder-attachments
+     :inapt-if (lambda ()
+                 (disco-room--attachment-token-action-unavailable-reason 2)))
     ("r" "Reply to message" disco-room-reply-to-message
      :inapt-if disco-room--reply-unavailable-reason)
     ("F" "Forward message" disco-room-forward-message
@@ -7589,7 +7724,10 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if (lambda ()
                  (disco-room--edit-start-unavailable-reason
                   (ignore-errors (disco-room--message-at-point)))))
-    ("d" "Delete at point" disco-room-delete-message)
+    ("d" "Delete at point" disco-room-delete-message
+     :inapt-if (lambda ()
+                 (disco-room--delete-message-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
     ("!" "Toggle reaction" disco-room-toggle-reaction)
     ("+" "Add reaction" disco-room-add-reaction)
     ("-" "Remove reaction" disco-room-remove-reaction)
@@ -7603,9 +7741,11 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("X" "End poll" disco-room-expire-poll)
     ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
    ["Thread"
-    ("m" "Create from message" disco-room-create-thread-from-message)
+    ("m" "Create from message" disco-room-create-thread-from-message
+     :inapt-if disco-room--thread-create-from-message-unavailable-reason)
     ("o" "Open msg thread" disco-room-open-thread-from-message-at-point)
-    ("n" "Create detached" disco-room-create-thread)
+    ("n" "Create detached" disco-room-create-thread
+     :inapt-if (lambda () (disco-room--thread-create-unavailable-reason :any)))
     ("R" "Rename thread" disco-room-rename-thread)
     ("L" "Toggle locked" disco-room-toggle-thread-locked)
     ("S" "Set slowmode" disco-room-set-thread-slowmode)
