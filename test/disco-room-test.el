@@ -219,6 +219,21 @@
     (should (equal '(send-messages-in-threads)
                    (disco-room--composer-missing-permissions)))))
 
+(ert-deftest disco-room-composer-visible-p-hides-system-user-dm ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "sysdm")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "sysdm")
+       (type . 1)
+       (recipients . (((id . "643945264868098049")
+                       (username . "Discord")
+                       (system . t))))))
+    (should-not (disco-room--composer-visible-p))
+    (should (string-match-p "official Discord system DMs are read-only"
+                            (disco-room--composer-hidden-status-line)))))
+
 (ert-deftest disco-room-render-hides-composer-when-send-permission-missing ()
   (with-temp-buffer
     (disco-room-mode)
@@ -489,6 +504,20 @@
     (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
     (should-error (disco-room-forward-message "m2" "src" nil nil)
                   :type 'user-error)))
+
+(ert-deftest disco-room-send-message-errors-for-system-user-dm ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "sysdm")
+    (setq-local disco-room--draft-input "hello")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "sysdm")
+       (type . 1)
+       (recipients . (((id . "643945264868098049")
+                       (username . "Discord")
+                       (system . t))))))
+    (should-error (disco-room-send-message) :type 'user-error)))
 
 (ert-deftest disco-room-edit-message-errors-while-replying ()
   (with-temp-buffer

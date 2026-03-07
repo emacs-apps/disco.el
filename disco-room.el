@@ -822,6 +822,16 @@ negatives."
           (disco-room--required-send-permissions channel)
           nil))))
 
+(defun disco-room--system-user-dm-restriction-reason (&optional channel)
+  "Return read-only reason for official system-user DM CHANNEL, or nil."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (channel-type (and (listp channel) (alist-get 'type channel)))
+         (recipients (and (listp channel) (alist-get 'recipients channel)))
+         (recipient (and (equal channel-type 1) (car recipients))))
+    (when (and (listp recipient)
+               (alist-get 'system recipient))
+      "official Discord system DMs are read-only")))
+
 (defun disco-room--thread-send-restriction-reason (&optional channel)
   "Return thread-local send restriction reason for CHANNEL, or nil."
   (let ((channel (or channel (disco-room--channel-object))))
@@ -836,13 +846,15 @@ negatives."
 
 EXTRA-PERMISSIONS augments the base send permission set for this room."
   (let* ((channel (or channel (disco-room--channel-object)))
+         (system-dm-reason (disco-room--system-user-dm-restriction-reason channel))
          (thread-reason (disco-room--thread-send-restriction-reason channel))
          (permissions (append (disco-room--required-send-permissions channel)
                               (or extra-permissions '())))
          (missing (and channel
                        (disco-permission-channel-known-p channel)
                        (disco-permission-channel-missing channel permissions nil))))
-    (or thread-reason
+    (or system-dm-reason
+        thread-reason
         (when missing
           (format "missing %s"
                   (mapconcat #'disco-permission-display-name missing ", "))))))
