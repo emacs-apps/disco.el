@@ -190,6 +190,64 @@
                              :compact))
       (should (string-match-p "alice" (buffer-string))))))
 
+(ert-deftest disco-room-handle-message-ack-moves-unread-divider-in-place ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m3")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:10:00.000000+00:00")
+        (content . "third")
+        (author . ((id . "u2") (username . "bob"))))
+       ((id . "m2")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:05:00.000000+00:00")
+        (content . "second")
+        (author . ((id . "u1") (username . "alice"))))
+       ((id . "m1")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:00:00.000000+00:00")
+        (content . "first")
+        (author . ((id . "u1") (username . "alice"))))))
+    (disco-state-apply-message-ack "chat" "m1" 1)
+    (disco-room-render)
+    (should (disco-util-json-true-p
+             (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+                        :insert-unread)))
+    (let ((ewoc disco-room--ewoc)
+          (node-m2 (gethash "m2" disco-room--message-node-table))
+          (node-m3 (gethash "m3" disco-room--message-node-table))
+          full-render
+          preserve-render)
+      (disco-state-apply-message-ack "chat" "m2" 0)
+      (cl-letf (((symbol-function 'disco-room-render)
+                 (lambda () (setq full-render t)))
+                ((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () (setq preserve-render t))))
+        (disco-room--handle-gateway-event
+         '(:type message-ack
+           :channel-id "chat"
+           :message-id "m2")))
+      (should-not full-render)
+      (should-not preserve-render)
+      (should (eq ewoc disco-room--ewoc))
+      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
+      (should (eq node-m3 (gethash "m3" disco-room--message-node-table)))
+      (should-not (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+                             :insert-unread))
+      (should (disco-util-json-true-p
+               (plist-get (gethash "m3" disco-room--render-context-by-message-id)
+                          :insert-unread))))))
+
 (ert-deftest disco-room-resolve-pending-jump-fetches-around-once ()
   (with-temp-buffer
     (let ((disco-room--pending-jump-message-id "m1")
