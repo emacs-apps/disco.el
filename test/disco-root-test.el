@@ -76,6 +76,23 @@
         (disco-root--flush-live-updates (current-buffer))
         (should rendered)))))
 
+(ert-deftest disco-root-flush-live-updates-rerenders-parent-thread-buffer ()
+  (with-temp-buffer
+    (disco-root-parent-threads-mode)
+    (let ((disco-root--dirty-channel-ids '("t1"))
+          (disco-root--dirty-structure-p nil)
+          (disco-root--dirty-header-p nil)
+          rendered)
+      (cl-letf (((symbol-function 'disco-root--render-parent-threads-buffer)
+                 (lambda ()
+                   (setq rendered t)))
+                ((symbol-function 'disco-view-capture-position)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'disco-root--update-window-points)
+                 (lambda () nil)))
+        (disco-root--flush-live-updates (current-buffer))
+        (should rendered)))))
+
 (ert-deftest disco-root-flush-live-updates-patches-in-all-view ()
   (with-temp-buffer
     (disco-root-mode)
@@ -1023,7 +1040,7 @@
                          (disco-root--activity-secondary-label channel))))
       (disco-state-reset))))
 
-(ert-deftest disco-root-activity-secondary-label-queues-preview-fetch ()
+(ert-deftest disco-root-activity-preview-line-queues-preview-fetch ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((channel '((id . "c3")
@@ -1035,7 +1052,24 @@
                  (lambda (_channel)
                    (setq queued t))))
         (should (equal "(preview unavailable)"
-                       (disco-root--activity-secondary-label channel)))
+                       (disco-root--activity-preview-line channel nil 'activity)))
+        (should queued)))))
+
+(ert-deftest disco-root-thread-browser-preview-line-queues-preview-fetch-with-fallback ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((thread '((id . "th1")
+                    (guild_id . "g1")
+                    (type . 11)
+                    (parent_id . "forum1")
+                    (last_message_id . "44")
+                    (message_count . 8)))
+          queued)
+      (cl-letf (((symbol-function 'disco-root--queue-missing-preview-fetch)
+                 (lambda (_channel)
+                   (setq queued t))))
+        (should (equal "8 msgs"
+                       (disco-root--activity-preview-line thread nil 'parent-thread)))
         (should queued)))))
 
 (ert-deftest disco-root-queue-missing-preview-fetch-dedupes-same-last-message-id ()
@@ -1085,6 +1119,23 @@
         (should (= 0
                    (hash-table-count
                     disco-root--missing-preview-pending-by-guild)))))))
+
+(ert-deftest disco-root-flush-missing-preview-fetches-runs-in-parent-thread-mode ()
+  (with-temp-buffer
+    (disco-root-parent-threads-mode)
+    (let (calls)
+      (setq-local disco-root--missing-preview-pending-by-guild
+                  (make-hash-table :test #'equal))
+      (puthash "g1" '("t1")
+               disco-root--missing-preview-pending-by-guild)
+      (cl-letf (((symbol-function 'disco-gateway-running-p)
+                 (lambda () t))
+                ((symbol-function 'disco-gateway-request-last-messages)
+                 (lambda (guild-id channel-ids)
+                   (push (list guild-id channel-ids) calls)
+                   t)))
+        (disco-root--flush-missing-preview-fetches (current-buffer))
+        (should (equal '(("g1" ("t1"))) calls))))))
 
 (ert-deftest disco-root-flush-missing-preview-fetches-keeps-overflow-queued ()
   (with-temp-buffer

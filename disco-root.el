@@ -3341,6 +3341,17 @@ if structural fallback is required."
     (cancel-timer disco-root--missing-preview-fetch-timer)
     (setq disco-root--missing-preview-fetch-timer nil)))
 
+(defun disco-root--live-updatable-buffer-mode-p ()
+  "Return non-nil when current buffer supports root-style live updates."
+  (memq major-mode '(disco-root-mode
+                     disco-root-parent-threads-mode
+                     disco-root-archived-threads-mode)))
+
+(defun disco-root--thread-browser-buffer-mode-p ()
+  "Return non-nil when current buffer is a thread browser list buffer."
+  (memq major-mode '(disco-root-parent-threads-mode
+                     disco-root-archived-threads-mode)))
+
 (defun disco-root--schedule-missing-preview-fetch ()
   "Schedule debounced proactive fetch for missing preview messages."
   (unless (timerp disco-root--missing-preview-fetch-timer)
@@ -3355,7 +3366,7 @@ if structural fallback is required."
   "Flush queued missing-preview requests in ROOT-BUFFER via op34."
   (when (buffer-live-p root-buffer)
     (with-current-buffer root-buffer
-      (when (eq major-mode 'disco-root-mode)
+      (when (disco-root--live-updatable-buffer-mode-p)
         (setq disco-root--missing-preview-fetch-timer nil)
         (when (and (disco-gateway-running-p)
                    (hash-table-p disco-root--missing-preview-pending-by-guild)
@@ -3427,6 +3438,13 @@ Each channel `last_message_id' is only requested once per root session."
           (puthash guild-id pending pending-by-guild))
         (disco-root--schedule-missing-preview-fetch)))))
 
+(defun disco-root--maybe-queue-missing-preview-fetch (channel)
+  "Queue preview fetch for CHANNEL when a message preview could exist but is absent."
+  (when (and (listp channel)
+             (alist-get 'last_message_id channel)
+             (not (disco-msg-channel-last-cached-message channel)))
+    (disco-root--queue-missing-preview-fetch channel)))
+
 (defun disco-root--queue-live-update (channel-ids &optional structural-p header-p)
   "Queue CHANNEL-IDS for debounced UI update.
 
@@ -3456,13 +3474,28 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
            #'disco-root--flush-live-updates
            (current-buffer)))))
 
+(defun disco-root--render-list-buffer-preserving-position (render-fn)
+  "Call RENDER-FN and restore point/window position by `disco-channel-id'."
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t)
+        (position-snapshot
+         (disco-view-capture-position
+          :anchor-property 'disco-channel-id
+          :preserve-window-start t)))
+    (with-silent-modifications
+      (funcall render-fn))
+    (when position-snapshot
+      (disco-view-restore-position position-snapshot)
+      (disco-root--update-window-points))))
+
 (defun disco-root--flush-live-updates (root-buffer)
   "Flush queued live updates into ROOT-BUFFER."
   (when (buffer-live-p root-buffer)
     (with-current-buffer root-buffer
-      (when (eq major-mode 'disco-root-mode)
+      (when (disco-root--live-updatable-buffer-mode-p)
         (setq disco-root--live-update-timer nil)
-        (if disco-root--refresh-in-flight
+        (if (and (eq major-mode 'disco-root-mode)
+                 disco-root--refresh-in-flight)
             (setq disco-root--live-update-timer
                   (run-with-timer
                    (max 0.02 disco-root-live-update-debounce)
@@ -3471,79 +3504,90 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                    root-buffer))
           (let* ((dirty-channel-ids (nreverse disco-root--dirty-channel-ids))
                  (needs-structural disco-root--dirty-structure-p)
-                 (needs-header disco-root--dirty-header-p)
-                 (layout (disco-root--ensure-layout))
-                 (layout-update-mode
-                  (disco-root-layout-update-mode layout)))
-            (disco-root--debug-log
-             "flush-live-updates layout=%s view=%s dirty=%d structural=%s header=%s"
-             layout
-             disco-root--view-mode
-             (length dirty-channel-ids)
-             (and needs-structural t)
-             (and needs-header t))
+                 (needs-header disco-root--dirty-header-p))
             (setq disco-root--dirty-channel-ids nil)
             (setq disco-root--dirty-structure-p nil)
             (setq disco-root--dirty-header-p nil)
             (cond
-             (needs-structural
-              (disco-root--debug-log "flush-live-updates -> structural")
-              (disco-root--render-preserving-position))
-             ((eq layout 'search)
-              (disco-root--debug-log "flush-live-updates -> search-static")
-              (when needs-header
-                (disco-root--refresh-header-line)))
-             ((and (eq layout-update-mode 'full)
-                   (or dirty-channel-ids needs-header))
-              (disco-root--debug-log "flush-live-updates -> full-render")
-              (if (and needs-header (null dirty-channel-ids))
-                  (disco-root--refresh-header-line)
-                (disco-root--render-preserving-position)))
-             ((and dirty-channel-ids
-                   (eq disco-root--view-mode 'unread))
-              (disco-root--debug-log "flush-live-updates -> unread-render")
-              (disco-root--render-preserving-position))
+             ((disco-root--thread-browser-buffer-mode-p)
+              (when (or dirty-channel-ids needs-structural needs-header)
+                (disco-root--render-list-buffer-preserving-position
+                 (lambda ()
+                   (pcase major-mode
+                     ('disco-root-parent-threads-mode
+                      (disco-root--render-parent-threads-buffer))
+                     ('disco-root-archived-threads-mode
+                      (disco-root--render-archived-threads-buffer)))))))
              (t
-              (disco-root--debug-log "flush-live-updates -> incremental")
-              (let ((inhibit-read-only t)
-                    (buffer-undo-list t)
-                    (position-snapshot
-                     (disco-view-capture-position
-                      :anchor-property 'disco-channel-id
-                      :preserve-window-start t)))
-                (with-silent-modifications
-                  (dolist (channel-id dirty-channel-ids)
-                    (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
-                      (setq needs-structural t)
-                      (disco-root--debug-log
-                       "flush-live-updates -> structural(stale %s)" channel-id)))
-                  (when (and (not needs-structural)
-                             dirty-channel-ids
+              (let* ((layout (disco-root--ensure-layout))
+                     (layout-update-mode
+                      (disco-root-layout-update-mode layout)))
+                (disco-root--debug-log
+                 "flush-live-updates layout=%s view=%s dirty=%d structural=%s header=%s"
+                 layout
+                 disco-root--view-mode
+                 (length dirty-channel-ids)
+                 (and needs-structural t)
+                 (and needs-header t))
+                (cond
+                 (needs-structural
+                  (disco-root--debug-log "flush-live-updates -> structural")
+                  (disco-root--render-preserving-position))
+                 ((eq layout 'search)
+                  (disco-root--debug-log "flush-live-updates -> search-static")
+                  (when needs-header
+                    (disco-root--refresh-header-line)))
+                 ((and (eq layout-update-mode 'full)
+                       (or dirty-channel-ids needs-header))
+                  (disco-root--debug-log "flush-live-updates -> full-render")
+                  (if (and needs-header (null dirty-channel-ids))
+                      (disco-root--refresh-header-line)
+                    (disco-root--render-preserving-position)))
+                 ((and dirty-channel-ids
+                       (eq disco-root--view-mode 'unread))
+                  (disco-root--debug-log "flush-live-updates -> unread-render")
+                  (disco-root--render-preserving-position))
+                 (t
+                  (disco-root--debug-log "flush-live-updates -> incremental")
+                  (let ((inhibit-read-only t)
+                        (buffer-undo-list t)
+                        (position-snapshot
+                         (disco-view-capture-position
+                          :anchor-property 'disco-channel-id
+                          :preserve-window-start t)))
+                    (with-silent-modifications
+                      (dolist (channel-id dirty-channel-ids)
+                        (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
+                          (setq needs-structural t)
+                          (disco-root--debug-log
+                           "flush-live-updates -> structural(stale %s)" channel-id)))
+                      (when (and (not needs-structural)
+                                 dirty-channel-ids
+                                 (eq layout 'activity))
+                        (when (disco-root--activity-reorder-visible-nodes dirty-channel-ids)
+                          (setq needs-structural t)
+                          (disco-root--debug-log
+                           "flush-live-updates -> structural(activity-reorder)")))
+                      (when dirty-channel-ids
+                        (disco-root--refresh-active-layout-headings dirty-channel-ids))
+                      (cond
+                       (needs-header
+                        (disco-root--refresh-header-line))
+                       ((and dirty-channel-ids
                              (eq layout 'activity))
-                    (when (disco-root--activity-reorder-visible-nodes dirty-channel-ids)
-                      (setq needs-structural t)
-                      (disco-root--debug-log
-                       "flush-live-updates -> structural(activity-reorder)")))
-                  (when dirty-channel-ids
-                    (disco-root--refresh-active-layout-headings dirty-channel-ids))
-                  (cond
-                   (needs-header
-                    (disco-root--refresh-header-line))
-                   ((and dirty-channel-ids
-                         (eq layout 'activity))
-                    (disco-root--maybe-refresh-activity-header-line)))
-                  (when (and (not needs-structural)
-                             (disco-root--buffer-corrupted-p))
-                    (setq needs-structural t)
-                    (disco-root--debug-log
-                     "flush-live-updates -> structural(corrupted)"))
-                  (when (and (not needs-structural)
-                             position-snapshot)
-                    (disco-view-restore-position position-snapshot)
-                    (disco-root--update-window-points))))
-              (when needs-structural
-                (disco-root--debug-log "flush-live-updates -> structural(fallback)")
-                (disco-root--render-preserving-position))))))))))
+                        (disco-root--maybe-refresh-activity-header-line)))
+                      (when (and (not needs-structural)
+                                 (disco-root--buffer-corrupted-p))
+                        (setq needs-structural t)
+                        (disco-root--debug-log
+                         "flush-live-updates -> structural(corrupted)"))
+                      (when (and (not needs-structural)
+                                 position-snapshot)
+                        (disco-view-restore-position position-snapshot)
+                        (disco-root--update-window-points))))
+                  (when needs-structural
+                    (disco-root--debug-log "flush-live-updates -> structural(fallback)")
+                    (disco-root--render-preserving-position)))))))))))))
 
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
@@ -4138,12 +4182,10 @@ Fallback stays message-oriented and avoids status-tag placeholders."
         (and channel-id
              (disco-state-channel-conversation-summary-preview channel-id))
         (and (alist-get 'last_message_id channel)
-             (progn
-               (disco-root--queue-missing-preview-fetch channel)
-               ;; Keep this neutral: missing preview here means op34/cache did not
-               ;; materialize a message, not necessarily that summaries are
-               ;; unavailable for the guild/channel.
-               "(preview unavailable)"))
+             ;; Keep this neutral: missing preview here means op34/cache did not
+             ;; materialize a message, not necessarily that summaries are
+             ;; unavailable for the guild/channel.
+             "(preview unavailable)")
         "(no messages)")))
 
 (defun disco-root--activity-preview-label (channel &optional scope)
@@ -4391,7 +4433,9 @@ Output includes formatted date/time and a trailing status symbol."
 When MESSAGE is non-nil, use it as cached preview source."
   (or (and message (disco-msg-preview-line message))
       (disco-msg-channel-preview-line channel)
-      (disco-root--activity-preview-label channel scope)))
+      (progn
+        (disco-root--maybe-queue-missing-preview-fetch channel)
+        (disco-root--activity-preview-label channel scope))))
 
 (defun disco-root--insert-activity-icon (channel)
   "Insert activity icon for CHANNEL.
@@ -5449,6 +5493,7 @@ When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
         (setq disco-root--parent-threads-parent-channel parent-channel)
         (setq disco-root--parent-threads-refresh-generation 0)
         (setq disco-root--parent-threads-refresh-in-flight nil)
+        (disco-root--attach-live-updates)
         (disco-root-parent-threads-refresh))
       (pop-to-buffer buf))))
 
@@ -5629,6 +5674,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
     (with-current-buffer buf
       (disco-root-archived-threads-mode)
       (setq disco-root--archived-parent-channel parent-channel)
+      (disco-root--attach-live-updates)
       (disco-root-archived-threads-refresh))
     (pop-to-buffer buf)))
 
