@@ -266,6 +266,104 @@
       (should (eq node-m3 (gethash "m3" disco-room--message-node-table)))
       (should (string-match-p "↪ alice: source edited" (buffer-string))))))
 
+(ert-deftest disco-room-handle-gateway-message-delete-refreshes-thread-starter-fallback ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m2")
+        (type . 21)
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:10:00.000000+00:00")
+        (message_reference . ((message_id . "m1")
+                              (channel_id . "chat")))
+        (author . ((id . "u2") (username . "bob"))))
+       ((id . "m1")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:00:00.000000+00:00")
+        (content . "thread source")
+        (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-render)
+    (let ((ewoc disco-room--ewoc)
+          (node-m2 (gethash "m2" disco-room--message-node-table))
+          full-render
+          preserve-render)
+      (disco-state-put-messages
+       "chat"
+       '(((id . "m2")
+          (type . 21)
+          (channel_id . "chat")
+          (timestamp . "2026-03-08T00:10:00.000000+00:00")
+          (message_reference . ((message_id . "m1")
+                                (channel_id . "chat")))
+          (author . ((id . "u2") (username . "bob"))))))
+      (cl-letf (((symbol-function 'disco-room-render)
+                 (lambda () (setq full-render t)))
+                ((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () (setq preserve-render t)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (disco-room--handle-gateway-event
+         '(:type message-delete
+           :channel-id "chat"
+           :message-id "m1")))
+      (should-not full-render)
+      (should-not preserve-render)
+      (should (eq ewoc disco-room--ewoc))
+      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
+      (should (string-match-p "Sorry, we couldn't load the first message in this thread."
+                              (buffer-string))))))
+
+(ert-deftest disco-room-handle-channel-update-refreshes-forward-source-label ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
+    (disco-state-upsert-channel '((id . "src") (type . 0) (guild_id . "g1") (name . "old-src")))
+    (disco-state-upsert-guild '((id . "g1") (name . "Guild")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m1")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:00:00.000000+00:00")
+        (message_reference . ((type . 1)
+                              (message_id . "s1")
+                              (channel_id . "src")
+                              (guild_id . "g1")))
+        (message_snapshots . [((content . "snap body")
+                               (timestamp . "2026-03-08T00:00:00.000000+00:00"))])
+        (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-render)
+    (let ((ewoc disco-room--ewoc)
+          (node-m1 (gethash "m1" disco-room--message-node-table))
+          full-render
+          preserve-render)
+      (disco-state-upsert-channel '((id . "src") (type . 0) (guild_id . "g1") (name . "new-src")))
+      (cl-letf (((symbol-function 'disco-room-render)
+                 (lambda () (setq full-render t)))
+                ((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () (setq preserve-render t)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (disco-room--handle-gateway-event
+         '(:type channel-update
+           :channel-id "src")))
+      (should-not full-render)
+      (should-not preserve-render)
+      (should (eq ewoc disco-room--ewoc))
+      (should (eq node-m1 (gethash "m1" disco-room--message-node-table)))
+      (should (string-match-p "Guild / #new-src" (buffer-string))))))
+
 (ert-deftest disco-room-handle-message-update-refreshes-composer-reply-context ()
   (with-temp-buffer
     (disco-room-mode)

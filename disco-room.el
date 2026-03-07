@@ -6341,12 +6341,16 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  :insert-unread)))
    (or disco-room--displayed-message-ids '())))
 
-(defun disco-room--reply-reference-targets-current-room-p (msg)
-  "Return non-nil when MSG replies to a message in the current room."
+(defun disco-room--message-reference-targets-current-room-p (msg)
+  "Return non-nil when MSG references a message in the current room."
   (let ((ref-channel-id (disco-room--message-reference-channel-id msg)))
     (or (null ref-channel-id)
         (equal (disco-room--normalize-id ref-channel-id)
                (disco-room--normalize-id disco-room--channel-id)))))
+
+(defun disco-room--reply-reference-targets-current-room-p (msg)
+  "Return non-nil when MSG replies to a message in the current room."
+  (disco-room--message-reference-targets-current-room-p msg))
 
 (defun disco-room--reply-dependent-message-ids (ordered-messages message-id)
   "Return displayed reply message ids depending on MESSAGE-ID."
@@ -6357,6 +6361,44 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                    (disco-room--message-reply-type-p msg)
                    (disco-room--reply-reference-targets-current-room-p msg)
                    (equal (disco-room--reply-reference-id msg) message-id))
+          (push dependent-id dependent-ids))))
+    (nreverse dependent-ids)))
+
+(defun disco-room--thread-starter-dependent-message-ids (ordered-messages message-id)
+  "Return displayed thread-starter ids depending on MESSAGE-ID."
+  (let (dependent-ids)
+    (dolist (msg ordered-messages)
+      (let ((dependent-id (alist-get 'id msg)))
+        (when (and dependent-id
+                   (= (disco-room--message-type msg) 21)
+                   (disco-room--message-reference-targets-current-room-p msg)
+                   (equal (disco-room--message-reference-id msg) message-id))
+          (push dependent-id dependent-ids))))
+    (nreverse dependent-ids)))
+
+(defun disco-room--forward-source-dependent-message-ids (ordered-messages
+                                                         &optional source-channel-id source-guild-id)
+  "Return forwarded message ids depending on SOURCE-CHANNEL-ID or SOURCE-GUILD-ID."
+  (let ((normalized-channel-id (disco-room--normalize-id source-channel-id))
+        (normalized-guild-id (disco-room--normalize-id source-guild-id))
+        dependent-ids)
+    (dolist (msg ordered-messages)
+      (let* ((dependent-id (alist-get 'id msg))
+             (ref-channel-id (disco-room--message-reference-channel-id msg))
+             (resolved-guild-id
+              (or (disco-room--message-reference-guild-id msg)
+                  (and ref-channel-id
+                       (disco-room--normalize-id
+                        (alist-get 'guild_id (disco-state-channel ref-channel-id)))))))
+        (when (and dependent-id
+                   (disco-room--message-forwarded-p msg)
+                   (or (and normalized-channel-id
+                            ref-channel-id
+                            (equal (disco-room--normalize-id ref-channel-id)
+                                   normalized-channel-id))
+                       (and normalized-guild-id
+                            resolved-guild-id
+                            (equal resolved-guild-id normalized-guild-id))))
           (push dependent-id dependent-ids))))
     (nreverse dependent-ids)))
 
@@ -6441,6 +6483,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                         current-ids target-ids message-id))
          (reply-dependent-ids
           (disco-room--reply-dependent-message-ids ordered-messages message-id))
+         (thread-starter-dependent-ids
+          (disco-room--thread-starter-dependent-message-ids ordered-messages message-id))
          (target-message (seq-find (lambda (msg)
                                      (equal (alist-get 'id msg) message-id))
                                    ordered-messages))
@@ -6479,6 +6523,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  (append
                   (and present-after (list message-id))
                   reply-dependent-ids
+                  thread-starter-dependent-ids
                   (disco-room--changed-render-context-ids
                    affected-ids context-snapshot)))))
            (dolist (affected-id invalidate-ids)
@@ -6565,6 +6610,21 @@ Return non-nil when a node is removed."
         (remhash message-id disco-room--message-node-table)
         t))))
 
+(defun disco-room--invalidate-message-ids-preserving-point (message-ids)
+  "Invalidate MESSAGE-IDS in current room EWOC while preserving position."
+  (when (and disco-room--ewoc message-ids)
+    (let ((ids (delete-dups (delq nil message-ids))))
+      (when ids
+        (disco-room--mutate-timeline-preserving-point
+         (lambda ()
+           (dolist (message-id ids)
+             (when-let* ((node (gethash message-id disco-room--message-node-table)))
+               (let ((disco-room--rendering t)
+                     (inhibit-read-only t)
+                     (buffer-undo-list t))
+                 (ewoc-invalidate disco-room--ewoc node))))))
+        t))))
+
 (defun disco-room--apply-read-state-change-partially ()
   "Patch unread divider placement in the persistent EWOC when possible."
   (when (and disco-room--ewoc
@@ -6587,6 +6647,17 @@ Return non-nil when a node is removed."
                      (buffer-undo-list t))
                  (ewoc-invalidate disco-room--ewoc node))))))
         t))))
+
+(defun disco-room--apply-forward-source-change-partially (&optional source-channel-id source-guild-id)
+  "Invalidate forwarded message cards depending on SOURCE-CHANNEL-ID/GUILD-ID."
+  (when (and disco-room--ewoc
+             (not (disco-room--msg-filter-active-p))
+             disco-room--displayed-message-ids)
+    (disco-room--invalidate-message-ids-preserving-point
+     (disco-room--forward-source-dependent-message-ids
+      (reverse (or (disco-state-messages disco-room--channel-id) '()))
+      source-channel-id
+      source-guild-id))))
 
 (defun disco-room--apply-live-message-event-partially (event)
   "Apply EVENT with EWOC-local message updates when possible.
@@ -6695,6 +6766,10 @@ REASON is shown in the minibuffer."
       (disco-room--close-for-deleted-channel
        (format "disco: guild for channel %s was deleted"
                (or disco-room--channel-name disco-room--channel-id))))
+     ((and (memq event-type '(guild-update guild-delete))
+           event-guild-id)
+      (when (disco-room--apply-forward-source-change-partially nil event-guild-id)
+        t))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(channel-update
                               thread-update
@@ -6705,7 +6780,12 @@ REASON is shown in the minibuffer."
       (let ((channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
-        (disco-room--update-frame-preserving-point)))
+        (disco-room--update-frame-preserving-point)
+        (disco-room--apply-forward-source-change-partially event-channel-id event-guild-id)))
+     ((and event-channel-id
+           (memq event-type '(channel-update thread-update channel-delete thread-delete)))
+      (when (disco-room--apply-forward-source-change-partially event-channel-id event-guild-id)
+        t))
      ((and (equal event-channel-id disco-room--channel-id)
            (eq event-type 'message-ack))
       (disco-room--optimistic-read-ack-confirm (plist-get event :message-id))
