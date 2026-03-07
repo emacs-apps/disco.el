@@ -92,6 +92,85 @@
                  (get-text-property 0 'face rendered)
                  (cdr entry)))))))
 
+(ert-deftest disco-markdown-render-internal-emphasis-strips-markers ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "**bold** *italic* __under__ ~~strike~~"
+                    :context 'test-internal-emphasis))
+         (plain (substring-no-properties rendered))
+         (bold-pos (string-match "bold" plain))
+         (italic-pos (string-match "italic" plain))
+         (underline-pos (string-match "under" plain))
+         (strike-pos (string-match "strike" plain)))
+    (should (equal "bold italic under strike" plain))
+    (should (disco-markdown--face-match-p
+             (get-text-property bold-pos 'face rendered)
+             'disco-markdown-strong-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property italic-pos 'face rendered)
+             'disco-markdown-emphasis-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property underline-pos 'face rendered)
+             'disco-markdown-underline-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property strike-pos 'face rendered)
+             'disco-markdown-strikethrough-face))))
+
+(ert-deftest disco-markdown-render-internal-inline-code-protects-content ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "`https://example.com` `<@123>` `||spoiler||`"
+                    :context 'test-internal-inline-code
+                    :spoiler-message-id "m1"))
+         (plain (substring-no-properties rendered))
+         (url-pos (string-match "https://example.com" plain))
+         (mention-pos (string-match "<@123>" plain))
+         (spoiler-pos (string-match "||spoiler||" plain)))
+    (should (equal "https://example.com <@123> ||spoiler||" plain))
+    (should (disco-markdown--face-match-p
+             (get-text-property url-pos 'face rendered)
+             'disco-markdown-code-face))
+    (should-not (get-text-property url-pos 'disco-markdown-url rendered))
+    (should-not (get-text-property mention-pos 'disco-markdown-spoiler-message-id rendered))
+    (should-not (get-text-property spoiler-pos 'disco-markdown-spoiler-message-id rendered))))
+
+(ert-deftest disco-markdown-render-internal-fenced-code-protects-block-content ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "```elisp\n# Title\n-# subtitle\nhttps://example.com\n<@123>\n```"
+                    :context 'test-internal-fence
+                    :spoiler-message-id "m1"))
+         (plain (substring-no-properties rendered))
+         (heading-pos (string-match "# Title" plain))
+         (subtitle-pos (string-match "-# subtitle" plain))
+         (url-pos (string-match "https://example.com" plain))
+         (mention-pos (string-match "<@123>" plain)))
+    (should (equal "# Title\n-# subtitle\nhttps://example.com\n<@123>\n" plain))
+    (dolist (pos (list heading-pos subtitle-pos url-pos mention-pos))
+      (should (disco-markdown--face-match-p
+               (get-text-property pos 'face rendered)
+               'disco-markdown-code-face)))
+    (should-not (get-text-property heading-pos 'disco-markdown-url rendered))
+    (should-not (get-text-property url-pos 'disco-markdown-url rendered))
+    (should-not (get-text-property mention-pos 'disco-markdown-spoiler-message-id rendered))))
+
+(ert-deftest disco-markdown-render-internal-fenced-code-uses-language-highlighting ()
+  (let* ((disco-markdown-backend 'internal)
+         (disco-markdown-fontify-code-blocks-natively t)
+         (rendered (disco-markdown-render
+                    "```elisp\n(let ((x 1))\n  x)\n```"
+                    :context 'test-internal-fence-highlight))
+         (plain (substring-no-properties rendered))
+         (let-pos (string-match "let" plain)))
+    (should let-pos)
+    (should (equal "(let ((x 1))\n  x)\n" plain))
+    (should (disco-markdown--face-match-p
+             (get-text-property let-pos 'face rendered)
+             'disco-markdown-code-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property let-pos 'face rendered)
+             'font-lock-keyword-face))))
+
 (ert-deftest disco-markdown-render-inline-links-are-openable ()
   (skip-unless (disco-markdown--markdown-mode-available-p))
   (let ((disco-markdown-backend 'markdown-mode))

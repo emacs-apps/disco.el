@@ -60,6 +60,42 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
   :type 'integer
   :group 'disco)
 
+(defcustom disco-markdown-fontify-code-blocks-natively t
+  "When non-nil, fontify fenced code blocks using the hinted language mode.
+
+This mirrors Discord's language-tagged code block behavior without depending
+on `markdown-mode' at render time."
+  :type 'boolean
+  :group 'disco)
+
+(defcustom disco-markdown-code-block-default-mode nil
+  "Fallback major mode used to fontify fenced code blocks without a language."
+  :type '(choice (const :tag "None" nil)
+          (symbol :tag "Major mode"))
+  :group 'disco)
+
+(defcustom disco-markdown-code-lang-modes
+  '(("bash" . sh-mode)
+    ("c" . c-mode)
+    ("cpp" . c++-mode)
+    ("c++" . c++-mode)
+    ("elisp" . emacs-lisp-mode)
+    ("emacs-lisp" . emacs-lisp-mode)
+    ("go" . go-mode)
+    ("javascript" . js-mode)
+    ("js" . js-mode)
+    ("json" . js-json-mode)
+    ("python" . python-mode)
+    ("rust" . rust-mode)
+    ("sh" . sh-mode)
+    ("shell" . sh-mode)
+    ("typescript" . typescript-mode)
+    ("ts" . typescript-mode))
+  "Extra language name to major mode mappings for fenced code blocks."
+  :type '(repeat (cons (string :tag "Language")
+                       (symbol :tag "Major mode")))
+  :group 'disco)
+
 (defface disco-markdown-mention-face
   '((t :inherit font-lock-variable-name-face))
   "Face used for rendered Discord mentions."
@@ -98,6 +134,31 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 (defface disco-markdown-link-face
   '((t :inherit link))
   "Face used for internal rendered links."
+  :group 'disco)
+
+(defface disco-markdown-strong-face
+  '((t :inherit bold))
+  "Face used for internal strong emphasis."
+  :group 'disco)
+
+(defface disco-markdown-emphasis-face
+  '((t :inherit italic))
+  "Face used for internal emphasis."
+  :group 'disco)
+
+(defface disco-markdown-underline-face
+  '((t :underline t))
+  "Face used for internal underline emphasis."
+  :group 'disco)
+
+(defface disco-markdown-strikethrough-face
+  '((t :strike-through t))
+  "Face used for internal strikethrough emphasis."
+  :group 'disco)
+
+(defface disco-markdown-code-face
+  '((t :inherit fixed-pitch))
+  "Face used for internal inline and fenced code."
   :group 'disco)
 
 (defface disco-markdown-heading-1-face
@@ -173,6 +234,18 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 (defconst disco-markdown--regexp-angle-autolink
   "<\\([[:alpha:]][[:alnum:]+.-]*://[^<>[:space:]]+\\)>"
   "Regexp matching angle-bracket autolinks.")
+
+(defconst disco-markdown--regexp-fenced-code-block-start
+  "^```.*$"
+  "Regexp matching the opening line of a fenced code block.")
+
+(defconst disco-markdown--regexp-fenced-code-block-end
+  "^```[ \t]*$"
+  "Regexp matching the closing line of a fenced code block.")
+
+(defconst disco-markdown--regexp-inline-code
+  "`\\([^`\n]+\\)`"
+  "Regexp matching a simple inline code span.")
 
 (defconst disco-markdown--spoiler-translation-table
   (let ((table (make-char-table 'translation-table))
@@ -471,6 +544,9 @@ return visible spoiler contents; otherwise return masked text."
                    (disco-markdown--string-present-p url))
               (progn
                 (unless (or (get-text-property (1- beg)
+                                               'disco-markdown-protected
+                                               copy)
+                            (get-text-property (1- beg)
                                                'disco-markdown-spoiler-message-id
                                                copy)
                             (get-text-property (1- beg)
@@ -494,7 +570,8 @@ return visible spoiler contents; otherwise return masked text."
       (let ((line-start (line-beginning-position))
             (line-end (line-end-position)))
         (goto-char line-start)
-        (when (looking-at disco-markdown--regexp-heading-marker)
+        (when (and (not (get-text-property line-start 'disco-markdown-protected))
+                   (looking-at disco-markdown--regexp-heading-marker))
           (let ((level (min 6 (length (match-string-no-properties 2)))))
             (delete-region (match-beginning 2) (match-end 0))
             (setq line-start (line-beginning-position)
@@ -553,7 +630,10 @@ visible ATX marker fallback so all heading levels render consistently."
 (defun disco-markdown--render-internal (text)
   "Render TEXT with disco's internal Discord-focused renderer."
   (let ((rendered (if (stringp text) text "")))
+    (setq rendered (disco-markdown--apply-fenced-code-blocks rendered))
+    (setq rendered (disco-markdown--apply-inline-code-spans rendered))
     (setq rendered (disco-markdown--apply-internal-link-replacements rendered))
+    (setq rendered (disco-markdown--apply-inline-emphasis rendered))
     (setq rendered (disco-markdown--apply-heading-lines rendered))
     (disco-markdown--apply-visible-url-properties rendered)))
 
@@ -761,10 +841,206 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
         (seq-some #'disco-markdown--code-face-p face)
       (disco-markdown--code-face-p face))))
 
+(defun disco-markdown--position-protected-p (backend position)
+  "Return non-nil when POSITION should be skipped for BACKEND transforms."
+  (pcase backend
+    ('markdown-mode
+     (disco-markdown--position-in-code-face-p position))
+    ('internal
+     (get-text-property position 'disco-markdown-protected))
+    (_ nil)))
+
+(defun disco-markdown--word-constituent-char-p (char)
+  "Return non-nil when CHAR behaves like a word constituent."
+  (and char
+       (memq (char-syntax char) '(?w ?_))))
+
+(defun disco-markdown--lang-mode-predicate (mode)
+  "Return non-nil when MODE is a usable major mode for code fontification."
+  (and mode
+       (fboundp mode)
+       (or (not (string-match-p "ts-mode\\'" (symbol-name mode)))
+           (cl-loop for pair in (bound-and-true-p major-mode-remap-alist)
+                    for func = (cdr pair)
+                    thereis (and (atom func) (eq mode func)))
+           (cl-loop for pair in auto-mode-alist
+                    for func = (cdr pair)
+                    thereis (and (atom func) (eq mode func))))))
+
+(defun disco-markdown--get-lang-mode (lang)
+  "Return the major mode that should be used for LANG."
+  (let ((name (string-trim (or lang ""))))
+    (when (disco-markdown--string-present-p name)
+      (cl-find-if
+       #'disco-markdown--lang-mode-predicate
+       (nconc
+        (list (cdr (assoc name disco-markdown-code-lang-modes))
+              (cdr (assoc (downcase name) disco-markdown-code-lang-modes)))
+        (and (fboundp 'treesit-language-available-p)
+             (list (and (treesit-language-available-p (intern name))
+                        (intern (concat name "-ts-mode")))
+                   (and (treesit-language-available-p (intern (downcase name)))
+                        (intern (concat (downcase name) "-ts-mode")))))
+        (list (intern (concat name "-mode"))
+              (intern (concat (downcase name) "-mode"))))))))
+
+(defun disco-markdown--code-fence-language (line)
+  "Return the language tag parsed from fenced code LINE, or nil."
+  (when (and (stringp line)
+             (string-match "\\`[ \\t]*```[ \\t]*\\([^ \\t`\\r\\n]+\\)" line))
+    (match-string 1 line)))
+
+(defun disco-markdown--make-code-string (text &optional lang)
+  "Return TEXT propertized as code, optionally fontified for LANG."
+  (let* ((source (or text ""))
+         (payload (copy-sequence source))
+         (lang-mode (and disco-markdown-fontify-code-blocks-natively
+                         (or (and (disco-markdown--string-present-p lang)
+                                  (disco-markdown--get-lang-mode lang))
+                             disco-markdown-code-block-default-mode))))
+    (when (and (< 0 (length payload))
+               (symbolp lang-mode)
+               (fboundp lang-mode))
+      (with-current-buffer
+          (get-buffer-create
+           (format " *disco-markdown-code-fontification:%s*"
+                   (symbol-name lang-mode)))
+        (let ((inhibit-modification-hooks nil))
+          (erase-buffer)
+          (insert payload " "))
+        (unless (eq major-mode lang-mode)
+          (funcall lang-mode))
+        (when (fboundp 'font-lock-ensure)
+          (font-lock-ensure (point-min) (point-max)))
+        (setq payload
+              (disco-markdown--sanitize-face-properties
+               (buffer-substring (point-min) (1- (point-max)))))))
+    (when (< 0 (length payload))
+      (add-face-text-property 0 (length payload)
+                              'disco-markdown-code-face 'append payload)
+      (add-text-properties 0 (length payload)
+                           '(disco-markdown-protected t)
+                           payload))
+    payload))
+
+(defun disco-markdown--inline-delimiter-content-valid-p (open-end close-start)
+  "Return non-nil when delimiter span between OPEN-END and CLOSE-START is usable."
+  (and (< open-end close-start)
+       (let ((first (char-after open-end))
+             (last (char-before close-start)))
+         (and first last
+              (not (memq first '(?\s ?\t ?\n)))
+              (not (memq last '(?\s ?\t ?\n)))))))
+
+(defun disco-markdown--apply-inline-delimiter-face (text delimiter face &optional protect predicate)
+  "Strip DELIMITER pairs from TEXT and apply FACE to enclosed text.
+
+When PROTECT is non-nil, enclosed text is marked as internal protected text.
+When PREDICATE is non-nil it is called with OPEN-START, OPEN-END, CLOSE-START,
+and CLOSE-END and must return non-nil for the span to be transformed."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let ((delimiter-len (length delimiter)))
+      (while (search-forward delimiter nil t)
+        (let* ((open-start (- (point) delimiter-len))
+               (open-end (point))
+               (line-limit (line-end-position))
+               (close-start nil))
+          (unless (disco-markdown--position-protected-p 'internal open-start)
+            (save-excursion
+              (while (and (not close-start)
+                          (search-forward delimiter line-limit t))
+                (let ((candidate-start (- (point) delimiter-len))
+                      (candidate-end (point)))
+                  (when (and (not (disco-markdown--position-protected-p
+                                   'internal candidate-start))
+                             (disco-markdown--inline-delimiter-content-valid-p
+                              open-end candidate-start)
+                             (or (null predicate)
+                                 (funcall predicate open-start open-end
+                                          candidate-start candidate-end)))
+                    (setq close-start candidate-start)))))
+            (when close-start
+              (delete-region close-start (+ close-start delimiter-len))
+              (delete-region open-start (+ open-start delimiter-len))
+              (let ((beg open-start)
+                    (end (- close-start delimiter-len)))
+                (when (< beg end)
+                  (add-face-text-property beg end face 'append)
+                  (when protect
+                    (add-text-properties beg end
+                                         '(disco-markdown-protected t))))
+                (goto-char (max beg end))))))))
+    (buffer-string)))
+
+(defun disco-markdown--apply-fenced-code-blocks (text)
+  "Strip fenced code block markers from TEXT and protect the contents."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (while (re-search-forward disco-markdown--regexp-fenced-code-block-start nil t)
+      (let* ((open-start (match-beginning 0))
+             (open-line (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position)))
+             (lang (disco-markdown--code-fence-language open-line)))
+        (forward-line 1)
+        (let ((content-start (point)))
+          (if (re-search-forward disco-markdown--regexp-fenced-code-block-end nil t)
+              (let* ((close-start (match-beginning 0))
+                     (close-end (match-end 0))
+                     (payload (disco-markdown--make-code-string
+                               (buffer-substring content-start close-start)
+                               lang)))
+                (delete-region open-start close-end)
+                (goto-char open-start)
+                (insert payload)
+                (goto-char (+ open-start (length payload))))
+            (goto-char (point-max))))))
+    (buffer-string)))
+
+(defun disco-markdown--apply-inline-code-spans (text)
+  "Strip inline code span markers from TEXT and protect the contents."
+  (disco-markdown--apply-regexp-replacements
+   text 'internal
+   (list
+    (cons disco-markdown--regexp-inline-code
+          (lambda ()
+            (disco-markdown--make-code-string
+             (buffer-substring (match-beginning 1) (match-end 1))))))))
+
+(defun disco-markdown--apply-inline-emphasis (text)
+  "Apply internal emphasis styling to TEXT."
+  (let ((rendered text))
+    (setq rendered
+          (disco-markdown--apply-inline-delimiter-face
+           rendered "**" 'disco-markdown-strong-face))
+    (setq rendered
+          (disco-markdown--apply-inline-delimiter-face
+           rendered "__" 'disco-markdown-underline-face nil
+           (lambda (open-start _open-end _close-start close-end)
+             (and (not (disco-markdown--word-constituent-char-p
+                        (char-before open-start)))
+                  (not (disco-markdown--word-constituent-char-p
+                        (char-after close-end)))))))
+    (setq rendered
+          (disco-markdown--apply-inline-delimiter-face
+           rendered "~~" 'disco-markdown-strikethrough-face))
+    (setq rendered
+          (disco-markdown--apply-inline-delimiter-face
+           rendered "*" 'disco-markdown-emphasis-face))
+    (disco-markdown--apply-inline-delimiter-face
+     rendered "_" 'disco-markdown-emphasis-face nil
+     (lambda (open-start _open-end _close-start close-end)
+       (and (not (disco-markdown--word-constituent-char-p
+                  (char-before open-start)))
+            (not (disco-markdown--word-constituent-char-p
+                  (char-after close-end))))))))
+
 (defun disco-markdown--apply-regexp-replacements (text backend replacements)
   "Apply REPLACEMENTS over TEXT and return transformed string.
 
-BACKEND controls whether code-face regions are protected from replacements."
+BACKEND controls whether protected regions are skipped." 
   (with-temp-buffer
     (insert text)
     (dolist (entry replacements)
@@ -773,8 +1049,7 @@ BACKEND controls whether code-face regions are protected from replacements."
             (replacer (cdr entry)))
         (while (re-search-forward regexp nil t)
           (let ((beg (match-beginning 0)))
-            (unless (and (eq backend 'markdown-mode)
-                         (disco-markdown--position-in-code-face-p beg))
+            (unless (disco-markdown--position-protected-p backend beg)
               (let ((replacement (funcall replacer)))
                 (when (stringp replacement)
                   (replace-match replacement t t))))))))
@@ -783,15 +1058,14 @@ BACKEND controls whether code-face regions are protected from replacements."
 (defun disco-markdown--apply-subtitle-lines (text backend)
   "Render Discord `-#` subtitle lines in TEXT.
 
-BACKEND controls whether code-face regions are protected from the transform."
+BACKEND controls whether protected regions are skipped." 
   (with-temp-buffer
     (insert text)
     (goto-char (point-min))
     (while (re-search-forward disco-markdown--regexp-subtitle-line nil t)
       (let ((marker-start (match-end 1))
             (marker-end (match-end 0)))
-        (unless (and (eq backend 'markdown-mode)
-                     (disco-markdown--position-in-code-face-p marker-start))
+        (unless (disco-markdown--position-protected-p backend marker-start)
           (delete-region marker-start marker-end)
           (let ((line-end (line-end-position)))
             (when (< (point) line-end)
