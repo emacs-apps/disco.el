@@ -6341,6 +6341,30 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  :insert-unread)))
    (or disco-room--displayed-message-ids '())))
 
+(defun disco-room--reply-reference-targets-current-room-p (msg)
+  "Return non-nil when MSG replies to a message in the current room."
+  (let ((ref-channel-id (disco-room--message-reference-channel-id msg)))
+    (or (null ref-channel-id)
+        (equal (disco-room--normalize-id ref-channel-id)
+               (disco-room--normalize-id disco-room--channel-id)))))
+
+(defun disco-room--reply-dependent-message-ids (ordered-messages message-id)
+  "Return displayed reply message ids depending on MESSAGE-ID."
+  (let (dependent-ids)
+    (dolist (msg ordered-messages)
+      (let ((dependent-id (alist-get 'id msg)))
+        (when (and dependent-id
+                   (disco-room--message-reply-type-p msg)
+                   (disco-room--reply-reference-targets-current-room-p msg)
+                   (equal (disco-room--reply-reference-id msg) message-id))
+          (push dependent-id dependent-ids))))
+    (nreverse dependent-ids)))
+
+(defun disco-room--message-affects-composer-context-p (message-id)
+  "Return non-nil when MESSAGE-ID is used by current composer context."
+  (or (equal message-id disco-room--pending-reply-to)
+      (equal message-id (disco-room--composer-edit-message-id))))
+
 (defun disco-room--mutate-timeline-preserving-point (mutator)
   "Run MUTATOR while preserving chat reading and composer position."
   (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
@@ -6415,11 +6439,15 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
          (present-after (member message-id target-ids))
          (affected-ids (disco-room--message-neighborhood-ids
                         current-ids target-ids message-id))
+         (reply-dependent-ids
+          (disco-room--reply-dependent-message-ids ordered-messages message-id))
          (target-message (seq-find (lambda (msg)
                                      (equal (alist-get 'id msg) message-id))
                                    ordered-messages))
          (context-snapshot
-          (disco-room--copy-render-contexts-for-ids affected-ids)))
+          (disco-room--copy-render-contexts-for-ids affected-ids))
+         (composer-context-affected-p
+          (disco-room--message-affects-composer-context-p message-id)))
     (when (and message-id
                disco-room--ewoc
                (or present-before present-after)
@@ -6444,10 +6472,13 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  (ewoc-set-data node target-message))))))
          (setq disco-room--displayed-message-ids target-ids)
          (disco-room--recompute-render-contexts-for-ids ordered-messages affected-ids)
+         (when composer-context-affected-p
+           (disco-room--set-ewoc-frame))
          (let ((invalidate-ids
                 (delete-dups
                  (append
                   (and present-after (list message-id))
+                  reply-dependent-ids
                   (disco-room--changed-render-context-ids
                    affected-ids context-snapshot)))))
            (dolist (affected-id invalidate-ids)
