@@ -803,6 +803,23 @@
         (should-not disco-room--revealed-spoiler-message-id)
         (should (equal '("m2") invalidated))))))
 
+(ert-deftest disco-room-forward-snapshot-content-uses-internal-markdown-renderer ()
+  (let* ((disco-markdown-backend 'internal)
+         (msg '((id . "m1")
+                (message_snapshots
+                 . (((message
+                      . ((content . "[link](https://example.com)\n> quote"))))))))
+         (rendered (disco-room--forward-snapshot-content msg))
+         (plain (substring-no-properties rendered))
+         (link-pos (string-match "link" plain))
+         (quote-pos (string-match "quote" plain)))
+    (should (equal "link\nquote" plain))
+    (should (equal "https://example.com"
+                   (get-text-property link-pos 'disco-markdown-url rendered)))
+    (should (equal "| "
+                   (substring-no-properties
+                    (get-text-property quote-pos 'line-prefix rendered))))))
+
 (provide 'disco-room-test)
 
 ;;; disco-room-test.el ends here
