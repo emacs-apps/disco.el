@@ -528,7 +528,7 @@
     (should (eq list-spec (disco-root-layout-view-spec-list-spec view-spec)))))
 
 (ert-deftest disco-root-layout-ewoc-items-view-spec-create-defaults-to-root-hooks ()
-  (let* ((items '((:entry-type text :text "hello")))
+  (let* ((items (list (disco-root-layout-entry-create :type 'text :text "hello")))
          (view-spec (disco-root-layout-ewoc-items-view-spec-create items)))
     (should (disco-root-layout-view-spec-p view-spec))
     (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
@@ -550,8 +550,9 @@
         (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
         (should (eq 'disco-root--ewoc-insert-entry
                     (disco-root-layout-view-spec-item-inserter view-spec)))
-        (should (equal 'channel (plist-get first-item :entry-type)))
-        (should (equal "c1" (alist-get 'id (plist-get first-item :channel))))))))
+        (should (eq 'channel (disco-root-layout-entry-type first-item)))
+        (should (equal "c1"
+                       (alist-get 'id (disco-root-layout-entry-channel first-item))))))))
 
 (ert-deftest disco-root-render-layout-tree-returns-ewoc-items-view-spec ()
   (with-temp-buffer
@@ -574,10 +575,10 @@
                (items (disco-root-layout-view-spec-items view-spec)))
           (should (disco-root-layout-view-spec-p view-spec))
           (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
-          (should (equal 'section (plist-get (car items) :entry-type)))
-          (should (equal 'unread (plist-get (car items) :section)))
+          (should (eq 'section (disco-root-layout-entry-type (car items))))
+          (should (equal 'unread (disco-root-layout-entry-section (car items))))
           (should (seq-some (lambda (item)
-                              (equal 'channel (plist-get item :entry-type)))
+                              (eq 'channel (disco-root-layout-entry-type item)))
                             items)))))))
 
 (ert-deftest disco-root-layout-render-view-spec-renders-ewoc-items ()
@@ -585,7 +586,7 @@
     (disco-root-mode)
     (let ((view-spec
            (disco-root-layout-ewoc-items-view-spec-create
-            '((:entry-type text :text "hello")))))
+            (list (disco-root-layout-entry-create :type 'text :text "hello")))))
       (disco-root-layout-render-view-spec view-spec)
       (should (string-match-p "hello" (buffer-string))))))
 
@@ -603,8 +604,8 @@
                (first-entry (car entries)))
           (should (eq 'disco-root--insert-layout-entry
                       (disco-view-list-spec-item-inserter spec)))
-          (should (equal 'channel (plist-get first-entry :entry-type)))
-          (should (equal 'parent-thread (plist-get first-entry :scope))))))))
+          (should (eq 'channel (disco-root-layout-entry-type first-entry)))
+          (should (eq 'parent-thread (disco-root-layout-entry-scope first-entry))))))))
 
 (ert-deftest disco-root-archived-threads-list-spec-uses-layout-entry-inserter ()
   (with-temp-buffer
@@ -623,8 +624,8 @@
                (first-entry (car entries)))
           (should (eq 'disco-root--insert-layout-entry
                       (disco-view-list-spec-item-inserter spec)))
-          (should (equal 'channel (plist-get first-entry :entry-type)))
-          (should (equal 'archived-thread (plist-get first-entry :scope))))))))
+          (should (eq 'channel (disco-root-layout-entry-type first-entry)))
+          (should (eq 'archived-thread (disco-root-layout-entry-scope first-entry))))))))
 
 (ert-deftest disco-root-mode-disables-undo-history ()
   (with-temp-buffer
@@ -862,11 +863,11 @@
                    :cursor nil
                    :total-results 1)))
     (let ((first-entry (car (disco-root--search-layout-entries))))
-      (should (equal 'search-section (plist-get first-entry :entry-type)))
-      (should (equal "Messages" (plist-get first-entry :title)))
-      (should (= 1 (plist-get first-entry :loaded-count)))
-      (should (= 1 (plist-get first-entry :total-count)))
-      (should-not (plist-get first-entry :loading)))))
+      (should (eq 'search-section (disco-root-layout-entry-type first-entry)))
+      (should (equal "Messages" (disco-root-layout-entry-title first-entry)))
+      (should (= 1 (disco-root-layout-entry-loaded-count first-entry)))
+      (should (= 1 (disco-root-layout-entry-total-count first-entry)))
+      (should-not (disco-root-layout-entry-loading first-entry)))))
 
 (ert-deftest disco-root-render-layout-search-renders-sections ()
   (with-temp-buffer

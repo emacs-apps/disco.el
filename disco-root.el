@@ -3029,7 +3029,7 @@ Return one of symbols:
                     (let ((inhibit-read-only t))
                       (dolist (node (if (listp nodes) nodes (list nodes)))
                         (let ((entry (copy-sequence (ewoc-data node))))
-                          (setq entry (plist-put entry :channel channel))
+                          (setf (disco-root-layout-entry-channel entry) channel)
                           (ewoc-set-data node entry)
                           (ewoc-invalidate disco-root--ewoc node)
                           (setq updated t))))
@@ -3086,8 +3086,8 @@ Return one of symbols:
   "Return channel object stored in activity EWOC NODE, or nil."
   (when node
     (let ((entry (ewoc-data node)))
-      (when (eq (plist-get entry :entry-type) 'channel)
-        (plist-get entry :channel)))))
+      (when (eq (disco-root-layout-entry-type entry) 'channel)
+        (disco-root-layout-entry-channel entry)))))
 
 (defun disco-root--activity-node-prev-channel (node)
   "Return previous activity channel node before NODE, or nil."
@@ -3221,7 +3221,7 @@ if structural fallback is required."
                    (gethash section disco-root--section-node-table))))
     (when (and node disco-root--ewoc)
       (let ((entry (copy-sequence (ewoc-data node))))
-        (setq entry (plist-put entry :count count))
+        (setf (disco-root-layout-entry-count entry) count)
         (ewoc-set-data node entry)
         (ewoc-invalidate disco-root--ewoc node)
         t))))
@@ -3284,11 +3284,9 @@ if structural fallback is required."
       (let ((guild (disco-root--guild-by-id guild-id)))
         (when guild
           (let ((entry (copy-sequence (ewoc-data node))))
-            (setq entry (plist-put entry :guild guild))
-            (setq entry (plist-put
-                         entry
-                         :unread-count
-                         (disco-root--guild-unread-total guild-id t)))
+            (setf (disco-root-layout-entry-guild entry) guild)
+            (setf (disco-root-layout-entry-unread-count entry)
+                  (disco-root--guild-unread-total guild-id t))
             (ewoc-set-data node entry)
             (ewoc-invalidate disco-root--ewoc node)
             t))))))
@@ -3303,11 +3301,9 @@ if structural fallback is required."
         (when category
           (let* ((children (disco-root--category-visible-children category))
                  (entry (copy-sequence (ewoc-data node))))
-            (setq entry (plist-put entry :category category))
-            (setq entry (plist-put
-                         entry
-                         :unread-count
-                         (disco-root--category-children-unread-total children)))
+            (setf (disco-root-layout-entry-category entry) category)
+            (setf (disco-root-layout-entry-unread-count entry)
+                  (disco-root--category-children-unread-total children))
             (ewoc-set-data node entry)
             (ewoc-invalidate disco-root--ewoc node)
             t))))))
@@ -5011,14 +5007,6 @@ Higher score means channel should appear earlier in activity mode."
      (error "Unknown EWOC entry type: %S"
             (disco-root-layout-entry-type entry)))))
 
-(defun disco-root--insert-private-channels ()
-  "Insert visible private-channel rows into root buffer."
-  (let ((channels (disco-root--visible-private-channels)))
-    (if channels
-        (dolist (channel channels)
-          (disco-root--ewoc-insert-channel channel 2))
-      (disco-root--ewoc-insert-text "  (no direct messages loaded)"))))
-
 (defun disco-root--guild-name-by-id (guild-id)
   "Return guild display name for GUILD-ID."
   (let ((guild
@@ -5748,16 +5736,11 @@ row indentation and defaults to 8 spaces."
                               (gethash category-id category-children))))
                      categories)))
       (when (or uncategorized-parents has-categorized-parents has-visible-thread)
-        (push (list :entry-type 'guild
-                    :guild guild
-                    :unread-count guild-unread)
+        (push (disco-root--entry-guild guild guild-unread)
               entries)
         (when (disco-root--guild-expanded-p guild-id)
           (dolist (channel uncategorized-parents)
-            (push (list :entry-type 'channel
-                        :channel channel
-                        :indent 4
-                        :scope 'root)
+            (push (disco-root--entry-channel channel 4 'root)
                   entries)
             (when (disco-root--thread-parent-channel-p channel)
               (dolist (entry (disco-root--parent-thread-entries
@@ -5772,16 +5755,11 @@ row indentation and defaults to 8 spaces."
                    (category-unread (and children
                                          (disco-root--category-children-unread-total children))))
               (when children
-                (push (list :entry-type 'category
-                            :category category
-                            :unread-count (or category-unread 0))
+                (push (disco-root--entry-category category (or category-unread 0))
                       entries)
                 (when (disco-root--category-expanded-p category-id)
                   (dolist (channel children)
-                    (push (list :entry-type 'channel
-                                :channel channel
-                                :indent 6
-                                :scope 'root)
+                    (push (disco-root--entry-channel channel 6 'root)
                           entries)
                     (when (disco-root--thread-parent-channel-p channel)
                       (dolist (entry (disco-root--parent-thread-entries
@@ -5799,14 +5777,11 @@ row indentation and defaults to 8 spaces."
                   (push thread orphan-threads))))
             (setq orphan-threads (nreverse orphan-threads))
             (when orphan-threads
-              (push (list :entry-type 'text :text "    [threads]") entries)
+              (push (disco-root--entry-text "    [threads]") entries)
               (dolist (thread orphan-threads)
-                (push (list :entry-type 'channel
-                            :channel thread
-                            :indent 8
-                            :scope 'root)
+                (push (disco-root--entry-channel thread 8 'root)
                       entries)))))
-        (push (list :entry-type 'blank) entries)
+        (push (disco-root--entry-blank) entries)
         (nreverse entries)))))
 
 (defun disco-root--clear-ewoc-state ()
@@ -5840,54 +5815,35 @@ row indentation and defaults to 8 spaces."
      (append (when show-unread '(unread))
              '(private guilds)))
     (when show-unread
-      (push (list :entry-type 'section
-                  :section 'unread
-                  :title "Unread"
-                  :count (length unread-channels))
+      (push (disco-root--entry-section 'unread "Unread" (length unread-channels))
             items)
       (when (disco-root--section-expanded-p 'unread)
         (if unread-visible
             (dolist (channel unread-visible)
-              (push (list :entry-type 'channel
-                          :channel channel
-                          :indent 2
-                          :scope 'root)
+              (push (disco-root--entry-channel channel 2 'root)
                     items))
-          (push (list :entry-type 'text
-                      :text "  (no unread channels)")
+          (push (disco-root--entry-text "  (no unread channels)")
                 items))
         (when (> unread-hidden 0)
-          (push (list :entry-type 'text
-                      :text (format "  (... %d more unread channels)"
-                                    unread-hidden))
+          (push (disco-root--entry-text
+                 (format "  (... %d more unread channels)" unread-hidden))
                 items)))
-      (push (list :entry-type 'blank) items))
-    (push (list :entry-type 'section
-                :section 'private
-                :title "People"
-                :count (length private-channels))
+      (push (disco-root--entry-blank) items))
+    (push (disco-root--entry-section 'private "People" (length private-channels))
           items)
     (when (disco-root--section-expanded-p 'private)
       (if private-channels
           (dolist (channel private-channels)
-            (push (list :entry-type 'channel
-                        :channel channel
-                        :indent 2
-                        :scope 'root)
+            (push (disco-root--entry-channel channel 2 'root)
                   items))
-        (push (list :entry-type 'text
-                    :text "  (no direct messages loaded)")
+        (push (disco-root--entry-text "  (no direct messages loaded)")
               items)))
-    (push (list :entry-type 'blank) items)
-    (push (list :entry-type 'section
-                :section 'guilds
-                :title "Guilds"
-                :count (length guilds))
+    (push (disco-root--entry-blank) items)
+    (push (disco-root--entry-section 'guilds "Guilds" (length guilds))
           items)
     (when (disco-root--section-expanded-p 'guilds)
       (if (eq disco-root--view-mode 'dms)
-          (push (list :entry-type 'text
-                      :text "  (guild sections hidden in dms view)")
+          (push (disco-root--entry-text "  (guild sections hidden in dms view)")
                 items)
         (let ((inserted 0))
           (dolist (guild guilds)
@@ -5896,8 +5852,7 @@ row indentation and defaults to 8 spaces."
               (dolist (entry entries)
                 (push entry items))))
           (when (= inserted 0)
-            (push (list :entry-type 'text
-                        :text "  (no visible guild channels)")
+            (push (disco-root--entry-text "  (no visible guild channels)")
                   items)))))
     (nreverse items)))
 
@@ -5912,13 +5867,9 @@ row indentation and defaults to 8 spaces."
         items)
     (if channels
         (dolist (channel channels)
-          (push (list :entry-type 'channel
-                      :channel channel
-                      :indent 2
-                      :scope 'activity)
+          (push (disco-root--entry-channel channel 2 'activity)
                 items))
-      (push (list :entry-type 'text
-                  :text "  (no visible channels)")
+      (push (disco-root--entry-text "  (no visible channels)")
             items))
     (nreverse items)))
 
@@ -5937,43 +5888,32 @@ row indentation and defaults to 8 spaces."
              (error (plist-get state :error))
              (cursor (plist-get state :cursor))
              (total (plist-get state :total-results)))
-        (push (list :entry-type 'search-section
-                    :tab tab
-                    :title (disco-root--search-tab-label tab)
-                    :loaded-count (length items)
-                    :total-count total
-                    :loading loading)
+        (push (disco-root--entry-search-section
+               tab
+               (disco-root--search-tab-label tab)
+               (length items)
+               total
+               loading)
               result)
         (cond
          (items
           (dolist (message items)
-            (push (list :entry-type 'search-message
-                        :message message
-                        :indent 2
-                        :tab tab)
+            (push (disco-root--entry-search-message message 2 tab)
                   result)))
          (loading
-          (push (list :entry-type 'search-note
-                      :text "  (loading...)"
-                      :face 'shadow)
+          (push (disco-root--entry-search-note "  (loading...)" 'shadow)
                 result))
          (error
-          (push (list :entry-type 'search-note
-                      :text (format "  (%s)" error)
-                      :face 'font-lock-warning-face)
+          (push (disco-root--entry-search-note (format "  (%s)" error)
+                                               'font-lock-warning-face)
                 result))
          (t
-          (push (list :entry-type 'search-note
-                      :text "  (no results)"
-                      :face 'shadow)
+          (push (disco-root--entry-search-note "  (no results)" 'shadow)
                 result)))
         (when cursor
-          (push (list :entry-type 'search-action
-                      :label "Show more"
-                      :action 'load-more
-                      :tab tab)
+          (push (disco-root--entry-search-action "Show more" 'load-more tab)
                 result))
-        (push (list :entry-type 'blank) result)))
+        (push (disco-root--entry-blank) result)))
     (nreverse result)))
 
 (defun disco-root--search-layout-list-spec ()

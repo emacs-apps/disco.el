@@ -110,10 +110,11 @@ built-in tree/activity layouts, return an `items` view spec instead:
 (defun my-disco-root-build-people-ewoc ()
   (disco-root-layout-ewoc-items-view-spec-create
    (mapcar (lambda (channel)
-             (list :entry-type 'channel
-                   :channel channel
-                   :indent 2
-                   :scope 'root))
+             (disco-root-layout-entry-create
+              :type 'channel
+              :channel channel
+              :indent 2
+              :scope 'root))
            (disco-root--visible-private-channels))))
 ```
 
