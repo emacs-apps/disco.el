@@ -44,6 +44,7 @@
 (defvar-local disco-room--newest-message-id nil)
 (defvar-local disco-room--history-exhausted nil)
 (defvar-local disco-room--pending-reply-to nil)
+(defvar-local disco-room--pending-edit nil)
 (defvar-local disco-room--pending-jump-message-id nil)
 (defvar-local disco-room--jump-in-flight nil)
 (defvar-local disco-room--gateway-handler nil)
@@ -831,6 +832,110 @@ negatives."
     (when missing
       (format "(read-only room; composer hidden: missing %s)"
               (mapconcat #'disco-permission-display-name missing ", ")))))
+
+(defun disco-room--composer-edit-active-p ()
+  "Return non-nil when room composer is editing an existing message."
+  (and (listp disco-room--pending-edit)
+       (eq (plist-get disco-room--pending-edit :type) 'edit)))
+
+(defun disco-room--composer-edit-message-id ()
+  "Return target message id for active composer edit, or nil."
+  (and (disco-room--composer-edit-active-p)
+       (plist-get disco-room--pending-edit :message-id)))
+
+(defun disco-room--copy-attachment-token-table ()
+  "Return deep copy of current attachment token table as alist entries."
+  (let (entries)
+    (when (hash-table-p disco-room--attachment-token-table)
+      (maphash (lambda (token-id entry)
+                 (push (cons token-id (copy-tree entry)) entries))
+               disco-room--attachment-token-table))
+    (nreverse entries)))
+
+(defun disco-room--restore-attachment-token-table (entries)
+  "Replace current attachment token table with ENTRIES alist copy."
+  (unless (hash-table-p disco-room--attachment-token-table)
+    (setq disco-room--attachment-token-table (make-hash-table :test #'equal)))
+  (clrhash disco-room--attachment-token-table)
+  (dolist (entry entries)
+    (puthash (car entry) (copy-tree (cdr entry)) disco-room--attachment-token-table)))
+
+(defun disco-room--composer-edit-saved-state ()
+  "Capture composer state to be restored after edit cancel/success."
+  (list :draft (disco-room--current-draft)
+        :reply-to disco-room--pending-reply-to
+        :attachment-token-seq disco-room--attachment-token-seq
+        :attachment-token-entries (disco-room--copy-attachment-token-table)))
+
+(defun disco-room--composer-edit-restore-state (state)
+  "Restore composer STATE captured by `disco-room--composer-edit-saved-state'."
+  (let ((draft (or (plist-get state :draft) "")))
+    (setq disco-room--pending-reply-to (plist-get state :reply-to))
+    (setq disco-room--attachment-token-seq
+          (or (plist-get state :attachment-token-seq) 0))
+    (disco-room--restore-attachment-token-table
+     (plist-get state :attachment-token-entries))
+    (setq disco-room--draft-input draft)
+    (setq disco-room--input-index nil)
+    (setq disco-room--input-pending nil)
+    (disco-room--prune-unused-attachment-tokens draft)
+    (disco-room--sync-pending-attachments-from-draft draft)))
+
+(defun disco-room--composer-edit-clear (&optional restore-state)
+  "Clear active composer edit.
+
+When RESTORE-STATE is non-nil, also restore the saved draft/reply/attachment
+state that was present before edit mode was entered."
+  (when (disco-room--composer-edit-active-p)
+    (let ((saved-state (plist-get disco-room--pending-edit :saved-state)))
+      (setq disco-room--pending-edit nil)
+      (when restore-state
+        (disco-room--composer-edit-restore-state saved-state)))
+    t))
+
+(defun disco-room--composer-context-message (message-id)
+  "Return cached local message object for MESSAGE-ID, or nil."
+  (and message-id (disco-room--message-by-id message-id)))
+
+(defun disco-room--composer-context-text (action message-id)
+  "Return multi-line composer context text for ACTION and MESSAGE-ID."
+  (let* ((msg (disco-room--composer-context-message message-id))
+         (author (and msg (disco-room--message-author msg)))
+         (preview (and msg (disco-msg-preview-content msg)))
+         (headline
+          (if author
+              (format "%s %s [%s]" action author message-id)
+            (format "%s: %s" action message-id))))
+    (concat
+     headline
+     " (C-c C-k to cancel)\n"
+     (if (and (stringp preview) (not (string-empty-p preview)))
+         (format "> %s\n" preview)
+       ""))))
+
+(defun disco-room--composer-enter-edit (msg)
+  "Enter composer edit mode for MSG."
+  (let* ((message-id (alist-get 'id msg))
+         (old-content (or (alist-get 'content msg) ""))
+         (saved-state (disco-room--composer-edit-saved-state)))
+    (unless (and message-id (not (string-empty-p (format "%s" message-id))))
+      (user-error "disco: message id is unavailable for edit"))
+    (when (disco-room--composer-edit-active-p)
+      (disco-room--composer-edit-clear t))
+    (setq disco-room--pending-edit
+          (list :type 'edit
+                :message-id message-id
+                :saved-state saved-state))
+    (setq disco-room--pending-reply-to nil)
+    (setq disco-room--draft-input old-content)
+    (setq disco-room--input-index nil)
+    (setq disco-room--input-pending nil)
+    (setq disco-room--pending-attachments nil)
+    (setq disco-room--attachment-token-seq 0)
+    (when (hash-table-p disco-room--attachment-token-table)
+      (clrhash disco-room--attachment-token-table))
+    (disco-room-render)
+    (message "disco: editing message %s in composer" message-id)))
 
 (cl-defun disco-room--poll-owned-by-current-user-p (msg &optional (unknown-value t))
   "Return non-nil when poll in MSG is owned by current user.
@@ -5454,16 +5559,25 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
    "   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments"
    "   C-c C-t o: open message thread   C-c C-t: thread ops"
    (if (disco-room--composer-visible-p channel)
-       "   RET/C-c C-c: send   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit"
+       (format "   RET/C-c C-c: %s   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit"
+               (if (disco-room--composer-edit-active-p)
+                   "save edit"
+                 "send"))
      "   C-c C-v: refetch avatars   [composer hidden]   q: quit")))
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
   (concat
-   (if disco-room--pending-reply-to
-       (format "Replying to: %s (C-c C-k to cancel)\n"
-               disco-room--pending-reply-to)
-     "")
+   (cond
+    ((disco-room--composer-edit-active-p)
+     (disco-room--composer-context-text
+      "Editing"
+      (disco-room--composer-edit-message-id)))
+    (disco-room--pending-reply-to
+     (disco-room--composer-context-text
+      "Replying to"
+      disco-room--pending-reply-to))
+    (t ""))
    (if disco-room--pending-attachments
        (format "Queued attachments: %s\n"
                (mapconcat #'identity
@@ -5634,16 +5748,11 @@ Return non-nil when handled without full room rerender."
           (when disco-room--send-in-flight
             (insert "   [sending...]"))
           (insert "\n")
-          (when (and (not composer-visible-p)
-                     disco-room--pending-reply-to)
-            (insert (format "Replying to: %s (C-c C-k to cancel)\n"
-                            disco-room--pending-reply-to)))
-          (when (and (not composer-visible-p)
-                     disco-room--pending-attachments)
-            (insert (format "Queued attachments: %s\n"
-                            (mapconcat #'identity
-                                       (disco-room--pending-attachment-labels)
-                                       ", "))))
+          (when (not composer-visible-p)
+            (let ((context-text (disco-room--input-footer-context-text)))
+              (when (and (stringp context-text)
+                         (not (string-empty-p context-text)))
+                (insert context-text))))
           (when disco-room--history-exhausted
             (insert "(older history exhausted)\n"))
           (when-let* ((filter-line (disco-room--msg-filter-status-line)))
@@ -6647,9 +6756,11 @@ When called with prefix argument, force draft edit in minibuffer first."
            (token-attachments (disco-room--attachments-from-draft content))
            (has-attachments (not (null token-attachments)))
            (content-without-tokens (disco-room--draft-without-attachment-tokens content))
-           (normalized (string-trim-right (or content-without-tokens ""))))
+           (normalized (string-trim-right (or content-without-tokens "")))
+           (edit-message-id (disco-room--composer-edit-message-id)))
       (if (and (string-empty-p normalized)
-               (not has-attachments))
+               (not has-attachments)
+               (not edit-message-id))
           (message "disco: draft is empty")
         (let* ((room-buffer (current-buffer))
                (channel-id disco-room--channel-id)
@@ -6664,64 +6775,94 @@ When called with prefix argument, force draft edit in minibuffer first."
                    '(attach-files))
                  (when reply-to
                    '(read-message-history)))))
-          (disco-permission-ensure-channel
-           (disco-room--channel-object)
-           required-permissions
-           :action "sending messages")
-          (unless (string-empty-p normalized)
-            (disco-room--input-history-push normalized))
-          (setq disco-room--draft-input "")
-          (setq disco-room--send-in-flight t)
-          (disco-room-render)
-          (if has-attachments
-              (disco-api-send-message-with-attachments-async
+          (if edit-message-id
+              (progn
+                (when has-attachments
+                  (user-error "disco: editing via composer does not support attachments yet"))
+                (setq disco-room--draft-input "")
+                (setq disco-room--send-in-flight t)
+                (disco-room-render)
+                (disco-api-edit-message-async
+                 channel-id
+                 edit-message-id
+                 normalized
+                 :allowed-mentions (disco-room--send-allowed-mentions)
+                 :on-success
+                 (lambda (_response)
+                   (when (disco-room--channel-buffer-p room-buffer channel-id)
+                     (with-current-buffer room-buffer
+                       (setq disco-room--send-in-flight nil)
+                       (disco-room--composer-edit-clear t)
+                       (disco-room-refresh)
+                       (message "disco: edited message %s" edit-message-id))))
+                 :on-error
+                 (lambda (err)
+                   (when (disco-room--channel-buffer-p room-buffer channel-id)
+                     (with-current-buffer room-buffer
+                       (setq disco-room--send-in-flight nil)
+                       (setq disco-room--draft-input normalized)
+                       (disco-room-render)
+                       (message "disco: edit failed for %s: %s"
+                                edit-message-id
+                                (disco-room--async-error-message err)))))))
+            (disco-permission-ensure-channel
+             (disco-room--channel-object)
+             required-permissions
+             :action "sending messages")
+            (unless (string-empty-p normalized)
+              (disco-room--input-history-push normalized))
+            (setq disco-room--draft-input "")
+            (setq disco-room--send-in-flight t)
+            (disco-room-render)
+            (if has-attachments
+                (disco-api-send-message-with-attachments-async
+                 channel-id
+                 :content (unless (string-empty-p normalized) normalized)
+                 :reply-to-message-id reply-to
+                 :allowed-mentions allowed-mentions
+                 :attachments attachments
+                 :on-success
+                 (lambda (_response)
+                   (when (disco-room--channel-buffer-p room-buffer channel-id)
+                     (with-current-buffer room-buffer
+                       (setq disco-room--send-in-flight nil)
+                       (setq disco-room--pending-reply-to nil)
+                       (setq disco-room--pending-attachments nil)
+                       (when disco-room--attachment-token-table
+                         (clrhash disco-room--attachment-token-table))
+                       (disco-room-refresh)
+                       (message "disco: message with attachment(s) sent"))))
+                 :on-error
+                 (lambda (err)
+                   (when (disco-room--channel-buffer-p room-buffer channel-id)
+                     (with-current-buffer room-buffer
+                       (setq disco-room--send-in-flight nil)
+                       (setq disco-room--draft-input content)
+                       (disco-room-render)
+                       (message "disco: send failed: %s"
+                                (disco-room--async-error-message err))))))
+              (disco-api-send-message-async
                channel-id
-               :content (unless (string-empty-p normalized) normalized)
+               normalized
                :reply-to-message-id reply-to
                :allowed-mentions allowed-mentions
-               :attachments attachments
                :on-success
                (lambda (_response)
                  (when (disco-room--channel-buffer-p room-buffer channel-id)
                    (with-current-buffer room-buffer
                      (setq disco-room--send-in-flight nil)
                      (setq disco-room--pending-reply-to nil)
-                     (setq disco-room--pending-attachments nil)
-                     (when disco-room--attachment-token-table
-                       (clrhash disco-room--attachment-token-table))
                      (disco-room-refresh)
-                     (message "disco: message with attachment(s) sent"))))
+                     (message "disco: message sent"))))
                :on-error
                (lambda (err)
                  (when (disco-room--channel-buffer-p room-buffer channel-id)
                    (with-current-buffer room-buffer
                      (setq disco-room--send-in-flight nil)
-                     (setq disco-room--draft-input content)
+                     (setq disco-room--draft-input normalized)
                      (disco-room-render)
                      (message "disco: send failed: %s"
-                              (disco-room--async-error-message err))))))
-            (disco-api-send-message-async
-             channel-id
-             normalized
-             :reply-to-message-id reply-to
-             :allowed-mentions allowed-mentions
-             :on-success
-             (lambda (_response)
-               (when (disco-room--channel-buffer-p room-buffer channel-id)
-                 (with-current-buffer room-buffer
-                   (setq disco-room--send-in-flight nil)
-                   (setq disco-room--pending-reply-to nil)
-                   (disco-room-refresh)
-                   (message "disco: message sent"))))
-             :on-error
-             (lambda (err)
-               (when (disco-room--channel-buffer-p room-buffer channel-id)
-                 (with-current-buffer room-buffer
-                   (setq disco-room--send-in-flight nil)
-                   (setq disco-room--draft-input normalized)
-                   (disco-room-render)
-                   (message "disco: send failed: %s"
-                            (disco-room--async-error-message err)))))))))))))
+                              (disco-room--async-error-message err))))))))))))))
 
 (defun disco-room-load-older-messages ()
   "Load one older page for the current room view asynchronously."
@@ -6788,6 +6929,8 @@ When called interactively, defaults to message under point."
                (or fallback
                    (user-error "disco: no target message available"))
              raw))))
+  (when (disco-room--composer-edit-active-p)
+    (disco-room--composer-edit-clear t))
   (setq disco-room--pending-reply-to message-id)
   (disco-room-render)
   (message "disco: next message will reply to %s" message-id))
@@ -6914,11 +7057,19 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
       (send-forward normalized-content nil))))
 
 (defun disco-room-cancel-reply ()
-  "Cancel pending reply target for next send."
+  "Cancel pending composer reply/edit context."
   (interactive)
-  (setq disco-room--pending-reply-to nil)
-  (disco-room-render)
-  (message "disco: reply target cleared"))
+  (cond
+   ((disco-room--composer-edit-active-p)
+    (disco-room--composer-edit-clear t)
+    (disco-room-render)
+    (message "disco: edit target cleared"))
+   (disco-room--pending-reply-to
+    (setq disco-room--pending-reply-to nil)
+    (disco-room-render)
+    (message "disco: reply target cleared"))
+   (t
+    (message "disco: no composer context to cancel"))))
 
 (defun disco-room-return-dwim ()
   "RET behavior for room buffer.
@@ -6939,30 +7090,9 @@ Otherwise open draft editor."
            (if disco-room-wrap-long-lines "enabled" "disabled")))
 
 (defun disco-room-edit-message ()
-  "Edit message at point in current room."
+  "Enter composer edit mode for message at point in current room."
   (interactive)
-  (let* ((msg (disco-room--message-at-point))
-         (message-id (alist-get 'id msg))
-         (old-content (or (alist-get 'content msg) ""))
-         (new-content (read-string (format "Edit message %s: " message-id) old-content))
-         (room-buffer (current-buffer))
-         (channel-id disco-room--channel-id))
-    (disco-api-edit-message-async
-     channel-id
-     message-id
-     new-content
-     :allowed-mentions (disco-room--send-allowed-mentions)
-     :on-success
-     (lambda (_response)
-       (when (disco-room--channel-buffer-p room-buffer channel-id)
-         (with-current-buffer room-buffer
-           (disco-room-refresh)
-           (message "disco: edited message %s" message-id))))
-     :on-error
-     (lambda (err)
-       (message "disco: edit failed for %s: %s"
-                message-id
-                (disco-room--async-error-message err))))))
+  (disco-room--composer-enter-edit (disco-room--message-at-point)))
 
 (defun disco-room-delete-message ()
   "Delete message at point in current room."
@@ -7419,6 +7549,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
               #'disco-room--buffer-substring-filter)
   (disco-room--typing-cancel-expire-timer)
   (setq-local disco-room--draft-input "")
+  (setq-local disco-room--pending-reply-to nil)
+  (setq-local disco-room--pending-edit nil)
   (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))
   (setq-local disco-room--input-index nil)
   (setq-local disco-room--input-pending nil)
