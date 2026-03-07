@@ -83,6 +83,8 @@
 (defvar-local disco-room--typing-expire-timer nil)
 (defvar-local disco-room--poll-selection-drafts nil)
 (defvar-local disco-room--revealed-spoiler-message-id nil)
+(defvar-local disco-room--optimistic-read-ack-seq 0)
+(defvar-local disco-room--pending-optimistic-read-ack nil)
 
 (defconst disco-room--attachment-token-regexp "\\[file:\\([0-9]+\\)\\]"
   "Regexp used to match attachment tokens in room draft input.")
@@ -1747,6 +1749,83 @@ When INDEX is nil, restore pending draft text."
     (setq disco-room--input-pending nil)
     (disco-room--set-draft updated)))
 
+(defun disco-room--read-state-snapshot-fields (state)
+  "Return writable read-state fields copied from STATE."
+  (let (fields)
+    (dolist (field '(last_message_id
+                     mention_count
+                     last_pin_timestamp
+                     flags
+                     last_viewed
+                     version))
+      (when (assq field state)
+        (push (cons field (alist-get field state)) fields)))
+    (nreverse fields)))
+
+(defun disco-room--restore-channel-read-state (channel-id state ack-token)
+  "Restore CHANNEL-ID read STATE and ACK-TOKEN snapshot." 
+  (if state
+      (disco-state--upsert-read-state
+       disco-read-state-type-channel
+       channel-id
+       (disco-room--read-state-snapshot-fields state))
+    (progn
+      (disco-state--delete-read-state disco-read-state-type-channel channel-id)
+      (when ack-token
+        (disco-state-set-channel-ack-token channel-id ack-token)))))
+
+(defun disco-room--optimistic-read-ack-begin (channel-id target-id ack-fields)
+  "Apply optimistic read ACK for CHANNEL-ID/TARGET-ID and return op seq."
+  (let ((seq (1+ disco-room--optimistic-read-ack-seq)))
+    (setq disco-room--optimistic-read-ack-seq seq)
+    (setq disco-room--pending-optimistic-read-ack
+          (list :seq seq
+                :channel-id channel-id
+                :target-id target-id
+                :previous-state (disco-state-read-state
+                                 disco-read-state-type-channel channel-id)
+                :previous-token (disco-state-channel-ack-token channel-id)))
+    (disco-state-apply-message-ack
+     channel-id
+     target-id
+     0
+     (plist-get ack-fields :flags)
+     (plist-get ack-fields :last-viewed))
+    (disco-room--apply-read-state-change-partially)
+    seq))
+
+(defun disco-room--optimistic-read-ack-clear (seq)
+  "Clear pending optimistic read ACK when it matches SEQ." 
+  (when (and (listp disco-room--pending-optimistic-read-ack)
+             (= (or (plist-get disco-room--pending-optimistic-read-ack :seq) -1)
+                seq))
+    (setq disco-room--pending-optimistic-read-ack nil)
+    t))
+
+(defun disco-room--optimistic-read-ack-confirm (message-id)
+  "Confirm pending optimistic read ACK using MESSAGE-ID from gateway/server." 
+  (when (and (listp disco-room--pending-optimistic-read-ack)
+             (stringp message-id))
+    (let ((target-id (plist-get disco-room--pending-optimistic-read-ack :target-id)))
+      (when (and (stringp target-id)
+                 (or (equal message-id target-id)
+                     (disco-state-snowflake< target-id message-id)))
+        (setq disco-room--pending-optimistic-read-ack nil)
+        t))))
+
+(defun disco-room--optimistic-read-ack-rollback (seq)
+  "Rollback pending optimistic read ACK when it still matches SEQ." 
+  (when (and (listp disco-room--pending-optimistic-read-ack)
+             (= (or (plist-get disco-room--pending-optimistic-read-ack :seq) -1)
+                seq))
+    (let ((channel-id (plist-get disco-room--pending-optimistic-read-ack :channel-id))
+          (previous-state (plist-get disco-room--pending-optimistic-read-ack :previous-state))
+          (previous-token (plist-get disco-room--pending-optimistic-read-ack :previous-token)))
+      (setq disco-room--pending-optimistic-read-ack nil)
+      (disco-room--restore-channel-read-state channel-id previous-state previous-token)
+      (disco-room--apply-read-state-change-partially)
+      t)))
+
 (defun disco-room--mark-read (&optional message-id)
   "Mark current room as read and acknowledge MESSAGE-ID.
 
@@ -1763,27 +1842,33 @@ Unread counters are always cleared locally."
          (should-ack (and target-id
                           (or (null last-read-id)
                               (disco-state-snowflake< last-read-id target-id)))))
-    (disco-state-apply-message-ack channel-id nil 0)
-    (when should-ack
-      (let ((ack-fields (disco-state-channel-ack-request-fields channel-id)))
-        (disco-api-ack-message-async
-         channel-id
-         target-id
-         :token (plist-get ack-fields :token)
-         :flags (plist-get ack-fields :flags)
-         :last-viewed (plist-get ack-fields :last-viewed)
-         :on-success
-         (lambda (response)
-           (when (disco-room--callback-active-p room-buffer channel-id generation)
-             (with-current-buffer room-buffer
-               (disco-state-apply-message-ack channel-id target-id 0)
-               (disco-state-apply-channel-ack-response channel-id response)
-               (disco-room--apply-read-state-change-partially))))
-         :on-error
-         (lambda (err)
-           (message "disco: read-state ack failed for %s: %s"
-                    channel-id
-                    (disco-room--async-error-message err))))))))
+    (if should-ack
+        (let* ((ack-fields (disco-state-channel-ack-request-fields channel-id))
+               (optimistic-seq (disco-room--optimistic-read-ack-begin
+                                channel-id target-id ack-fields)))
+          (disco-api-ack-message-async
+           channel-id
+           target-id
+           :token (plist-get ack-fields :token)
+           :flags (plist-get ack-fields :flags)
+           :last-viewed (plist-get ack-fields :last-viewed)
+           :on-success
+           (lambda (response)
+             (when (disco-room--callback-active-p room-buffer channel-id generation)
+               (with-current-buffer room-buffer
+                 (disco-room--optimistic-read-ack-clear optimistic-seq)
+                 (disco-state-apply-message-ack channel-id target-id 0)
+                 (disco-state-apply-channel-ack-response channel-id response)
+                 (disco-room--apply-read-state-change-partially))))
+           :on-error
+           (lambda (err)
+             (when (disco-room--callback-active-p room-buffer channel-id generation)
+               (with-current-buffer room-buffer
+                 (disco-room--optimistic-read-ack-rollback optimistic-seq)))
+             (message "disco: read-state ack failed for %s: %s"
+                      channel-id
+                      (disco-room--async-error-message err)))))
+      (disco-state-apply-message-ack channel-id nil 0))))
 
 (defun disco-room-ack-channel-pins ()
   "Acknowledge currently pinned messages in the active room channel."
@@ -6592,6 +6677,7 @@ REASON is shown in the minibuffer."
         (disco-room--update-frame-preserving-point)))
      ((and (equal event-channel-id disco-room--channel-id)
            (eq event-type 'message-ack))
+      (disco-room--optimistic-read-ack-confirm (plist-get event :message-id))
       (unless (disco-room--apply-read-state-change-partially)
         (disco-room--update-frame-preserving-point)))
      ((and (equal event-channel-id disco-room--channel-id)
@@ -8645,6 +8731,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--typing-expire-timer nil)
   (setq-local disco-room--poll-selection-drafts (make-hash-table :test #'equal))
   (setq-local disco-room--revealed-spoiler-message-id nil)
+  (setq-local disco-room--optimistic-read-ack-seq 0)
+  (setq-local disco-room--pending-optimistic-read-ack nil)
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (when (fboundp 'cursor-intangible-mode)
     (cursor-intangible-mode 1))
