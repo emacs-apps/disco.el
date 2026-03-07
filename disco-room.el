@@ -1300,7 +1300,7 @@ state that was present before edit mode was entered."
     (setq disco-room--attachment-token-seq 0)
     (when (hash-table-p disco-room--attachment-token-table)
       (clrhash disco-room--attachment-token-table))
-    (disco-room-render)
+    (disco-room--update-frame-preserving-point)
     (message "disco: editing message %s in composer" message-id)))
 
 (cl-defun disco-room--poll-owned-by-current-user-p (msg &optional (unknown-value t))
@@ -1431,7 +1431,7 @@ If current user identity is unknown, return UNKNOWN-VALUE."
       (setq disco-room--typing-expire-timer nil)
       (when (disco-room--typing-prune-expired)
         (unless disco-room--rendering
-          (disco-room--render-preserving-point)))
+          (disco-room--update-frame-preserving-point)))
       (disco-room--typing-reschedule-expire-timer))))
 
 (defun disco-room--typing-reschedule-expire-timer ()
@@ -1479,7 +1479,7 @@ If current user identity is unknown, return UNKNOWN-VALUE."
               (disco-room--typing-reschedule-expire-timer)
               (when changed
                 (unless disco-room--rendering
-                  (disco-room--render-preserving-point))))))))))
+                  (disco-room--update-frame-preserving-point))))))))))
 
 (defun disco-room--typing-stop-user (user-id &optional no-rerender)
   "Remove USER-ID from typing indicators.
@@ -1492,7 +1492,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
       (remhash normalized-id disco-room--typing-users)
       (disco-room--typing-reschedule-expire-timer)
       (unless (or no-rerender disco-room--rendering)
-        (disco-room--render-preserving-point)))))
+        (disco-room--update-frame-preserving-point)))))
 
 (defun disco-room--latest-message-id ()
   "Return newest known message ID for current room, or nil."
@@ -1678,11 +1678,11 @@ When NO-RERENDER is non-nil, update local state without rendering."
    :sync-function #'disco-room--sync-draft-from-buffer))
 
 (defun disco-room--set-draft (text)
-  "Set room draft TEXT and re-render room."
+  "Set room draft TEXT and refresh the room composer frame."
   (setq disco-room--draft-input (or text ""))
   (disco-room--prune-unused-attachment-tokens disco-room--draft-input)
   (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
-  (disco-room-render))
+  (disco-room--update-frame-preserving-point))
 
 (defun disco-room--clear-draft ()
   "Clear room draft and reset draft history navigation state."
@@ -1709,7 +1709,8 @@ When INDEX is nil, restore pending draft text."
   (if (null index)
       (setq disco-room--draft-input (or disco-room--input-pending ""))
     (setq disco-room--draft-input (ring-ref disco-room--input-ring index)))
-  (disco-room-render))
+  (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
+  (disco-room--update-frame-preserving-point))
 
 (defun disco-room-draft-prev (&optional n)
   "Replace draft with N previous entries from draft history."
@@ -2058,6 +2059,7 @@ page."
     (setq disco-room--refresh-generation generation)
     (setq disco-room--jump-in-flight t)
     (setq disco-room--refresh-in-flight t)
+    (disco-room--update-frame-preserving-point)
     (disco-api-channel-messages-around-async
      channel-id
      target-id
@@ -2078,6 +2080,7 @@ page."
                      (message "disco: jumped to message %s" target-id)
                    (message "disco: failed to render jump target %s" target-id)))
              (setq disco-room--pending-jump-message-id nil)
+             (disco-room--update-frame-preserving-point)
              (message "disco: message %s not found in around fetch" target-id)))))
      :on-error
      (lambda (err)
@@ -2086,6 +2089,7 @@ page."
            (setq disco-room--jump-in-flight nil)
            (setq disco-room--refresh-in-flight nil)
            (setq disco-room--pending-jump-message-id nil)
+           (disco-room--update-frame-preserving-point)
            (message "disco: jump fetch failed: %s"
                     (disco-room--async-error-message err))))))))
 
@@ -2599,6 +2603,7 @@ When APPEND is non-nil, load the next page of matching messages."
        (when (disco-room--filter-callback-active-p room-buffer channel-id generation)
          (with-current-buffer room-buffer
            (setq-local disco-room--filter-in-flight nil)
+           (disco-room--update-frame-preserving-point)
            (message "disco: filter search failed: %s"
                     (disco-room--async-error-message err))))))))
 
@@ -5990,12 +5995,136 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
    :input-property 'disco-room-input
    :leading-newline t))
 
+(defun disco-room--clear-input-region-markers ()
+  "Detach current room composer markers from any stale footer text."
+  (when (markerp disco-room--input-marker)
+    (set-marker disco-room--input-marker nil))
+  (when (markerp disco-room--input-prompt-marker)
+    (set-marker disco-room--input-prompt-marker nil)))
+
 (defun disco-room--bind-input-region-from-footer ()
   "Locate and bind editable input region from EWOC footer properties."
-  (when (disco-chat-input-bind-region-from-properties
-         'disco-room-input 'disco-room-prompt
-         disco-room--input-marker disco-room--input-prompt-marker)
+  (disco-room--clear-input-region-markers)
+  (when (and (markerp disco-room--input-marker)
+             (markerp disco-room--input-prompt-marker)
+             (disco-chat-input-bind-region-from-properties
+              'disco-room-input 'disco-room-prompt
+              disco-room--input-marker disco-room--input-prompt-marker))
     (disco-room--apply-input-text-properties)))
+
+(defun disco-room--header-text (&optional channel)
+  "Build EWOC header text for the current room state."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (channel-name (or disco-room--channel-name ""))
+         (channel-suffix (disco-room--channel-header-suffix channel))
+         (help-text (disco-room--header-help-text channel))
+         (composer-visible-p (disco-room--composer-visible-p channel))
+         (context-text (and (not composer-visible-p)
+                            (disco-room--input-footer-context-text)))
+         (filter-line (disco-room--msg-filter-status-line))
+         (composer-status-line (disco-room--composer-hidden-status-line channel))
+         (text
+          (with-temp-buffer
+            (insert (format "Channel: %s%s\n" channel-name channel-suffix))
+            (insert help-text)
+            (when disco-room--refresh-in-flight
+              (insert "   [refreshing...]"))
+            (when disco-room--older-in-flight
+              (insert "   [loading older...]"))
+            (when disco-room--send-in-flight
+              (insert "   [sending...]"))
+            (insert "\n")
+            (when (and (stringp context-text)
+                       (not (string-empty-p context-text)))
+              (insert context-text))
+            (when disco-room--history-exhausted
+              (insert "(older history exhausted)\n"))
+            (when (stringp filter-line)
+              (insert filter-line "\n"))
+            (when (stringp composer-status-line)
+              (insert composer-status-line "\n"))
+            (insert "\n")
+            (buffer-string))))
+    (add-text-properties
+     0 (length text)
+     '(read-only t
+       front-sticky (read-only)
+       rear-nonsticky (read-only))
+     text)
+    text))
+
+(defun disco-room--footer-text (&optional draft)
+  "Build EWOC footer text for the current room state."
+  (disco-room--input-footer-text (or draft (disco-room--current-draft))))
+
+(defun disco-room--ensure-ewoc (&optional channel draft)
+  "Ensure current room buffer owns one persistent EWOC instance."
+  (unless (hash-table-p disco-room--message-node-table)
+    (setq disco-room--message-node-table (make-hash-table :test #'equal)))
+  (unless (hash-table-p disco-room--render-context-by-message-id)
+    (setq disco-room--render-context-by-message-id (make-hash-table :test #'equal)))
+  (unless disco-room--ewoc
+    (let ((disco-room--rendering t)
+          (inhibit-read-only t)
+          (buffer-undo-list t))
+      (erase-buffer)
+      (setq disco-room--ewoc
+            (ewoc-create
+             #'disco-room--ewoc-printer
+             (disco-room--header-text channel)
+             (disco-room--footer-text draft)
+             t))
+      (disco-room--bind-input-region-from-footer))))
+
+(defun disco-room--set-ewoc-frame (&optional channel draft)
+  "Update current room EWOC header/footer in place."
+  (disco-room--ensure-ewoc channel draft)
+  (let ((disco-room--rendering t)
+        (inhibit-read-only t)
+        (buffer-undo-list t))
+    (ewoc-set-hf disco-room--ewoc
+                 (disco-room--header-text channel)
+                 (disco-room--footer-text draft)))
+  (disco-room--bind-input-region-from-footer))
+
+(defun disco-room--clear-timeline ()
+  "Remove all currently rendered message nodes from the room EWOC."
+  (disco-room--ensure-ewoc)
+  (let ((disco-room--rendering t)
+        (inhibit-read-only t)
+        (buffer-undo-list t))
+    (ewoc-filter disco-room--ewoc (lambda (_msg) nil)))
+  (clrhash disco-room--message-node-table)
+  (clrhash disco-room--render-context-by-message-id))
+
+(defun disco-room--update-frame-preserving-point ()
+  "Refresh room header/footer while preserving message and input position."
+  (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
+         (input-start (disco-room--input-start-position))
+         (in-input (and (number-or-marker-p input-start)
+                        (disco-room--point-in-input-p)))
+         (input-offset (and in-input (- (point) input-start)))
+         (anchor-at-point (and (not in-input)
+                               (or (get-text-property (point) 'disco-message-id)
+                                   (get-text-property (line-beginning-position)
+                                                      'disco-message-id))))
+         (snapshot (and anchor-at-point
+                        (disco-view-capture-position
+                         :anchor-property 'disco-message-id
+                         :preserve-window-start t))))
+    (unwind-protect
+        (progn
+          (disco-room--set-ewoc-frame)
+          (if (and in-input (numberp input-offset))
+              (let ((new-start (disco-room--input-start-position))
+                    (logical-end (disco-room--input-logical-end-position)))
+                (when (and (number-or-marker-p new-start)
+                           (number-or-marker-p logical-end))
+                  (goto-char (min logical-end
+                                  (max new-start (+ new-start input-offset))))))
+            (when snapshot
+              (disco-view-restore-position snapshot))))
+      (disco-room--restore-window-input-offsets window-input-offsets))))
 
 (defun disco-room--insert-message-node (msg)
   "Insert one message node for MSG at the end of room EWOC."
@@ -6076,16 +6205,9 @@ Return non-nil when handled without full room rerender."
 
 (defun disco-room-render ()
   "Render timeline for current room buffer."
-  (let* ((inhibit-read-only t)
-         ;; Timeline redraws can be large (many image previews); do not
-         ;; accumulate undo entries for background rendering.
-         (buffer-undo-list t)
-         (channel (disco-room--channel-object))
-         (composer-visible-p (disco-room--composer-visible-p channel))
+  (let* ((channel (disco-room--channel-object))
          (messages (disco-room--display-messages))
          (draft (disco-room--current-draft))
-         (composer-status-line (disco-room--composer-hidden-status-line channel))
-         header-end
          (disco-room--avatar-fetch-budget
           (when (numberp disco-room-avatar-max-fetches-per-render)
             (max 0 disco-room-avatar-max-fetches-per-render)))
@@ -6096,48 +6218,14 @@ Return non-nil when handled without full room rerender."
     (disco-media-set-preview-fetch-budget preview-fetch-budget)
     (unwind-protect
         (progn
-          (erase-buffer)
-          (insert (format "Channel: %s%s\n"
-                          disco-room--channel-name
-                          (disco-room--channel-header-suffix channel)))
-          (insert (disco-room--header-help-text channel))
-          (when disco-room--refresh-in-flight
-            (insert "   [refreshing...]"))
-          (when disco-room--older-in-flight
-            (insert "   [loading older...]"))
-          (when disco-room--send-in-flight
-            (insert "   [sending...]"))
-          (insert "\n")
-          (when (not composer-visible-p)
-            (let ((context-text (disco-room--input-footer-context-text)))
-              (when (and (stringp context-text)
-                         (not (string-empty-p context-text)))
-                (insert context-text))))
-          (when disco-room--history-exhausted
-            (insert "(older history exhausted)\n"))
-          (when-let* ((filter-line (disco-room--msg-filter-status-line)))
-            (insert filter-line "\n"))
-          (when (stringp composer-status-line)
-            (insert composer-status-line "\n"))
-          (insert "\n")
-          (setq header-end (point))
-          (put-text-property (point-min) header-end 'read-only t)
-          (setq disco-room--input-marker nil)
-          (setq disco-room--input-prompt-marker nil)
-          (setq disco-room--message-node-table (make-hash-table :test #'equal))
-          (setq disco-room--ewoc
-                (ewoc-create
-                 #'disco-room--ewoc-printer
-                 nil
-                 (disco-room--input-footer-text draft)
-                 t))
+          (disco-room--set-ewoc-frame channel draft)
+          (disco-room--clear-timeline)
           ;; API returns newest-first by default; reverse for chat-like display.
           (let* ((ordered (reverse messages))
                  (last-read-id (disco-state-channel-last-read-message-id disco-room--channel-id))
                  (previous-msg nil)
                  (previous-day nil)
                  (unread-divider-inserted nil))
-            (setq disco-room--render-context-by-message-id (make-hash-table :test #'equal))
             (dolist (msg ordered)
               (let* ((message-id (alist-get 'id msg))
                      (day-key (disco-room--message-day-key msg))
@@ -6170,7 +6258,6 @@ Return non-nil when handled without full room rerender."
             (let ((logical-end (disco-room--input-logical-end-position)))
               (when logical-end
                 (goto-char logical-end)))
-
             (disco-room--sync-draft-from-buffer)))
       (disco-media-set-preview-fetch-budget nil)
       (setq disco-room--rendering nil))))
@@ -6185,6 +6272,7 @@ Return non-nil when handled without full room rerender."
            (generation (1+ disco-room--refresh-generation)))
       (setq disco-room--refresh-generation generation)
       (setq disco-room--refresh-in-flight t)
+      (disco-room--update-frame-preserving-point)
       (disco-api-channel-messages-async
        channel-id
        :on-success
@@ -6206,6 +6294,7 @@ Return non-nil when handled without full room rerender."
          (when (disco-room--callback-active-p room-buffer channel-id generation)
            (with-current-buffer room-buffer
              (setq disco-room--refresh-in-flight nil)
+             (disco-room--update-frame-preserving-point)
              (message "disco: room refresh failed: %s"
                       (disco-room--async-error-message err)))))))))
 
@@ -6242,13 +6331,10 @@ REASON is shown in the minibuffer."
                               channel-unread-update
                               channel-pins-update
                               channel-pins-ack)))
-      (let ((at-bottom (disco-room--at-message-bottom-p))
-            (channel (disco-room--channel-object)))
+      (let ((channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
-        (if at-bottom
-            (disco-room-render)
-          (disco-room--render-preserving-point))))
+        (disco-room--update-frame-preserving-point)))
      ((and (equal event-channel-id disco-room--channel-id)
            (eq event-type 'typing-start))
       (disco-room--typing-track-user
@@ -6434,7 +6520,7 @@ markers are appended in requested order."
         (disco-room--sync-draft-from-buffer)
         (when token-id
           (remhash token-id disco-room--attachment-token-table))
-        (disco-room-render)
+        (disco-room--update-frame-preserving-point)
         (message "disco: removed attachment token %s" (or token-id ""))))
      (t
       (let* ((ids (disco-room--attachment-token-ids-in-text (disco-room--current-draft)))
@@ -6479,7 +6565,7 @@ markers are appended in requested order."
       (setq entry (plist-put entry :description (unless (string-empty-p next) next)))
       (puthash token-id entry disco-room--attachment-token-table)
       (disco-room--sync-pending-attachments-from-draft)
-      (disco-room-render)
+      (disco-room--update-frame-preserving-point)
       (if (string-empty-p next)
           (message "disco: cleared description for %s" token-id)
         (message "disco: updated description for %s" token-id)))))
@@ -7083,7 +7169,7 @@ CONTENT is optional extra text sent alongside the poll."
      required-permissions
      :action "sending poll")
     (setq disco-room--send-in-flight t)
-    (disco-room-render)
+    (disco-room--update-frame-preserving-point)
     (disco-api-create-message-async
      channel-id
      :content content
@@ -7101,7 +7187,7 @@ CONTENT is optional extra text sent alongside the poll."
        (when (disco-room--channel-buffer-p room-buffer channel-id)
          (with-current-buffer room-buffer
            (setq disco-room--send-in-flight nil)
-           (disco-room-render)
+           (disco-room--update-frame-preserving-point)
            (message "disco: send poll failed: %s"
                     (disco-room--async-error-message err))))))))
 
@@ -7270,7 +7356,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                   (user-error "disco: editing via composer does not support attachments yet"))
                 (setq disco-room--draft-input "")
                 (setq disco-room--send-in-flight t)
-                (disco-room-render)
+                (disco-room--update-frame-preserving-point)
                 (disco-api-edit-message-async
                  channel-id
                  edit-message-id
@@ -7290,7 +7376,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                      (with-current-buffer room-buffer
                        (setq disco-room--send-in-flight nil)
                        (setq disco-room--draft-input normalized)
-                       (disco-room-render)
+                       (disco-room--update-frame-preserving-point)
                        (message "disco: edit failed for %s: %s"
                                 edit-message-id
                                 (disco-room--async-error-message err)))))))
@@ -7307,7 +7393,7 @@ When called with prefix argument, force draft edit in minibuffer first."
               (disco-room--input-history-push normalized))
             (setq disco-room--draft-input "")
             (setq disco-room--send-in-flight t)
-            (disco-room-render)
+            (disco-room--update-frame-preserving-point)
             (cl-labels
                 ((room-active-p ()
                    (disco-room--channel-buffer-p room-buffer channel-id))
@@ -7357,12 +7443,12 @@ When called with prefix argument, force draft edit in minibuffer first."
                                     (setq disco-room--pending-reply-to nil)
                                     (when has-attachments
                                       (disco-room--clear-pending-attachment-state))
-                                    (disco-room-render)
+                                    (disco-room--update-frame-preserving-point)
                                     (message "disco: sent %d/%d split messages; restored remaining draft: %s"
                                              sent-count total
                                              (disco-room--async-error-message err)))
                                 (setq disco-room--draft-input content)
-                                (disco-room-render)
+                                (disco-room--update-frame-preserving-point)
                                 (message "disco: send failed: %s"
                                          (disco-room--async-error-message err))))))
                         (send-next (remaining sent-count)
@@ -7404,7 +7490,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                             (with-current-buffer room-buffer
                               (setq disco-room--send-in-flight nil)
                               (setq disco-room--draft-input content)
-                              (disco-room-render)
+                              (disco-room--update-frame-preserving-point)
                               (message "disco: send failed: %s"
                                        (disco-room--async-error-message err))))))
                      (ignore-errors
@@ -7430,7 +7516,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                       (with-current-buffer room-buffer
                         (setq disco-room--send-in-flight nil)
                         (setq disco-room--draft-input (if has-attachments content normalized))
-                        (disco-room-render)
+                        (disco-room--update-frame-preserving-point)
                         (message "disco: send failed: %s"
                                  (disco-room--async-error-message err))))))))))))))))
 
@@ -7451,6 +7537,7 @@ When called with prefix argument, force draft edit in minibuffer first."
            (before (or disco-room--oldest-message-id
                        (user-error "disco: no oldest message cursor; refresh first"))))
       (setq disco-room--older-in-flight t)
+      (disco-room--update-frame-preserving-point)
       (disco-api-channel-messages-async
        channel-id
        :before before
@@ -7481,6 +7568,7 @@ When called with prefix argument, force draft edit in minibuffer first."
            (with-current-buffer room-buffer
              (when (equal channel-id disco-room--channel-id)
                (setq disco-room--older-in-flight nil)
+               (disco-room--update-frame-preserving-point)
                (message "disco: older history load failed: %s"
                         (disco-room--async-error-message err)))))))))))
 
@@ -7509,7 +7597,7 @@ When called interactively, defaults to message under point."
   (when (disco-room--composer-edit-active-p)
     (disco-room--composer-edit-clear t))
   (setq disco-room--pending-reply-to message-id)
-  (disco-room-render)
+  (disco-room--update-frame-preserving-point)
   (message "disco: next message will reply to %s" message-id))
 
 (defun disco-room--forward-comment-rejected-p (status message)
@@ -7582,7 +7670,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
      :action "forwarding messages")
     (disco-room--ensure-jump-permissions source-channel-id source-channel)
     (setq disco-room--send-in-flight t)
-    (disco-room-render)
+    (disco-room--update-frame-preserving-point)
     (cl-labels
         ((room-active-p ()
            (disco-room--channel-buffer-p room-buffer target-channel-id))
@@ -7599,7 +7687,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
            (when (room-active-p)
              (with-current-buffer room-buffer
                (setq disco-room--send-in-flight nil)
-               (disco-room-render)
+               (disco-room--update-frame-preserving-point)
                (message "%s" text))))
          (send-comment-then-forward ()
            (when (room-active-p)
@@ -7647,11 +7735,11 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
   (cond
    ((disco-room--composer-edit-active-p)
     (disco-room--composer-edit-clear t)
-    (disco-room-render)
+    (disco-room--update-frame-preserving-point)
     (message "disco: edit target cleared"))
    (disco-room--pending-reply-to
     (setq disco-room--pending-reply-to nil)
-    (disco-room-render)
+    (disco-room--update-frame-preserving-point)
     (message "disco: reply target cleared"))
    (t
     (message "disco: no composer context to cancel"))))
@@ -8280,8 +8368,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)
   (setq-local disco-room--inplace-search-generation 0)
-  (setq-local disco-room--input-marker nil)
-  (setq-local disco-room--input-prompt-marker nil)
+  (setq-local disco-room--input-marker (make-marker))
+  (setq-local disco-room--input-prompt-marker (make-marker))
   (setq-local disco-room--rendering nil)
   (setq-local disco-room--ewoc nil)
   (setq-local disco-room--render-context-by-message-id (make-hash-table :test #'equal))

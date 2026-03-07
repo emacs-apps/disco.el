@@ -53,25 +53,19 @@
         (disco-room-ack-channel-pins)
         (should-not api-called)))))
 
-(ert-deftest disco-room-handle-gateway-pin-events-rerender-current-channel ()
+(ert-deftest disco-room-handle-gateway-pin-events-refresh-current-frame ()
   (with-temp-buffer
     (let ((disco-room--channel-id "chan")
           (disco-room--channel-name "old")
-          (render-called nil)
-          (preserve-called nil))
-      (cl-letf (((symbol-function 'disco-room--at-message-bottom-p)
-                 (lambda () t))
-                ((symbol-function 'disco-room--channel-object)
+          (frame-called nil))
+      (cl-letf (((symbol-function 'disco-room--channel-object)
                  (lambda () '((id . "chan") (name . "new"))))
-                ((symbol-function 'disco-room-render)
-                 (lambda () (setq render-called t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-called t))))
+                ((symbol-function 'disco-room--update-frame-preserving-point)
+                 (lambda () (setq frame-called t))))
         (disco-room--handle-gateway-event
          '(:type channel-pins-update
            :channel-id "chan"))
-        (should render-called)
-        (should-not preserve-called)
+        (should frame-called)
         (should (equal "new" disco-room--channel-name))))))
 
 (ert-deftest disco-room-resolve-pending-jump-fetches-around-once ()
@@ -282,7 +276,7 @@
        (permissions . "0")))
     (disco-room-render)
     (should-not (text-property-any (point-min) (point-max) 'disco-room-input t))
-    (should-not (markerp disco-room--input-marker))
+    (should-not (marker-buffer disco-room--input-marker))
     (should (string-match-p "composer hidden: missing SEND_MESSAGES"
                             (buffer-string)))
     (should-not (string-match-p "type at >>>" (buffer-string)))))
@@ -464,6 +458,28 @@
     (should (text-property-any (point-min) (point-max) 'disco-room-input t))
     (should (markerp disco-room--input-marker))
     (should (string-match-p "type at >>>" (buffer-string)))))
+
+(ert-deftest disco-room-set-draft-preserves-ewoc-and-input-markers ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (setq-local disco-room--draft-input "hello")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (let ((ewoc disco-room--ewoc)
+          (input-marker disco-room--input-marker)
+          (prompt-marker disco-room--input-prompt-marker))
+      (disco-room--set-draft "updated body")
+      (should (eq ewoc disco-room--ewoc))
+      (should (eq input-marker disco-room--input-marker))
+      (should (eq prompt-marker disco-room--input-prompt-marker))
+      (should (string-match-p "> updated body" (buffer-string))))))
 
 (ert-deftest disco-room-composer-visible-p-hides-archived-thread ()
   (with-temp-buffer
