@@ -251,11 +251,9 @@ on `markdown-mode' at render time."
   (let ((table (make-char-table 'translation-table))
         (mask-char (decode-char 'ucs #x2588)))
     (set-char-table-range table t mask-char)
-    (aset table ?\s ?\s)
-    (aset table ?\t ?\t)
     (aset table ?\n ?\n)
     table)
-  "Translation table used to hide spoiler text similarly to telega.")
+  "Translation table used to mask hidden spoiler contents.")
 
 (defvar disco-markdown--link-keymap
   (let ((map (make-sparse-keymap)))
@@ -481,12 +479,24 @@ leak into room buffers."
      (list 'disco-markdown-url url))))
 
 (defun disco-markdown--hide-spoiler-text (text)
-  "Return TEXT translated to spoiler blocks, preserving spaces/newlines."
-  (with-temp-buffer
-    (insert (or text ""))
-    (translate-region (point-min) (point-max)
-                      disco-markdown--spoiler-translation-table)
-    (buffer-string)))
+  "Return TEXT with display masking applied for hidden spoilers.
+
+The underlying text stays intact so reveal and copy behavior can preserve the
+original spoiler contents, including leading and trailing spaces."
+  (let* ((payload (copy-sequence (or text "")))
+         (len (length payload))
+         (pos 0))
+    (while (< pos len)
+      (let* ((char (aref payload pos))
+             (masked (char-table-range disco-markdown--spoiler-translation-table
+                                       char)))
+        (unless (eq char ?\n)
+          (add-text-properties pos (1+ pos)
+                               (list 'display (string masked)
+                                     'rear-nonsticky '(display))
+                               payload))
+        (setq pos (1+ pos))))
+    payload))
 
 (defun disco-markdown--make-spoiler-string (text spoiler-message-id reveal-spoilers)
   "Return TEXT rendered as a Discord spoiler string.

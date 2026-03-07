@@ -56,17 +56,32 @@
 
 (ert-deftest disco-markdown-render-internal-spoilers-mask-and-tag-message ()
   (let* ((disco-markdown-backend 'internal)
-         (masked (disco-markdown--hide-spoiler-text "spoiler"))
          (rendered (disco-markdown-render
                     "Look ||spoiler|| now"
                     :context 'test-internal-spoiler
                     :spoiler-message-id "m1"))
-         (pos (string-match (regexp-quote masked) rendered)))
+         (plain (substring-no-properties rendered))
+         (pos (string-match "spoiler" plain)))
     (should pos)
-    (should-not (string-match-p "spoiler" (substring-no-properties rendered)))
+    (should (equal "Look spoiler now" plain))
     (should (equal "m1"
                    (get-text-property pos 'disco-markdown-spoiler-message-id rendered)))
+    (should (equal "█"
+                   (get-text-property pos 'display rendered)))
     (should (keymapp (get-text-property pos 'keymap rendered)))))
+
+(ert-deftest disco-markdown-render-internal-spoilers-mask-edge-spaces ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "Look || spoiler || now"
+                    :context 'test-internal-spoiler-spaces
+                    :spoiler-message-id "m1"))
+         (plain (substring-no-properties rendered))
+         (pos (string-match " spoiler " plain)))
+    (should pos)
+    (should (equal "Look  spoiler  now" plain))
+    (should (equal "█" (get-text-property pos 'display rendered)))
+    (should (equal "█" (get-text-property (1- (match-end 0)) 'display rendered)))))
 
 (ert-deftest disco-markdown-render-internal-subtitle-lines-strip-marker ()
   (let* ((disco-markdown-backend 'internal)
@@ -198,16 +213,18 @@
 (ert-deftest disco-markdown-render-spoilers-mask-and-tag-message ()
   (skip-unless (disco-markdown--markdown-mode-available-p))
   (let* ((disco-markdown-backend 'markdown-mode)
-         (masked (disco-markdown--hide-spoiler-text "spoiler"))
          (rendered (disco-markdown-render
                     "Look ||spoiler|| now"
                     :context 'test-spoiler
                     :spoiler-message-id "m1"))
-         (pos (string-match (regexp-quote masked) rendered)))
+         (plain (substring-no-properties rendered))
+         (pos (string-match "spoiler" plain)))
     (should pos)
-    (should-not (string-match-p "spoiler" (substring-no-properties rendered)))
+    (should (equal "Look spoiler now" plain))
     (should (equal "m1"
                    (get-text-property pos 'disco-markdown-spoiler-message-id rendered)))
+    (should (equal "█"
+                   (get-text-property pos 'display rendered)))
     (should (keymapp (get-text-property pos 'keymap rendered)))))
 
 (ert-deftest disco-markdown-render-spoilers-can-be-revealed ()
