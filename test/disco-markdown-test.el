@@ -186,6 +186,67 @@
              (get-text-property let-pos 'face rendered)
              'font-lock-keyword-face))))
 
+(ert-deftest disco-markdown-render-internal-blockquotes-add-prefix-and-face ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render "> quoted"
+                                          :context 'test-internal-blockquote))
+         (plain (substring-no-properties rendered))
+         (prefix (get-text-property 0 'line-prefix rendered)))
+    (should (equal "quoted" plain))
+    (should (stringp prefix))
+    (should (equal "| " (substring-no-properties prefix)))
+    (should (disco-markdown--face-match-p
+             (get-text-property 0 'face rendered)
+             'disco-markdown-blockquote-face))))
+
+(ert-deftest disco-markdown-render-internal-blockquote-rest-quotes-following-lines ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render ">>> first line\nsecond line"
+                                          :context 'test-internal-blockquote-rest))
+         (plain (substring-no-properties rendered))
+         (second-pos (string-match "second" plain)))
+    (should (equal "first line\nsecond line" plain))
+    (should (equal "| "
+                   (substring-no-properties
+                    (get-text-property 0 'line-prefix rendered))))
+    (should (equal "| "
+                   (substring-no-properties
+                    (get-text-property second-pos 'line-prefix rendered))))))
+
+(ert-deftest disco-markdown-render-internal-blockquote-allows-headings-inside ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render "> # Quoted Title"
+                                          :context 'test-internal-blockquote-heading))
+         (plain (substring-no-properties rendered)))
+    (should (equal "Quoted Title" plain))
+    (should (equal "| "
+                   (substring-no-properties
+                    (get-text-property 0 'line-prefix rendered))))
+    (should (disco-markdown--face-match-p
+             (get-text-property 0 'face rendered)
+             'disco-markdown-heading-1-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property 0 'face rendered)
+             'disco-markdown-blockquote-face))))
+
+(ert-deftest disco-markdown-render-internal-unordered-lists-normalize-markers ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render "* one\n  + two\n- three"
+                                          :context 'test-internal-list))
+         (plain (substring-no-properties rendered))
+         (two-pos (string-match "two" plain))
+         (three-pos (string-match "three" plain)))
+    (should (equal "- one\n  - two\n- three" plain))
+    (should (disco-markdown--face-match-p
+             (get-text-property 0 'face rendered)
+             'disco-markdown-list-marker-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property (- two-pos 2) 'face rendered)
+             'disco-markdown-list-marker-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property (- three-pos 2) 'face rendered)
+             'disco-markdown-list-marker-face))))
+
 (ert-deftest disco-markdown-render-inline-links-are-openable ()
   (skip-unless (disco-markdown--markdown-mode-available-p))
   (let ((disco-markdown-backend 'markdown-mode))

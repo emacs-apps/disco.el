@@ -161,6 +161,16 @@ on `markdown-mode' at render time."
   "Face used for internal inline and fenced code."
   :group 'disco)
 
+(defface disco-markdown-blockquote-face
+  '((t :inherit font-lock-comment-face))
+  "Face used for internal blockquote sections."
+  :group 'disco)
+
+(defface disco-markdown-list-marker-face
+  '((t :inherit shadow))
+  "Face used for internal list item markers."
+  :group 'disco)
+
 (defface disco-markdown-heading-1-face
   '((t :inherit default :weight bold :height 1.30))
   "Face used for first-level headings."
@@ -246,6 +256,18 @@ on `markdown-mode' at render time."
 (defconst disco-markdown--regexp-inline-code
   "`\\([^`\n]+\\)`"
   "Regexp matching a simple inline code span.")
+
+(defconst disco-markdown--regexp-blockquote-line
+  "^\\([ \t]*\\)>\\(?:[ \t]+\\|$\\)"
+  "Regexp matching a single-line blockquote marker.")
+
+(defconst disco-markdown--regexp-blockquote-rest-line
+  "^\\([ \t]*\\)>>>\\(?:[ \t]+\\|$\\)"
+  "Regexp matching a blockquote marker that quotes the rest of the message.")
+
+(defconst disco-markdown--regexp-unordered-list-line
+  "^\\([ \t]*\\)\\([*+-]\\)\\(?:[ \t]+\\|$\\)"
+  "Regexp matching a basic unordered list item marker.")
 
 (defconst disco-markdown--spoiler-translation-table
   (let ((table (make-char-table 'translation-table))
@@ -571,6 +593,74 @@ return visible spoiler contents; otherwise return masked text."
             (forward-char 1)))))
     copy))
 
+(defun disco-markdown--apply-line-prefix-properties (line-start line-end prefix face)
+  "Apply PREFIX and FACE display properties to a line.
+
+LINE-START and LINE-END delimit the line contents in the current buffer."
+  (let ((prop-end (if (< line-start line-end)
+                      line-end
+                    (and (< line-end (point-max))
+                         (1+ line-end)))))
+    (when prop-end
+      (add-text-properties line-start prop-end
+                           (list 'line-prefix prefix
+                                 'wrap-prefix prefix)
+                           (current-buffer)))
+    (when (< line-start line-end)
+      (add-face-text-property line-start line-end face 'append))))
+
+(defun disco-markdown--apply-blockquote-lines (text)
+  "Render blockquote markers in plain TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let ((quote-rest nil)
+          (prefix (propertize "| " 'face 'disco-markdown-blockquote-face)))
+      (while (< (point) (point-max))
+        (let ((line-start (line-beginning-position))
+              (line-end (line-end-position)))
+          (goto-char line-start)
+          (cond
+           (quote-rest
+            (disco-markdown--apply-line-prefix-properties
+             line-start line-end prefix 'disco-markdown-blockquote-face))
+           ((not (get-text-property line-start 'disco-markdown-protected))
+            (cond
+             ((looking-at disco-markdown--regexp-blockquote-rest-line)
+              (delete-region (match-end 1) (match-end 0))
+              (setq line-start (line-beginning-position)
+                    line-end (line-end-position)
+                    quote-rest t)
+              (disco-markdown--apply-line-prefix-properties
+               line-start line-end prefix 'disco-markdown-blockquote-face))
+             ((looking-at disco-markdown--regexp-blockquote-line)
+              (delete-region (match-end 1) (match-end 0))
+              (setq line-start (line-beginning-position)
+                    line-end (line-end-position))
+              (disco-markdown--apply-line-prefix-properties
+               line-start line-end prefix 'disco-markdown-blockquote-face))))))
+        (forward-line 1)))
+    (buffer-string)))
+
+(defun disco-markdown--apply-unordered-list-lines (text)
+  "Render unordered list markers in plain TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (while (< (point) (point-max))
+      (let ((line-start (line-beginning-position)))
+        (goto-char line-start)
+        (when (and (not (get-text-property line-start 'disco-markdown-protected))
+                   (looking-at disco-markdown--regexp-unordered-list-line))
+          (delete-region (match-end 1) (match-end 0))
+          (goto-char (match-end 1))
+          (let ((marker-start (point)))
+            (insert "- ")
+            (add-face-text-property marker-start (point)
+                                    'disco-markdown-list-marker-face 'append)))
+        (forward-line 1)))
+    (buffer-string)))
+
 (defun disco-markdown--apply-heading-lines (text)
   "Apply disco heading faces to ATX heading lines in plain TEXT."
   (with-temp-buffer
@@ -642,6 +732,8 @@ visible ATX marker fallback so all heading levels render consistently."
   (let ((rendered (if (stringp text) text "")))
     (setq rendered (disco-markdown--apply-fenced-code-blocks rendered))
     (setq rendered (disco-markdown--apply-inline-code-spans rendered))
+    (setq rendered (disco-markdown--apply-blockquote-lines rendered))
+    (setq rendered (disco-markdown--apply-unordered-list-lines rendered))
     (setq rendered (disco-markdown--apply-internal-link-replacements rendered))
     (setq rendered (disco-markdown--apply-inline-emphasis rendered))
     (setq rendered (disco-markdown--apply-heading-lines rendered))
