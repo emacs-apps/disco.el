@@ -11,6 +11,7 @@
 
 (require 'cl-lib)
 (require 'ewoc)
+(require 'pp)
 (autoload 'org-read-date "org" nil nil)
 (require 'transient)
 (require 'seq)
@@ -42,6 +43,9 @@
 
 (defvar-local disco-root--parent-threads-refresh-in-flight nil
   "Non-nil while async active-thread fetch for parent-thread buffer runs.")
+
+(defvar-local disco-root--inspect-channel nil
+  "Channel object rendered by the current inspect buffer.")
 
 (defconst disco-root--archived-thread-sources
   '(("public" . disco-api-channel-archived-public-threads)
@@ -627,13 +631,14 @@ after passive EWOC and full-buffer updates."
 
 (defun disco-root--search-channel-domain (channel)
   "Return channel-scoped search domain plist for CHANNEL."
-  (when-let* ((channel-id (and (listp channel) (alist-get 'id channel))))
-    (let ((label (or (disco-root--channel-display-name channel)
-                     channel-id)))
-      (list :kind 'channel
-            :id channel-id
-            :guild-id (alist-get 'guild_id channel)
-            :label label))))
+  (when (disco-channel-searchable-p channel)
+    (when-let* ((channel-id (and (listp channel) (alist-get 'id channel))))
+      (let ((label (or (disco-root--channel-display-name channel)
+                       channel-id)))
+        (list :kind 'channel
+              :id channel-id
+              :guild-id (alist-get 'guild_id channel)
+              :label label)))))
 
 (defun disco-root--search-current-channel-domain ()
   "Return current channel-scoped search domain inferred from point, or nil."
@@ -773,8 +778,10 @@ after passive EWOC and full-buffer updates."
   (let ((seen (make-hash-table :test #'equal))
         result)
     (dolist (channel (disco-root--search-domain-channel-objects domain))
-      (when-let* ((channel-id (alist-get 'id channel)))
-        (let* ((name (disco-root--channel-display-name channel))
+      (when (and (disco-channel-searchable-p channel)
+                 (alist-get 'id channel))
+        (let* ((channel-id (alist-get 'id channel))
+               (name (disco-root--channel-display-name channel))
                (context (disco-root--search-context-label channel))
                (aliases (delq nil
                               (list context
@@ -2385,6 +2392,9 @@ buffer without CHANNEL, use the channel at point."
            (t nil))))
     (unless resolved-channel
       (user-error "disco: no channel available for channel search"))
+    (unless (disco-channel-searchable-p resolved-channel)
+      (user-error "disco: channel search is unsupported for %s channels"
+                  (disco-channel-type-name resolved-channel)))
     (let ((buf (get-buffer-create disco-root-buffer-name))
           (domain (disco-root--search-channel-domain resolved-channel)))
       (with-current-buffer buf
@@ -3640,6 +3650,17 @@ This prevents noisy permission errors for sources that require elevated access."
   "Return non-nil when CHANNEL has a supported open action."
   (not (null (disco-channel-open-mode channel))))
 
+(defun disco-root--channel-open-help-echo (channel)
+  "Return hover help text describing how CHANNEL will open."
+  (let ((channel-id (alist-get 'id channel)))
+    (pcase (disco-channel-open-mode channel)
+      ('thread-list
+       (format "Open threads under channel %s" channel-id))
+      ('inspect
+       (format "Inspect channel %s" channel-id))
+      (_
+       (format "Open channel %s" channel-id)))))
+
 (defun disco-root--thread-parent-channel-p (channel)
   "Return non-nil when CHANNEL can contain visible threads in UI."
   (disco-thread-parent-channel-p channel))
@@ -3943,40 +3964,38 @@ Discord channel position can arrive as integer or numeric string."
 
 (defun disco-root--channel-context-label (channel)
   "Return context label for CHANNEL in activity layout."
-  (pcase (alist-get 'type channel)
-    ((or 1 3)
-     "direct-messages")
-    (_
-     (let* ((guild-id (alist-get 'guild_id channel))
-            (guild-name (and guild-id (disco-root--guild-name-by-id guild-id)))
-            (parent-id (alist-get 'parent_id channel))
-            (parent-channel (and parent-id (disco-state-channel parent-id)))
-            (parent-name (and parent-channel
-                              (disco-root--channel-display-name parent-channel)))
-            (category-id (cond
-                          ((and parent-channel
-                                (disco-state-channel-thread-p channel))
-                           (alist-get 'parent_id parent-channel))
-                          (parent-id
-                           parent-id)
-                          (t nil)))
-            (category-channel (and category-id (disco-state-channel category-id)))
-            (category-name (and category-channel
-                                (disco-root--channel-category-p category-channel)
-                                (disco-root--channel-display-name category-channel)))
-            parts)
-       (when (and (stringp guild-name)
-                  (not (string-empty-p guild-name)))
-         (push guild-name parts))
-       (when (and (stringp category-name)
-                  (not (string-empty-p category-name)))
-         (push category-name parts))
-       (when (and (disco-state-channel-thread-p channel)
-                  (stringp parent-name)
-                  (not (string-empty-p parent-name)))
-         (push (format "#%s" parent-name) parts))
-       (when parts
-         (string-join (nreverse parts) " / "))))))
+  (if (disco-channel-private-p channel)
+      "direct-messages"
+    (let* ((guild-id (alist-get 'guild_id channel))
+           (guild-name (and guild-id (disco-root--guild-name-by-id guild-id)))
+           (parent-id (alist-get 'parent_id channel))
+           (parent-channel (and parent-id (disco-state-channel parent-id)))
+           (parent-name (and parent-channel
+                             (disco-root--channel-display-name parent-channel)))
+           (category-id (cond
+                         ((and parent-channel
+                               (disco-state-channel-thread-p channel))
+                          (alist-get 'parent_id parent-channel))
+                         (parent-id
+                          parent-id)
+                         (t nil)))
+           (category-channel (and category-id (disco-state-channel category-id)))
+           (category-name (and category-channel
+                               (disco-root--channel-category-p category-channel)
+                               (disco-root--channel-display-name category-channel)))
+           parts)
+      (when (and (stringp guild-name)
+                 (not (string-empty-p guild-name)))
+        (push guild-name parts))
+      (when (and (stringp category-name)
+                 (not (string-empty-p category-name)))
+        (push category-name parts))
+      (when (and (disco-state-channel-thread-p channel)
+                 (stringp parent-name)
+                 (not (string-empty-p parent-name)))
+        (push (format "#%s" parent-name) parts))
+      (when parts
+        (string-join (nreverse parts) " / ")))))
 
 (defun disco-root--channel-category-name (channel)
   "Return category name for CHANNEL, or nil when not categorized."
@@ -4009,12 +4028,20 @@ Discord channel position can arrive as integer or numeric string."
         (string-join parts " | ")
       (disco-root--channel-display-name channel))))
 
+(defun disco-root--activity-secondary-placeholder (channel)
+  "Return non-message placeholder preview for CHANNEL, or nil."
+  (pcase (disco-channel-open-mode channel)
+    ('inspect
+     (format "(%s view)" (disco-channel-type-name channel)))
+    (_ nil)))
+
 (defun disco-root--activity-secondary-label (channel)
   "Return fallback activity preview label for CHANNEL.
 
 Fallback stays message-oriented and avoids status-tag placeholders."
   (let ((channel-id (alist-get 'id channel)))
-    (or (and channel-id
+    (or (disco-root--activity-secondary-placeholder channel)
+        (and channel-id
              (disco-state-channel-conversation-summary-preview channel-id))
         (and (alist-get 'last_message_id channel)
              (progn
@@ -4305,7 +4332,6 @@ Guild rows use real guild icons when available, with fixed text fallback."
 (defun disco-root--insert-activity-channel-line (channel indent)
   "Insert one activity-style CHANNEL row with INDENT."
   (let* ((channel-id (alist-get 'id channel))
-         (channel-type (alist-get 'type channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
          (mention-count (disco-state-channel-effective-unread-count channel))
          (has-unread (disco-root--channel-has-unread-p channel))
@@ -4377,9 +4403,7 @@ Guild rows use real guild icons when available, with fixed text fallback."
        line-start
        (point)
        (list 'mouse-face 'highlight
-             'help-echo (if (memq channel-type '(15 16))
-                            (format "Open threads under channel %s" channel-id)
-                          (format "Open channel %s" channel-id)))))))
+             'help-echo (disco-root--channel-open-help-echo channel))))))
 
 (defun disco-root--search-message-seconds (message)
   "Return MESSAGE timestamp as float seconds, or nil on parse failure."
@@ -4541,6 +4565,8 @@ SCOPE is a symbol describing where the row is rendered."
                       (format "[media] %s%s%s%s" name suffix state-suffix trail-suffix)))))
                 (2 (format "[voice] %s%s%s" name state-suffix trail-suffix))
                 (13 (format "[stage] %s%s%s" name state-suffix trail-suffix))
+                (14 (format "[directory] %s%s%s" name state-suffix trail-suffix))
+                (17 (format "[lobby] %s%s%s" name state-suffix trail-suffix))
                 (_
                  (format "[type-%s] %s%s%s"
                          channel-type name state-suffix trail-suffix)))))))
@@ -5316,6 +5342,100 @@ When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
         (disco-root-parent-threads-refresh))
       (pop-to-buffer buf))))
 
+(defun disco-root--channel-inspect-buffer-name (channel)
+  "Return inspect buffer name for CHANNEL."
+  (format "*disco-channel:%s*"
+          (or (disco-root--channel-display-name channel)
+              (alist-get 'id channel)
+              "unknown")))
+
+(defun disco-root--render-channel-inspect-buffer ()
+  "Render the current inspect buffer for `disco-root--inspect-channel'."
+  (unless disco-root--inspect-channel
+    (user-error "disco: inspect buffer has no channel context"))
+  (let* ((channel disco-root--inspect-channel)
+         (channel-id (alist-get 'id channel))
+         (channel-name (disco-root--channel-display-name channel))
+         (guild-name (disco-root--channel-guild-name channel))
+         (category-name (disco-root--channel-category-name channel))
+         (parent-id (alist-get 'parent_id channel))
+         (parent (and parent-id (disco-state-channel parent-id)))
+         (parent-name (and parent (disco-root--channel-display-name parent)))
+         (open-mode (disco-channel-open-mode channel))
+         (inspect-note (disco-channel-inspect-note channel))
+         (linked-lobby (alist-get 'linked_lobby channel))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "%s\n" (or channel-name "(no-name)")))
+    (insert (make-string (length (or channel-name "(no-name)")) ?=))
+    (insert "\n\n")
+    (insert (format "Type: %s\n" (disco-channel-type-name channel)))
+    (insert (format "ID: %s\n" (or channel-id "(unknown)")))
+    (when guild-name
+      (insert (format "Guild: %s\n" guild-name)))
+    (when category-name
+      (insert (format "Category: %s\n" category-name)))
+    (when parent-name
+      (insert (format "Parent: %s\n" parent-name)))
+    (when open-mode
+      (insert (format "Open mode: %s\n" open-mode)))
+    (when-let* ((last-message-id (alist-get 'last_message_id channel)))
+      (insert (format "Last message id: %s\n" last-message-id)))
+    (when-let* ((position (alist-get 'position channel)))
+      (insert (format "Position: %s\n" position)))
+    (when (listp linked-lobby)
+      (insert "\nLinked lobby:\n")
+      (when-let* ((lobby-id (alist-get 'lobby_id linked-lobby)))
+        (insert (format "  Lobby ID: %s\n" lobby-id)))
+      (when-let* ((linked-by (alist-get 'linked_by linked-lobby)))
+        (insert (format "  Linked by: %s\n" linked-by)))
+      (when-let* ((linked-at (alist-get 'linked_at linked-lobby)))
+        (insert (format "  Linked at: %s\n" linked-at))))
+    (when inspect-note
+      (insert "\n")
+      (insert inspect-note)
+      (insert "\n"))
+    (insert "\nRaw channel object:\n\n")
+    (insert (pp-to-string channel))
+    (goto-char (point-min))))
+
+(defun disco-root-channel-inspect-refresh ()
+  "Refresh the current inspect buffer from local state."
+  (interactive)
+  (unless disco-root--inspect-channel
+    (user-error "disco: inspect buffer has no channel context"))
+  (when-let* ((channel-id (alist-get 'id disco-root--inspect-channel))
+              (updated (disco-state-channel channel-id)))
+    (setq disco-root--inspect-channel updated))
+  (disco-root--render-channel-inspect-buffer)
+  (message "disco: refreshed channel inspect"))
+
+(defvar disco-root-channel-inspect-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'disco-root-channel-inspect-refresh)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `disco-root-channel-inspect-mode'.")
+
+(define-derived-mode disco-root-channel-inspect-mode special-mode "Disco-Inspect"
+  "Major mode for channel inspect buffers."
+  (setq buffer-read-only t)
+  (setq truncate-lines nil))
+
+(defun disco-root-open-channel-inspect (&optional channel-id)
+  "Open inspect view for CHANNEL-ID."
+  (interactive)
+  (let ((channel (and channel-id (disco-state-channel channel-id))))
+    (unless channel
+      (user-error "disco: channel %s is unavailable" channel-id))
+    (let ((buf (get-buffer-create
+                (disco-root--channel-inspect-buffer-name channel))))
+      (with-current-buffer buf
+        (disco-root-channel-inspect-mode)
+        (setq disco-root--inspect-channel channel)
+        (disco-root--render-channel-inspect-buffer))
+      (pop-to-buffer buf))))
+
 (defun disco-root--open-channel (channel-id)
   "Open CHANNEL-ID according to channel semantics."
   (let* ((channel (and channel-id (disco-state-channel channel-id)))
@@ -5327,6 +5447,8 @@ When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
     (pcase open-mode
       ('thread-list
        (disco-root-open-parent-threads channel-id))
+      ('inspect
+       (disco-root-open-channel-inspect channel-id))
       (_
        (disco-room-open channel-id (disco-root--channel-display-name channel))))))
 
@@ -5407,7 +5529,6 @@ SCOPE is forwarded to extra-info providers."
   (if (eq scope 'activity)
       (disco-root--insert-activity-channel-line channel indent)
     (let* ((channel-id (alist-get 'id channel))
-           (channel-type (alist-get 'type channel))
            (label (disco-root--channel-label channel scope))
            (unread-count (disco-state-channel-effective-unread-count channel))
            (has-unread (disco-root--channel-has-unread-p channel))
@@ -5426,9 +5547,7 @@ SCOPE is forwarded to extra-info providers."
            line-start
            (point)
            (list 'mouse-face 'highlight
-                 'help-echo (if (memq channel-type '(15 16))
-                                (format "Open threads under channel %s" channel-id)
-                              (format "Open channel %s" channel-id)))))))))
+                 'help-echo (disco-root--channel-open-help-echo channel))))))))
 
 (defun disco-root-button-forward (&optional n)
   "Move point to next channel row by N steps."

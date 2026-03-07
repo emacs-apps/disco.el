@@ -57,7 +57,10 @@
     (13 :name "stage"
         :root-visible t
         :open-mode timeline)
-    (14 :name "directory")
+    (14 :name "directory"
+        :root-visible t
+        :open-mode inspect
+        :inspect-note "Directory channel browsing is not implemented yet. Use this view to inspect the raw channel metadata.")
     (15 :name "forum"
         :root-visible t
         :open-mode thread-list
@@ -70,7 +73,10 @@
         :thread-parent t
         :thread-only-parent t
         :forum-or-media t)
-    (17 :name "lobby")
+    (17 :name "lobby"
+        :root-visible t
+        :open-mode inspect
+        :inspect-note "Lobby channel timelines are not implemented yet. Use this view to inspect the channel and any linked lobby metadata.")
     (18 :name "ephemeral-dm"
         :root-visible t
         :open-mode timeline
@@ -149,6 +155,10 @@
 (defun disco-channel-searchable-p (channel-or-type)
   "Return non-nil when CHANNEL-OR-TYPE supports remote message search."
   (eq t (disco-channel-type-get channel-or-type :searchable)))
+
+(defun disco-channel-inspect-note (channel-or-type)
+  "Return inspector note string for CHANNEL-OR-TYPE, or nil."
+  (disco-channel-type-get channel-or-type :inspect-note))
 
 (provide 'disco-channel-type)
 

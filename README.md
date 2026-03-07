@@ -17,7 +17,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Hide guild channels lacking `VIEW_CHANNEL` based on computed channel permissions.
 - Fetch and display thread channels nested under their parent channels.
 - Browse archived thread lists per parent channel.
-- Open channel timelines, including voice/stage text chats, while forum/media parents open thread browsers.
+- Open channel timelines, including voice/stage text chats; forum/media parents open thread browsers; directory/lobby rows open inspect views.
 - Room timeline supports telega-inspired compact same-sender grouping, date separators, and unread divider rendering.
 - Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
 - Send plain text message with `C-c C-c` in room buffer.

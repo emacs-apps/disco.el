@@ -366,8 +366,10 @@ PROPS is appended as additional plist metadata."
     (5 " announcement")
     ((or 10 11 12) " thread")
     (13 " stage")
+    (14 " directory")
     (15 " forum")
     (16 " media")
+    (17 " lobby")
     (_ " channel")))
 
 (defun disco-company--completion-mentionable-channel-p (channel)

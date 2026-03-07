@@ -887,6 +887,57 @@
           (should (equal '("voice1" "Voice") opened))))
     (disco-state-reset)))
 
+(ert-deftest disco-root-open-channel-opens-directory-inspect-buffer ()
+  (disco-state-reset)
+  (let (opened-buffer)
+    (unwind-protect
+        (progn
+          (disco-state-upsert-channel
+           '((id . "dir1")
+             (type . 14)
+             (guild_id . "g1")
+             (name . "Directory")))
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (buffer &rest _args)
+                       (setq opened-buffer buffer)
+                       buffer))
+                    ((symbol-function 'disco-room-open)
+                     (lambda (&rest _args)
+                       (ert-fail "directory channels should not open room timelines")))
+                    ((symbol-function 'disco-root-open-parent-threads)
+                     (lambda (&rest _args)
+                       (ert-fail "directory channels should not open thread browsers"))))
+            (disco-root--open-channel "dir1")
+            (should (buffer-live-p opened-buffer))
+            (with-current-buffer opened-buffer
+              (should (eq major-mode 'disco-root-channel-inspect-mode))
+              (should (string-match-p "Directory channel browsing is not implemented yet"
+                                      (buffer-string))))))
+      (when (buffer-live-p opened-buffer)
+        (kill-buffer opened-buffer))
+      (disco-state-reset))))
+
+(ert-deftest disco-root-search-channel-candidates-skip-unsearchable-types ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-channel '((id . "text1") (guild_id . "g1") (type . 0) (name . "chat")))
+        (disco-state-upsert-channel '((id . "dir1") (guild_id . "g1") (type . 14) (name . "Directory")))
+        (let ((candidates (disco-root--search-channel-candidates '(:kind guild :id "g1"))))
+          (should (member '("chat" . "text1") candidates))
+          (should-not (member '("Directory" . "dir1") candidates))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-activity-secondary-label-uses-directory-placeholder ()
+  (let ((queued nil)
+        (channel '((id . "dir1") (type . 14) (name . "Directory") (last_message_id . "42"))))
+    (cl-letf (((symbol-function 'disco-root--queue-missing-preview-fetch)
+               (lambda (&rest _args)
+                 (setq queued t))))
+      (should (equal "(directory view)"
+                     (disco-root--activity-secondary-label channel)))
+      (should-not queued))))
+
 (ert-deftest disco-root-activity-secondary-label-uses-message-placeholders ()
   (disco-state-reset)
   (let ((channel '((id . "c1")
