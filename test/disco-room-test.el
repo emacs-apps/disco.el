@@ -68,6 +68,128 @@
         (should frame-called)
         (should (equal "new" disco-room--channel-name))))))
 
+(ert-deftest disco-room-handle-gateway-message-create-patches-persistent-ewoc ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (setq-local disco-room-group-messages t)
+    (setq-local disco-room-group-messages-timespan 3600)
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m1")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:00:00.000000+00:00")
+        (content . "first")
+        (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-render)
+    (let ((ewoc disco-room--ewoc)
+          (node-m1 (gethash "m1" disco-room--message-node-table))
+          full-render
+          preserve-render)
+      (disco-state-put-messages
+       "chat"
+       '(((id . "m2")
+          (channel_id . "chat")
+          (timestamp . "2026-03-08T00:05:00.000000+00:00")
+          (content . "second")
+          (author . ((id . "u1") (username . "alice"))))
+         ((id . "m1")
+          (channel_id . "chat")
+          (timestamp . "2026-03-08T00:00:00.000000+00:00")
+          (content . "first")
+          (author . ((id . "u1") (username . "alice"))))))
+      (cl-letf (((symbol-function 'disco-room-render)
+                 (lambda () (setq full-render t)))
+                ((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () (setq preserve-render t)))
+                ((symbol-function 'disco-room--mark-read)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (disco-room--handle-gateway-event
+         '(:type message-create
+           :channel-id "chat"
+           :message ((id . "m2")
+                     (channel_id . "chat")
+                     (timestamp . "2026-03-08T00:05:00.000000+00:00")
+                     (content . "second")
+                     (author . ((id . "u1") (username . "alice")))))))
+      (should-not full-render)
+      (should-not preserve-render)
+      (should (eq ewoc disco-room--ewoc))
+      (should (eq node-m1 (gethash "m1" disco-room--message-node-table)))
+      (should (gethash "m2" disco-room--message-node-table))
+      (should (equal '("m1" "m2") disco-room--displayed-message-ids))
+      (should (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+                         :compact))
+      (should (string-match-p "second" (buffer-string))))))
+
+(ert-deftest disco-room-handle-gateway-message-delete-recomputes-next-context ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (setq-local disco-room-group-messages t)
+    (setq-local disco-room-group-messages-timespan 3600)
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m2")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:05:00.000000+00:00")
+        (content . "second")
+        (author . ((id . "u1") (username . "alice"))))
+       ((id . "m1")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:00:00.000000+00:00")
+        (content . "first")
+        (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-render)
+    (should (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+                       :compact))
+    (let ((ewoc disco-room--ewoc)
+          (node-m2 (gethash "m2" disco-room--message-node-table))
+          full-render
+          preserve-render)
+      (disco-state-put-messages
+       "chat"
+       '(((id . "m2")
+          (channel_id . "chat")
+          (timestamp . "2026-03-08T00:05:00.000000+00:00")
+          (content . "second")
+          (author . ((id . "u1") (username . "alice"))))))
+      (cl-letf (((symbol-function 'disco-room-render)
+                 (lambda () (setq full-render t)))
+                ((symbol-function 'disco-room--render-preserving-point)
+                 (lambda () (setq preserve-render t)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (disco-room--handle-gateway-event
+         '(:type message-delete
+           :channel-id "chat"
+           :message-id "m1")))
+      (should-not full-render)
+      (should-not preserve-render)
+      (should (eq ewoc disco-room--ewoc))
+      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
+      (should-not (gethash "m1" disco-room--message-node-table))
+      (should (equal '("m2") disco-room--displayed-message-ids))
+      (should-not (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+                             :compact))
+      (should (string-match-p "alice" (buffer-string))))))
+
 (ert-deftest disco-room-resolve-pending-jump-fetches-around-once ()
   (with-temp-buffer
     (let ((disco-room--pending-jump-message-id "m1")
