@@ -485,6 +485,61 @@
        (permissions . ,(number-to-string (ash 1 35)))))
     (should-error (disco-room-create-thread "topic" 12 nil nil nil) :type 'user-error)))
 
+(ert-deftest disco-room-add-reaction-errors-without-add-reactions ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
+    (should-error (disco-room-add-reaction "👍" "m1") :type 'user-error)))
+
+(ert-deftest disco-room-vote-poll-answer-errors-in-archived-thread ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (let* ((poll-msg
+            '((id . "m1")
+              (channel_id . "thread")
+              (poll . ((answers . (((answer_id . 1)
+                                    (poll_media . ((text . "one"))))
+                                   ((answer_id . 2)
+                                    (poll_media . ((text . "two")))))))))))
+      (disco-state-reset)
+      (disco-state-upsert-channel
+       `((id . "thread")
+         (type . 11)
+         (guild_id . "g1")
+         (permissions . ,(number-to-string (ash 1 38)))
+         (thread_metadata . ((archived . t)))))
+      (disco-state-put-messages "thread" (list poll-msg))
+      (should-error (disco-room-vote-poll-answer 1 "m1") :type 'user-error))))
+
+(ert-deftest disco-room-rename-thread-errors-when-archived ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     `((id . "thread")
+       (type . 11)
+       (guild_id . "g1")
+       (permissions . ,(number-to-string (ash 1 34)))
+       (thread_metadata . ((archived . t)))))
+    (should-error (disco-room-rename-thread "new-name") :type 'user-error)))
+
+(ert-deftest disco-room-toggle-thread-archived-errors-without-manage-threads ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     `((id . "thread")
+       (type . 11)
+       (guild_id . "g1")
+       (permissions . ,(number-to-string (ash 1 38)))
+       (thread_metadata . ((archived . :false) (locked . :false)))))
+    (should-error (disco-room-toggle-thread-archived) :type 'user-error)))
+
 (ert-deftest disco-room-send-poll-errors-while-replying ()
   (with-temp-buffer
     (disco-room-mode)

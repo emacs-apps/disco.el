@@ -982,6 +982,105 @@ MIN-COUNT optionally requires at least that many queued attachment tokens."
        (append (when has-attachments '(attach-files))
                (when reply-to '(read-message-history)))))))
 
+(defun disco-room--channel-permission-reason (permissions &optional channel)
+  "Return missing-permission reason for PERMISSIONS on CHANNEL, or nil."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (missing (and channel
+                       (disco-permission-channel-known-p channel)
+                       (disco-permission-channel-missing channel permissions nil))))
+    (when missing
+      (format "missing %s"
+              (mapconcat #'disco-permission-display-name missing ", ")))))
+
+(defun disco-room--reaction-unavailable-reason (&optional _msg)
+  "Return reason reaction actions are unavailable, or nil."
+  (disco-room--room-send-restriction-reason '(add-reactions)))
+
+(defun disco-room--poll-vote-unavailable-reason (&optional msg)
+  "Return reason poll voting actions are unavailable for MSG, or nil."
+  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+         (poll (and (listp msg) (disco-room--message-poll msg))))
+    (cond
+     ((null msg)
+      "point is not on a message")
+     ((null poll)
+      "point is not on a poll")
+     ((disco-room--poll-expired-p poll)
+      "poll is closed")
+     (t
+      (disco-room--room-send-restriction-reason)))))
+
+(defun disco-room--poll-submit-unavailable-reason (&optional msg)
+  "Return reason staged poll submit is unavailable for MSG, or nil."
+  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+         (base-reason (disco-room--poll-vote-unavailable-reason msg)))
+    (or base-reason
+        (let* ((target-id (alist-get 'id msg))
+               (poll (disco-room--message-poll msg))
+               (staged (disco-room--poll-effective-selection target-id poll))
+               (committed (disco-room--poll-voted-answer-ids poll)))
+          (cond
+           ((null staged)
+            "no staged poll selection")
+           ((equal (disco-room--poll-normalize-answer-id-list staged)
+                   (disco-room--poll-normalize-answer-id-list committed))
+            "no pending poll vote changes"))))))
+
+(defun disco-room--poll-clear-unavailable-reason (&optional msg)
+  "Return reason clear-poll-votes is unavailable for MSG, or nil."
+  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+         (base-reason (disco-room--poll-vote-unavailable-reason msg)))
+    (or base-reason
+        (let* ((poll (and (listp msg) (disco-room--message-poll msg)))
+               (committed (and poll (disco-room--poll-voted-answer-ids poll))))
+          (unless committed
+            "no existing poll vote to remove")))))
+
+(defun disco-room--poll-expire-unavailable-reason (&optional msg)
+  "Return reason end-poll is unavailable for MSG, or nil."
+  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+         (poll (and (listp msg) (disco-room--message-poll msg))))
+    (cond
+     ((null msg)
+      "point is not on a message")
+     ((null poll)
+      "point is not on a poll")
+     ((disco-room--poll-expired-p poll)
+      "poll is already closed")
+     ((not (disco-room--poll-owned-by-current-user-p msg nil))
+      "only poll author can end this poll")
+     (t
+      (disco-room--room-send-restriction-reason '(send-polls))))))
+
+(defun disco-room--thread-update-unavailable-reason (&optional channel)
+  "Return reason thread update actions are unavailable for CHANNEL, or nil.
+
+This covers operations like rename, lock, slowmode, and auto-archive changes
+that require an active, mutable thread."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (cond
+     ((not (disco-room--thread-channel-p channel))
+      "current room is not a thread")
+     ((disco-room--thread-archived-p channel)
+      "current thread is archived")
+     (t
+      (disco-room--channel-permission-reason '(manage-threads) channel)))))
+
+(defun disco-room--thread-toggle-archived-unavailable-reason (&optional channel)
+  "Return reason toggle-thread-archived is unavailable for CHANNEL, or nil."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (cond
+     ((not (disco-room--thread-channel-p channel))
+      "current room is not a thread")
+     ((not (disco-room--thread-archived-p channel))
+      (disco-room--channel-permission-reason '(manage-threads) channel))
+     ((disco-room--thread-locked-p channel)
+      (disco-room--channel-permission-reason '(manage-threads) channel))
+     (t
+      (disco-room--channel-permission-reason
+       (disco-room--required-send-permissions channel)
+       channel)))))
+
 (defun disco-room--delete-message-unavailable-reason (&optional msg)
   "Return reason delete-message action is unavailable for MSG, or nil."
   (when (listp msg)
@@ -6376,10 +6475,16 @@ markers are appended in requested order."
   "Add EMOJI reaction to MESSAGE-ID at point."
   (interactive
    (let* ((msg (or (disco-room--message-at-point)
-                   (user-error "disco: point is not on a message")))
-          (default (disco-room--default-reaction-emoji msg))
-          (picked (disco-room--read-reaction-emoji "Add reaction" default)))
-     (list picked (alist-get 'id msg))))
+                   (user-error "disco: point is not on a message"))))
+     (disco-room--ensure-action-available
+      (disco-room--reaction-unavailable-reason msg)
+      "add reactions")
+     (let* ((default (disco-room--default-reaction-emoji msg))
+            (picked (disco-room--read-reaction-emoji "Add reaction" default)))
+       (list picked (alist-get 'id msg)))))
+  (disco-room--ensure-action-available
+   (disco-room--reaction-unavailable-reason)
+   "add reactions")
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
@@ -6406,10 +6511,16 @@ markers are appended in requested order."
   "Remove current user's EMOJI reaction from MESSAGE-ID at point."
   (interactive
    (let* ((msg (or (disco-room--message-at-point)
-                   (user-error "disco: point is not on a message")))
-          (default (disco-room--default-reaction-emoji msg))
-          (picked (disco-room--read-reaction-emoji "Remove reaction" default)))
-     (list picked (alist-get 'id msg))))
+                   (user-error "disco: point is not on a message"))))
+     (disco-room--ensure-action-available
+      (disco-room--reaction-unavailable-reason msg)
+      "remove reactions")
+     (let* ((default (disco-room--default-reaction-emoji msg))
+            (picked (disco-room--read-reaction-emoji "Remove reaction" default)))
+       (list picked (alist-get 'id msg)))))
+  (disco-room--ensure-action-available
+   (disco-room--reaction-unavailable-reason)
+   "remove reactions")
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
@@ -6436,10 +6547,16 @@ markers are appended in requested order."
   "Toggle current user's EMOJI reaction on MESSAGE-ID at point."
   (interactive
    (let* ((msg (or (disco-room--message-at-point)
-                   (user-error "disco: point is not on a message")))
-          (default (disco-room--default-reaction-emoji msg))
-          (picked (disco-room--read-reaction-emoji "Toggle reaction" default)))
-     (list picked (alist-get 'id msg))))
+                   (user-error "disco: point is not on a message"))))
+     (disco-room--ensure-action-available
+      (disco-room--reaction-unavailable-reason msg)
+      "toggle reactions")
+     (let* ((default (disco-room--default-reaction-emoji msg))
+            (picked (disco-room--read-reaction-emoji "Toggle reaction" default)))
+       (list picked (alist-get 'id msg)))))
+  (disco-room--ensure-action-available
+   (disco-room--reaction-unavailable-reason)
+   "toggle reactions")
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (msg (or (disco-room--message-by-id target-id)
                   (disco-room--message-at-point)
@@ -6512,13 +6629,13 @@ Each item is (LABEL . ANSWER-ID)."
 (defun disco-room--submit-poll-vote (message-id selected-answer-ids)
   "Submit SELECTED-ANSWER-IDS for poll MESSAGE-ID asynchronously."
   (let* ((msg (disco-room--poll-message-required message-id))
-         (poll (disco-room--message-poll msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
          (target-id (alist-get 'id msg))
          (normalized (disco-room--poll-normalize-answer-id-list selected-answer-ids)))
-    (when (disco-room--poll-expired-p poll)
-      (user-error "disco: poll is closed"))
+    (disco-room--ensure-action-available
+     (disco-room--poll-vote-unavailable-reason msg)
+     "vote in polls")
     (disco-permission-ensure-channel
      (disco-room--channel-object)
      (disco-room--poll-vote-required-permissions)
@@ -6561,13 +6678,14 @@ In single-select polls, this replaces the staged selection."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg))
-         (picked (disco-room--pick-poll-answer-id msg answer-id)))
-    (unless (disco-room--poll-can-vote-p msg)
-      (user-error "disco: poll voting is unavailable here"))
-    (disco-room--stage-poll-selection
-     target-id
-     (disco-room--poll-add-selection target-id poll picked))))
+         (poll (disco-room--message-poll msg)))
+    (disco-room--ensure-action-available
+     (disco-room--poll-vote-unavailable-reason msg)
+     "stage poll votes")
+    (let ((picked (disco-room--pick-poll-answer-id msg answer-id)))
+      (disco-room--stage-poll-selection
+       target-id
+       (disco-room--poll-add-selection target-id poll picked)))))
 
 (defun disco-room-remove-poll-vote (&optional answer-id message-id)
   "Stage removal of ANSWER-ID vote from poll MESSAGE-ID."
@@ -6575,15 +6693,16 @@ In single-select polls, this replaces the staged selection."
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
          (poll (disco-room--message-poll msg))
-         (picked (disco-room--pick-poll-answer-id msg answer-id))
          (current (disco-room--poll-effective-selection target-id poll)))
-    (unless (disco-room--poll-can-vote-p msg)
-      (user-error "disco: poll voting is unavailable here"))
-    (unless (member picked current)
-      (user-error "disco: answer %s is not selected" picked))
-    (disco-room--stage-poll-selection
-     target-id
-     (delete picked (copy-sequence current)))))
+    (disco-room--ensure-action-available
+     (disco-room--poll-vote-unavailable-reason msg)
+     "stage poll vote removals")
+    (let ((picked (disco-room--pick-poll-answer-id msg answer-id)))
+      (unless (member picked current)
+        (user-error "disco: answer %s is not selected" picked))
+      (disco-room--stage-poll-selection
+       target-id
+       (delete picked (copy-sequence current))))))
 
 (defun disco-room-toggle-poll-answer (&optional answer-id message-id)
   "Toggle staged poll ANSWER-ID in MESSAGE-ID.
@@ -6593,13 +6712,14 @@ send votes to Discord."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg))
-         (picked (disco-room--pick-poll-answer-id msg answer-id)))
-    (unless (disco-room--poll-can-vote-p msg)
-      (user-error "disco: poll voting is unavailable here"))
-    (disco-room--stage-poll-selection
-     target-id
-     (disco-room--poll-toggle-draft-selection target-id poll picked))))
+         (poll (disco-room--message-poll msg)))
+    (disco-room--ensure-action-available
+     (disco-room--poll-vote-unavailable-reason msg)
+     "toggle staged poll votes")
+    (let ((picked (disco-room--pick-poll-answer-id msg answer-id)))
+      (disco-room--stage-poll-selection
+       target-id
+       (disco-room--poll-toggle-draft-selection target-id poll picked)))))
 
 (defun disco-room-submit-poll-vote (&optional message-id)
   "Submit staged poll selection for MESSAGE-ID at point."
@@ -6609,8 +6729,9 @@ send votes to Discord."
          (poll (disco-room--message-poll msg))
          (staged (disco-room--poll-effective-selection target-id poll))
          (committed (disco-room--poll-voted-answer-ids poll)))
-    (unless (disco-room--poll-can-vote-p msg)
-      (user-error "disco: poll voting is unavailable here"))
+    (disco-room--ensure-action-available
+     (disco-room--poll-submit-unavailable-reason msg)
+     "submit poll votes")
     (when (null staged)
       (user-error "disco: select at least one answer before voting"))
     (when (equal (disco-room--poll-normalize-answer-id-list staged)
@@ -6625,8 +6746,9 @@ send votes to Discord."
          (target-id (alist-get 'id msg))
          (poll (disco-room--message-poll msg))
          (committed (disco-room--poll-voted-answer-ids poll)))
-    (unless (disco-room--poll-can-vote-p msg)
-      (user-error "disco: poll voting is unavailable here"))
+    (disco-room--ensure-action-available
+     (disco-room--poll-clear-unavailable-reason msg)
+     "clear poll votes")
     (unless committed
       (user-error "disco: no existing poll vote to remove"))
     (disco-room--submit-poll-vote target-id '())))
@@ -6635,14 +6757,12 @@ send votes to Discord."
   "End poll in MESSAGE-ID at point."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
-         (poll (disco-room--message-poll msg))
          (target-id (alist-get 'id msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id))
-    (when (disco-room--poll-expired-p poll)
-      (user-error "disco: poll is already closed"))
-    (unless (disco-room--poll-owned-by-current-user-p msg nil)
-      (user-error "disco: only poll author can end this poll"))
+    (disco-room--ensure-action-available
+     (disco-room--poll-expire-unavailable-reason msg)
+     "end polls")
     (disco-permission-ensure-channel
      (disco-room--channel-object)
      (disco-room--poll-expire-required-permissions)
@@ -7482,6 +7602,9 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 (defun disco-room-toggle-thread-archived ()
   "Toggle archived state for current thread."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--thread-toggle-archived-unavailable-reason)
+   "toggle thread archived state")
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
@@ -7501,12 +7624,19 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 (defun disco-room-rename-thread (name)
   "Rename current thread to NAME."
   (interactive
-   (let* ((channel (or (disco-room--channel-object)
-                       (user-error "disco: unknown thread in state")))
-          (current-name (or (alist-get 'name channel) ""))
-          (name (string-trim
-                 (read-string "Thread name: " current-name))))
-     (list name)))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--thread-update-unavailable-reason)
+      "rename threads")
+     (let* ((channel (or (disco-room--channel-object)
+                         (user-error "disco: unknown thread in state")))
+            (current-name (or (alist-get 'name channel) ""))
+            (name (string-trim
+                   (read-string "Thread name: " current-name))))
+       (list name))))
+  (disco-room--ensure-action-available
+   (disco-room--thread-update-unavailable-reason)
+   "rename threads")
   (disco-room--ensure-thread-channel)
   (when (string-empty-p name)
     (user-error "disco: thread name cannot be empty"))
@@ -7524,6 +7654,9 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 (defun disco-room-toggle-thread-locked ()
   "Toggle locked state for current thread."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--thread-update-unavailable-reason)
+   "toggle thread locked state")
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
@@ -7545,9 +7678,16 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 
 When called interactively, empty input clears slowmode (sets to 0)."
   (interactive
-   (list (or (disco-room--read-optional-nonnegative-int
-              "Slowmode seconds (empty clears to 0): ")
-             0)))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--thread-update-unavailable-reason)
+      "set thread slowmode")
+     (list (or (disco-room--read-optional-nonnegative-int
+                "Slowmode seconds (empty clears to 0): ")
+               0))))
+  (disco-room--ensure-action-available
+   (disco-room--thread-update-unavailable-reason)
+   "set thread slowmode")
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
@@ -7568,12 +7708,19 @@ When called interactively, empty input clears slowmode (sets to 0)."
 (defun disco-room-set-thread-auto-archive-duration (minutes)
   "Set current thread auto archive duration to MINUTES."
   (interactive
-   (let* ((channel (or (disco-room--channel-object)
-                       (user-error "disco: unknown thread in state")))
-          (meta (disco-room--thread-metadata channel))
-          (current (or (alist-get 'auto_archive_duration meta)
-                       (alist-get 'auto_archive_duration channel))))
-     (list (disco-room--read-required-thread-auto-archive-duration current))))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--thread-update-unavailable-reason)
+      "set thread auto archive duration")
+     (let* ((channel (or (disco-room--channel-object)
+                         (user-error "disco: unknown thread in state")))
+            (meta (disco-room--thread-metadata channel))
+            (current (or (alist-get 'auto_archive_duration meta)
+                         (alist-get 'auto_archive_duration channel))))
+       (list (disco-room--read-required-thread-auto-archive-duration current)))))
+  (disco-room--ensure-action-available
+   (disco-room--thread-update-unavailable-reason)
+   "set thread auto archive duration")
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
@@ -7602,6 +7749,9 @@ When called interactively, empty input clears slowmode (sets to 0)."
 (defun disco-room-edit-thread-settings ()
   "Edit multiple thread settings in one PATCH request."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--thread-update-unavailable-reason)
+   "edit thread settings")
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
@@ -7740,17 +7890,44 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if (lambda ()
                  (disco-room--delete-message-unavailable-reason
                   (ignore-errors (disco-room--message-at-point)))))
-    ("!" "Toggle reaction" disco-room-toggle-reaction)
-    ("+" "Add reaction" disco-room-add-reaction)
-    ("-" "Remove reaction" disco-room-remove-reaction)
+    ("!" "Toggle reaction" disco-room-toggle-reaction
+     :inapt-if (lambda ()
+                 (disco-room--reaction-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
+    ("+" "Add reaction" disco-room-add-reaction
+     :inapt-if (lambda ()
+                 (disco-room--reaction-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
+    ("-" "Remove reaction" disco-room-remove-reaction
+     :inapt-if (lambda ()
+                 (disco-room--reaction-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
     ("p" "Send poll" disco-room-send-poll
      :inapt-if disco-room--poll-unavailable-reason)
-    ("w" "Select answer" disco-room-vote-poll-answer)
-    ("u" "Unselect answer" disco-room-remove-poll-vote)
-    ("t" "Toggle staged answer" disco-room-toggle-poll-answer)
-    ("W" "Submit staged vote" disco-room-submit-poll-vote)
-    ("C" "Remove my vote" disco-room-clear-poll-votes)
-    ("X" "End poll" disco-room-expire-poll)
+    ("w" "Select answer" disco-room-vote-poll-answer
+     :inapt-if (lambda ()
+                 (disco-room--poll-vote-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
+    ("u" "Unselect answer" disco-room-remove-poll-vote
+     :inapt-if (lambda ()
+                 (disco-room--poll-vote-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
+    ("t" "Toggle staged answer" disco-room-toggle-poll-answer
+     :inapt-if (lambda ()
+                 (disco-room--poll-vote-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
+    ("W" "Submit staged vote" disco-room-submit-poll-vote
+     :inapt-if (lambda ()
+                 (disco-room--poll-submit-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
+    ("C" "Remove my vote" disco-room-clear-poll-votes
+     :inapt-if (lambda ()
+                 (disco-room--poll-clear-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
+    ("X" "End poll" disco-room-expire-poll
+     :inapt-if (lambda ()
+                 (disco-room--poll-expire-unavailable-reason
+                  (ignore-errors (disco-room--message-at-point)))))
     ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message
@@ -7758,15 +7935,21 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("o" "Open msg thread" disco-room-open-thread-from-message-at-point)
     ("n" "Create detached" disco-room-create-thread
      :inapt-if (lambda () (disco-room--thread-create-unavailable-reason :any)))
-    ("R" "Rename thread" disco-room-rename-thread)
-    ("L" "Toggle locked" disco-room-toggle-thread-locked)
-    ("S" "Set slowmode" disco-room-set-thread-slowmode)
-    ("U" "Set auto-archive" disco-room-set-thread-auto-archive-duration)
-    ("E" "Edit thread settings" disco-room-edit-thread-settings)
+    ("R" "Rename thread" disco-room-rename-thread
+     :inapt-if disco-room--thread-update-unavailable-reason)
+    ("L" "Toggle locked" disco-room-toggle-thread-locked
+     :inapt-if disco-room--thread-update-unavailable-reason)
+    ("S" "Set slowmode" disco-room-set-thread-slowmode
+     :inapt-if disco-room--thread-update-unavailable-reason)
+    ("U" "Set auto-archive" disco-room-set-thread-auto-archive-duration
+     :inapt-if disco-room--thread-update-unavailable-reason)
+    ("E" "Edit thread settings" disco-room-edit-thread-settings
+     :inapt-if disco-room--thread-update-unavailable-reason)
     ("M" "Set muted" disco-room-set-thread-muted)
     ("j" "Join thread" disco-room-join-thread)
     ("l" "Leave thread" disco-room-leave-thread)
-    ("a" "Toggle archived" disco-room-toggle-thread-archived)
+    ("a" "Toggle archived" disco-room-toggle-thread-archived
+     :inapt-if disco-room--thread-toggle-archived-unavailable-reason)
     ("A" "Parent archived threads..." disco-room-open-parent-archived-threads)]
    ["Inspect"
     ("/" "Search channel..." disco-room-search-channel)
