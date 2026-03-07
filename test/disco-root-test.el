@@ -127,7 +127,7 @@
     (let ((disco-root-custom-layouts
            '((stress-full
               :label "Stress Full"
-              :render disco-root--render-layout-activity
+              :build disco-root--render-layout-activity
               :update-mode full)))
           (disco-root--layout 'stress-full)
           (disco-root--dirty-channel-ids '("c1"))
@@ -760,8 +760,10 @@
       (cl-letf (((symbol-function 'disco-root--insert-search-message-line)
                  (lambda (_message _indent _tab)
                    (insert "  result-row\n"))))
-        (disco-root--prepare-ewoc-state)
-        (disco-root--render-layout-search)
+        (let ((view-spec (disco-root--render-layout-search)))
+          (should (disco-root-layout-view-spec-p view-spec))
+          (should (eq 'list-spec (disco-root-layout-view-spec-kind view-spec)))
+          (disco-root-layout-render-view-spec view-spec))
         (should (string-match-p "Search results in DMs" (buffer-string)))
         (should (string-match-p "Messages (1/1)" (buffer-string)))
         (should (string-match-p "Show more" (buffer-string)))

@@ -102,3 +102,27 @@
 (ert-deftest disco-view-elide-string-noop-when-string-fits ()
   (let ((text "short"))
     (should (equal text (disco-view-elide-string text 12 'shadow)))))
+
+(ert-deftest disco-view-insert-heading-line-applies-face-and-properties ()
+  (with-temp-buffer
+    (disco-view-insert-heading-line
+     "Heading"
+     :face 'font-lock-keyword-face
+     :line-properties '(row-kind section))
+    (goto-char (point-min))
+    (should (equal 'section (get-text-property (point) 'row-kind)))
+    (should (equal 'font-lock-keyword-face
+                   (get-text-property (point) 'face)))))
+
+(ert-deftest disco-view-insert-action-line-uses-default-link-styling ()
+  (with-temp-buffer
+    (disco-view-insert-action-line
+     "Show more"
+     :line-properties '(row-kind action)
+     :help-echo "Show more")
+    (goto-char (point-min))
+    (should (looking-at-p "  \\[Show more\\]"))
+    (should (equal 'action (get-text-property (point) 'row-kind)))
+    (should (equal 'link (get-text-property (point) 'face)))
+    (should (equal 'highlight (get-text-property (point) 'mouse-face)))
+    (should (equal "Show more" (get-text-property (point) 'help-echo)))))

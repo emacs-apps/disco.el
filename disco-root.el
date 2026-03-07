@@ -5716,16 +5716,28 @@ Return non-nil when at least one visible row is inserted for GUILD."
         (disco-root--ewoc-insert-blank)
         t))))
 
-(defun disco-root--prepare-ewoc-state ()
-  "Reset root EWOC and node indexes before layout rendering."
+(defun disco-root--clear-ewoc-state ()
+  "Clear root EWOC and node indexes for non-EWOC layouts."
   (setq disco-root--channel-node-table (make-hash-table :test #'equal))
   (setq disco-root--section-node-table (make-hash-table :test #'eq))
   (setq disco-root--guild-node-table (make-hash-table :test #'equal))
   (setq disco-root--category-node-table (make-hash-table :test #'equal))
+  (setq disco-root--ewoc nil))
+
+(defun disco-root--prepare-ewoc-state ()
+  "Reset root EWOC and node indexes before layout rendering."
+  (disco-root--clear-ewoc-state)
   (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t)))
 
-(defun disco-root--render-layout-tree ()
-  "Render guild/category tree layout."
+(defun disco-root--ewoc-layout-view-spec (render-function)
+  "Return one EWOC-backed layout view spec for RENDER-FUNCTION."
+  (disco-root-layout-view-spec-create
+   :kind 'render-function
+   :before-render #'disco-root--prepare-ewoc-state
+   :render-function render-function))
+
+(defun disco-root--render-tree-layout-view ()
+  "Render guild/category tree layout into the current EWOC."
   (let* ((show-unread disco-root--tree-show-unread-section)
          (unread-channels (and show-unread
                                (disco-root--collect-visible-unread-channels)))
@@ -5774,25 +5786,36 @@ Return non-nil when at least one visible row is inserted for GUILD."
           (when (= inserted 0)
             (disco-root--ewoc-insert-text "  (no visible guild channels)")))))))
 
-(defun disco-root--render-layout-activity ()
-  "Render activity-sorted channel list layout."
+(defun disco-root--render-layout-tree ()
+  "Return view spec for the guild/category tree layout."
+  (disco-root--ewoc-layout-view-spec #'disco-root--render-tree-layout-view))
+
+(defun disco-root--render-activity-layout-view ()
+  "Render activity-sorted channel list layout into the current EWOC."
   (let ((channels (disco-root--collect-activity-channels)))
     (if channels
         (dolist (channel channels)
           (disco-root--ewoc-insert-channel channel 2 'activity))
       (disco-root--ewoc-insert-text "  (no visible channels)"))))
 
-(defun disco-root--render-layout-search ()
-  "Render root search results layout from current search session state."
-  (if (not (and disco-root--search-domain
-                (disco-root--search-effective-spec-p disco-root--search-query-spec)))
-      (progn
-        (disco-root--ewoc-insert-text "Search root with s")
-        (disco-root--ewoc-insert-text "  (no active search)"))
-    (disco-root--ewoc-insert-text
-     (format "Search results in %s"
-             (disco-root--search-domain-label disco-root--search-domain)))
-    (disco-root--ewoc-insert-blank)
+(defun disco-root--render-layout-activity ()
+  "Return view spec for the activity-sorted channel list layout."
+  (disco-root--ewoc-layout-view-spec #'disco-root--render-activity-layout-view))
+
+(defun disco-root--search-section-heading (title loaded-count &optional total-count loading)
+  "Return one formatted root search section heading line."
+  (concat title
+          (cond
+           ((numberp total-count)
+            (format " (%d/%d)" loaded-count total-count))
+           (loading
+            (format " (%d loaded, loading...)" loaded-count))
+           (t
+            (format " (%d)" loaded-count)))))
+
+(defun disco-root--search-layout-items ()
+  "Return mixed list items for the current root search layout."
+  (let (result)
     (dolist (tab disco-root--search-tab-order)
       (let* ((state (disco-root--search-tab-state tab))
              (items (or (plist-get state :items) '()))
@@ -5800,26 +5823,96 @@ Return non-nil when at least one visible row is inserted for GUILD."
              (error (plist-get state :error))
              (cursor (plist-get state :cursor))
              (total (plist-get state :total-results)))
-        (disco-root--ewoc-insert-search-section
-         tab
-         (disco-root--search-tab-label tab)
-         (length items)
-         total
-         loading)
+        (push (list :item-type 'section
+                    :tab tab
+                    :text (disco-root--search-section-heading
+                           (disco-root--search-tab-label tab)
+                           (length items)
+                           total
+                           loading))
+              result)
         (cond
          (items
           (dolist (message items)
-            (disco-root--ewoc-insert-search-message message 2 tab)))
+            (push (list :item-type 'message
+                        :message message
+                        :indent 2
+                        :tab tab)
+                  result)))
          (loading
-          (disco-root--ewoc-insert-search-note "  (loading...)" 'shadow))
+          (push (list :item-type 'note
+                      :text "  (loading...)"
+                      :face 'shadow)
+                result))
          (error
-          (disco-root--ewoc-insert-search-note (format "  (%s)" error)
-                                               'font-lock-warning-face))
+          (push (list :item-type 'note
+                      :text (format "  (%s)" error)
+                      :face 'font-lock-warning-face)
+                result))
          (t
-          (disco-root--ewoc-insert-search-note "  (no results)" 'shadow)))
+          (push (list :item-type 'note
+                      :text "  (no results)"
+                      :face 'shadow)
+                result)))
         (when cursor
-          (disco-root--ewoc-insert-search-action "Show more" 'load-more tab))
-        (disco-root--ewoc-insert-blank)))))
+          (push (list :item-type 'action
+                      :label "Show more"
+                      :action 'load-more
+                      :tab tab)
+                result))
+        (push (list :item-type 'blank) result)))
+    (nreverse result)))
+
+(defun disco-root--insert-search-list-item (item)
+  "Insert one root search layout ITEM into the current buffer."
+  (pcase (plist-get item :item-type)
+    ('section
+     (disco-view-insert-heading-line
+      (plist-get item :text)
+      :face 'font-lock-keyword-face
+      :line-properties (list 'disco-root-row-type 'search-section)))
+    ('note
+     (disco-view-insert-note-line
+      (plist-get item :text)
+      :face (or (plist-get item :face) 'shadow)
+      :line-properties (list 'disco-root-row-type 'search-note)))
+    ('action
+     (let ((label (or (plist-get item :label) "Action"))
+           (action (plist-get item :action))
+           (tab (plist-get item :tab)))
+       (disco-view-insert-action-line
+        label
+        :line-properties
+        (list 'disco-root-row-type 'search-action
+              'disco-root-search-action action
+              'disco-root-search-tab tab)
+        :help-echo label)))
+    ('message
+     (disco-root--insert-search-message-line
+      (plist-get item :message)
+      (or (plist-get item :indent) 2)
+      (plist-get item :tab)))
+    ('blank
+     (insert "\n"))))
+
+(defun disco-root--search-layout-list-spec ()
+  "Return list spec for the current root search layout."
+  (if (not (and disco-root--search-domain
+                (disco-root--search-effective-spec-p disco-root--search-query-spec)))
+      (disco-view-list-spec-create
+       :title "Search root with s"
+       :empty-text "  (no active search)")
+    (disco-view-list-spec-create
+     :title (format "Search results in %s"
+                    (disco-root--search-domain-label disco-root--search-domain))
+     :items (disco-root--search-layout-items)
+     :item-inserter #'disco-root--insert-search-list-item)))
+
+(defun disco-root--render-layout-search ()
+  "Return view spec for the current root search session layout."
+  (disco-root-layout-view-spec-create
+   :kind 'list-spec
+   :list-spec (disco-root--search-layout-list-spec)))
 
 (defun disco-root--refresh-active-layout-headings (channel-ids)
   "Patch heading rows for current layout using CHANNEL-IDS context."
@@ -6032,8 +6125,7 @@ Return non-nil when at least one visible row is inserted for GUILD."
   "Render root dashboard from in-memory state."
   (let* ((inhibit-read-only t)
          (buffer-undo-list t)
-         (layout (disco-root--ensure-layout))
-         (renderer (disco-root-layout-renderer layout)))
+         (layout (disco-root--ensure-layout)))
     (setq-local disco-root--fill-column (disco-root--render-fill-column))
     (disco-root--debug-log
      "render layout=%s view=%s fill=%s"
@@ -6051,10 +6143,9 @@ Return non-nil when at least one visible row is inserted for GUILD."
     (insert "\n")
     (set-marker disco-root--ewoc-marker (point))
     (set-marker-insertion-type disco-root--ewoc-marker nil)
-    (disco-root--prepare-ewoc-state)
-    (if (functionp renderer)
-        (funcall renderer)
-      (disco-root--render-layout-tree))
+    (disco-root--clear-ewoc-state)
+    (unless (disco-root-layout-render layout)
+      (disco-root-layout-render 'tree))
     (goto-char (point-min))))
 
 (defun disco-root--gateway-sync-guild-ids ()
