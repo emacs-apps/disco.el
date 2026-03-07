@@ -27,6 +27,31 @@
                'disco-markdown-link-face))
       (should (keymapp (get-text-property pos 'keymap rendered))))))
 
+(ert-deftest disco-markdown-render-internal-inline-links-support-escaped-delimiters ()
+  (let ((disco-markdown-backend 'internal))
+    (let* ((rendered (disco-markdown-render
+                      "[te\\]st](https://example.com/a\\)b)"
+                      :context 'test-internal-link-escapes))
+           (plain (substring-no-properties rendered))
+           (pos (string-match "te]st" plain)))
+      (should pos)
+      (should (equal "te]st" plain))
+      (should (equal "https://example.com/a)b"
+                     (get-text-property pos 'disco-markdown-url rendered)))
+      (should (keymapp (get-text-property pos 'keymap rendered))))))
+
+(ert-deftest disco-markdown-render-internal-escaped-links-stay-literal ()
+  (let ((disco-markdown-backend 'internal))
+    (dolist (entry '(("\\[link](https://example.com)" . "[link](https://example.com)")
+                     ("\\<https://example.com>" . "<https://example.com>")))
+      (let* ((rendered (disco-markdown-render (car entry)
+                                              :context 'test-internal-link-literal))
+             (plain (substring-no-properties rendered))
+             (url-pos (string-match "https://example.com" plain)))
+        (should (equal (cdr entry) plain))
+        (should url-pos)
+        (should-not (get-text-property url-pos 'disco-markdown-url rendered))))))
+
 (ert-deftest disco-markdown-render-internal-bare-links-are-openable ()
   (let ((disco-markdown-backend 'internal))
     (let* ((rendered (disco-markdown-render
@@ -131,6 +156,47 @@
              (get-text-property strike-pos 'face rendered)
              'disco-markdown-strikethrough-face))))
 
+(ert-deftest disco-markdown-render-internal-nested-emphasis-combines-faces ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "***both*** **bold *italic*** *italic **bold*** [***link***](https://example.com)"
+                    :context 'test-internal-nested-emphasis))
+         (plain (substring-no-properties rendered))
+         (both-pos (string-match "both" plain))
+         (nested-italic-pos (string-match "italic" plain))
+         (nested-bold-pos (string-match "bold" plain (1+ nested-italic-pos)))
+         (link-pos (string-match "link" plain)))
+    (should (equal "both bold italic italic bold link" plain))
+    (should (disco-markdown--face-match-p
+             (get-text-property both-pos 'face rendered)
+             'disco-markdown-strong-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property both-pos 'face rendered)
+             'disco-markdown-emphasis-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property nested-italic-pos 'face rendered)
+             'disco-markdown-strong-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property nested-italic-pos 'face rendered)
+             'disco-markdown-emphasis-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property nested-bold-pos 'face rendered)
+             'disco-markdown-strong-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property nested-bold-pos 'face rendered)
+             'disco-markdown-emphasis-face))
+    (should (equal "https://example.com"
+                   (get-text-property link-pos 'disco-markdown-url rendered)))
+    (should (disco-markdown--face-match-p
+             (get-text-property link-pos 'face rendered)
+             'disco-markdown-link-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property link-pos 'face rendered)
+             'disco-markdown-strong-face))
+    (should (disco-markdown--face-match-p
+             (get-text-property link-pos 'face rendered)
+             'disco-markdown-emphasis-face))))
+
 (ert-deftest disco-markdown-render-internal-inline-code-protects-content ()
   (let* ((disco-markdown-backend 'internal)
          (rendered (disco-markdown-render
@@ -229,23 +295,12 @@
              (get-text-property 0 'face rendered)
              'disco-markdown-blockquote-face))))
 
-(ert-deftest disco-markdown-render-internal-unordered-lists-normalize-markers ()
+(ert-deftest disco-markdown-render-internal-lists-stay-plain-text ()
   (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render "* one\n  + two\n- three"
+         (rendered (disco-markdown-render "* one\n  + two\n- three\n1. four"
                                           :context 'test-internal-list))
-         (plain (substring-no-properties rendered))
-         (two-pos (string-match "two" plain))
-         (three-pos (string-match "three" plain)))
-    (should (equal "- one\n  - two\n- three" plain))
-    (should (disco-markdown--face-match-p
-             (get-text-property 0 'face rendered)
-             'disco-markdown-list-marker-face))
-    (should (disco-markdown--face-match-p
-             (get-text-property (- two-pos 2) 'face rendered)
-             'disco-markdown-list-marker-face))
-    (should (disco-markdown--face-match-p
-             (get-text-property (- three-pos 2) 'face rendered)
-             'disco-markdown-list-marker-face))))
+         (plain (substring-no-properties rendered)))
+    (should (equal "* one\n  + two\n- three\n1. four" plain))))
 
 (ert-deftest disco-markdown-render-internal-escapes-protect-inline-markup ()
   (let* ((disco-markdown-backend 'internal)
@@ -270,15 +325,11 @@
                     "\\> not quote\n\\- not list\n\\# not heading\n\\-# not subtitle"
                     :context 'test-internal-escapes-block))
          (plain (substring-no-properties rendered))
-         (list-pos (string-match "- not list" plain))
          (heading-pos (string-match "# not heading" plain))
          (subtitle-pos (string-match "-# not subtitle" plain)))
     (should (equal "> not quote\n- not list\n# not heading\n-# not subtitle"
                    plain))
     (should-not (get-text-property 0 'line-prefix rendered))
-    (should-not (disco-markdown--face-match-p
-                 (get-text-property list-pos 'face rendered)
-                 'disco-markdown-list-marker-face))
     (should-not (disco-markdown--face-match-p
                  (get-text-property heading-pos 'face rendered)
                  'disco-markdown-heading-1-face))

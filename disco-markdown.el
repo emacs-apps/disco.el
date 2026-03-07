@@ -166,11 +166,6 @@ on `markdown-mode' at render time."
   "Face used for internal blockquote sections."
   :group 'disco)
 
-(defface disco-markdown-list-marker-face
-  '((t :inherit shadow))
-  "Face used for internal list item markers."
-  :group 'disco)
-
 (defface disco-markdown-heading-1-face
   '((t :inherit default :weight bold :height 1.30))
   "Face used for first-level headings."
@@ -264,10 +259,6 @@ on `markdown-mode' at render time."
 (defconst disco-markdown--regexp-blockquote-rest-line
   "^\\([ \t]*\\)>>>\\(?:[ \t]+\\|$\\)"
   "Regexp matching a blockquote marker that quotes the rest of the message.")
-
-(defconst disco-markdown--regexp-unordered-list-line
-  "^\\([ \t]*\\)\\([*+-]\\)\\(?:[ \t]+\\|$\\)"
-  "Regexp matching a basic unordered list item marker.")
 
 (defconst disco-markdown--spoiler-translation-table
   (let ((table (make-char-table 'translation-table))
@@ -560,6 +551,18 @@ return visible spoiler contents; otherwise return masked text."
         (setq pos next)))
     copy))
 
+(defun disco-markdown--url-inside-literal-markdown-link-p (text start end)
+  "Return non-nil when URL span START END in TEXT is part of literal link syntax."
+  (or (and (< 1 start)
+           (< end (length text))
+           (eq (aref text (1- start)) ?\()
+           (eq (aref text (- start 2)) ?\])
+           (eq (aref text end) ?\)))
+      (and (< 0 start)
+           (< end (length text))
+           (eq (aref text (1- start)) ?<)
+           (eq (aref text end) ?>))))
+
 (defun disco-markdown--apply-visible-url-properties (text)
   "Attach open actions to visible URL substrings in TEXT."
   (let ((copy (copy-sequence text)))
@@ -583,7 +586,9 @@ return visible spoiler contents; otherwise return masked text."
                                                copy)
                             (get-text-property (1- beg)
                                                'disco-markdown-url
-                                               copy))
+                                               copy)
+                            (disco-markdown--url-inside-literal-markdown-link-p
+                             copy (1- beg) (1- end)))
                   (unless (disco-markdown--link-face-p
                            (get-text-property (1- beg) 'face copy))
                     (disco-markdown--add-link-face copy (1- beg) (1- end)))
@@ -646,27 +651,6 @@ LINE-START and LINE-END delimit the line contents in the current buffer."
         (forward-line 1)))
     (buffer-string)))
 
-(defun disco-markdown--apply-unordered-list-lines (text)
-  "Render unordered list markers in plain TEXT."
-  (with-temp-buffer
-    (insert text)
-    (goto-char (point-min))
-    (while (< (point) (point-max))
-      (let ((line-start (line-beginning-position)))
-        (goto-char line-start)
-        (when (and (not (get-text-property line-start 'disco-markdown-protected))
-                   (looking-at disco-markdown--regexp-unordered-list-line)
-                   (not (get-text-property (match-beginning 2)
-                                           'disco-markdown-protected)))
-          (delete-region (match-end 1) (match-end 0))
-          (goto-char (match-end 1))
-          (let ((marker-start (point)))
-            (insert "- ")
-            (add-face-text-property marker-start (point)
-                                    'disco-markdown-list-marker-face 'append)))
-        (forward-line 1)))
-    (buffer-string)))
-
 (defun disco-markdown--apply-heading-lines (text)
   "Apply disco heading faces to ATX heading lines in plain TEXT."
   (with-temp-buffer
@@ -720,20 +704,100 @@ visible ATX marker fallback so all heading levels render consistently."
         (forward-line 1)))
     (buffer-string)))
 
-(defun disco-markdown--apply-internal-link-replacements (text)
-  "Render inline links and autolinks in plain TEXT."
+(defun disco-markdown--find-next-unprotected-char (char limit)
+  "Return next unprotected CHAR before LIMIT in current buffer, or nil."
+  (let ((found nil)
+        (needle (char-to-string char)))
+    (while (and (not found)
+                (search-forward needle limit t))
+      (let ((pos (1- (point))))
+        (unless (disco-markdown--position-protected-p 'internal pos)
+          (setq found pos))))
+    found))
+
+(defun disco-markdown--find-inline-link-url-end (limit)
+  "Return URL closing paren position before LIMIT in current buffer, or nil."
+  (let ((depth 1)
+        (close-pos nil))
+    (while (and (not close-pos)
+                (< (point) limit))
+      (let ((pos (point))
+            (char (char-after)))
+        (cond
+         ((or (null char)
+              (eq char ?\n))
+          (setq close-pos :invalid))
+         ((disco-markdown--position-protected-p 'internal pos)
+          (forward-char 1))
+         ((eq char ?\()
+          (setq depth (1+ depth))
+          (forward-char 1))
+         ((eq char ?\))
+          (setq depth (1- depth))
+          (if (= depth 0)
+              (setq close-pos pos)
+            (forward-char 1)))
+         (t
+          (forward-char 1)))))
+    (unless (eq close-pos :invalid)
+      close-pos)))
+
+(defun disco-markdown--apply-inline-link-replacements (text)
+  "Render inline Markdown links in plain TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (while (search-forward "[" nil t)
+      (let* ((open-start (1- (point)))
+             (line-limit (min (1+ (line-end-position)) (point-max)))
+             (continue-pos (point)))
+        (unless (disco-markdown--position-protected-p 'internal open-start)
+          (let ((label-start (point))
+                (close-bracket nil)
+                (close-end nil)
+                (payload nil))
+            (save-excursion
+              (setq close-bracket
+                    (disco-markdown--find-next-unprotected-char ?\] line-limit))
+              (when close-bracket
+                (goto-char (1+ close-bracket))
+                (when (and (< (point) line-limit)
+                           (eq (char-after) ?\()
+                           (not (disco-markdown--position-protected-p
+                                 'internal (point))))
+                  (forward-char 1)
+                  (let* ((url-start (point))
+                         (url-end (disco-markdown--find-inline-link-url-end line-limit)))
+                    (when url-end
+                      (let ((url (buffer-substring-no-properties url-start url-end)))
+                        (when (disco-markdown--string-present-p url)
+                          (setq close-end (1+ url-end)
+                                payload
+                                (disco-markdown--make-link-string
+                                 (buffer-substring label-start close-bracket)
+                                 url)))))))))
+            (when (and payload close-end)
+              (delete-region open-start close-end)
+              (goto-char open-start)
+              (insert payload)
+              (setq continue-pos (+ open-start (length payload))))))
+        (goto-char continue-pos)))
+    (buffer-string)))
+
+(defun disco-markdown--apply-angle-autolink-replacements (text)
+  "Render angle-bracket autolinks in plain TEXT."
   (disco-markdown--apply-regexp-replacements
    text 'internal
    (list
-    (cons disco-markdown--regexp-inline-link
-          (lambda ()
-            (disco-markdown--make-link-string
-             (buffer-substring (match-beginning 1) (match-end 1))
-             (match-string-no-properties 2))))
     (cons disco-markdown--regexp-angle-autolink
           (lambda ()
             (let ((url (match-string-no-properties 1)))
               (disco-markdown--make-link-string url url)))))))
+
+(defun disco-markdown--apply-internal-link-replacements (text)
+  "Render inline links and autolinks in plain TEXT."
+  (disco-markdown--apply-angle-autolink-replacements
+   (disco-markdown--apply-inline-link-replacements text)))
 
 (defun disco-markdown--render-internal (text)
   "Render TEXT with disco's internal Discord-focused renderer."
@@ -742,7 +806,6 @@ visible ATX marker fallback so all heading levels render consistently."
     (setq rendered (disco-markdown--apply-inline-code-spans rendered))
     (setq rendered (disco-markdown--apply-escapes rendered))
     (setq rendered (disco-markdown--apply-blockquote-lines rendered))
-    (setq rendered (disco-markdown--apply-unordered-list-lines rendered))
     (setq rendered (disco-markdown--apply-internal-link-replacements rendered))
     (setq rendered (disco-markdown--apply-inline-emphasis rendered))
     (setq rendered (disco-markdown--apply-heading-lines rendered))
