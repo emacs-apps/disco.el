@@ -76,6 +76,7 @@
 (defvar-local disco-room--typing-users nil)
 (defvar-local disco-room--typing-expire-timer nil)
 (defvar-local disco-room--poll-selection-drafts nil)
+(defvar-local disco-room--revealed-spoiler-message-id nil)
 
 (defconst disco-room--attachment-token-regexp "\\[file:\\([0-9]+\\)\\]"
   "Regexp used to match attachment tokens in room draft input.")
@@ -1659,7 +1660,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
                'rear-nonsticky '(read-only)))))))
 
 (defun disco-room--post-command ()
-  "Keep point out of prompt glyphs and off the synthetic trailing draft row."
+  "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
   (unless disco-room--rendering
     (when (disco-room--point-in-prompt-p)
       (let ((input-start (disco-room--input-start-position)))
@@ -1669,7 +1670,16 @@ When NO-RERENDER is non-nil, update local state without rendering."
       (when (and (number-or-marker-p logical-end)
                  (disco-room--point-in-input-p)
                  (> (point) logical-end))
-        (goto-char logical-end)))))
+        (goto-char logical-end)))
+    (let ((current-message-id (or (get-text-property (point) 'disco-message-id)
+                                  (get-text-property (line-beginning-position)
+                                                     'disco-message-id))))
+      (when (and disco-room--revealed-spoiler-message-id
+                 (not (equal current-message-id
+                             disco-room--revealed-spoiler-message-id)))
+        (let ((previous disco-room--revealed-spoiler-message-id))
+          (setq disco-room--revealed-spoiler-message-id nil)
+          (disco-room--invalidate-message-node previous))))))
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
@@ -1854,6 +1864,45 @@ Message lines carry the `disco-message-id' text property."
   (or (get-text-property (point) 'disco-message-id)
       (get-text-property (line-beginning-position) 'disco-message-id)
       (user-error "disco: point is not on a message line")))
+
+(defun disco-room--message-spoilers-revealed-p (message-id)
+  "Return non-nil when MESSAGE-ID currently shows revealed spoilers."
+  (and (stringp message-id)
+       (equal message-id disco-room--revealed-spoiler-message-id)))
+
+(defun disco-room--invalidate-message-node (message-id)
+  "Invalidate the rendered node for MESSAGE-ID when present."
+  (when (and message-id disco-room--ewoc disco-room--message-node-table)
+    (let ((node (gethash message-id disco-room--message-node-table)))
+      (when node
+        (let* ((anchor-at-point
+                (or (get-text-property (point) 'disco-message-id)
+                    (get-text-property (line-beginning-position)
+                                       'disco-message-id)))
+               (snapshot (and anchor-at-point
+                              (disco-view-capture-position
+                               :anchor-property 'disco-message-id
+                               :preserve-window-start t)))
+               (disco-room--rendering t)
+               (inhibit-read-only t)
+               (buffer-undo-list t))
+          (ewoc-invalidate disco-room--ewoc node)
+          (when snapshot
+            (disco-view-restore-position snapshot))
+          t)))))
+
+(defun disco-room-toggle-message-spoilers (message-id)
+  "Toggle all rendered spoilers for MESSAGE-ID, telega-style."
+  (interactive (list (disco-room--message-id-at-point)))
+  (unless (stringp message-id)
+    (user-error "disco: invalid spoiler message id"))
+  (let ((previous disco-room--revealed-spoiler-message-id))
+    (setq disco-room--revealed-spoiler-message-id
+          (unless (equal previous message-id)
+            message-id))
+    (when (and previous (not (equal previous message-id)))
+      (disco-room--invalidate-message-node previous))
+    (disco-room--invalidate-message-node message-id)))
 
 (defun disco-room--capture-window-input-offsets ()
   "Return (WINDOW . OFFSET) pairs for windows currently in draft input."
@@ -4578,11 +4627,15 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 (defun disco-room--forward-snapshot-content (msg)
   "Return forwarded snapshot content for MSG without line folding/truncation."
   (let* ((snapshot (disco-room--message-forward-snapshot msg))
+         (message-id (alist-get 'id msg))
          (text (and (listp snapshot) (alist-get 'content snapshot))))
     (when (and (stringp text) (not (string-empty-p text)))
       (disco-markdown-render text
                              :context 'forward-snapshot
-                             :message snapshot))))
+                             :message snapshot
+                             :spoiler-message-id message-id
+                             :reveal-spoilers
+                             (disco-room--message-spoilers-revealed-p message-id)))))
 
 (defun disco-room--message-effective-attachments (msg)
   "Return attachments to render for MSG, including forward snapshots."
@@ -4620,11 +4673,16 @@ When TARGET-PATH is nil, prompt interactively for destination path."
   "Return one-line summary for forwarded MSG content, or nil."
   (when (disco-room--message-forwarded-p msg)
     (let* ((snapshot (disco-room--message-forward-snapshot msg))
+           (message-id (alist-get 'id msg))
            (text (and (listp snapshot) (alist-get 'content snapshot)))
            (display (and (stringp text)
-                         (disco-markdown-render text
-                                                :context 'forward-summary
-                                                :message snapshot)))
+                         (disco-markdown-render
+                          text
+                          :context 'forward-summary
+                          :message snapshot
+                          :spoiler-message-id message-id
+                          :reveal-spoilers
+                          (disco-room--message-spoilers-revealed-p message-id))))
            (trimmed (and (stringp display) (string-trim display))))
       (if (and (stringp trimmed) (not (string-empty-p trimmed)))
           (format "[forwarded] %s" trimmed)
@@ -4891,11 +4949,16 @@ messages; everything else is a system event shown as a centered divider."
 
 (defun disco-room--message-display-content (msg)
   "Return human-readable content string for message MSG."
-  (let* ((raw-content (or (alist-get 'content msg) ""))
+  (let* ((message-id (alist-get 'id msg))
+         (raw-content (or (alist-get 'content msg) ""))
          (content (disco-room--highlight-search-query
-                   (disco-markdown-render raw-content
-                                          :context 'room-message
-                                          :message msg)))
+                   (disco-markdown-render
+                    raw-content
+                    :context 'room-message
+                    :message msg
+                    :spoiler-message-id message-id
+                    :reveal-spoilers
+                    (disco-room--message-spoilers-revealed-p message-id))))
          (attachments (disco-room--message-effective-attachments msg))
          (embeds (disco-room--message-effective-embeds msg))
          (poll (disco-room--message-poll msg))
@@ -8143,6 +8206,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--typing-users (make-hash-table :test #'equal))
   (setq-local disco-room--typing-expire-timer nil)
   (setq-local disco-room--poll-selection-drafts (make-hash-table :test #'equal))
+  (setq-local disco-room--revealed-spoiler-message-id nil)
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (when (fboundp 'cursor-intangible-mode)
     (cursor-intangible-mode 1))

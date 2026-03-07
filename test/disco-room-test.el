@@ -783,6 +783,26 @@
         (should-not (disco-room--inplace-search-dispatch '(:query "match") nil "m9"))
         (should-not api-called)))))
 
+(ert-deftest disco-room-toggle-message-spoilers-switches-active-message ()
+  (with-temp-buffer
+    (let ((disco-room--revealed-spoiler-message-id nil)
+          invalidated)
+      (cl-letf (((symbol-function 'disco-room--invalidate-message-node)
+                 (lambda (message-id)
+                   (push message-id invalidated)
+                   t)))
+        (disco-room-toggle-message-spoilers "m1")
+        (should (equal "m1" disco-room--revealed-spoiler-message-id))
+        (should (equal '("m1") invalidated))
+        (setq invalidated nil)
+        (disco-room-toggle-message-spoilers "m2")
+        (should (equal "m2" disco-room--revealed-spoiler-message-id))
+        (should (equal '("m2" "m1") invalidated))
+        (setq invalidated nil)
+        (disco-room-toggle-message-spoilers "m2")
+        (should-not disco-room--revealed-spoiler-message-id)
+        (should (equal '("m2") invalidated))))))
+
 (provide 'disco-room-test)
 
 ;;; disco-room-test.el ends here

@@ -8,10 +8,13 @@
 
 ;;; Code:
 
+(require 'browse-url)
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'disco-util)
+
+(declare-function markdown-link-url "markdown-mode" ())
 
 (defcustom disco-markdown-backend 'auto
   "Backend used for Markdown rendering in disco.
@@ -79,8 +82,13 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
   :group 'disco)
 
 (defface disco-markdown-spoiler-face
-  '((t :inherit shadow))
+  '((t :inherit default))
   "Face used for rendered Discord spoiler contents."
+  :group 'disco)
+
+(defface disco-markdown-subtitle-face
+  '((t :inherit shadow :height 0.9))
+  "Face used for Discord `-#` subtitle lines."
   :group 'disco)
 
 (defconst disco-markdown--regexp-user-mention "<@!?\\([0-9]+\\)>"
@@ -113,6 +121,33 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 (defconst disco-markdown--regexp-spoiler "||\\([^|\n][^|\n]*?\\)||"
   "Regexp matching single-line Discord spoiler tokens.")
 
+(defconst disco-markdown--regexp-subtitle-line "^\\([ \t]*\\)-#\\(?:[ \t]+\\|$\\)"
+  "Regexp matching Discord `-#` subtitle lines.")
+
+(defconst disco-markdown--spoiler-translation-table
+  (let ((table (make-char-table 'translation-table))
+        (mask-char (decode-char 'ucs #x2588)))
+    (set-char-table-range table t mask-char)
+    (aset table ?\s ?\s)
+    (aset table ?\t ?\t)
+    (aset table ?\n ?\n)
+    table)
+  "Translation table used to hide spoiler text similarly to telega.")
+
+(defvar disco-markdown--link-keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'disco-markdown-open-at-point)
+    (define-key map (kbd "RET") #'disco-markdown-open-at-point)
+    map)
+  "Keymap used for rendered Markdown links.")
+
+(defvar disco-markdown--spoiler-keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'disco-markdown-toggle-spoiler-at-point)
+    (define-key map (kbd "RET") #'disco-markdown-toggle-spoiler-at-point)
+    map)
+  "Keymap used for rendered spoiler regions.")
+
 (defvar disco-markdown--cache (make-hash-table :test #'equal)
   "Cache table for rendered Markdown strings.")
 
@@ -143,6 +178,31 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
     (let ((str (string-trim (format "%s" value))))
       (unless (string-empty-p str)
         str)))))
+
+(defun disco-markdown-open-at-point (&optional event)
+  "Open rendered Markdown link at point or EVENT."
+  (interactive (list last-input-event))
+  (when (eventp event)
+    (posn-set-point (event-start event)))
+  (let ((url (or (get-text-property (point) 'disco-markdown-url)
+                 (get-text-property (line-beginning-position)
+                                    'disco-markdown-url))))
+    (unless (disco-markdown--string-present-p url)
+      (user-error "disco: no Markdown link at point"))
+    (browse-url url t)))
+
+(defun disco-markdown-toggle-spoiler-at-point (&optional event)
+  "Toggle rendered spoiler at point or EVENT."
+  (interactive (list last-input-event))
+  (when (eventp event)
+    (posn-set-point (event-start event)))
+  (let ((message-id (or (get-text-property (point) 'disco-markdown-spoiler-message-id)
+                        (get-text-property (line-beginning-position)
+                                           'disco-markdown-spoiler-message-id))))
+    (unless (and (disco-markdown--string-present-p message-id)
+                 (fboundp 'disco-room-toggle-message-spoilers))
+      (user-error "disco: spoiler is not interactive here"))
+    (funcall 'disco-room-toggle-message-spoilers message-id)))
 
 (defun disco-markdown--cache-key (backend context text &optional message-context-key)
   "Build cache key from BACKEND, CONTEXT, TEXT and MESSAGE-CONTEXT-KEY."
@@ -213,6 +273,107 @@ properties that should not leak into room buffers."
         (setq pos next)))
     copy))
 
+(defun disco-markdown--face-match-p (face target)
+  "Return non-nil when FACE or one of its entries matches TARGET."
+  (if (listp face)
+      (memq target face)
+    (eq face target)))
+
+(defun disco-markdown--markdown-link-face-p (face)
+  "Return non-nil when FACE denotes a rendered Markdown link span."
+  (or (disco-markdown--face-match-p face 'markdown-link-face)
+      (disco-markdown--face-match-p face 'markdown-url-face)))
+
+(defun disco-markdown--add-action-properties (object start end keymap help-echo properties)
+  "Add KEYMAP/HELP-ECHO/PROPERTIES to OBJECT between START and END."
+  (when (< start end)
+    (add-text-properties
+     start end
+     (append (list 'keymap keymap
+                   'mouse-face 'highlight
+                   'follow-link t
+                   'help-echo help-echo)
+             properties)
+     object)))
+
+(defun disco-markdown--add-open-url-properties (object start end url)
+  "Add Markdown URL open properties to OBJECT between START and END for URL."
+  (when (disco-markdown--string-present-p url)
+    (disco-markdown--add-action-properties
+     object start end disco-markdown--link-keymap
+     (format "Open link: %s" url)
+     (list 'disco-markdown-url url))))
+
+(defun disco-markdown--hide-spoiler-text (text)
+  "Return TEXT translated to spoiler blocks, preserving spaces/newlines."
+  (with-temp-buffer
+    (insert (or text ""))
+    (translate-region (point-min) (point-max)
+                      disco-markdown--spoiler-translation-table)
+    (buffer-string)))
+
+(defun disco-markdown--make-spoiler-string (text spoiler-message-id reveal-spoilers)
+  "Return TEXT rendered as a Discord spoiler string.
+
+SPOILER-MESSAGE-ID enables room interaction. When REVEAL-SPOILERS is non-nil,
+return visible spoiler contents; otherwise return masked text."
+  (let* ((payload (if reveal-spoilers
+                      (copy-sequence (or text ""))
+                    (disco-markdown--hide-spoiler-text text)))
+         (help-echo (if reveal-spoilers
+                        "Hide spoiler"
+                      "Reveal spoiler")))
+    (add-face-text-property 0 (length payload)
+                            'disco-markdown-spoiler-face 'append payload)
+    (if (disco-markdown--string-present-p spoiler-message-id)
+        (disco-markdown--add-action-properties
+         payload 0 (length payload) disco-markdown--spoiler-keymap help-echo
+         (list 'disco-markdown-spoiler-message-id spoiler-message-id
+               'disco-markdown-spoiler-hidden (not reveal-spoilers)))
+      (when (< 0 (length payload))
+        (add-text-properties 0 (length payload)
+                             (list 'help-echo help-echo)
+                             payload)))
+    payload))
+
+(defun disco-markdown--markdown-url-at-position (position)
+  "Resolve Markdown URL at original buffer POSITION."
+  (save-excursion
+    (goto-char position)
+    (ignore-errors (markdown-link-url))))
+
+(defun disco-markdown--apply-markdown-mode-link-properties (text)
+  "Copy Markdown link open properties from current buffer into TEXT."
+  (let ((copy (copy-sequence text))
+        (pos (point-min))
+        (out-pos 0)
+        link-buffer-start
+        link-output-start)
+    (cl-labels ((flush-link ()
+                  (when link-output-start
+                    (let ((url (disco-markdown--markdown-url-at-position
+                                link-buffer-start)))
+                      (when (disco-markdown--string-present-p url)
+                        (disco-markdown--add-open-url-properties
+                         copy link-output-start out-pos url)))
+                    (setq link-buffer-start nil
+                          link-output-start nil))))
+      (while (< pos (point-max))
+        (if (get-char-property pos 'invisible)
+            (flush-link)
+          (let* ((face (or (get-text-property pos 'face)
+                           (get-text-property pos 'font-lock-face)))
+                 (linkp (disco-markdown--markdown-link-face-p face)))
+            (if linkp
+                (unless link-output-start
+                  (setq link-buffer-start pos
+                        link-output-start out-pos))
+              (flush-link))
+            (setq out-pos (1+ out-pos))))
+        (setq pos (1+ pos)))
+      (flush-link))
+    copy))
+
 (defun disco-markdown--render-with-markdown-mode (text)
   "Render TEXT through markdown-mode and return visible propertized string."
   (with-temp-buffer
@@ -223,8 +384,9 @@ properties that should not leak into room buffers."
                'markdown-view-mode))
     (when (fboundp 'font-lock-ensure)
       (font-lock-ensure (point-min) (point-max)))
-    (disco-markdown--sanitize-face-properties
-     (filter-buffer-substring (point-min) (point-max) nil))))
+    (disco-markdown--apply-markdown-mode-link-properties
+     (disco-markdown--sanitize-face-properties
+      (filter-buffer-substring (point-min) (point-max) nil)))))
 
 (defun disco-markdown--render-legacy (text)
   "Render TEXT with legacy markdown punctuation unescape behavior."
@@ -433,10 +595,32 @@ BACKEND controls whether code-face regions are protected from replacements."
                   (replace-match replacement t t))))))))
     (buffer-string)))
 
-(defun disco-markdown--render-discord-tokens (text backend message)
+(defun disco-markdown--apply-subtitle-lines (text backend)
+  "Render Discord `-#` subtitle lines in TEXT.
+
+BACKEND controls whether code-face regions are protected from the transform."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (while (re-search-forward disco-markdown--regexp-subtitle-line nil t)
+      (let ((marker-start (match-end 1))
+            (marker-end (match-end 0)))
+        (unless (and (eq backend 'markdown-mode)
+                     (disco-markdown--position-in-code-face-p marker-start))
+          (delete-region marker-start marker-end)
+          (let ((line-end (line-end-position)))
+            (when (< (point) line-end)
+              (add-face-text-property
+               (point) line-end 'disco-markdown-subtitle-face 'append))))))
+    (buffer-string)))
+
+(defun disco-markdown--render-discord-tokens (text backend message
+                                                   spoiler-message-id reveal-spoilers)
   "Render Discord-specific token syntax in TEXT.
 
-BACKEND controls code-region behavior. MESSAGE carries mention/channel context."
+BACKEND controls code-region behavior. MESSAGE carries mention/channel context.
+SPOILER-MESSAGE-ID identifies the message used for spoiler interaction.
+REVEAL-SPOILERS controls whether spoiler contents are visible."
   (if (not (and (eq backend 'markdown-mode)
                 (disco-markdown--string-present-p text)))
       text
@@ -516,24 +700,32 @@ BACKEND controls code-region behavior. MESSAGE carries mention/channel context."
                (list
                 (cons disco-markdown--regexp-spoiler
                       (lambda ()
-                        (propertize (match-string-no-properties 1)
-                                    'face 'disco-markdown-spoiler-face
-                                    'help-echo "spoiler")))))))
-      (if replacements
-          (disco-markdown--apply-regexp-replacements text backend replacements)
-        text))))
+                        (disco-markdown--make-spoiler-string
+                         (buffer-substring (match-beginning 1) (match-end 1))
+                         spoiler-message-id
+                         reveal-spoilers)))))))
+      (let ((rendered (if replacements
+                          (disco-markdown--apply-regexp-replacements
+                           text backend replacements)
+                        text)))
+        (disco-markdown--apply-subtitle-lines rendered backend)))))
 
-(cl-defun disco-markdown-render (text &key context message)
+(cl-defun disco-markdown-render (text &key context message spoiler-message-id
+                                      reveal-spoilers)
   "Render Markdown TEXT for display.
 
 CONTEXT is an optional symbol used for cache key partitioning.
-MESSAGE is optional message data used to resolve mention-like tokens."
+MESSAGE is optional message data used to resolve mention-like tokens.
+SPOILER-MESSAGE-ID enables spoiler toggling inside room buffers.
+When REVEAL-SPOILERS is non-nil, spoiler contents are shown instead of masked."
   (let* ((source (if (stringp text) text ""))
          (backend (disco-markdown--resolve-backend))
          (message-context-key (disco-markdown--message-context-key message))
          (cache-context (list context
                               disco-markdown-enable-discord-tokens
-                              disco-markdown-enable-spoiler-render))
+                              disco-markdown-enable-spoiler-render
+                              spoiler-message-id
+                              (and reveal-spoilers t)))
          (cacheable-p (and disco-markdown-cache-enabled
                            (not (disco-markdown--contains-relative-timestamp-p source))))
          (cache-key (and cacheable-p
@@ -551,7 +743,8 @@ MESSAGE is optional message data used to resolve mention-like tokens."
                   (error
                    (disco-markdown--render-legacy source))))
                (rendered (disco-markdown--render-discord-tokens
-                          markdown-rendered backend message)))
+                          markdown-rendered backend message
+                          spoiler-message-id reveal-spoilers)))
           (disco-markdown--cache-put cache-key rendered)
           rendered))))
 

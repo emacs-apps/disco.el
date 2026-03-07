@@ -1,0 +1,70 @@
+;;; disco-markdown-test.el --- Tests for disco-markdown -*- lexical-binding: t; -*-
+
+(require 'ert)
+
+(add-to-list 'load-path
+             (expand-file-name ".."
+                               (file-name-directory (or load-file-name buffer-file-name))))
+
+(let ((markdown-mode-dir "/home/_WD_/.config/emacs/.local/straight/repos/markdown-mode"))
+  (when (file-directory-p markdown-mode-dir)
+    (add-to-list 'load-path markdown-mode-dir)))
+
+(require 'disco-markdown)
+
+(ert-deftest disco-markdown-render-inline-links-are-openable ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let ((disco-markdown-backend 'markdown-mode))
+    (let* ((rendered (disco-markdown-render
+                      "hello [link](https://example.com)"
+                      :context 'test-link))
+           (pos (string-match "link" rendered)))
+      (should pos)
+      (should (equal "https://example.com"
+                     (get-text-property pos 'disco-markdown-url rendered)))
+      (should (keymapp (get-text-property pos 'keymap rendered))))))
+
+(ert-deftest disco-markdown-render-spoilers-mask-and-tag-message ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let* ((disco-markdown-backend 'markdown-mode)
+         (masked (disco-markdown--hide-spoiler-text "spoiler"))
+         (rendered (disco-markdown-render
+                    "Look ||spoiler|| now"
+                    :context 'test-spoiler
+                    :spoiler-message-id "m1"))
+         (pos (string-match (regexp-quote masked) rendered)))
+    (should pos)
+    (should-not (string-match-p "spoiler" (substring-no-properties rendered)))
+    (should (equal "m1"
+                   (get-text-property pos 'disco-markdown-spoiler-message-id rendered)))
+    (should (keymapp (get-text-property pos 'keymap rendered)))))
+
+(ert-deftest disco-markdown-render-spoilers-can-be-revealed ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let* ((disco-markdown-backend 'markdown-mode)
+         (rendered (disco-markdown-render
+                    "Look ||spoiler|| now"
+                    :context 'test-spoiler-reveal
+                    :spoiler-message-id "m1"
+                    :reveal-spoilers t))
+         (plain (substring-no-properties rendered))
+         (pos (string-match "spoiler" plain)))
+    (should pos)
+    (should (string-match-p "spoiler" plain))
+    (should (equal "m1"
+                   (get-text-property pos 'disco-markdown-spoiler-message-id rendered)))))
+
+(ert-deftest disco-markdown-render-subtitle-lines-strip-marker ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let* ((disco-markdown-backend 'markdown-mode)
+         (rendered (disco-markdown-render "-# Small print"
+                                          :context 'test-subtitle))
+         (plain (substring-no-properties rendered)))
+    (should (equal "Small print" plain))
+    (should (disco-markdown--face-match-p
+             (get-text-property 0 'face rendered)
+             'disco-markdown-subtitle-face))))
+
+(provide 'disco-markdown-test)
+
+;;; disco-markdown-test.el ends here
