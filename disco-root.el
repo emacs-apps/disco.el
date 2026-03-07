@@ -4739,6 +4739,69 @@ Higher score means channel should appear earlier in activity mode."
   (disco-root-render)
   (message "disco: root view mode -> %s" disco-root--view-mode))
 
+(defun disco-root--entry-text (text)
+  "Return one plain text layout entry for TEXT."
+  (disco-root-layout-entry-create :type 'text :text text))
+
+(defun disco-root--entry-blank ()
+  "Return one blank layout entry."
+  (disco-root-layout-entry-create :type 'blank))
+
+(defun disco-root--entry-section (section title &optional count)
+  "Return one section layout entry."
+  (disco-root-layout-entry-create :type 'section
+                                  :section section
+                                  :title title
+                                  :count count))
+
+(defun disco-root--entry-guild (guild unread-count)
+  "Return one guild layout entry."
+  (disco-root-layout-entry-create :type 'guild
+                                  :guild guild
+                                  :unread-count unread-count))
+
+(defun disco-root--entry-category (category unread-count)
+  "Return one category layout entry."
+  (disco-root-layout-entry-create :type 'category
+                                  :category category
+                                  :unread-count unread-count))
+
+(defun disco-root--entry-channel (channel indent &optional scope)
+  "Return one channel layout entry for CHANNEL at INDENT in SCOPE."
+  (disco-root-layout-entry-create :type 'channel
+                                  :channel channel
+                                  :indent indent
+                                  :scope (or scope 'root)))
+
+(defun disco-root--entry-search-section (tab title loaded-count &optional total-count loading)
+  "Return one search-section layout entry."
+  (disco-root-layout-entry-create :type 'search-section
+                                  :tab tab
+                                  :title title
+                                  :loaded-count loaded-count
+                                  :total-count total-count
+                                  :loading loading))
+
+(defun disco-root--entry-search-message (message indent &optional tab)
+  "Return one search-message layout entry."
+  (disco-root-layout-entry-create :type 'search-message
+                                  :message message
+                                  :indent (or indent 2)
+                                  :tab tab))
+
+(defun disco-root--entry-search-note (text &optional face)
+  "Return one search-note layout entry."
+  (disco-root-layout-entry-create :type 'search-note
+                                  :text text
+                                  :face face))
+
+(defun disco-root--entry-search-action (label action tab)
+  "Return one search-action layout entry."
+  (disco-root-layout-entry-create :type 'search-action
+                                  :label label
+                                  :action action
+                                  :tab tab))
+
 (defun disco-root--section-label-row (section title &optional count)
   "Return label row model for one root SECTION heading."
   (let* ((expanded (disco-root--section-expanded-p section))
@@ -4822,53 +4885,53 @@ Higher score means channel should appear earlier in activity mode."
 
 (defun disco-root--layout-entry-label-row (entry)
   "Return label row model for renderable root layout ENTRY, or nil."
-  (pcase (plist-get entry :entry-type)
+  (pcase (disco-root-layout-entry-type entry)
     ('section
-     (disco-root--section-label-row (plist-get entry :section)
-                                    (plist-get entry :title)
-                                    (plist-get entry :count)))
+     (disco-root--section-label-row (disco-root-layout-entry-section entry)
+                                    (disco-root-layout-entry-title entry)
+                                    (disco-root-layout-entry-count entry)))
     ('guild
-     (disco-root--guild-label-row (plist-get entry :guild)
-                                  (or (plist-get entry :unread-count) 0)))
+     (disco-root--guild-label-row (disco-root-layout-entry-guild entry)
+                                  (or (disco-root-layout-entry-unread-count entry) 0)))
     ('category
-     (disco-root--category-label-row (plist-get entry :category)
-                                     (or (plist-get entry :unread-count) 0)))
+     (disco-root--category-label-row (disco-root-layout-entry-category entry)
+                                     (or (disco-root-layout-entry-unread-count entry) 0)))
     ('search-section
-     (disco-root--search-section-label-row (plist-get entry :title)
-                                           (or (plist-get entry :loaded-count) 0)
-                                           (plist-get entry :total-count)
-                                           (plist-get entry :loading)))
+     (disco-root--search-section-label-row (disco-root-layout-entry-title entry)
+                                           (or (disco-root-layout-entry-loaded-count entry) 0)
+                                           (disco-root-layout-entry-total-count entry)
+                                           (disco-root-layout-entry-loading entry)))
     ('search-note
-     (disco-root--search-note-label-row (plist-get entry :text)
-                                        (plist-get entry :face)))
+     (disco-root--search-note-label-row (disco-root-layout-entry-text entry)
+                                        (disco-root-layout-entry-face entry)))
     ('search-action
-     (disco-root--search-action-label-row (plist-get entry :label)
-                                          (plist-get entry :action)
-                                          (plist-get entry :tab)))
+     (disco-root--search-action-label-row (disco-root-layout-entry-label entry)
+                                          (disco-root-layout-entry-action entry)
+                                          (disco-root-layout-entry-tab entry)))
     (_ nil)))
 
 (defun disco-root--insert-layout-entry (entry)
   "Insert one root layout ENTRY into the current buffer."
   (if-let* ((row (disco-root--layout-entry-label-row entry)))
       (disco-view-insert-label-row row)
-    (pcase (plist-get entry :entry-type)
+    (pcase (disco-root-layout-entry-type entry)
       ('search-message
        (disco-root--insert-search-message-line
-        (plist-get entry :message)
-        (or (plist-get entry :indent) 2)
-        (plist-get entry :tab)))
+        (disco-root-layout-entry-message entry)
+        (or (disco-root-layout-entry-indent entry) 2)
+        (disco-root-layout-entry-tab entry)))
       ('text
-       (insert (or (plist-get entry :text) "") "\n"))
+       (insert (or (disco-root-layout-entry-text entry) "") "\n"))
       ('blank
        (insert "\n"))
       ('channel
        (disco-root--insert-channel-line
-        (plist-get entry :channel)
-        (or (plist-get entry :indent) 0)
-        (or (plist-get entry :scope) 'root)))
+        (disco-root-layout-entry-channel entry)
+        (or (disco-root-layout-entry-indent entry) 0)
+        (or (disco-root-layout-entry-scope entry) 'root)))
       (_
        (error "Unknown root layout entry type: %S"
-              (plist-get entry :entry-type))))))
+              (disco-root-layout-entry-type entry))))))
 
 (defun disco-root--ewoc-printer (entry)
   "Pretty-printer for one root EWOC ENTRY."
@@ -4877,15 +4940,12 @@ Higher score means channel should appear earlier in activity mode."
 (defun disco-root--ewoc-insert-text (text)
   "Insert one plain TEXT row in root EWOC."
   (ewoc-enter-last disco-root--ewoc
-                   (list :entry-type 'text :text text)))
+                   (disco-root--entry-text text)))
 
 (defun disco-root--ewoc-insert-section (section title &optional count)
   "Insert one clickable SECTION row with TITLE and optional COUNT."
   (let ((node (ewoc-enter-last disco-root--ewoc
-                               (list :entry-type 'section
-                                     :section section
-                                     :title title
-                                     :count count))))
+                               (disco-root--entry-section section title count))))
     (when (hash-table-p disco-root--section-node-table)
       (puthash section node disco-root--section-node-table))
     node))
@@ -4893,9 +4953,7 @@ Higher score means channel should appear earlier in activity mode."
 (defun disco-root--ewoc-insert-guild (guild unread-count)
   "Insert one collapsible GUILD row with UNREAD-COUNT badge."
   (let* ((node (ewoc-enter-last disco-root--ewoc
-                                (list :entry-type 'guild
-                                      :guild guild
-                                      :unread-count unread-count)))
+                                (disco-root--entry-guild guild unread-count)))
          (guild-id (alist-get 'id guild)))
     (when (and guild-id
                (hash-table-p disco-root--guild-node-table))
@@ -4905,9 +4963,7 @@ Higher score means channel should appear earlier in activity mode."
 (defun disco-root--ewoc-insert-category (category unread-count)
   "Insert one collapsible CATEGORY row with UNREAD-COUNT badge."
   (let* ((node (ewoc-enter-last disco-root--ewoc
-                                (list :entry-type 'category
-                                      :category category
-                                      :unread-count unread-count)))
+                                (disco-root--entry-category category unread-count)))
          (category-id (alist-get 'id category)))
     (when (and category-id
                (hash-table-p disco-root--category-node-table))
@@ -4916,14 +4972,11 @@ Higher score means channel should appear earlier in activity mode."
 
 (defun disco-root--ewoc-insert-blank ()
   "Insert one blank row in root EWOC."
-  (ewoc-enter-last disco-root--ewoc (list :entry-type 'blank)))
+  (ewoc-enter-last disco-root--ewoc (disco-root--entry-blank)))
 
 (defun disco-root--ewoc-insert-channel (channel indent &optional scope)
   "Insert CHANNEL row at INDENT into root EWOC and index node by channel ID."
-  (let* ((entry (list :entry-type 'channel
-                      :channel channel
-                      :indent indent
-                      :scope (or scope 'root)))
+  (let* ((entry (disco-root--entry-channel channel indent (or scope 'root)))
          (node (ewoc-enter-last disco-root--ewoc entry))
          (channel-id (alist-get 'id channel)))
     (when channel-id
@@ -4935,79 +4988,28 @@ Higher score means channel should appear earlier in activity mode."
                  disco-root--channel-node-table)))
     node))
 
-(defun disco-root--ewoc-insert-search-section (tab title loaded-count &optional total-count loading)
-  "Insert one root search TAB section TITLE row."
-  (ewoc-enter-last disco-root--ewoc
-                   (list :entry-type 'search-section
-                         :tab tab
-                         :title title
-                         :loaded-count loaded-count
-                         :total-count total-count
-                         :loading loading)))
-
-(defun disco-root--ewoc-insert-search-message (message &optional indent tab)
-  "Insert one root search result MESSAGE row."
-  (ewoc-enter-last disco-root--ewoc
-                   (list :entry-type 'search-message
-                         :message message
-                         :indent (or indent 2)
-                         :tab tab)))
-
-(defun disco-root--ewoc-insert-search-note (text &optional face)
-  "Insert one root search informational TEXT row."
-  (ewoc-enter-last disco-root--ewoc
-                   (list :entry-type 'search-note
-                         :text text
-                         :face face)))
-
-(defun disco-root--ewoc-insert-search-action (label action tab)
-  "Insert one actionable root search row with LABEL, ACTION and TAB."
-  (ewoc-enter-last disco-root--ewoc
-                   (list :entry-type 'search-action
-                         :label label
-                         :action action
-                         :tab tab)))
-
 (defun disco-root--ewoc-insert-entry (entry)
   "Insert one generic EWOC ENTRY and update node indexes as needed."
-  (pcase (plist-get entry :entry-type)
-    ('text
-     (disco-root--ewoc-insert-text (plist-get entry :text)))
+  (pcase (disco-root-layout-entry-type entry)
     ('section
-     (disco-root--ewoc-insert-section (plist-get entry :section)
-                                      (plist-get entry :title)
-                                      (plist-get entry :count)))
+     (disco-root--ewoc-insert-section (disco-root-layout-entry-section entry)
+                                      (disco-root-layout-entry-title entry)
+                                      (disco-root-layout-entry-count entry)))
     ('guild
-     (disco-root--ewoc-insert-guild (plist-get entry :guild)
-                                    (or (plist-get entry :unread-count) 0)))
+     (disco-root--ewoc-insert-guild (disco-root-layout-entry-guild entry)
+                                    (or (disco-root-layout-entry-unread-count entry) 0)))
     ('category
-     (disco-root--ewoc-insert-category (plist-get entry :category)
-                                       (or (plist-get entry :unread-count) 0)))
-    ('blank
-     (disco-root--ewoc-insert-blank))
+     (disco-root--ewoc-insert-category (disco-root-layout-entry-category entry)
+                                       (or (disco-root-layout-entry-unread-count entry) 0)))
     ('channel
-     (disco-root--ewoc-insert-channel (plist-get entry :channel)
-                                      (or (plist-get entry :indent) 0)
-                                      (or (plist-get entry :scope) 'root)))
-    ('search-section
-     (disco-root--ewoc-insert-search-section (plist-get entry :tab)
-                                             (plist-get entry :title)
-                                             (or (plist-get entry :loaded-count) 0)
-                                             (plist-get entry :total-count)
-                                             (plist-get entry :loading)))
-    ('search-message
-     (disco-root--ewoc-insert-search-message (plist-get entry :message)
-                                             (or (plist-get entry :indent) 2)
-                                             (plist-get entry :tab)))
-    ('search-note
-     (disco-root--ewoc-insert-search-note (plist-get entry :text)
-                                          (plist-get entry :face)))
-    ('search-action
-     (disco-root--ewoc-insert-search-action (plist-get entry :label)
-                                            (plist-get entry :action)
-                                            (plist-get entry :tab)))
+     (disco-root--ewoc-insert-channel (disco-root-layout-entry-channel entry)
+                                      (or (disco-root-layout-entry-indent entry) 0)
+                                      (or (disco-root-layout-entry-scope entry) 'root)))
+    ((or 'text 'blank 'search-section 'search-message 'search-note 'search-action)
+     (ewoc-enter-last disco-root--ewoc entry))
     (_
-     (error "Unknown EWOC entry type: %S" (plist-get entry :entry-type)))))
+     (error "Unknown EWOC entry type: %S"
+            (disco-root-layout-entry-type entry)))))
 
 (defun disco-root--insert-private-channels ()
   "Insert visible private-channel rows into root buffer."
@@ -5199,10 +5201,7 @@ Return plist with keys :threads and :errors for this page only."
 (defun disco-root--channel-list-entries (channels indent scope)
   "Return channel layout entries for CHANNELS at INDENT in SCOPE."
   (mapcar (lambda (channel)
-            (list :entry-type 'channel
-                  :channel channel
-                  :indent indent
-                  :scope scope))
+            (disco-root--entry-channel channel indent scope))
           (or channels '())))
 
 (defun disco-root--archived-threads-list-spec ()
@@ -5683,10 +5682,7 @@ row indentation and defaults to 8 spaces."
                    (disco-root--displayable-channel-p thread)
                    (disco-root--channel-visible-in-view-p thread))
           (puthash thread-id t rendered-thread-ids)
-          (push (list :entry-type 'channel
-                      :channel thread
-                      :indent (or indent 8)
-                      :scope 'root)
+          (push (disco-root--entry-channel thread (or indent 8) 'root)
                 entries))))
     (nreverse entries)))
 

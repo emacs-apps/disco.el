@@ -54,6 +54,28 @@ Custom entries can override built-in layouts when NAME matches."
   list-spec
   after-render)
 
+(cl-defstruct (disco-root-layout-entry
+               (:constructor disco-root-layout-entry-create))
+  type
+  section
+  title
+  count
+  guild
+  unread-count
+  category
+  text
+  face
+  channel
+  indent
+  scope
+  tab
+  message
+  label
+  action
+  loaded-count
+  total-count
+  loading)
+
 (defconst disco-root-layout-builtin-specs
   '((tree
      :label "Tree"
