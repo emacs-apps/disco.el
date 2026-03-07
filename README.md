@@ -105,6 +105,23 @@ with `:update-mode full` and return a `list-spec`:
          :toggle-hint "next channel")))
 ```
 
+If you want an EWOC-backed custom layout that reuses the same entry pipeline as
+built-in tree/activity layouts, return an `items` view spec instead:
+
+```elisp
+(defun my-disco-root-build-people-ewoc ()
+  (disco-root-layout-view-spec-create
+   :kind 'items
+   :before-render #'disco-root--prepare-ewoc-state
+   :items (mapcar (lambda (channel)
+                    (list :entry-type 'channel
+                          :channel channel
+                          :indent 2
+                          :scope 'root))
+                  (disco-root--visible-private-channels))
+   :item-inserter #'disco-root--ewoc-insert-entry))
+```
+
 ## Runtime Observability
 
 - `M-x disco-describe-http-queue`: show current queue limit/active/pending counts.

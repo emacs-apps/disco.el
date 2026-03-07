@@ -4739,89 +4739,118 @@ Higher score means channel should appear earlier in activity mode."
   (disco-root-render)
   (message "disco: root view mode -> %s" disco-root--view-mode))
 
+(defun disco-root--section-label-row (section title &optional count)
+  "Return label row model for one root SECTION heading."
+  (let* ((expanded (disco-root--section-expanded-p section))
+         (indicator (if expanded "[-]" "[+]")))
+    (disco-view-label-row-create
+     :label (or title "Section")
+     :prefix (format "%s " indicator)
+     :suffix (if (numberp count) (format " (%d)" count) "")
+     :face (if expanded 'font-lock-keyword-face 'shadow)
+     :line-properties (list 'disco-root-row-type 'section
+                            'disco-root-section section)
+     :help-echo "RET or TAB toggles this section"
+     :mouse-face 'highlight)))
+
+(defun disco-root--guild-label-row (guild unread-count)
+  "Return label row model for one GUILD heading with UNREAD-COUNT."
+  (let* ((guild-id (alist-get 'id guild))
+         (expanded (disco-root--guild-expanded-p guild-id))
+         (indicator (if expanded "[-]" "[+]"))
+         (label (disco-root--guild-label guild unread-count 'root)))
+    (disco-view-label-row-create
+     :label label
+     :prefix (format "  %s " indicator)
+     :icon-inserter (lambda ()
+                      (disco-root--insert-guild-icon guild))
+     :icon-separator " "
+     :face 'font-lock-function-name-face
+     :line-properties (list 'disco-root-row-type 'guild
+                            'disco-root-guild-id guild-id)
+     :help-echo "RET/TAB/t toggles this guild"
+     :mouse-face 'highlight)))
+
+(defun disco-root--category-label-row (category unread-count)
+  "Return label row model for one CATEGORY heading with UNREAD-COUNT."
+  (let* ((category-id (alist-get 'id category))
+         (expanded (disco-root--category-expanded-p category-id))
+         (indicator (if expanded "[-]" "[+]"))
+         (label (disco-root--category-label category unread-count 'root)))
+    (disco-view-label-row-create
+     :label label
+     :prefix (format "    %s " indicator)
+     :face 'font-lock-keyword-face
+     :line-properties (list 'disco-root-row-type 'category
+                            'disco-root-category-id category-id)
+     :help-echo "RET/TAB/t toggles this category"
+     :mouse-face 'highlight)))
+
+(defun disco-root--search-section-label-row (title loaded-count &optional total-count loading)
+  "Return label row model for one search section heading."
+  (let ((suffix (cond
+                 ((numberp total-count)
+                  (format " (%d/%d)" loaded-count total-count))
+                 (loading
+                  (format " (%d loaded, loading...)" loaded-count))
+                 (t
+                  (format " (%d)" loaded-count)))))
+    (disco-view-label-row-create
+     :label (format "%s%s" (or title "Results") suffix)
+     :face 'font-lock-keyword-face
+     :line-properties (list 'disco-root-row-type 'search-section))))
+
+(defun disco-root--search-note-label-row (text &optional face)
+  "Return label row model for one search note TEXT."
+  (disco-view-label-row-create
+   :label (or text "")
+   :face (or face 'shadow)
+   :line-properties (list 'disco-root-row-type 'search-note)))
+
+(defun disco-root--search-action-label-row (label action tab)
+  "Return label row model for one search action LABEL, ACTION, and TAB."
+  (disco-view-label-row-create
+   :label (or label "Action")
+   :prefix "  ["
+   :suffix "]"
+   :face 'link
+   :line-properties (list 'disco-root-row-type 'search-action
+                          'disco-root-search-action action
+                          'disco-root-search-tab tab)
+   :help-echo label
+   :mouse-face 'highlight))
+
 (defun disco-root--ewoc-printer (entry)
   "Pretty-printer for one root EWOC ENTRY."
   (pcase (plist-get entry :entry-type)
     ('section
-     (let* ((section (plist-get entry :section))
-            (title (or (plist-get entry :title) "Section"))
-            (count (plist-get entry :count))
-            (expanded (disco-root--section-expanded-p section))
-            (indicator (if expanded "[-]" "[+]"))
-            (suffix (if (numberp count) (format " (%d)" count) "")))
-       (disco-view-insert-label-line
-        title
-        :prefix (format "%s " indicator)
-        :suffix suffix
-        :face (if expanded 'font-lock-keyword-face 'shadow)
-        :line-properties (list 'disco-root-row-type 'section
-                               'disco-root-section section)
-        :help-echo "RET or TAB toggles this section"
-        :mouse-face 'highlight)))
+     (disco-view-insert-label-row
+      (disco-root--section-label-row (plist-get entry :section)
+                                     (plist-get entry :title)
+                                     (plist-get entry :count))))
     ('guild
-     (let* ((guild (plist-get entry :guild))
-            (guild-id (alist-get 'id guild))
-            (unread (or (plist-get entry :unread-count) 0))
-            (expanded (disco-root--guild-expanded-p guild-id))
-            (indicator (if expanded "[-]" "[+]"))
-            (label (disco-root--guild-label guild unread 'root)))
-       (disco-view-insert-label-line
-        label
-        :prefix (format "  %s " indicator)
-        :icon-inserter (lambda ()
-                         (disco-root--insert-guild-icon guild))
-        :icon-separator " "
-        :face 'font-lock-function-name-face
-        :line-properties (list 'disco-root-row-type 'guild
-                               'disco-root-guild-id guild-id)
-        :help-echo "RET/TAB/t toggles this guild"
-        :mouse-face 'highlight)))
+     (disco-view-insert-label-row
+      (disco-root--guild-label-row (plist-get entry :guild)
+                                   (or (plist-get entry :unread-count) 0))))
     ('category
-     (let* ((category (plist-get entry :category))
-            (category-id (alist-get 'id category))
-            (unread (or (plist-get entry :unread-count) 0))
-            (expanded (disco-root--category-expanded-p category-id))
-            (indicator (if expanded "[-]" "[+]"))
-            (label (disco-root--category-label category unread 'root)))
-       (disco-view-insert-label-line
-        label
-        :prefix (format "    %s " indicator)
-        :face 'font-lock-keyword-face
-        :line-properties (list 'disco-root-row-type 'category
-                               'disco-root-category-id category-id)
-        :help-echo "RET/TAB/t toggles this category"
-        :mouse-face 'highlight)))
+     (disco-view-insert-label-row
+      (disco-root--category-label-row (plist-get entry :category)
+                                      (or (plist-get entry :unread-count) 0))))
     ('search-section
-     (let* ((title (or (plist-get entry :title) "Results"))
-            (loaded (or (plist-get entry :loaded-count) 0))
-            (total (plist-get entry :total-count))
-            (loading (plist-get entry :loading))
-            (suffix (cond
-                     ((numberp total)
-                      (format " (%d/%d)" loaded total))
-                     (loading
-                      (format " (%d loaded, loading...)" loaded))
-                     (t
-                      (format " (%d)" loaded)))))
-       (disco-view-insert-heading-line
-        (format "%s%s" title suffix)
-        :face 'font-lock-keyword-face
-        :line-properties (list 'disco-root-row-type 'search-section))))
+     (disco-view-insert-label-row
+      (disco-root--search-section-label-row (plist-get entry :title)
+                                            (or (plist-get entry :loaded-count) 0)
+                                            (plist-get entry :total-count)
+                                            (plist-get entry :loading))))
     ('search-note
-     (disco-view-insert-note-line
-      (or (plist-get entry :text) "")
-      :face (or (plist-get entry :face) 'shadow)
-      :line-properties (list 'disco-root-row-type 'search-note)))
+     (disco-view-insert-label-row
+      (disco-root--search-note-label-row (plist-get entry :text)
+                                         (plist-get entry :face))))
     ('search-action
-     (let* ((label (or (plist-get entry :label) "Action"))
-            (action (plist-get entry :action))
-            (tab (plist-get entry :tab)))
-       (disco-view-insert-action-line
-        label
-        :line-properties (list 'disco-root-row-type 'search-action
-                               'disco-root-search-action action
-                               'disco-root-search-tab tab)
-        :help-echo label)))
+     (disco-view-insert-label-row
+      (disco-root--search-action-label-row (plist-get entry :label)
+                                           (plist-get entry :action)
+                                           (plist-get entry :tab))))
     ('search-message
      (disco-root--insert-search-message-line
       (plist-get entry :message)
@@ -5897,17 +5926,6 @@ row indentation and defaults to 8 spaces."
   (disco-root--ewoc-items-view-spec
    (disco-root--activity-layout-items)))
 
-(defun disco-root--search-section-heading (title loaded-count &optional total-count loading)
-  "Return one formatted root search section heading line."
-  (concat title
-          (cond
-           ((numberp total-count)
-            (format " (%d/%d)" loaded-count total-count))
-           (loading
-            (format " (%d loaded, loading...)" loaded-count))
-           (t
-            (format " (%d)" loaded-count)))))
-
 (defun disco-root--search-layout-items ()
   "Return mixed list items for the current root search layout."
   (let (result)
@@ -5920,11 +5938,10 @@ row indentation and defaults to 8 spaces."
              (total (plist-get state :total-results)))
         (push (list :item-type 'section
                     :tab tab
-                    :text (disco-root--search-section-heading
-                           (disco-root--search-tab-label tab)
-                           (length items)
-                           total
-                           loading))
+                    :title (disco-root--search-tab-label tab)
+                    :loaded-count (length items)
+                    :total-count total
+                    :loading loading)
               result)
         (cond
          (items
@@ -5962,26 +5979,20 @@ row indentation and defaults to 8 spaces."
   "Insert one root search layout ITEM into the current buffer."
   (pcase (plist-get item :item-type)
     ('section
-     (disco-view-insert-heading-line
-      (plist-get item :text)
-      :face 'font-lock-keyword-face
-      :line-properties (list 'disco-root-row-type 'search-section)))
+     (disco-view-insert-label-row
+      (disco-root--search-section-label-row (plist-get item :title)
+                                            (or (plist-get item :loaded-count) 0)
+                                            (plist-get item :total-count)
+                                            (plist-get item :loading))))
     ('note
-     (disco-view-insert-note-line
-      (plist-get item :text)
-      :face (or (plist-get item :face) 'shadow)
-      :line-properties (list 'disco-root-row-type 'search-note)))
+     (disco-view-insert-label-row
+      (disco-root--search-note-label-row (plist-get item :text)
+                                         (plist-get item :face))))
     ('action
-     (let ((label (or (plist-get item :label) "Action"))
-           (action (plist-get item :action))
-           (tab (plist-get item :tab)))
-       (disco-view-insert-action-line
-        label
-        :line-properties
-        (list 'disco-root-row-type 'search-action
-              'disco-root-search-action action
-              'disco-root-search-tab tab)
-        :help-echo label)))
+     (disco-view-insert-label-row
+      (disco-root--search-action-label-row (plist-get item :label)
+                                           (plist-get item :action)
+                                           (plist-get item :tab))))
     ('message
      (disco-root--insert-search-message-line
       (plist-get item :message)

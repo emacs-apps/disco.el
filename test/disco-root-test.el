@@ -806,6 +806,22 @@
     (should (equal "fixed by domain"
                    (disco-root--search-transient-format-channel-ids nil)))))
 
+(ert-deftest disco-root-search-layout-items-preserve-section-metadata ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (setq-local disco-root--search-tabs
+                '((messages :items (((id . "m1")))
+                   :loading nil
+                   :error nil
+                   :cursor nil
+                   :total-results 1)))
+    (let ((first-item (car (disco-root--search-layout-items))))
+      (should (equal 'section (plist-get first-item :item-type)))
+      (should (equal "Messages" (plist-get first-item :title)))
+      (should (= 1 (plist-get first-item :loaded-count)))
+      (should (= 1 (plist-get first-item :total-count)))
+      (should-not (plist-get first-item :loading)))))
+
 (ert-deftest disco-root-render-layout-search-renders-sections ()
   (with-temp-buffer
     (disco-root-mode)

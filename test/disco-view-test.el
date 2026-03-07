@@ -103,6 +103,21 @@
   (let ((text "short"))
     (should (equal text (disco-view-elide-string text 12 'shadow)))))
 
+(ert-deftest disco-view-insert-label-row-applies-struct-fields ()
+  (with-temp-buffer
+    (disco-view-insert-label-row
+     (disco-view-label-row-create
+      :label "Section"
+      :prefix "[+] "
+      :suffix " (4)"
+      :face 'font-lock-keyword-face
+      :line-properties '(row-kind section)))
+    (goto-char (point-min))
+    (should (equal "[+] Section (4)\n" (buffer-string)))
+    (should (equal 'section (get-text-property (point) 'row-kind)))
+    (should (equal 'font-lock-keyword-face
+                   (get-text-property (point) 'face)))))
+
 (ert-deftest disco-view-insert-label-line-supports-prefix-icon-and-suffix ()
   (with-temp-buffer
     (disco-view-insert-label-line

@@ -171,31 +171,57 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
    :preserve-window-start preserve-window-start
    :after-restore after-restore))
 
-(cl-defun disco-view-insert-label-line
-    (label &key prefix suffix icon-inserter icon-separator
-           face line-properties help-echo mouse-face)
-  "Insert LABEL as one styled line with optional prefix, suffix, and icon."
+(cl-defstruct (disco-view-label-row
+               (:constructor disco-view-label-row-create))
+  label
+  prefix
+  suffix
+  icon-inserter
+  icon-separator
+  face
+  line-properties
+  help-echo
+  mouse-face)
+
+(defun disco-view-insert-label-row (row)
+  "Insert one simple label ROW."
   (let ((start (point)))
-    (when prefix
+    (when-let* ((prefix (disco-view-label-row-prefix row)))
       (insert prefix))
-    (when icon-inserter
+    (when-let* ((icon-inserter (disco-view-label-row-icon-inserter row)))
       (funcall icon-inserter)
-      (when icon-separator
+      (when-let* ((icon-separator (disco-view-label-row-icon-separator row)))
         (insert icon-separator)))
-    (insert (or label ""))
-    (when suffix
+    (insert (or (disco-view-label-row-label row) ""))
+    (when-let* ((suffix (disco-view-label-row-suffix row)))
       (insert suffix))
     (insert "\n")
     (add-text-properties
      start
      (point)
-     (append (or line-properties '())
-             (when face
+     (append (or (disco-view-label-row-line-properties row) '())
+             (when-let* ((face (disco-view-label-row-face row)))
                (list 'face face))
-             (when help-echo
+             (when-let* ((help-echo (disco-view-label-row-help-echo row)))
                (list 'help-echo help-echo))
-             (when mouse-face
+             (when-let* ((mouse-face (disco-view-label-row-mouse-face row)))
                (list 'mouse-face mouse-face))))))
+
+(cl-defun disco-view-insert-label-line
+    (label &key prefix suffix icon-inserter icon-separator
+           face line-properties help-echo mouse-face)
+  "Insert LABEL as one styled line with optional prefix, suffix, and icon."
+  (disco-view-insert-label-row
+   (disco-view-label-row-create
+    :label label
+    :prefix prefix
+    :suffix suffix
+    :icon-inserter icon-inserter
+    :icon-separator icon-separator
+    :face face
+    :line-properties line-properties
+    :help-echo help-echo
+    :mouse-face mouse-face)))
 
 (cl-defun disco-view-insert-heading-line
     (text &key face line-properties help-echo mouse-face)
