@@ -171,11 +171,21 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
    :preserve-window-start preserve-window-start
    :after-restore after-restore))
 
-(cl-defun disco-view-insert-heading-line
-    (text &key face line-properties help-echo mouse-face)
-  "Insert heading TEXT as one styled line."
+(cl-defun disco-view-insert-label-line
+    (label &key prefix suffix icon-inserter icon-separator
+           face line-properties help-echo mouse-face)
+  "Insert LABEL as one styled line with optional prefix, suffix, and icon."
   (let ((start (point)))
-    (insert (or text "") "\n")
+    (when prefix
+      (insert prefix))
+    (when icon-inserter
+      (funcall icon-inserter)
+      (when icon-separator
+        (insert icon-separator)))
+    (insert (or label ""))
+    (when suffix
+      (insert suffix))
+    (insert "\n")
     (add-text-properties
      start
      (point)
@@ -186,6 +196,16 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
                (list 'help-echo help-echo))
              (when mouse-face
                (list 'mouse-face mouse-face))))))
+
+(cl-defun disco-view-insert-heading-line
+    (text &key face line-properties help-echo mouse-face)
+  "Insert heading TEXT as one styled line."
+  (disco-view-insert-label-line
+   text
+   :face face
+   :line-properties line-properties
+   :help-echo help-echo
+   :mouse-face mouse-face))
 
 (cl-defun disco-view-insert-note-line
     (text &key face line-properties help-echo mouse-face)
@@ -200,11 +220,10 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
 (cl-defun disco-view-insert-action-line
     (label &key prefix suffix face line-properties help-echo mouse-face)
   "Insert clickable action LABEL as one styled line."
-  (disco-view-insert-heading-line
-   (format "%s%s%s"
-           (or prefix "  [")
-           (or label "")
-           (or suffix "]"))
+  (disco-view-insert-label-line
+   label
+   :prefix (or prefix "  [")
+   :suffix (or suffix "]")
    :face (or face 'link)
    :line-properties line-properties
    :help-echo help-echo

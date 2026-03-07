@@ -4748,54 +4748,49 @@ Higher score means channel should appear earlier in activity mode."
             (count (plist-get entry :count))
             (expanded (disco-root--section-expanded-p section))
             (indicator (if expanded "[-]" "[+]"))
-            (suffix (if (numberp count) (format " (%d)" count) ""))
-            (label (format "%s %s%s\n" indicator title suffix))
-            (start (point)))
-       (insert label)
-       (add-text-properties
-        start
-        (point)
-        (list 'face (if expanded 'font-lock-keyword-face 'shadow)
-              'mouse-face 'highlight
-              'help-echo "RET or TAB toggles this section"
-              'disco-root-row-type 'section
-              'disco-root-section section))))
+            (suffix (if (numberp count) (format " (%d)" count) "")))
+       (disco-view-insert-label-line
+        title
+        :prefix (format "%s " indicator)
+        :suffix suffix
+        :face (if expanded 'font-lock-keyword-face 'shadow)
+        :line-properties (list 'disco-root-row-type 'section
+                               'disco-root-section section)
+        :help-echo "RET or TAB toggles this section"
+        :mouse-face 'highlight)))
     ('guild
      (let* ((guild (plist-get entry :guild))
             (guild-id (alist-get 'id guild))
             (unread (or (plist-get entry :unread-count) 0))
             (expanded (disco-root--guild-expanded-p guild-id))
             (indicator (if expanded "[-]" "[+]"))
-            (label (disco-root--guild-label guild unread 'root))
-            (start (point)))
-       (insert (format "  %s " indicator))
-       (disco-root--insert-guild-icon guild)
-       (insert (format " %s\n" label))
-       (add-text-properties
-        start
-        (point)
-        (list 'face 'font-lock-function-name-face
-              'mouse-face 'highlight
-              'help-echo "RET/TAB/t toggles this guild"
-              'disco-root-row-type 'guild
-              'disco-root-guild-id guild-id))))
+            (label (disco-root--guild-label guild unread 'root)))
+       (disco-view-insert-label-line
+        label
+        :prefix (format "  %s " indicator)
+        :icon-inserter (lambda ()
+                         (disco-root--insert-guild-icon guild))
+        :icon-separator " "
+        :face 'font-lock-function-name-face
+        :line-properties (list 'disco-root-row-type 'guild
+                               'disco-root-guild-id guild-id)
+        :help-echo "RET/TAB/t toggles this guild"
+        :mouse-face 'highlight)))
     ('category
      (let* ((category (plist-get entry :category))
             (category-id (alist-get 'id category))
             (unread (or (plist-get entry :unread-count) 0))
             (expanded (disco-root--category-expanded-p category-id))
             (indicator (if expanded "[-]" "[+]"))
-            (label (disco-root--category-label category unread 'root))
-            (start (point)))
-       (insert (format "    %s %s\n" indicator label))
-       (add-text-properties
-        start
-        (point)
-        (list 'face 'font-lock-keyword-face
-              'mouse-face 'highlight
-              'help-echo "RET/TAB/t toggles this category"
-              'disco-root-row-type 'category
-              'disco-root-category-id category-id))))
+            (label (disco-root--category-label category unread 'root)))
+       (disco-view-insert-label-line
+        label
+        :prefix (format "    %s " indicator)
+        :face 'font-lock-keyword-face
+        :line-properties (list 'disco-root-row-type 'category
+                               'disco-root-category-id category-id)
+        :help-echo "RET/TAB/t toggles this category"
+        :mouse-face 'highlight)))
     ('search-section
      (let* ((title (or (plist-get entry :title) "Results"))
             (loaded (or (plist-get entry :loaded-count) 0))
@@ -4807,35 +4802,26 @@ Higher score means channel should appear earlier in activity mode."
                      (loading
                       (format " (%d loaded, loading...)" loaded))
                      (t
-                      (format " (%d)" loaded))))
-            (start (point)))
-       (insert (format "%s%s\n" title suffix))
-       (add-text-properties start (point)
-                            (list 'face 'font-lock-keyword-face
-                                  'disco-root-row-type 'search-section))))
+                      (format " (%d)" loaded)))))
+       (disco-view-insert-heading-line
+        (format "%s%s" title suffix)
+        :face 'font-lock-keyword-face
+        :line-properties (list 'disco-root-row-type 'search-section))))
     ('search-note
-     (let ((start (point))
-           (text (or (plist-get entry :text) ""))
-           (face (or (plist-get entry :face) 'shadow)))
-       (insert text "\n")
-       (add-text-properties start (point)
-                            (list 'face face
-                                  'disco-root-row-type 'search-note))))
+     (disco-view-insert-note-line
+      (or (plist-get entry :text) "")
+      :face (or (plist-get entry :face) 'shadow)
+      :line-properties (list 'disco-root-row-type 'search-note)))
     ('search-action
      (let* ((label (or (plist-get entry :label) "Action"))
             (action (plist-get entry :action))
-            (tab (plist-get entry :tab))
-            (start (point)))
-       (insert (format "  [%s]\n" label))
-       (add-text-properties
-        start
-        (point)
-        (list 'face 'link
-              'mouse-face 'highlight
-              'help-echo label
-              'disco-root-row-type 'search-action
-              'disco-root-search-action action
-              'disco-root-search-tab tab))))
+            (tab (plist-get entry :tab)))
+       (disco-view-insert-action-line
+        label
+        :line-properties (list 'disco-root-row-type 'search-action
+                               'disco-root-search-action action
+                               'disco-root-search-tab tab)
+        :help-echo label)))
     ('search-message
      (disco-root--insert-search-message-line
       (plist-get entry :message)

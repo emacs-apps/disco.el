@@ -504,6 +504,28 @@
   (let ((disco-root-custom-layouts nil))
     (should (eq 'incremental (disco-root-layout-update-mode 'activity)))))
 
+(ert-deftest disco-root-layout-render-prefers-builders-over-legacy-renderers ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root-custom-layouts
+           '((demo
+              :label "Demo"
+              :build disco-root-test--build-demo
+              :render disco-root-test--legacy-render-demo))))
+      (cl-letf (((symbol-function 'disco-root-test--build-demo)
+                 (lambda ()
+                   (disco-root-layout-view-spec-create
+                    :kind 'list-spec
+                    :list-spec
+                    (disco-view-list-spec-create
+                     :title "Builder Demo"
+                     :empty-text "(empty)"))))
+                ((symbol-function 'disco-root-test--legacy-render-demo)
+                 (lambda ()
+                   (ert-fail "legacy renderer should not run when :build exists"))))
+        (should (disco-root-layout-render 'demo))
+        (should (string-match-p "Builder Demo" (buffer-string)))))))
+
 (ert-deftest disco-root-render-layout-activity-returns-ewoc-items-view-spec ()
   (with-temp-buffer
     (disco-root-mode)

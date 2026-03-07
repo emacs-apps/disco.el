@@ -76,6 +76,35 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
 - `disco-company.el`: composer completion engine (`@`/`#`, CAPF, optional company backend).
 
+## Custom Layout Example
+
+Use `:build` when you want a custom layout to return a view spec instead of
+rendering buffer contents directly. For simple custom layouts, pair `:build`
+with `:update-mode full` and return a `list-spec`:
+
+```elisp
+(defun my-disco-root-build-dm-focus ()
+  (let ((channels (disco-root--visible-private-channels)))
+    (disco-root-layout-view-spec-create
+     :kind 'list-spec
+     :list-spec
+     (disco-view-list-spec-create
+      :title "DM Focus"
+      :summary (format "Visible DMs: %d" (length channels))
+      :items channels
+      :item-inserter (lambda (channel)
+                       (disco-root--insert-channel-line channel 2 'activity))
+      :empty-text "(no visible private channels)"))))
+
+(setq disco-root-custom-layouts
+      '((dm-focus
+         :label "DM Focus"
+         :build my-disco-root-build-dm-focus
+         :update-mode full
+         :unread-mode filter
+         :toggle-hint "next channel")))
+```
+
 ## Runtime Observability
 
 - `M-x disco-describe-http-queue`: show current queue limit/active/pending counts.

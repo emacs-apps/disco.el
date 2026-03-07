@@ -103,6 +103,22 @@
   (let ((text "short"))
     (should (equal text (disco-view-elide-string text 12 'shadow)))))
 
+(ert-deftest disco-view-insert-label-line-supports-prefix-icon-and-suffix ()
+  (with-temp-buffer
+    (disco-view-insert-label-line
+     "Guild"
+     :prefix "  [-] "
+     :icon-inserter (lambda ()
+                      (insert "*"))
+     :icon-separator " "
+     :suffix " (2)"
+     :line-properties '(row-kind guild)
+     :help-echo "toggle")
+    (goto-char (point-min))
+    (should (looking-at-p "  \\[-\\] \\* Guild (2)"))
+    (should (equal 'guild (get-text-property (point) 'row-kind)))
+    (should (equal "toggle" (get-text-property (point) 'help-echo)))))
+
 (ert-deftest disco-view-insert-heading-line-applies-face-and-properties ()
   (with-temp-buffer
     (disco-view-insert-heading-line
