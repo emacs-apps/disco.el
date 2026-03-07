@@ -4189,10 +4189,6 @@ Fallback stays message-oriented and avoids status-tag placeholders."
           (disco-root--activity-secondary-label channel))
     (disco-root--activity-secondary-label channel)))
 
-(defun disco-root--canonicalize-number (spec base)
-  "Resolve SPEC against BASE columns."
-  (disco-view-canonicalize-number spec base))
-
 (defun disco-root--human-count (value)
   "Return VALUE formatted in compact human-readable form."
   (let ((n (max 0 (or value 0))))
@@ -4205,22 +4201,6 @@ Fallback stays message-oriented and avoids status-tag placeholders."
                                 (format "%.1fk" (/ n 1000.0))))
      (t
       (number-to-string n)))))
-
-(defun disco-root--truncate-fill (text width &optional right-align)
-  "Return TEXT truncated and padded to WIDTH."
-  (disco-view-truncate-fill text width right-align))
-
-(defun disco-root--elide-string (str max &optional face)
-  "Return STR visually elided to MAX columns using display properties."
-  (disco-view-elide-string str max face))
-
-(defun disco-root--current-column ()
-  "Like `current-column', but account for prior `:align-to' spacers."
-  (disco-view-current-column))
-
-(defun disco-root--move-to-column (column)
-  "Insert one forward-only align-to spacer for COLUMN."
-  (disco-view-move-to-column column))
 
 (defun disco-root--snowflake-epoch-seconds (snowflake)
   "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
@@ -4361,11 +4341,6 @@ Guild rows use real guild icons when available, with fixed text fallback."
      (t
       (insert "[#]")))
     (add-text-properties start (point) (list 'face 'shadow))))
-
-(defun disco-root--activity-column-widths (content-width)
-  "Return telega-like context/preview width split for CONTENT-WIDTH."
-  (disco-view-one-line-column-widths content-width
-                                     disco-root-activity-context-width))
 
 (defun disco-root--preview-leading-length (preview-text message)
   "Return highlighted author-prefix length for PREVIEW-TEXT from MESSAGE."
