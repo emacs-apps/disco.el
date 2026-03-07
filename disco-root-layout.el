@@ -125,6 +125,27 @@ Custom entries can override built-in layouts when NAME matches."
   "Return legacy renderer function symbol for LAYOUT (or active layout)."
   (plist-get (disco-root-layout-spec layout) :render))
 
+(cl-defun disco-root-layout-list-spec-view-spec-create (list-spec &key after-render)
+  "Return one root layout view spec wrapping LIST-SPEC."
+  (disco-root-layout-view-spec-create
+   :kind 'list-spec
+   :list-spec list-spec
+   :after-render after-render))
+
+(cl-defun disco-root-layout-ewoc-items-view-spec-create
+    (items &key before-render item-inserter after-render)
+  "Return one EWOC-backed root layout view spec for ENTRY ITEMS.
+
+When BEFORE-RENDER or ITEM-INSERTER are omitted, use the standard root EWOC
+helpers so custom `:build' layouts can reuse the built-in tree/activity entry
+pipeline without re-declaring private hooks."
+  (disco-root-layout-view-spec-create
+   :kind 'items
+   :before-render (or before-render 'disco-root--prepare-ewoc-state)
+   :items items
+   :item-inserter (or item-inserter 'disco-root--ewoc-insert-entry)
+   :after-render after-render))
+
 (defun disco-root-layout-render-view-spec (view-spec)
   "Render VIEW-SPEC in current root buffer.
 

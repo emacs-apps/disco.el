@@ -514,9 +514,7 @@
               :render disco-root-test--legacy-render-demo))))
       (cl-letf (((symbol-function 'disco-root-test--build-demo)
                  (lambda ()
-                   (disco-root-layout-view-spec-create
-                    :kind 'list-spec
-                    :list-spec
+                   (disco-root-layout-list-spec-view-spec-create
                     (disco-view-list-spec-create
                      :title "Builder Demo"
                      :empty-text "(empty)"))))
@@ -525,6 +523,24 @@
                    (ert-fail "legacy renderer should not run when :build exists"))))
         (should (disco-root-layout-render 'demo))
         (should (string-match-p "Builder Demo" (buffer-string)))))))
+
+(ert-deftest disco-root-layout-list-spec-view-spec-create-wraps-list-spec ()
+  (let* ((list-spec (disco-view-list-spec-create :title "List" :empty-text "(empty)"))
+         (view-spec (disco-root-layout-list-spec-view-spec-create list-spec)))
+    (should (disco-root-layout-view-spec-p view-spec))
+    (should (eq 'list-spec (disco-root-layout-view-spec-kind view-spec)))
+    (should (eq list-spec (disco-root-layout-view-spec-list-spec view-spec)))))
+
+(ert-deftest disco-root-layout-ewoc-items-view-spec-create-defaults-to-root-hooks ()
+  (let* ((items '((:entry-type text :text "hello")))
+         (view-spec (disco-root-layout-ewoc-items-view-spec-create items)))
+    (should (disco-root-layout-view-spec-p view-spec))
+    (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
+    (should (eq 'disco-root--prepare-ewoc-state
+                (disco-root-layout-view-spec-before-render view-spec)))
+    (should (eq 'disco-root--ewoc-insert-entry
+                (disco-root-layout-view-spec-item-inserter view-spec)))
+    (should (equal items (disco-root-layout-view-spec-items view-spec)))))
 
 (ert-deftest disco-root-render-layout-activity-returns-ewoc-items-view-spec ()
   (with-temp-buffer
@@ -536,7 +552,7 @@
              (first-item (car items)))
         (should (disco-root-layout-view-spec-p view-spec))
         (should (eq 'items (disco-root-layout-view-spec-kind view-spec)))
-        (should (eq #'disco-root--ewoc-insert-entry
+        (should (eq 'disco-root--ewoc-insert-entry
                     (disco-root-layout-view-spec-item-inserter view-spec)))
         (should (equal 'channel (plist-get first-item :entry-type)))
         (should (equal "c1" (alist-get 'id (plist-get first-item :channel))))))))
@@ -572,11 +588,8 @@
   (with-temp-buffer
     (disco-root-mode)
     (let ((view-spec
-           (disco-root-layout-view-spec-create
-            :kind 'items
-            :before-render #'disco-root--prepare-ewoc-state
-            :items '((:entry-type text :text "hello"))
-            :item-inserter #'disco-root--ewoc-insert-entry)))
+           (disco-root-layout-ewoc-items-view-spec-create
+            '((:entry-type text :text "hello")))))
       (disco-root-layout-render-view-spec view-spec)
       (should (string-match-p "hello" (buffer-string))))))
 

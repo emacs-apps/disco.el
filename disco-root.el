@@ -5813,14 +5813,6 @@ row indentation and defaults to 8 spaces."
   (disco-root--clear-ewoc-state)
   (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t)))
 
-(defun disco-root--ewoc-items-view-spec (items)
-  "Return one EWOC-backed layout view spec for ENTRY ITEMS."
-  (disco-root-layout-view-spec-create
-   :kind 'items
-   :before-render #'disco-root--prepare-ewoc-state
-   :items items
-   :item-inserter #'disco-root--ewoc-insert-entry))
-
 (defun disco-root--tree-layout-items ()
   "Return EWOC entry items for the guild/category tree layout."
   (let* ((show-unread disco-root--tree-show-unread-section)
@@ -5902,7 +5894,7 @@ row indentation and defaults to 8 spaces."
 
 (defun disco-root--render-layout-tree ()
   "Return view spec for the guild/category tree layout."
-  (disco-root--ewoc-items-view-spec
+  (disco-root-layout-ewoc-items-view-spec-create
    (disco-root--tree-layout-items)))
 
 (defun disco-root--activity-layout-items ()
@@ -5923,7 +5915,7 @@ row indentation and defaults to 8 spaces."
 
 (defun disco-root--render-layout-activity ()
   "Return view spec for the activity-sorted channel list layout."
-  (disco-root--ewoc-items-view-spec
+  (disco-root-layout-ewoc-items-view-spec-create
    (disco-root--activity-layout-items)))
 
 (defun disco-root--search-layout-items ()
@@ -6016,9 +6008,8 @@ row indentation and defaults to 8 spaces."
 
 (defun disco-root--render-layout-search ()
   "Return view spec for the current root search session layout."
-  (disco-root-layout-view-spec-create
-   :kind 'list-spec
-   :list-spec (disco-root--search-layout-list-spec)))
+  (disco-root-layout-list-spec-view-spec-create
+   (disco-root--search-layout-list-spec)))
 
 (defun disco-root--refresh-active-layout-headings (channel-ids)
   "Patch heading rows for current layout using CHANNEL-IDS context."

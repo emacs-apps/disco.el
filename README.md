@@ -85,9 +85,7 @@ with `:update-mode full` and return a `list-spec`:
 ```elisp
 (defun my-disco-root-build-dm-focus ()
   (let ((channels (disco-root--visible-private-channels)))
-    (disco-root-layout-view-spec-create
-     :kind 'list-spec
-     :list-spec
+    (disco-root-layout-list-spec-view-spec-create
      (disco-view-list-spec-create
       :title "DM Focus"
       :summary (format "Visible DMs: %d" (length channels))
@@ -110,16 +108,13 @@ built-in tree/activity layouts, return an `items` view spec instead:
 
 ```elisp
 (defun my-disco-root-build-people-ewoc ()
-  (disco-root-layout-view-spec-create
-   :kind 'items
-   :before-render #'disco-root--prepare-ewoc-state
-   :items (mapcar (lambda (channel)
-                    (list :entry-type 'channel
-                          :channel channel
-                          :indent 2
-                          :scope 'root))
-                  (disco-root--visible-private-channels))
-   :item-inserter #'disco-root--ewoc-insert-entry))
+  (disco-root-layout-ewoc-items-view-spec-create
+   (mapcar (lambda (channel)
+             (list :entry-type 'channel
+                   :channel channel
+                   :indent 2
+                   :scope 'root))
+           (disco-root--visible-private-channels))))
 ```
 
 ## Runtime Observability
