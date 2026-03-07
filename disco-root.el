@@ -3474,19 +3474,14 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
            #'disco-root--flush-live-updates
            (current-buffer)))))
 
-(defun disco-root--render-list-buffer-preserving-position (render-fn)
-  "Call RENDER-FN and restore point/window position by `disco-channel-id'."
-  (let ((inhibit-read-only t)
-        (buffer-undo-list t)
-        (position-snapshot
-         (disco-view-capture-position
-          :anchor-property 'disco-channel-id
-          :preserve-window-start t)))
-    (with-silent-modifications
-      (funcall render-fn))
-    (when position-snapshot
-      (disco-view-restore-position position-snapshot)
-      (disco-root--update-window-points))))
+(defun disco-root--current-thread-browser-list-spec ()
+  "Return current thread-browser list spec for the active special buffer."
+  (pcase major-mode
+    ('disco-root-parent-threads-mode
+     (disco-root--parent-threads-list-spec))
+    ('disco-root-archived-threads-mode
+     (disco-root--archived-threads-list-spec))
+    (_ nil)))
 
 (defun disco-root--flush-live-updates (root-buffer)
   "Flush queued live updates into ROOT-BUFFER."
@@ -3511,13 +3506,12 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
             (cond
              ((disco-root--thread-browser-buffer-mode-p)
               (when (or dirty-channel-ids needs-structural needs-header)
-                (disco-root--render-list-buffer-preserving-position
-                 (lambda ()
-                   (pcase major-mode
-                     ('disco-root-parent-threads-mode
-                      (disco-root--render-parent-threads-buffer))
-                     ('disco-root-archived-threads-mode
-                      (disco-root--render-archived-threads-buffer)))))))
+                (when-let* ((spec (disco-root--current-thread-browser-list-spec)))
+                  (disco-view-render-list-spec-preserving-position
+                   spec
+                   :anchor-property 'disco-channel-id
+                   :preserve-window-start t
+                   :after-restore #'disco-root--update-window-points))))
              (t
               (let* ((layout (disco-root--ensure-layout))
                      (layout-update-mode
@@ -5165,14 +5159,12 @@ Return plist with keys :threads and :errors for this page only."
                     (disco-root--dedupe-threads page-threads))
           :errors (nreverse errors))))
 
-(defun disco-root--render-archived-threads-buffer ()
-  "Render archived-thread buffer from local pagination/cache state."
+(defun disco-root--archived-threads-list-spec ()
+  "Return list spec for the current archived-thread buffer."
   (let* ((parent-channel disco-root--archived-parent-channel)
          (threads (or disco-root--archived-threads-cache '()))
-         (errors (or disco-root--archived-last-errors '()))
-         (inhibit-read-only t))
-    (erase-buffer)
-    (disco-ui-render-list-view
+         (errors (or disco-root--archived-last-errors '())))
+    (disco-view-list-spec-create
      :title (format "Archived Threads: %s"
                     (disco-root--channel-label parent-channel 'archived-parent))
      :key-hints "g: refresh   n: next page   RET/mouse-1: open thread   q: quit"
@@ -5189,7 +5181,14 @@ Return plist with keys :threads and :errors for this page only."
                      (append (list "Errors:")
                              (mapcar (lambda (err)
                                        (format "  - %s" err))
-                                     errors))))
+                                     errors))))))
+
+(defun disco-root--render-archived-threads-buffer ()
+  "Render archived-thread buffer from local pagination/cache state."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (disco-view-render-list-spec
+     (disco-root--archived-threads-list-spec))
     (goto-char (point-min))))
 
 (defun disco-root--archived-buffer-name (parent-channel)
@@ -5211,14 +5210,12 @@ Return plist with keys :threads and :errors for this page only."
      (seq-filter #'disco-root--displayable-channel-p
                  (disco-state-parent-threads parent-id)))))
 
-(defun disco-root--render-parent-threads-buffer ()
-  "Render active-thread buffer from local parent-thread state."
+(defun disco-root--parent-threads-list-spec ()
+  "Return list spec for the current active parent-thread buffer."
   (let* ((parent-channel disco-root--parent-threads-parent-channel)
          (threads (and parent-channel
-                       (disco-root--active-parent-threads parent-channel)))
-         (inhibit-read-only t))
-    (erase-buffer)
-    (disco-ui-render-list-view
+                       (disco-root--active-parent-threads parent-channel))))
+    (disco-view-list-spec-create
      :title (format "Threads: %s"
                     (if parent-channel
                         (disco-root--channel-label parent-channel 'parent-threads-parent)
@@ -5231,7 +5228,14 @@ Return plist with keys :threads and :errors for this page only."
      :items threads
      :item-inserter (lambda (thread)
                       (disco-root--insert-channel-line thread 2 'parent-thread))
-     :empty-text "(no active threads indexed)")
+     :empty-text "(no active threads indexed)")))
+
+(defun disco-root--render-parent-threads-buffer ()
+  "Render active-thread buffer from local parent-thread state."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (disco-view-render-list-spec
+     (disco-root--parent-threads-list-spec))
     (goto-char (point-min))))
 
 (defun disco-root-parent-threads-refresh ()

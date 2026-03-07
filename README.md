@@ -71,7 +71,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root-layout.el`: root layout registry, built-in layout specs, and user-defined layout customization.
-- `disco-root.el`: root dashboard buffer and layout renderers.
+- `disco-view.el`: shared cursor preservation helpers plus reusable one-line/list-view rendering helpers.
+- `disco-root.el`: root dashboard buffer controllers and root/thread-browser view orchestration.
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
 - `disco-company.el`: composer completion engine (`@`/`#`, CAPF, optional company backend).
 

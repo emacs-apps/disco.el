@@ -14,6 +14,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'disco-ui)
 
 (cl-defstruct (disco-view--snapshot
                (:constructor disco-view--snapshot-create))
@@ -119,16 +120,56 @@ restore by anchor first. Otherwise restore by line/column fallback."
           (set-window-start win (point) 'noforce))))))
 
 (cl-defun disco-view-render-preserving-position
-    (render-fn &key anchor-property preserve-window-start)
+    (render-fn &key anchor-property preserve-window-start after-restore)
   "Call RENDER-FN, then restore cursor/viewport context.
 
 RENDER-FN must redraw current buffer. ANCHOR-PROPERTY and
-PRESERVE-WINDOW-START are forwarded to `disco-view-capture-position'."
+PRESERVE-WINDOW-START are forwarded to `disco-view-capture-position'.
+AFTER-RESTORE, when non-nil, is called after point/window restoration."
   (let ((snapshot (disco-view-capture-position
                    :anchor-property anchor-property
                    :preserve-window-start preserve-window-start)))
     (funcall render-fn)
-    (disco-view-restore-position snapshot)))
+    (when snapshot
+      (disco-view-restore-position snapshot))
+    (when (functionp after-restore)
+      (funcall after-restore))))
+
+(cl-defstruct (disco-view-list-spec
+               (:constructor disco-view-list-spec-create))
+  title
+  key-hints
+  summary
+  loading-note
+  items
+  item-inserter
+  empty-text
+  footer-lines)
+
+(defun disco-view-render-list-spec (spec)
+  "Render list SPEC in current buffer using `disco-ui-render-list-view'."
+  (disco-ui-render-list-view
+   :title (disco-view-list-spec-title spec)
+   :key-hints (disco-view-list-spec-key-hints spec)
+   :summary (disco-view-list-spec-summary spec)
+   :loading-note (disco-view-list-spec-loading-note spec)
+   :items (disco-view-list-spec-items spec)
+   :item-inserter (disco-view-list-spec-item-inserter spec)
+   :empty-text (disco-view-list-spec-empty-text spec)
+   :footer-lines (disco-view-list-spec-footer-lines spec)))
+
+(cl-defun disco-view-render-list-spec-preserving-position
+    (spec &key anchor-property preserve-window-start after-restore)
+  "Render list SPEC and restore cursor/viewport context."
+  (disco-view-render-preserving-position
+   (lambda ()
+     (let ((inhibit-read-only t))
+       (erase-buffer)
+       (disco-view-render-list-spec spec)
+       (goto-char (point-min))))
+   :anchor-property anchor-property
+   :preserve-window-start preserve-window-start
+   :after-restore after-restore))
 
 (cl-defstruct (disco-view-one-line-row
                (:constructor disco-view-one-line-row-create))
