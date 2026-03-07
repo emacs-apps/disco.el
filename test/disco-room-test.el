@@ -540,6 +540,40 @@
        (thread_metadata . ((archived . :false) (locked . :false)))))
     (should-error (disco-room-toggle-thread-archived) :type 'user-error)))
 
+(ert-deftest disco-room-join-thread-errors-when-already-joined ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "thread") (type . 11) (guild_id . "g1")
+                                  (thread_metadata . ((archived . :false)))))
+    (disco-state-upsert-thread-member "thread" "u1")
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "u1")))
+      (should-error (disco-room-join-thread) :type 'user-error))))
+
+(ert-deftest disco-room-leave-thread-errors-when-not-joined ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "thread") (type . 11) (guild_id . "g1")
+                                  (thread_metadata . ((archived . :false)))))
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "u1")))
+      (should-error (disco-room-leave-thread) :type 'user-error))))
+
+(ert-deftest disco-room-set-thread-muted-errors-when-not-joined ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "thread") (type . 11) (guild_id . "g1")
+                                  (thread_metadata . ((archived . :false)))))
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "u1")))
+      (should-error (disco-room-set-thread-muted t) :type 'user-error))))
+
 (ert-deftest disco-room-send-poll-errors-while-replying ()
   (with-temp-buffer
     (disco-room-mode)

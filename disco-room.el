@@ -1081,6 +1081,52 @@ that require an active, mutable thread."
        (disco-room--required-send-permissions channel)
        channel)))))
 
+(defun disco-room--thread-joined-p (&optional channel)
+  "Return non-nil when current user is known to be joined to thread CHANNEL."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (thread-id (and (listp channel) (alist-get 'id channel)))
+         (self-id (disco-gateway-current-user-id)))
+    (and thread-id
+         self-id
+         (member (format "%s" self-id)
+                 (disco-state-thread-member-ids thread-id)))))
+
+(defun disco-room--thread-join-unavailable-reason (&optional channel)
+  "Return reason join-thread is unavailable for CHANNEL, or nil."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (cond
+     ((not (disco-room--thread-channel-p channel))
+      "current room is not a thread")
+     ((disco-room--thread-archived-p channel)
+      "current thread is archived")
+     ((disco-room--thread-joined-p channel)
+      "already joined to this thread")
+     (t nil))))
+
+(defun disco-room--thread-leave-unavailable-reason (&optional channel)
+  "Return reason leave-thread is unavailable for CHANNEL, or nil."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (cond
+     ((not (disco-room--thread-channel-p channel))
+      "current room is not a thread")
+     ((disco-room--thread-archived-p channel)
+      "current thread is archived")
+     ((not (disco-room--thread-joined-p channel))
+      "not joined to this thread")
+     (t nil))))
+
+(defun disco-room--thread-mute-unavailable-reason (&optional channel)
+  "Return reason set-thread-muted is unavailable for CHANNEL, or nil."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (cond
+     ((not (disco-room--thread-channel-p channel))
+      "current room is not a thread")
+     ((disco-room--thread-archived-p channel)
+      "current thread is archived")
+     ((not (disco-room--thread-joined-p channel))
+      "join the thread before changing mute state")
+     (t nil))))
+
 (defun disco-room--delete-message-unavailable-reason (&optional msg)
   "Return reason delete-message action is unavailable for MSG, or nil."
   (when (listp msg)
@@ -7588,15 +7634,25 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
 (defun disco-room-join-thread ()
   "Join current thread room as current user."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--thread-join-unavailable-reason)
+   "join threads")
   (disco-room--ensure-thread-channel)
   (disco-api-join-thread disco-room--channel-id)
+  (when-let* ((self-id (disco-gateway-current-user-id)))
+    (disco-state-upsert-thread-member disco-room--channel-id self-id))
   (message "disco: joined thread %s" disco-room--channel-name))
 
 (defun disco-room-leave-thread ()
   "Leave current thread room as current user."
   (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--thread-leave-unavailable-reason)
+   "leave threads")
   (disco-room--ensure-thread-channel)
   (disco-api-leave-thread disco-room--channel-id)
+  (when-let* ((self-id (disco-gateway-current-user-id)))
+    (disco-state-delete-thread-member disco-room--channel-id self-id))
   (message "disco: left thread %s" disco-room--channel-name))
 
 (defun disco-room-toggle-thread-archived ()
@@ -7741,7 +7797,14 @@ When called interactively, empty input clears slowmode (sets to 0)."
 (defun disco-room-set-thread-muted (muted)
   "Set current user's muted state for current thread to MUTED."
   (interactive
-   (list (y-or-n-p "Mute this thread? ")))
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--thread-mute-unavailable-reason)
+      "set thread mute state")
+     (list (y-or-n-p "Mute this thread? "))))
+  (disco-room--ensure-action-available
+   (disco-room--thread-mute-unavailable-reason)
+   "set thread mute state")
   (disco-room--ensure-thread-channel)
   (disco-api-update-thread-member-settings disco-room--channel-id :muted muted)
   (message "disco: thread notifications %s" (if muted "muted" "unmuted")))
@@ -7945,9 +8008,12 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if disco-room--thread-update-unavailable-reason)
     ("E" "Edit thread settings" disco-room-edit-thread-settings
      :inapt-if disco-room--thread-update-unavailable-reason)
-    ("M" "Set muted" disco-room-set-thread-muted)
-    ("j" "Join thread" disco-room-join-thread)
-    ("l" "Leave thread" disco-room-leave-thread)
+    ("M" "Set muted" disco-room-set-thread-muted
+     :inapt-if disco-room--thread-mute-unavailable-reason)
+    ("j" "Join thread" disco-room-join-thread
+     :inapt-if disco-room--thread-join-unavailable-reason)
+    ("l" "Leave thread" disco-room-leave-thread
+     :inapt-if disco-room--thread-leave-unavailable-reason)
     ("a" "Toggle archived" disco-room-toggle-thread-archived
      :inapt-if disco-room--thread-toggle-archived-unavailable-reason)
     ("A" "Parent archived threads..." disco-room-open-parent-archived-threads)]
