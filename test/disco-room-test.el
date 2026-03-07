@@ -191,6 +191,30 @@
     (disco-state-upsert-channel '((id . "voice") (type . 2) (name . "Voice")))
     (should-error (disco-room-filter-search "hello") :type 'error)))
 
+(ert-deftest disco-room-search-current-channel-auto-includes-age-restricted-thread ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "thread")
+    (setq-local disco-room--guild-id "g1")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "parent")
+       (type . 0)
+       (guild_id . "g1")
+       (nsfw . t)))
+    (disco-state-upsert-channel
+     '((id . "thread")
+       (type . 11)
+       (guild_id . "g1")
+       (parent_id . "parent")))
+    (let (captured)
+      (cl-letf (((symbol-function 'disco-api-guild-search-messages-async)
+                 (lambda (guild-id &rest args)
+                   (setq captured (cons guild-id args)))))
+        (disco-room--search-current-channel-async :query "hello")
+        (should (equal "g1" (car captured)))
+        (should (eq t (plist-get (cdr captured) :include-nsfw)))))))
+
 (ert-deftest disco-room-composer-visible-p-hides-read-only-guild-channel ()
   (with-temp-buffer
     (disco-room-mode)
@@ -252,6 +276,22 @@
     (should (string-match-p "composer hidden: missing SEND_MESSAGES"
                             (buffer-string)))
     (should-not (string-match-p "type at >>>" (buffer-string)))))
+
+(ert-deftest disco-room-render-shows-age-restricted-header-tag ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "adult")
+    (setq-local disco-room--channel-name "adult")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "adult")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")
+       (nsfw . t)))
+    (disco-room-render)
+    (should (string-match-p (regexp-quote "Channel: adult [18+]")
+                            (buffer-string)))))
 
 (ert-deftest disco-room-render-shows-reply-and-attachments-near-composer ()
   (with-temp-buffer

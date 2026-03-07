@@ -109,6 +109,30 @@
   (should (disco-state-channel-has-unread-pins-p
            (disco-state-channel "chan"))))
 
+(ert-deftest disco-state-channel-age-restricted-p-uses-explicit-flag ()
+  (should (disco-state-channel-age-restricted-p
+           '((id . "adult")
+             (type . 0)
+             (nsfw . t))))
+  (should-not (disco-state-channel-age-restricted-p
+               '((id . "safe")
+                 (type . 0)
+                 (nsfw . :false)))))
+
+(ert-deftest disco-state-channel-age-restricted-p-inherits-thread-parent ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-channel
+         '((id . "parent")
+           (type . 0)
+           (nsfw . t)))
+        (should (disco-state-channel-age-restricted-p
+                 '((id . "thread")
+                   (type . 11)
+                   (parent_id . "parent")))))
+    (disco-state-reset)))
+
 (ert-deftest disco-state-apply-message-create-increments-unread-private-unmuted ()
   (disco-state-reset)
   (disco-state-upsert-channel '((id . "dm") (type . 1) (muted . :false)))

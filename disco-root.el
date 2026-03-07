@@ -209,7 +209,10 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
   :group 'disco)
 
 (defcustom disco-root-search-include-nsfw nil
-  "When non-nil, include NSFW channels in root search requests when allowed."
+  "When non-nil, include NSFW channels in root search requests when allowed.
+
+Channel-scoped searches also enable this automatically for age-restricted
+channels and threads."
   :type 'boolean
   :group 'disco)
 
@@ -2071,9 +2074,28 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
        (= (or (alist-get 'code body) 0) 110000)))
 
 (defun disco-root--search-domain-fixed-channel-ids (domain)
-  "Return fixed channel-id list implied by channel-scoped DOMAIN, or nil." 
+  "Return fixed channel-id list implied by channel-scoped DOMAIN, or nil."
   (when-let* ((channel-id (disco-root--search-domain-channel-id domain)))
     (list channel-id)))
+
+(defun disco-root--search-channel-object-by-id (channel-id)
+  "Return best known channel object for CHANNEL-ID."
+  (or (and channel-id (disco-state-channel channel-id))
+      (and (hash-table-p disco-root--search-channel-table)
+           (gethash channel-id disco-root--search-channel-table))
+      (and (hash-table-p disco-root--search-thread-table)
+           (gethash channel-id disco-root--search-thread-table))))
+
+(defun disco-root--search-include-nsfw-p (domain channel-ids)
+  "Return non-nil when root search request should include age-restricted channels."
+  (or disco-root-search-include-nsfw
+      (seq-some (lambda (channel-id)
+                  (when-let* ((channel (disco-root--search-channel-object-by-id channel-id)))
+                    (disco-state-channel-age-restricted-p channel)))
+                (or channel-ids
+                    (when-let* ((channel (disco-root--search-domain-channel-object domain))
+                                (channel-id (alist-get 'id channel)))
+                      (list channel-id))))))
 
 (defun disco-root--search-tab-base-spec (tab query-spec &optional cursor)
   "Return internal request plist for search TAB using QUERY-SPEC and CURSOR."
@@ -2212,10 +2234,11 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
 
 (defun disco-root--search-dispatch (generation tabs-alist)
   "Dispatch async root search request for GENERATION using TABS-ALIST."
-  (let ((root-buffer (current-buffer))
-        (domain disco-root--search-domain)
-        (channel-ids (or (disco-root--search-domain-fixed-channel-ids disco-root--search-domain)
-                         (plist-get disco-root--search-query-spec :channel-ids))))
+  (let* ((root-buffer (current-buffer))
+         (domain disco-root--search-domain)
+         (channel-ids (or (disco-root--search-domain-fixed-channel-ids disco-root--search-domain)
+                          (plist-get disco-root--search-query-spec :channel-ids)))
+         (include-nsfw (disco-root--search-include-nsfw-p domain channel-ids)))
     (setq-local disco-root--search-in-flight t)
     (disco-root--search-apply-request-state tabs-alist t)
     (disco-root--search-render-if-visible)
@@ -2225,7 +2248,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
         (disco-root--search-domain-id domain)
         :tabs tabs-alist
         :channel-ids channel-ids
-        :include-nsfw disco-root-search-include-nsfw
+        :include-nsfw include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
                       (when (buffer-live-p root-buffer)
@@ -2241,7 +2264,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
             guild-id
             :tabs tabs-alist
             :channel-ids channel-ids
-            :include-nsfw disco-root-search-include-nsfw
+            :include-nsfw include-nsfw
             :track-exact-total-hits disco-root-search-track-exact-total-hits
             :on-success (lambda (body)
                           (when (buffer-live-p root-buffer)
@@ -2254,7 +2277,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
          (disco-api-channel-search-messages-tabs-async
           (disco-root--search-domain-channel-id domain)
           :tabs tabs-alist
-          :include-nsfw disco-root-search-include-nsfw
+          :include-nsfw include-nsfw
           :track-exact-total-hits disco-root-search-track-exact-total-hits
           :on-success (lambda (body)
                         (when (buffer-live-p root-buffer)
@@ -2267,7 +2290,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
       (_
        (disco-api-user-search-messages-tabs-async
         :tabs tabs-alist
-        :include-nsfw disco-root-search-include-nsfw
+        :include-nsfw include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
                       (when (buffer-live-p root-buffer)
@@ -3874,6 +3897,8 @@ Discord channel position can arrive as integer or numeric string."
       (push "pins" tags))
     (when (eq t (alist-get 'muted channel))
       (push "muted" tags))
+    (when (disco-state-channel-age-restricted-p channel)
+      (push "18+" tags))
     (when (and (memq channel-type '(2 13))
                (numberp voice-member-count)
                (> voice-member-count 0))

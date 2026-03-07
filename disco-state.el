@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'disco-read-state)
+(require 'disco-util)
 
 (defvar disco-state--guilds nil
   "List of guild objects as alists.")
@@ -179,6 +180,38 @@
 (defun disco-state-thread-only-parent-channel-p (channel)
   "Return non-nil when CHANNEL is a thread-only parent channel."
   (memq (alist-get 'type channel) '(15 16)))
+
+(defun disco-state--channel-age-restricted-p (channel &optional seen)
+  "Return non-nil when CHANNEL or an ancestor is age-restricted.
+
+SEEN is an internal list of visited channel IDs used to avoid recursion loops."
+  (when (listp channel)
+    (let* ((channel-id (alist-get 'id channel))
+           (explicit-nsfw (assoc 'nsfw channel)))
+      (cond
+       ((and channel-id (member channel-id seen))
+        nil)
+       ((and explicit-nsfw
+             (disco-util-json-true-p (cdr explicit-nsfw)))
+        t)
+       ((disco-state-channel-thread-p channel)
+        (let* ((parent-id (alist-get 'parent_id channel))
+               (parent (and parent-id
+                            (disco-state-channel parent-id))))
+          (when parent
+            (disco-state--channel-age-restricted-p
+             parent
+             (if channel-id
+                 (cons channel-id seen)
+               seen)))))
+       (t nil)))))
+
+(defun disco-state-channel-age-restricted-p (channel)
+  "Return non-nil when CHANNEL should be treated as age-restricted.
+
+Thread channels inherit this status from their parent channel when Discord does
+not send an explicit `nsfw' field on the thread itself."
+  (disco-state--channel-age-restricted-p channel nil))
 
 (defun disco-state--parent-threads-upsert (parent-id channel)
   "Insert or replace thread CHANNEL under PARENT-ID."

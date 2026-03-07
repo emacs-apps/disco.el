@@ -782,6 +782,15 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   "Return human-readable status suffix for thread header."
   (disco-thread-header-suffix (disco-room--channel-object)))
 
+(defun disco-room--channel-header-suffix (&optional channel)
+  "Return human-readable suffixes for room header CHANNEL."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (concat
+     (if (disco-state-channel-age-restricted-p channel)
+         " [18+]"
+       "")
+     (disco-thread-header-suffix channel))))
+
 (defun disco-room--ensure-thread-channel ()
   "Signal user error unless current room channel is a thread."
   (unless (disco-room--thread-channel-p)
@@ -2439,10 +2448,26 @@ ACTION is optional text describing the attempted search action."
     (&key query author-id limit offset max-id min-id sort-order on-success on-error)
   "Search the current room channel asynchronously."
   (disco-room--ensure-searchable-channel "server-side room search")
-  (if disco-room--guild-id
-      (disco-api-guild-search-messages-async
-       disco-room--guild-id
-       :channel-ids (list disco-room--channel-id)
+  (let* ((channel (disco-room--channel-object))
+         (include-nsfw (and disco-room--guild-id
+                            (disco-state-channel-age-restricted-p channel))))
+    (if disco-room--guild-id
+        (disco-api-guild-search-messages-async
+         disco-room--guild-id
+         :channel-ids (list disco-room--channel-id)
+         :include-nsfw include-nsfw
+         :content query
+         :author-ids (and author-id (list author-id))
+         :limit limit
+         :offset offset
+         :max-id max-id
+         :min-id min-id
+         :sort-by 'timestamp
+         :sort-order sort-order
+         :on-success on-success
+         :on-error on-error)
+      (disco-api-channel-search-messages-async
+       disco-room--channel-id
        :content query
        :author-ids (and author-id (list author-id))
        :limit limit
@@ -2452,19 +2477,7 @@ ACTION is optional text describing the attempted search action."
        :sort-by 'timestamp
        :sort-order sort-order
        :on-success on-success
-       :on-error on-error)
-    (disco-api-channel-search-messages-async
-     disco-room--channel-id
-     :content query
-     :author-ids (and author-id (list author-id))
-     :limit limit
-     :offset offset
-     :max-id max-id
-     :min-id min-id
-     :sort-by 'timestamp
-     :sort-order sort-order
-     :on-success on-success
-     :on-error on-error)))
+       :on-error on-error))))
 
 (defun disco-room--msg-filter-title (filter)
   "Return human-readable title string for room FILTER plist."
@@ -6077,7 +6090,7 @@ Return non-nil when handled without full room rerender."
           (erase-buffer)
           (insert (format "Channel: %s%s\n"
                           disco-room--channel-name
-                          (disco-room--thread-header-suffix)))
+                          (disco-room--channel-header-suffix channel)))
           (insert (disco-room--header-help-text channel))
           (when disco-room--refresh-in-flight
             (insert "   [refreshing...]"))

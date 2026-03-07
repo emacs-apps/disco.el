@@ -792,6 +792,41 @@
         (disco-root--search-dispatch 1 (disco-root--search-request-tabs nil))
         (should (equal "c1" (car captured)))))))
 
+(ert-deftest disco-root-search-dispatch-channel-domain-auto-includes-age-restricted-thread ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (disco-state-reset)
+    (unwind-protect
+        (let (captured)
+          (disco-state-upsert-channel
+           '((id . "parent")
+             (type . 0)
+             (guild_id . "g1")
+             (name . "adult")
+             (nsfw . t)))
+          (disco-state-upsert-channel
+           '((id . "thread")
+             (type . 11)
+             (guild_id . "g1")
+             (name . "topic")
+             (parent_id . "parent")))
+          (setq-local disco-root--search-domain '(:kind channel :id "thread" :guild-id "g1" :label "topic"))
+          (setq-local disco-root--search-query-spec '(:content "foo" :sort-by timestamp :sort-order desc))
+          (disco-root--search-reset-tab-states)
+          (cl-letf (((symbol-function 'disco-root--search-render-if-visible)
+                     (lambda () nil))
+                    ((symbol-function 'disco-api-guild-search-messages-tabs-async)
+                     (lambda (guild-id &rest args)
+                       (setq captured (cons guild-id args))))
+                    ((symbol-function 'disco-api-channel-search-messages-tabs-async)
+                     (lambda (&rest _args)
+                       (ert-fail "channel endpoint should not be used for guild thread"))))
+            (disco-root--search-dispatch 1 (disco-root--search-request-tabs nil))
+            (should (equal "g1" (car captured)))
+            (should (equal '("thread") (plist-get (cdr captured) :channel-ids)))
+            (should (eq t (plist-get (cdr captured) :include-nsfw)))))
+      (disco-state-reset))))
+
 (ert-deftest disco-root-toggle-section-at-point-activity-falls-forward ()
   (with-temp-buffer
     (disco-root-mode)
@@ -1262,6 +1297,18 @@
       (let ((label (disco-root--channel-label channel)))
         (should (string-match-p "\\[unread\\]" label))
         (should-not (string-match-p "\\[@[0-9]+\\]" label))))))
+
+(ert-deftest disco-root-channel-label-shows-age-restricted-tag ()
+  (let ((channel '((id . "c6")
+                   (type . 0)
+                   (name . "adult")
+                   (nsfw . t))))
+    (cl-letf (((symbol-function 'disco-state-channel-effective-unread-count)
+               (lambda (_channel) 0))
+              ((symbol-function 'disco-root--channel-has-unread-p)
+               (lambda (_channel) nil)))
+      (let ((label (disco-root--channel-label channel)))
+        (should (string-match-p (regexp-quote "[18+]") label))))))
 
 (ert-deftest disco-root-line-has-unread-p-uses-state-flag-or-count ()
   (with-temp-buffer
