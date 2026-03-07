@@ -151,7 +151,7 @@ built-in tree/activity layouts, return an `items` view spec instead:
 - Root channel labels show `[read]` when local read cursor reaches known channel `last_message_id`.
 - `disco-root-live-update-debounce` controls how quickly aggregated gateway bursts flush into incremental root patches.
 - `disco-root-activity-header-refresh-interval` throttles implicit activity header refreshes during message bursts.
-- `disco-root-default-layout`, `disco-root-custom-layouts`, `disco-root-tree-default-show-unread-section`, and `disco-root-tree-unread-section-limit` control root layout behavior; custom layouts can now provide either legacy `:render` handlers or `:build` view-spec builders.
+- `disco-root-default-layout`, `disco-root-custom-layouts`, `disco-root-tree-default-show-unread-section`, and `disco-root-tree-unread-section-limit` control root layout behavior; custom layouts are built with `:build` view-spec builders.
 - `disco-root-activity-context-width` controls the left context block width in activity rows (telega-like fixed/ratio/bounded semantics).
 - `disco-root-activity-include-threads` controls whether thread channels are listed in activity layout (default off for performance).
 - `disco-root-activity-time-format-alist` and `disco-root-week-start-day` control telega-like activity timestamp formatting buckets.

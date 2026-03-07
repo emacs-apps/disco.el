@@ -4820,53 +4820,59 @@ Higher score means channel should appear earlier in activity mode."
    :help-echo label
    :mouse-face 'highlight))
 
-(defun disco-root--ewoc-printer (entry)
-  "Pretty-printer for one root EWOC ENTRY."
+(defun disco-root--layout-entry-label-row (entry)
+  "Return label row model for renderable root layout ENTRY, or nil."
   (pcase (plist-get entry :entry-type)
     ('section
-     (disco-view-insert-label-row
-      (disco-root--section-label-row (plist-get entry :section)
-                                     (plist-get entry :title)
-                                     (plist-get entry :count))))
+     (disco-root--section-label-row (plist-get entry :section)
+                                    (plist-get entry :title)
+                                    (plist-get entry :count)))
     ('guild
-     (disco-view-insert-label-row
-      (disco-root--guild-label-row (plist-get entry :guild)
-                                   (or (plist-get entry :unread-count) 0))))
+     (disco-root--guild-label-row (plist-get entry :guild)
+                                  (or (plist-get entry :unread-count) 0)))
     ('category
-     (disco-view-insert-label-row
-      (disco-root--category-label-row (plist-get entry :category)
-                                      (or (plist-get entry :unread-count) 0))))
+     (disco-root--category-label-row (plist-get entry :category)
+                                     (or (plist-get entry :unread-count) 0)))
     ('search-section
-     (disco-view-insert-label-row
-      (disco-root--search-section-label-row (plist-get entry :title)
-                                            (or (plist-get entry :loaded-count) 0)
-                                            (plist-get entry :total-count)
-                                            (plist-get entry :loading))))
+     (disco-root--search-section-label-row (plist-get entry :title)
+                                           (or (plist-get entry :loaded-count) 0)
+                                           (plist-get entry :total-count)
+                                           (plist-get entry :loading)))
     ('search-note
-     (disco-view-insert-label-row
-      (disco-root--search-note-label-row (plist-get entry :text)
-                                         (plist-get entry :face))))
+     (disco-root--search-note-label-row (plist-get entry :text)
+                                        (plist-get entry :face)))
     ('search-action
-     (disco-view-insert-label-row
-      (disco-root--search-action-label-row (plist-get entry :label)
-                                           (plist-get entry :action)
-                                           (plist-get entry :tab))))
-    ('search-message
-     (disco-root--insert-search-message-line
-      (plist-get entry :message)
-      (or (plist-get entry :indent) 2)
-      (plist-get entry :tab)))
-    ('text
-     (insert (or (plist-get entry :text) "") "\n"))
-    ('blank
-     (insert "\n"))
-    ('channel
-     (disco-root--insert-channel-line
-      (plist-get entry :channel)
-      (or (plist-get entry :indent) 0)
-      (or (plist-get entry :scope) 'root)))
-    (_
-     (insert "\n"))))
+     (disco-root--search-action-label-row (plist-get entry :label)
+                                          (plist-get entry :action)
+                                          (plist-get entry :tab)))
+    (_ nil)))
+
+(defun disco-root--insert-layout-entry (entry)
+  "Insert one root layout ENTRY into the current buffer."
+  (if-let* ((row (disco-root--layout-entry-label-row entry)))
+      (disco-view-insert-label-row row)
+    (pcase (plist-get entry :entry-type)
+      ('search-message
+       (disco-root--insert-search-message-line
+        (plist-get entry :message)
+        (or (plist-get entry :indent) 2)
+        (plist-get entry :tab)))
+      ('text
+       (insert (or (plist-get entry :text) "") "\n"))
+      ('blank
+       (insert "\n"))
+      ('channel
+       (disco-root--insert-channel-line
+        (plist-get entry :channel)
+        (or (plist-get entry :indent) 0)
+        (or (plist-get entry :scope) 'root)))
+      (_
+       (error "Unknown root layout entry type: %S"
+              (plist-get entry :entry-type))))))
+
+(defun disco-root--ewoc-printer (entry)
+  "Pretty-printer for one root EWOC ENTRY."
+  (disco-root--insert-layout-entry entry))
 
 (defun disco-root--ewoc-insert-text (text)
   "Insert one plain TEXT row in root EWOC."
@@ -5190,6 +5196,15 @@ Return plist with keys :threads and :errors for this page only."
                     (disco-root--dedupe-threads page-threads))
           :errors (nreverse errors))))
 
+(defun disco-root--channel-list-entries (channels indent scope)
+  "Return channel layout entries for CHANNELS at INDENT in SCOPE."
+  (mapcar (lambda (channel)
+            (list :entry-type 'channel
+                  :channel channel
+                  :indent indent
+                  :scope scope))
+          (or channels '())))
+
 (defun disco-root--archived-threads-list-spec ()
   "Return list spec for the current archived-thread buffer."
   (let* ((parent-channel disco-root--archived-parent-channel)
@@ -5204,9 +5219,8 @@ Return plist with keys :threads and :errors for this page only."
                       (disco-root--archived-source-status-string))
      :loading-note (unless (disco-root--archived-any-source-has-more-p)
                      "(no more archived pages)")
-     :items threads
-     :item-inserter (lambda (thread)
-                      (disco-root--insert-channel-line thread 2 'archived-thread))
+     :items (disco-root--channel-list-entries threads 2 'archived-thread)
+     :item-inserter #'disco-root--insert-layout-entry
      :empty-text "(no archived threads)"
      :footer-lines (when errors
                      (append (list "Errors:")
@@ -5256,9 +5270,8 @@ Return plist with keys :threads and :errors for this page only."
                       (length (or threads '())))
      :loading-note (when disco-root--parent-threads-refresh-in-flight
                      "[refreshing active threads...]")
-     :items threads
-     :item-inserter (lambda (thread)
-                      (disco-root--insert-channel-line thread 2 'parent-thread))
+     :items (disco-root--channel-list-entries threads 2 'parent-thread)
+     :item-inserter #'disco-root--insert-layout-entry
      :empty-text "(no active threads indexed)")))
 
 (defun disco-root--render-parent-threads-buffer ()
@@ -5918,8 +5931,8 @@ row indentation and defaults to 8 spaces."
   (disco-root-layout-ewoc-items-view-spec-create
    (disco-root--activity-layout-items)))
 
-(defun disco-root--search-layout-items ()
-  "Return mixed list items for the current root search layout."
+(defun disco-root--search-layout-entries ()
+  "Return root layout ENTRY list for the current root search layout."
   (let (result)
     (dolist (tab disco-root--search-tab-order)
       (let* ((state (disco-root--search-tab-state tab))
@@ -5928,7 +5941,7 @@ row indentation and defaults to 8 spaces."
              (error (plist-get state :error))
              (cursor (plist-get state :cursor))
              (total (plist-get state :total-results)))
-        (push (list :item-type 'section
+        (push (list :entry-type 'search-section
                     :tab tab
                     :title (disco-root--search-tab-label tab)
                     :loaded-count (length items)
@@ -5938,60 +5951,34 @@ row indentation and defaults to 8 spaces."
         (cond
          (items
           (dolist (message items)
-            (push (list :item-type 'message
+            (push (list :entry-type 'search-message
                         :message message
                         :indent 2
                         :tab tab)
                   result)))
          (loading
-          (push (list :item-type 'note
+          (push (list :entry-type 'search-note
                       :text "  (loading...)"
                       :face 'shadow)
                 result))
          (error
-          (push (list :item-type 'note
+          (push (list :entry-type 'search-note
                       :text (format "  (%s)" error)
                       :face 'font-lock-warning-face)
                 result))
          (t
-          (push (list :item-type 'note
+          (push (list :entry-type 'search-note
                       :text "  (no results)"
                       :face 'shadow)
                 result)))
         (when cursor
-          (push (list :item-type 'action
+          (push (list :entry-type 'search-action
                       :label "Show more"
                       :action 'load-more
                       :tab tab)
                 result))
-        (push (list :item-type 'blank) result)))
+        (push (list :entry-type 'blank) result)))
     (nreverse result)))
-
-(defun disco-root--insert-search-list-item (item)
-  "Insert one root search layout ITEM into the current buffer."
-  (pcase (plist-get item :item-type)
-    ('section
-     (disco-view-insert-label-row
-      (disco-root--search-section-label-row (plist-get item :title)
-                                            (or (plist-get item :loaded-count) 0)
-                                            (plist-get item :total-count)
-                                            (plist-get item :loading))))
-    ('note
-     (disco-view-insert-label-row
-      (disco-root--search-note-label-row (plist-get item :text)
-                                         (plist-get item :face))))
-    ('action
-     (disco-view-insert-label-row
-      (disco-root--search-action-label-row (plist-get item :label)
-                                           (plist-get item :action)
-                                           (plist-get item :tab))))
-    ('message
-     (disco-root--insert-search-message-line
-      (plist-get item :message)
-      (or (plist-get item :indent) 2)
-      (plist-get item :tab)))
-    ('blank
-     (insert "\n"))))
 
 (defun disco-root--search-layout-list-spec ()
   "Return list spec for the current root search layout."
@@ -6003,8 +5990,8 @@ row indentation and defaults to 8 spaces."
     (disco-view-list-spec-create
      :title (format "Search results in %s"
                     (disco-root--search-domain-label disco-root--search-domain))
-     :items (disco-root--search-layout-items)
-     :item-inserter #'disco-root--insert-search-list-item)))
+     :items (disco-root--search-layout-entries)
+     :item-inserter #'disco-root--insert-layout-entry)))
 
 (defun disco-root--render-layout-search ()
   "Return view spec for the current root search session layout."

@@ -36,8 +36,6 @@ When nil, show all unread rows without truncation."
 Each element is (NAME . PLIST), where NAME is a symbol and PLIST accepts:
 - `:label' string used in root header.
 - `:build' function symbol returning a `disco-root-layout-view-spec'.
-- `:render' legacy function symbol called by `disco-root-render'. It may
-  either render directly or return a `disco-root-layout-view-spec'.
 - `:update-mode' symbol `incremental' or `full'.
 - `:unread-mode' symbol such as `section', `summary', or `filter'.
 - `:toggle-hint' short help text shown in root header for TAB/t behavior.
@@ -51,7 +49,6 @@ Custom entries can override built-in layouts when NAME matches."
                (:constructor disco-root-layout-view-spec-create))
   kind
   before-render
-  render-function
   items
   item-inserter
   list-spec
@@ -121,10 +118,6 @@ Custom entries can override built-in layouts when NAME matches."
   "Return view builder function symbol for LAYOUT (or active layout)."
   (plist-get (disco-root-layout-spec layout) :build))
 
-(defun disco-root-layout-renderer (&optional layout)
-  "Return legacy renderer function symbol for LAYOUT (or active layout)."
-  (plist-get (disco-root-layout-spec layout) :render))
-
 (cl-defun disco-root-layout-list-spec-view-spec-create (list-spec &key after-render)
   "Return one root layout view spec wrapping LIST-SPEC."
   (disco-root-layout-view-spec-create
@@ -165,10 +158,6 @@ builder."
                       (disco-root-layout-view-spec-item-inserter view-spec)))
            (dolist (item (or (disco-root-layout-view-spec-items view-spec) '()))
              (funcall item-inserter item))))
-        ('render-function
-         (when-let* ((render-function
-                      (disco-root-layout-view-spec-render-function view-spec)))
-           (funcall render-function)))
         (_
          (error "Unknown root layout view spec kind: %S"
                 (disco-root-layout-view-spec-kind view-spec))))
@@ -179,18 +168,10 @@ builder."
 
 (defun disco-root-layout-render (&optional layout)
   "Render LAYOUT (or active layout) in the current root buffer."
-  (let ((builder (disco-root-layout-builder layout))
-        (renderer (disco-root-layout-renderer layout)))
-    (cond
-     ((functionp builder)
-      (when-let* ((view-spec (funcall builder)))
-        (disco-root-layout-render-view-spec view-spec)))
-     ((functionp renderer)
-      (let ((result (funcall renderer)))
-        (if (disco-root-layout-view-spec-p result)
-            (disco-root-layout-render-view-spec result)
-          t)))
-     (t nil))))
+  (when-let* ((builder (disco-root-layout-builder layout))
+              (view-spec (and (functionp builder)
+                              (funcall builder))))
+    (disco-root-layout-render-view-spec view-spec)))
 
 (defun disco-root-layout-update-mode (&optional layout)
   "Return update mode for LAYOUT (or active layout)."

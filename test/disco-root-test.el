@@ -504,23 +504,19 @@
   (let ((disco-root-custom-layouts nil))
     (should (eq 'incremental (disco-root-layout-update-mode 'activity)))))
 
-(ert-deftest disco-root-layout-render-prefers-builders-over-legacy-renderers ()
+(ert-deftest disco-root-layout-render-uses-builder-view-spec ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root-custom-layouts
            '((demo
               :label "Demo"
-              :build disco-root-test--build-demo
-              :render disco-root-test--legacy-render-demo))))
+              :build disco-root-test--build-demo))))
       (cl-letf (((symbol-function 'disco-root-test--build-demo)
                  (lambda ()
                    (disco-root-layout-list-spec-view-spec-create
                     (disco-view-list-spec-create
                      :title "Builder Demo"
-                     :empty-text "(empty)"))))
-                ((symbol-function 'disco-root-test--legacy-render-demo)
-                 (lambda ()
-                   (ert-fail "legacy renderer should not run when :build exists"))))
+                     :empty-text "(empty)")))))
         (should (disco-root-layout-render 'demo))
         (should (string-match-p "Builder Demo" (buffer-string)))))))
 
@@ -592,6 +588,43 @@
             '((:entry-type text :text "hello")))))
       (disco-root-layout-render-view-spec view-spec)
       (should (string-match-p "hello" (buffer-string))))))
+
+(ert-deftest disco-root-parent-threads-list-spec-uses-layout-entry-inserter ()
+  (with-temp-buffer
+    (disco-root-parent-threads-mode)
+    (let ((disco-root--parent-threads-parent-channel '((id . "p1") (type . 15) (name . "Forum"))))
+      (cl-letf (((symbol-function 'disco-root--active-parent-threads)
+                 (lambda (_parent)
+                   '(((id . "t1") (type . 11) (name . "Thread")))))
+                ((symbol-function 'disco-root--channel-label)
+                 (lambda (&rest _args) "Forum")))
+        (let* ((spec (disco-root--parent-threads-list-spec))
+               (entries (disco-view-list-spec-items spec))
+               (first-entry (car entries)))
+          (should (eq 'disco-root--insert-layout-entry
+                      (disco-view-list-spec-item-inserter spec)))
+          (should (equal 'channel (plist-get first-entry :entry-type)))
+          (should (equal 'parent-thread (plist-get first-entry :scope))))))))
+
+(ert-deftest disco-root-archived-threads-list-spec-uses-layout-entry-inserter ()
+  (with-temp-buffer
+    (disco-root-archived-threads-mode)
+    (let ((disco-root--archived-parent-channel '((id . "p1") (type . 15) (name . "Forum")))
+          (disco-root--archived-threads-cache '(((id . "t1") (type . 11) (name . "Thread"))))
+          (disco-root--archived-last-errors nil))
+      (cl-letf (((symbol-function 'disco-root--channel-label)
+                 (lambda (&rest _args) "Forum"))
+                ((symbol-function 'disco-root--archived-source-status-string)
+                 (lambda () "public:1"))
+                ((symbol-function 'disco-root--archived-any-source-has-more-p)
+                 (lambda () t)))
+        (let* ((spec (disco-root--archived-threads-list-spec))
+               (entries (disco-view-list-spec-items spec))
+               (first-entry (car entries)))
+          (should (eq 'disco-root--insert-layout-entry
+                      (disco-view-list-spec-item-inserter spec)))
+          (should (equal 'channel (plist-get first-entry :entry-type)))
+          (should (equal 'archived-thread (plist-get first-entry :scope))))))))
 
 (ert-deftest disco-root-mode-disables-undo-history ()
   (with-temp-buffer
@@ -819,7 +852,7 @@
     (should (equal "fixed by domain"
                    (disco-root--search-transient-format-channel-ids nil)))))
 
-(ert-deftest disco-root-search-layout-items-preserve-section-metadata ()
+(ert-deftest disco-root-search-layout-entries-preserve-section-metadata ()
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--search-tabs
@@ -828,12 +861,12 @@
                    :error nil
                    :cursor nil
                    :total-results 1)))
-    (let ((first-item (car (disco-root--search-layout-items))))
-      (should (equal 'section (plist-get first-item :item-type)))
-      (should (equal "Messages" (plist-get first-item :title)))
-      (should (= 1 (plist-get first-item :loaded-count)))
-      (should (= 1 (plist-get first-item :total-count)))
-      (should-not (plist-get first-item :loading)))))
+    (let ((first-entry (car (disco-root--search-layout-entries))))
+      (should (equal 'search-section (plist-get first-entry :entry-type)))
+      (should (equal "Messages" (plist-get first-entry :title)))
+      (should (= 1 (plist-get first-entry :loaded-count)))
+      (should (= 1 (plist-get first-entry :total-count)))
+      (should-not (plist-get first-entry :loading)))))
 
 (ert-deftest disco-root-render-layout-search-renders-sections ()
   (with-temp-buffer
