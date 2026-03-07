@@ -481,6 +481,39 @@
       (should (eq prompt-marker disco-room--input-prompt-marker))
       (should (string-match-p "> updated body" (buffer-string))))))
 
+(ert-deftest disco-room-render-reuses-existing-message-nodes ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m2") (channel_id . "chat") (content . "two"))
+       ((id . "m1") (channel_id . "chat") (content . "one"))))
+    (disco-room-render)
+    (let ((ewoc disco-room--ewoc)
+          (node-m1 (gethash "m1" disco-room--message-node-table))
+          (node-m2 (gethash "m2" disco-room--message-node-table)))
+      (disco-state-put-messages
+       "chat"
+       '(((id . "m3") (channel_id . "chat") (content . "three"))
+         ((id . "m2") (channel_id . "chat") (content . "two updated"))
+         ((id . "m1") (channel_id . "chat") (content . "one"))))
+      (disco-room-render)
+      (should (eq ewoc disco-room--ewoc))
+      (should (eq node-m1 (gethash "m1" disco-room--message-node-table)))
+      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
+      (should (gethash "m3" disco-room--message-node-table))
+      (should (equal '("m1" "m2" "m3")
+                     disco-room--displayed-message-ids))
+      (should (string-match-p "two updated" (buffer-string))))))
+
 (ert-deftest disco-room-composer-visible-p-hides-archived-thread ()
   (with-temp-buffer
     (disco-room-mode)
