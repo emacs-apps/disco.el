@@ -256,6 +256,21 @@ point is restored relative to the input start when it was inside the input."
     (disco-chatbuf--restore-input-point input-offset)
     disco-chatbuf--prompt-button))
 
+(defun disco-chatbuf-clear-prompt-and-input ()
+  "Remove the current prompt and input region from the buffer."
+  (interactive)
+  (let ((prompt-start (disco-chatbuf-prompt-start-position))
+        (inhibit-read-only t))
+    (when prompt-start
+      (delete-region prompt-start (point-max))))
+  (move-overlay disco-chatbuf--input-overlay (point-min) (point-min) (current-buffer))
+  (overlay-put disco-chatbuf--input-overlay 'keymap nil)
+  (setq disco-chatbuf--prompt-button nil)
+  (when (markerp disco-chatbuf--prompt-marker)
+    (set-marker disco-chatbuf--prompt-marker nil))
+  (when (markerp disco-chatbuf--input-marker)
+    (set-marker disco-chatbuf--input-marker nil)))
+
 (defun disco-chatbuf-has-input-p ()
   "Return non-nil when the current chat buffer has some input text."
   (when-let* ((input-start (disco-chatbuf-input-start-position)))

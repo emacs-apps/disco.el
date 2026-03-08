@@ -20,6 +20,7 @@
 (require 'url-handlers)
 (require 'plz)
 (require 'svg nil t)
+(require 'disco-chatbuf)
 (require 'disco-chat-input)
 (require 'disco-ui)
 (require 'disco-util)
@@ -1618,39 +1619,41 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--input-region-bounds ()
   "Return current writable draft region as (START . END), or nil."
-  (disco-chat-input-region-bounds disco-room--input-marker))
+  (disco-chatbuf-input-region-bounds))
 
 (defun disco-room--input-start-position ()
   "Return draft input start position for current room buffer, or nil."
-  (disco-chat-input-start-position disco-room--input-marker))
+  (disco-chatbuf-input-start-position))
 
 (defun disco-room--input-prompt-start-position ()
   "Return prompt start position preceding current draft input, or nil."
-  (disco-chat-input-prompt-start-position disco-room--input-prompt-marker))
+  (disco-chatbuf-prompt-start-position))
 
 (defun disco-room--input-logical-end-position ()
-  "Return logical draft end position, excluding synthetic trailing newline."
-  (disco-chat-input-logical-end-position disco-room--input-marker))
+  "Return logical draft end position for the tail input region."
+  (disco-chatbuf-input-logical-end-position))
 
 (defun disco-room--point-in-input-p (&optional position)
   "Return non-nil when POSITION (or point) is inside draft input region."
-  (disco-chat-input-point-in-input-p disco-room--input-marker position))
+  (disco-chatbuf-point-in-input-p position))
 
 (defun disco-room--point-in-prompt-p (&optional position)
   "Return non-nil when POSITION (or point) is inside prompt glyph span."
-  (disco-chat-input-point-in-prompt-p
-   disco-room--input-prompt-marker disco-room--input-marker position))
+  (disco-chatbuf-point-in-prompt-p position))
 
 (defun disco-room--apply-input-text-properties ()
   "Ensure current draft span stays editable and uses `disco-room-input-map'."
-  (disco-chat-input-apply-text-properties
-   disco-room--input-marker disco-room-input-map))
+  (disco-chatbuf-input-apply-text-properties disco-room-input-map)
+  (when-let* ((bounds (disco-room--input-region-bounds)))
+    (with-silent-modifications
+      (add-text-properties
+       (car bounds) (cdr bounds)
+       '(disco-room-input t)))))
 
 (defun disco-room--post-command ()
   "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
   (unless disco-room--rendering
-    (disco-chat-input-post-command-clamp-point
-     disco-room--input-marker disco-room--input-prompt-marker)
+    (disco-chatbuf-post-command-clamp-point)
     (let ((current-message-id (or (get-text-property (point) 'disco-message-id)
                                   (get-text-property (line-beginning-position)
                                                      'disco-message-id))))
@@ -1663,7 +1666,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
-  (when-let* ((text (disco-chat-input-current-string disco-room--input-marker)))
+  (let ((text (substring-no-properties (or (disco-chatbuf-input-string) ""))))
     (unless (equal text disco-room--draft-input)
       (setq disco-room--draft-input text)
       (setq disco-room--input-index nil)
@@ -1673,10 +1676,9 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--after-change (beg end _old-len)
   "Keep draft state synced after editable-region changes from BEG to END."
-  (disco-chat-input-after-change
+  (disco-chatbuf-after-change
    beg end
    :rendering-p disco-room--rendering
-   :input-marker disco-room--input-marker
    :input-map disco-room-input-map
    :sync-function #'disco-room--sync-draft-from-buffer))
 
@@ -6069,35 +6071,66 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                           ", "))
      "")))
 
-(defun disco-room--input-footer-text (draft)
-  "Build EWOC footer text containing room prompt with DRAFT."
-  (disco-chat-input-compose-text
-   :visible-p (disco-room--composer-visible-p)
-   :draft draft
-   :context-text (disco-room--input-footer-context-text)
-   :typing-text (if-let* ((typing-text (disco-room--typing-indicator-text)))
-                    (and (not (string-empty-p typing-text))
-                         (concat typing-text "\n")))
-   :typing-face 'disco-room-typing-indicator
-   :prompt-property 'disco-room-prompt
-   :input-property 'disco-room-input
-   :leading-newline t))
+(defun disco-room--input-footer-text ()
+  "Build read-only EWOC footer text shown above the room prompt."
+  (let ((context-text (disco-room--input-footer-context-text))
+        (typing-text (disco-room--typing-indicator-text)))
+    (if (not (disco-room--composer-visible-p))
+        ""
+      (let ((text
+             (concat
+              "\n"
+              (if (string-empty-p context-text)
+                  ""
+                context-text)
+              (if (and (stringp typing-text)
+                       (not (string-empty-p typing-text)))
+                  (propertize (concat typing-text "\n")
+                              'face 'disco-room-typing-indicator)
+                ""))))
+        (add-text-properties
+         0 (length text)
+         '(read-only t
+           front-sticky (read-only)
+           rear-nonsticky (read-only))
+         text)
+        text))))
+
+(defun disco-room--prompt-text ()
+  "Return visible prompt text for the current room buffer."
+  ">>> ")
 
 (defun disco-room--clear-input-region-markers ()
-  "Detach current room composer markers from any stale footer text."
-  (when (markerp disco-room--input-marker)
-    (set-marker disco-room--input-marker nil))
-  (when (markerp disco-room--input-prompt-marker)
-    (set-marker disco-room--input-prompt-marker nil)))
+  "Detach current room composer markers during hard resets only."
+  (disco-chatbuf-clear-prompt-and-input))
+
+(defun disco-room--sync-shared-aux-state ()
+  "Mirror room reply/edit context into shared chatbuf aux state."
+  (cond
+   ((disco-room--composer-edit-active-p)
+    (disco-chatbuf-aux-set
+     (list :aux-type 'edit
+           :aux-msg (disco-room--composer-context-message
+                     (disco-room--composer-edit-message-id))
+           :message-id (disco-room--composer-edit-message-id))))
+   (disco-room--pending-reply-to
+    (disco-chatbuf-aux-set
+     (list :aux-type 'reply
+           :aux-msg (disco-room--composer-context-message disco-room--pending-reply-to)
+           :message-id disco-room--pending-reply-to)))
+   (t
+    (disco-chatbuf-aux-reset))))
 
 (defun disco-room--bind-input-region-from-footer ()
-  "Locate and bind editable input region from EWOC footer properties."
+  "Ensure the persistent tail input region exists and matches current draft."
+  (disco-chatbuf-init-state disco-room-input-history-size)
+  (disco-room--sync-shared-aux-state)
   (disco-room--clear-input-region-markers)
-  (when (and (markerp disco-room--input-marker)
-             (markerp disco-room--input-prompt-marker)
-             (disco-chat-input-bind-region-from-properties
-              'disco-room-input 'disco-room-prompt
-              disco-room--input-marker disco-room--input-prompt-marker))
+  (when (disco-room--composer-visible-p)
+    (save-excursion
+      (goto-char (point-max))
+      (disco-chatbuf-install-prompt (disco-room--prompt-text)))
+    (disco-chatbuf-input-set-text disco-room--draft-input)
     (disco-room--apply-input-text-properties)))
 
 (defun disco-room--header-text (&optional channel)
@@ -6141,9 +6174,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
      text)
     text))
 
-(defun disco-room--footer-text (&optional draft)
+(defun disco-room--footer-text (&optional _draft)
   "Build EWOC footer text for the current room state."
-  (disco-room--input-footer-text (or draft (disco-room--current-draft))))
+  (disco-room--input-footer-text))
 
 (defun disco-room--ensure-ewoc (&optional channel draft)
   "Ensure current room buffer owns one persistent EWOC instance."
@@ -8819,6 +8852,17 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))
   (setq-local disco-room--input-index nil)
   (setq-local disco-room--input-pending nil)
+  (setq-local disco-room--input-marker (make-marker))
+  (setq-local disco-room--input-prompt-marker (make-marker))
+  (setq-local disco-chatbuf--input-marker disco-room--input-marker)
+  (setq-local disco-chatbuf--prompt-marker disco-room--input-prompt-marker)
+  (setq-local disco-chatbuf--input-ring disco-room--input-ring)
+  (setq-local disco-chatbuf--input-idx disco-room--input-index)
+  (setq-local disco-chatbuf--input-pending disco-room--input-pending)
+  (setq-local disco-chatbuf--prompt-button nil)
+  (disco-chatbuf-init-state disco-room-input-history-size)
+  (disco-chatbuf-aux-reset)
+  (disco-chatbuf-input-options-reset)
   (setq-local disco-room--send-in-flight nil)
   (setq-local disco-room--pending-jump-message-id nil)
   (setq-local disco-room--jump-in-flight nil)
@@ -8828,8 +8872,6 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)
   (setq-local disco-room--inplace-search-generation 0)
-  (setq-local disco-room--input-marker (make-marker))
-  (setq-local disco-room--input-prompt-marker (make-marker))
   (setq-local disco-room--rendering nil)
   (setq-local disco-room--ewoc nil)
   (setq-local disco-room--displayed-message-ids nil)
