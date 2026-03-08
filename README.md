@@ -21,21 +21,21 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room timeline supports telega-inspired compact same-sender grouping, date separators, and unread divider rendering.
 - Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
 - Send plain text message with `C-c C-c` in room buffer.
-- Send file attachments from room buffer (multipart upload) with structured composer objects: add via `C-c C-a` or `C-c C-f`, remove attachment at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
+- Send file attachments from room buffer (multipart upload) with structured composer objects: telega-like attach menu on `C-c C-a`, direct file attach on `C-c C-f`, reserved clipboard attach slot `C-c C-v`, remove attachment at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
 - Reply/edit/delete/forward message from room buffer with telega-like timeline keys `r`/`f`/`e`/`d` when point is outside the composer, or via `C-c m r/f/e/d`; legacy `C-c C-F` still works for forward. Load older history with `M-<`.
 - Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
 - Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, URL actions, and transfer state actions: Download/Cancel/Open Local/Save As, plus inline image preview loading).
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
 - Message rows render poll blocks with staged answer selection, explicit submit/remove/end controls, and live vote-count updates from gateway poll vote events.
-- Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n` draft history, and `RET` quick send.
+- Room composer supports direct inline typing after `>>>`, with `C-c '` edit, `M-p/M-n/M-r` draft history navigation/search, `M-RET` parsed preview, and `RET` quick send.
 - Room prompt footer now shows telega-style live typing indicators when other users are typing (DM + guild channels).
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
 - Room can render inline Discord avatar images (async, cached) with automatic placeholder fallback.
 - Draft input supports dynamic `TAB` completion for `@`/`#` tokens (users, roles, `@everyone`/`@here`, and guild channels) and inserts Discord mention syntax; company/Corfu rows can show username/id/avatar metadata.
-- Room provides `C-c C-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
+- Room provides `C-c M-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-t a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
@@ -135,6 +135,7 @@ built-in tree/activity layouts, return an `items` view spec instead:
 - Thread room buffer: `C-c C-t r` rename, `C-c C-t k` toggle locked, `C-c C-t s` set slowmode, `C-c C-t A` set auto-archive duration, `C-c C-t e` edit multi-field settings, `C-c C-t u` set thread mute.
 - Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
 - Room transient (`?`): includes message send/refresh plus thread create/join/leave/archive/rename/lock/slowmode/auto-archive/settings/mute actions.
+- Composer-aligned room keys use telega-style slots where possible: `C-c C-o` opens room input options, while `C-c C-e` formatting and `C-c C-v` clipboard attach are reserved placeholders until fuller parity lands.
 
 ## Message Commands
 
@@ -143,7 +144,7 @@ built-in tree/activity layouts, return an `items` view spec instead:
 - If API rejects forward comments in your session, `disco-room-forward-comment-rejection-action` controls fallback (`split` sends comment + forward as two messages).
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
-- Room buffer draft: attachment objects can be removed at point with `C-c C-d`.
+- Room buffer draft: attachment objects can be removed at point with `C-c C-d`; `M-r` searches draft history; `M-RET` opens a parsed composer preview buffer.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
 - Room timeline keys outside the composer follow telega-style message actions where available: `r` reply, `f` forward, `e` edit, `d` delete, `!` toggle reaction, `+` add reaction, `-` remove reaction, `T` open thread.
 - Room poll actions: `C-c C-p s` send poll, `C-c C-p +` select answer, `C-c C-p -` unselect answer, `C-c C-p t` toggle staged answer, `C-c C-p v` submit staged vote, `C-c C-p c` remove own vote, `C-c C-p e` end poll.
@@ -206,6 +207,6 @@ built-in tree/activity layouts, return an `items` view spec instead:
 ## Next Milestones
 
 1. Add tree interaction controls (collapse/expand guilds and thread subtrees) on top of the EWOC root model.
-2. Improve mention/composer parity (`M-r` history search, mention candidate popup UX, optional multiline compose mode).
+2. Improve mention/composer parity (mention candidate popup UX, optional multiline compose mode, fuller attach/options parity for `C-c C-e`/`C-c C-v`).
 3. Expand fast navigation (`M-g` prefix map for unread/mentions/reactions style jumps).
 4. Add queue prioritization/backpressure so user actions are favored over background work.

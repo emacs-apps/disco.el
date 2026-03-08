@@ -153,6 +153,9 @@ Each value is a plist carrying :status, :path, :process, :error and
 (defvar disco-room-inplace-search-history nil
   "Minibuffer history for room inplace searches.")
 
+(defvar disco-room-draft-history-search-history nil
+  "Minibuffer history for room draft-history searches.")
+
 (defcustom disco-room-filter-search-limit 25
   "Number of search hits to request per room filter-search page."
   :type 'integer
@@ -6290,17 +6293,17 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
    "   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
    "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline r/f/e/d/!/+/-/T: message actions"
    "   C-c C-w: toggle breakline   C-c C-p s/+/-/t/v/c/e: poll actions"
-   "   C-c C-P: ack pins   C-c C-a/C-f: attach   C-c C-d: remove attachment"
-   "   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments"
+   "   C-c C-P: ack pins   C-c C-a: attach menu   C-c C-f: attach file   C-c C-v: clipboard attach"
+   "   C-c C-e/o: formatting/options   C-c C-x: clear attachments   C-c M-l/M-e/M-r: attachment ops"
    "   C-c C-t o: open message thread   C-c C-t: thread ops"
    (if (disco-room--composer-visible-p channel)
        (concat
-        (format "   RET/C-c C-c: %s   TAB: @/# complete   C-c C-v: refetch avatars"
+        (format "   RET/C-c C-c: %s   M-RET: preview   TAB: @/# complete   C-c M-v: refetch avatars"
                 (if (disco-room--composer-edit-active-p)
                     "save edit"
                   "send"))
-        "   type at >>>   M-p/M-n: history")
-     "   C-c C-v: refetch avatars   [composer hidden]")
+        "   type at >>>   M-p/M-n/M-r: history")
+     "   C-c M-v: refetch avatars   [composer hidden]")
    "   timeline q: quit   C-c ?: menu"))
 
 (defun disco-room--input-footer-context-text ()
@@ -6373,10 +6376,23 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
    (t
     (disco-chatbuf-aux-reset))))
 
+(defun disco-room--current-input-options-state ()
+  "Return current room input-options plist for shared chatbuf state."
+  (list :send-on-return disco-room-send-on-return
+        :long-message-action disco-room-long-message-action
+        :allowed-mentions (copy-tree disco-room-allowed-mentions)
+        :reply-mention-replied-user disco-room-reply-mention-replied-user))
+
+(defun disco-room--sync-shared-input-options-state ()
+  "Mirror room-local input option state into shared chatbuf state."
+  (disco-chatbuf-input-options-set
+   (disco-room--current-input-options-state)))
+
 (defun disco-room--bind-input-region-from-footer ()
   "Ensure the persistent tail input region exists and matches current draft."
   (disco-chatbuf-init-state disco-room-input-history-size)
   (disco-room--sync-shared-aux-state)
+  (disco-room--sync-shared-input-options-state)
   (if (not (disco-room--composer-visible-p))
       (disco-room--clear-input-region-markers)
     (save-excursion
@@ -7858,6 +7874,151 @@ enabled, include `replied_user'."
           (setq base `((replied_user . ,value))))))
     base))
 
+(defun disco-room--input-history-elements ()
+  "Return room draft history entries from newest to oldest."
+  (let (items)
+    (when (ring-p disco-room--input-ring)
+      (dotimes (idx (ring-length disco-room--input-ring))
+        (push (ring-ref disco-room--input-ring idx) items)))
+    (nreverse items)))
+
+(defun disco-room-draft-history-search (regexp)
+  "Load one draft-history entry matching REGEXP."
+  (interactive
+   (list (read-regexp "Draft history search (regexp): "
+                      nil
+                      'disco-room-draft-history-search-history)))
+  (let* ((entries (cl-delete-duplicates
+                   (disco-room--input-history-elements)
+                   :test #'equal))
+         (matches (seq-filter (lambda (entry)
+                                (and (stringp entry)
+                                     (string-match-p regexp entry)))
+                              entries)))
+    (cond
+     ((null matches)
+      (message "disco: no draft history entry matches %s" regexp))
+     (t
+      (let ((picked (if (= 1 (length matches))
+                        (car matches)
+                      (completing-read "Matching draft: " matches nil t nil nil
+                                       (car matches)))))
+        (setq disco-room--input-index nil)
+        (setq disco-room--input-pending nil)
+        (disco-room--set-draft picked)
+        (message "disco: loaded draft history match"))))))
+
+(defun disco-room-input-preview ()
+  "Show parsed preview of the current composer input."
+  (interactive)
+  (let* ((draft (disco-room--current-draft))
+         (parsed (disco-room--parse-draft-input draft))
+         (content (string-trim-right (or (plist-get parsed :content) "")))
+         (attachments (or (plist-get parsed :attachments) '()))
+         (buf (get-buffer-create "*disco-room-preview*"))
+         (mode-label (cond
+                      ((disco-room--composer-edit-active-p) "edit")
+                      (disco-room--pending-reply-to "reply")
+                      (t "message"))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Room: %s\n" (or disco-room--channel-name disco-room--channel-id "(unknown)")))
+        (insert (format "Composer mode: %s\n" mode-label))
+        (insert (format "Structured objects: %d\n" (length (or (plist-get parsed :objects) '()))))
+        (insert (format "Attachments: %d\n\n" (length attachments)))
+        (insert "Content:\n")
+        (insert (if (string-empty-p content)
+                    "(empty)\n"
+                  (concat content "\n")))
+        (when attachments
+          (insert "\nAttachments:\n")
+          (dolist (attachment attachments)
+            (insert (format "- %s\n"
+                            (disco-room--attachment-label attachment "[file]")))))
+        (special-mode)))
+    (display-buffer buf)
+    (message "disco: opened composer preview")))
+
+(defun disco-room-attach-clipboard ()
+  "Placeholder for telega-style clipboard attach entry point."
+  (interactive)
+  (user-error "disco: clipboard attach is not implemented yet"))
+
+(defun disco-room-input-formatting-set ()
+  "Placeholder for telega-style explicit input formatting."
+  (interactive)
+  (user-error "disco: explicit input formatting is not implemented yet"))
+
+(defun disco-room-toggle-send-on-return ()
+  "Toggle whether `RET' sends the current room draft."
+  (interactive)
+  (setq-local disco-room-send-on-return (not disco-room-send-on-return))
+  (disco-room--sync-shared-input-options-state)
+  (message "disco: RET now %s"
+           (if disco-room-send-on-return
+               "sends messages"
+             "opens draft editor")))
+
+(defun disco-room-cycle-long-message-action ()
+  "Cycle long-message send behavior for current room buffer."
+  (interactive)
+  (setq-local disco-room-long-message-action
+              (pcase disco-room-long-message-action
+                ('split 'file)
+                (_ 'split)))
+  (disco-room--sync-shared-input-options-state)
+  (message "disco: long messages now %s"
+           (pcase disco-room-long-message-action
+             ('file "send as file")
+             (_ "split across messages"))))
+
+(defun disco-room-cycle-allowed-mentions ()
+  "Cycle allowed-mentions policy for current room buffer."
+  (interactive)
+  (setq-local disco-room-allowed-mentions
+              (pcase disco-room-allowed-mentions
+                ('none 'all)
+                ('all nil)
+                (_ 'none)))
+  (disco-room--sync-shared-input-options-state)
+  (message "disco: allowed mentions now %s"
+           (pcase disco-room-allowed-mentions
+             ('none "disabled")
+             ('all "explicitly enabled")
+             (_ "Discord defaults"))))
+
+(defun disco-room-toggle-reply-mention-replied-user ()
+  "Toggle whether replies mention the replied user in current room."
+  (interactive)
+  (setq-local disco-room-reply-mention-replied-user
+              (not disco-room-reply-mention-replied-user))
+  (disco-room--sync-shared-input-options-state)
+  (message "disco: reply mention of replied user %s"
+           (if disco-room-reply-mention-replied-user
+               "enabled"
+             "disabled")))
+
+(defun disco-room-reset-input-options ()
+  "Reset room-local input option overrides back to global defaults."
+  (interactive)
+  (dolist (var '(disco-room-send-on-return
+                 disco-room-long-message-action
+                 disco-room-allowed-mentions
+                 disco-room-reply-mention-replied-user))
+    (kill-local-variable var))
+  (disco-room--sync-shared-input-options-state)
+  (message "disco: room input options reset to global defaults"))
+
+(transient-define-prefix disco-room-input-options-transient ()
+  "Transient for telega-like room input options."
+  [["Input Options"
+    ("RET" "Toggle RET send/editor" disco-room-toggle-send-on-return)
+    ("l" "Cycle long-message action" disco-room-cycle-long-message-action)
+    ("m" "Cycle allowed mentions" disco-room-cycle-allowed-mentions)
+    ("r" "Toggle reply mention" disco-room-toggle-reply-mention-replied-user)
+    ("0" "Reset room-local options" disco-room-reset-input-options)]])
+
 (defun disco-room-send-poll (question options &optional duration allow-multiselect content)
   "Create and send a poll with QUESTION and OPTIONS in current room.
 
@@ -8934,6 +9095,15 @@ When called interactively, empty input clears slowmode (sets to 0)."
       (user-error "disco: current room has no parent channel"))
     (disco-root-list-archived-threads parent-id)))
 
+(transient-define-prefix disco-room-attach-transient ()
+  "Transient for telega-like room attachment commands."
+  [["Attach"
+    ("f" "Attach file" disco-room-attach-file
+     :inapt-if disco-room--attach-unavailable-reason)
+    ("p" "Send poll" disco-room-send-poll
+     :inapt-if disco-room--poll-unavailable-reason)
+    ("v" "Attach clipboard" disco-room-attach-clipboard)]])
+
 (transient-define-prefix disco-room-transient ()
   "Room command menu for disco.el."
   [["Timeline"
@@ -9040,6 +9210,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("/" "Search channel..." disco-room-search-channel)
     ("f" "Filter search" disco-room-filter-search)
     ("F" "Cancel filter" disco-room-filter-cancel)
+    ("v" "Refetch avatars" disco-room-refetch-avatars)
     ("H" "HTTP queue" disco-http-describe-queue)
     ("R" "Rate limits" disco-api-describe-rate-limits)
     ("G" "Gateway status" disco-gateway-describe-status)]
@@ -9059,9 +9230,11 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c m") disco-room-message-prefix-map)
     (define-key map (kbd "M-<") #'disco-room-load-older-messages)
     (define-key map (kbd "RET") #'disco-room-return-dwim)
+    (define-key map (kbd "M-RET") #'disco-room-input-preview)
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)
     (define-key map (kbd "M-p") #'disco-room-draft-prev)
     (define-key map (kbd "M-n") #'disco-room-draft-next)
+    (define-key map (kbd "M-r") #'disco-room-draft-history-search)
     (define-key map (kbd "M-g s") #'disco-room-inplace-search)
     (define-key map (kbd "M-g n") #'disco-room-inplace-search-next)
     (define-key map (kbd "M-g p") #'disco-room-inplace-search-prev)
@@ -9079,8 +9252,11 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
     (define-key map (kbd "C-c C-P") #'disco-room-ack-channel-pins)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
-    (define-key map (kbd "C-c C-a") #'disco-room-attach-file)
+    (define-key map (kbd "C-c C-a") #'disco-room-attach-transient)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
+    (define-key map (kbd "C-c C-v") #'disco-room-attach-clipboard)
+    (define-key map (kbd "C-c C-e") #'disco-room-input-formatting-set)
+    (define-key map (kbd "C-c C-o") #'disco-room-input-options-transient)
     (define-key map (kbd "C-c C-F") #'disco-room-forward-message)
     (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
     (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
@@ -9102,7 +9278,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-t u") #'disco-room-set-thread-muted)
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
-    (define-key map (kbd "C-c C-v") #'disco-room-refetch-avatars)
+    (define-key map (kbd "C-c M-v") #'disco-room-refetch-avatars)
     (define-key map (kbd "C-c ?") #'disco-room-transient)
     map)
   "Keymap for `disco-room-mode'.")

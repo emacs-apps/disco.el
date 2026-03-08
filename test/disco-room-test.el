@@ -32,6 +32,12 @@
     (should-not disco-room-timeline-mode)
     (should (eq (key-binding (kbd "q") t)
                 'self-insert-command))
+    (should (eq (key-binding (kbd "M-RET") t) 'disco-room-input-preview))
+    (should (eq (key-binding (kbd "M-r") t) 'disco-room-draft-history-search))
+    (should (eq (key-binding (kbd "C-c C-e") t) 'disco-room-input-formatting-set))
+    (should (eq (key-binding (kbd "C-c C-o") t) 'disco-room-input-options-transient))
+    (should (eq (key-binding (kbd "C-c C-v") t) 'disco-room-attach-clipboard))
+    (should (eq (key-binding (kbd "C-c M-v") t) 'disco-room-refetch-avatars))
     (goto-char (point-min))
     (disco-room--update-context-mode)
     (should disco-room-timeline-mode)
@@ -39,10 +45,51 @@
     (should (eq (key-binding (kbd "r") t) 'disco-room-reply-to-message))
     (should (eq (key-binding (kbd "f") t) 'disco-room-forward-message))
     (should (eq (key-binding (kbd "T") t) 'disco-room-open-thread-from-message-at-point))
-    (should (eq (key-binding (kbd "C-c C-a") t) 'disco-room-attach-file))
+    (should (eq (key-binding (kbd "C-c C-a") t) 'disco-room-attach-transient))
     (should (eq (key-binding (kbd "C-c m r") t) 'disco-room-reply-to-message))
     (should (eq (key-binding (kbd "C-c m f") t) 'disco-room-forward-message))
     (should (eq (key-binding (kbd "C-c m e") t) 'disco-room-edit-message))))
+
+(ert-deftest disco-room-draft-history-search-loads-match ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--input-ring (make-ring 5))
+    (ring-insert disco-room--input-ring "deploy status")
+    (ring-insert disco-room--input-ring "hello world")
+    (ring-insert disco-room--input-ring "alpha beta")
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest _args) nil)))
+      (disco-room-draft-history-search "hello"))
+    (should (equal "hello world" (disco-room--current-draft-text)))))
+
+(ert-deftest disco-room-input-preview-renders-parsed-attachments ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (let ((path (make-temp-file "disco-room-preview"))
+          (preview-buf nil))
+      (unwind-protect
+          (progn
+            (disco-room--set-draft
+             (concat "hello "
+                     (disco-room--attachment-input-object-string
+                      (disco-room--make-attachment-input-object path :description "preview"))))
+            (cl-letf (((symbol-function 'display-buffer)
+                       (lambda (buffer-or-name &rest _args)
+                         (setq preview-buf (get-buffer buffer-or-name))
+                         preview-buf))
+                      ((symbol-function 'message)
+                       (lambda (&rest _args) nil)))
+              (disco-room-input-preview))
+            (should (buffer-live-p preview-buf))
+            (with-current-buffer preview-buf
+              (should (string-match-p "Composer mode: message" (buffer-string)))
+              (should (string-match-p "hello" (buffer-string)))
+              (should (string-match-p "preview" (buffer-string)))))
+        (when (buffer-live-p preview-buf)
+          (kill-buffer preview-buf))
+        (delete-file path)))))
 
 (ert-deftest disco-room-ack-channel-pins-applies-state-on-success ()
   (with-temp-buffer

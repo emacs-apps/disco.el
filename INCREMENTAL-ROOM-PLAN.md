@@ -97,17 +97,19 @@ Rules:
 
 Current high-value follow-ups:
 
-- `C-c C-a` should become the primary attachment entry point
+- `C-c C-a` is the primary attachment entry point and should stay the
+  telega-aligned attach anchor
 - `C-c C-f` should evolve toward telega-like media/file attach semantics
 - message-at-point bare keys should be preferred whenever room is in timeline
   context, matching telega's button-map style
 - `C-c m f` should be the primary prefix fallback for forward, with legacy
   global binding treated as compatibility only
-- `C-c C-v` should eventually be freed for clipboard/media attach rather than
-  unrelated room maintenance actions
-- `M-RET`, `M-r`, `C-c C-e`, and `C-c C-o` should stay reserved for telega-like
-  preview, input-history search, formatting, and input options until room has
-  matching semantics
+- `C-c C-v` should remain reserved for clipboard/media attach semantics until
+  room has a real implementation behind it
+- `M-RET`, `M-r`, and `C-c C-o` now carry telega-like preview,
+  input-history-search, and input-options roles; `C-c C-e` and `C-c C-v`
+  should stay reserved until room has real formatting and clipboard-attach
+  implementations
 - `C-c C-c` needs an explicit long-term decision: either converge toward
   telega's filter-cancel usage or remain a documented divergence because room
   treats it as a send alias
