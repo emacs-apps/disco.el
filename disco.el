@@ -24,7 +24,6 @@
 (require 'disco-api)
 (require 'disco-http)
 (require 'disco-gateway)
-(require 'disco-transient)
 (require 'disco-room)
 (require 'disco-root)
 

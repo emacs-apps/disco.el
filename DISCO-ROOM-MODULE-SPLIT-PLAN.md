@@ -81,6 +81,12 @@ Target outcome:
 The goal is not file-name mimicry.  The goal is to copy telega's responsibility
 layout where it makes sense for Discord.
 
+One important consequence: `disco-transient.el` should not be treated as a
+catch-all home for root or room menus.  In telega, `telega-transient.el`
+mainly owns transient infrastructure and stateful operation transients.
+Root-local command menus belong with the root subsystem, and room transients
+should usually live with the module that owns the underlying operation.
+
 | disco target | Main responsibility | Telega reference | Notes |
 | --- | --- | --- | --- |
 | `disco-room.el` | room facade/adaptor | `telega-chat.el` chatbuf entrypoints | thin shell only |
@@ -90,7 +96,7 @@ layout where it makes sense for Discord.
 | `disco-room-events.el` | gateway-driven updates and local patch application | `telega-tdlib-events.el` + `telega-chat.el` dirtiness/update code | keep partial patching here |
 | `disco-room-search.el` | filter search, inplace search, jump flows, draft-history search | search/filter sections of `telega-chat.el` | message search is its own concern |
 | `disco-room-thread-ui.el` | room-level thread commands and prompts | thread/topic command areas in `telega-chat.el` | should build on `disco-thread.el` |
-| `disco-room-transient.el` | room transients and command menus | `telega-transient.el` | low-risk extraction |
+| `disco-transient.el` (optional later) | shared transient classes/helpers only | infrastructure portions of `telega-transient.el` | add only when support code is truly shared |
 | `disco-room-avatar.el` (optional) | avatar cache/fetch/render helpers | avatar/media helpers spread across telega | only if render remains too large |
 | `disco-room-read-state.el` (optional) | optimistic ack/read bookkeeping | read-state update helpers in telega chat/events | optional follow-up |
 
@@ -117,7 +123,7 @@ Should not own long implementations for:
 - gateway event dispatch
 - search/filter algorithms
 - thread setting prompts
-- transient definitions
+- operation-specific transient UIs that belong to compose/message/thread modules
 
 ### 2. `disco-room-compose.el`
 
@@ -288,8 +294,8 @@ Preferred internal split if needed:
 Telega correspondence:
 
 - this is the nearest disco equivalent to `telega-ins.el`
-- high churn risk; do this after compose/search/transient split patterns are
-  established
+- high churn risk; do this after compose/search split patterns and owner
+  boundaries are established
 
 ### 7. `disco-room-events.el`
 
@@ -314,17 +320,23 @@ Telega correspondence:
 - nearest disco equivalent to `telega-tdlib-events.el`
 - keep this module centered on incremental updates, not on initial full render
 
-### 8. `disco-room-transient.el`
+### 8. Transient placement rule
 
-Owns transient definitions only.
+Transient is an implementation detail, not a top-level split axis.
 
-Move here:
+Rules:
 
-- `disco-room-transient`
-- any future room attach/message/thread transients that grow further
+- keep root command menus in `disco-root.el` or another root-owned module
+- keep room-wide command menus in `disco-room.el` temporarily, unless a more
+  specific owner already exists
+- move composer transients into `disco-room-compose.el`
+- move message operation transients into `disco-room-message.el`
+- introduce or expand `disco-transient.el` only for shared transient classes,
+  infix/suffix helpers, or compatibility glue used by multiple subsystems
 
-This is intentionally small and low risk.  It is a good first extraction to set
-module conventions.
+Do not create standalone `disco-room-transient.el` or
+`disco-root-transient.el` files unless they later accumulate enough
+owner-specific support code to justify their own module boundary.
 
 ## Existing shared modules to expand instead of adding room-specific files
 
@@ -379,7 +391,7 @@ these modules rather than inventing `disco-room-attachment-render.el` too early.
 - define one naming rule:
   - room facade keeps `disco-room-*` for public room commands and adapters
   - extracted module internals should prefer module-specific prefixes such as
-    `disco-room-search--*` and `disco-room-transient--*`
+    `disco-room-search--*`, `disco-room-compose--*`, or `disco-room-menu--*`
   - compatibility wrappers using older `disco-room--*` names may remain while
     call sites, tests, and docs migrate
   - file ownership is documented in file header commentary
@@ -390,7 +402,7 @@ Acceptance:
 - no behavior change
 - load path and requires are stable
 
-### Milestone 1 - extract transients and search
+### Milestone 1 - extract search first
 
 Why first:
 
@@ -400,14 +412,14 @@ Why first:
 
 Move:
 
-- `disco-room-transient`
 - `disco-room-search*`, filter/inplace helpers, jump helpers
 
 Acceptance:
 
 - search behavior unchanged
-- room transient unchanged
-- tests split into `test/disco-room-search-test.el` and a transient smoke test
+- tests split into `test/disco-room-search-test.el` or equivalent focused cases
+- room/root command menus remain behavior-compatible while ownership is still
+  being sorted
 
 ### Milestone 2 - extract composer core
 
@@ -523,7 +535,9 @@ To prevent a new spaghetti graph, use these rules.
   should not own attach/send logic.
 - `disco-room-search.el` may depend on state/api/facade render hooks, but not
   on render section insertion helpers.
-- `disco-room-transient.el` should depend on public commands only.
+- transient helpers should depend on public commands or owner-local helpers
+  only; shared transient infrastructure belongs in `disco-transient.el` only
+  when multiple subsystems actually need it.
 
 If a helper is needed by both compose and render, prefer moving it into a shared
 module (`disco-chatbuf.el`, `disco-msg.el`, `disco-thread.el`) instead of
@@ -604,7 +618,9 @@ Mitigation:
 - do not split one file per command if they still share one state machine
 - do not move Discord-specific send logic into `disco-chatbuf.el`
 - do not make `disco-room-render.el` call deep composer internals directly
-- do not let transient files become the place where real business logic lives
+- do not create standalone transient files just because a command uses
+  `transient`; keep the code with the owning subsystem unless support code is
+  genuinely shared
 - do not remove compatibility wrappers until docs/tests and call sites are all
   updated
 
@@ -613,12 +629,13 @@ Mitigation:
 If work starts immediately, the lowest-risk sequence is:
 
 1. add this plan reference from `INCREMENTAL-ROOM-PLAN.md`
-2. create `disco-room-transient.el` and move transient definitions
-3. create `disco-room-search.el` and move filter/inplace/jump logic
-4. create `disco-room-compose.el` and move draft/object/preview/options helpers
-5. move send pipeline into the same compose module
-6. create `disco-room-message.el` and move reply/forward/edit/delete/reaction
+2. create `disco-room-search.el` and move filter/inplace/jump logic
+3. create `disco-room-compose.el` and move draft/object/preview/options helpers
+4. move send pipeline into the same compose module
+5. create `disco-room-message.el` and move reply/forward/edit/delete/reaction
    actions
+6. move transient UIs into the compose/message owners only when those owners
+   exist, instead of introducing a transient-only module first
 
 That gets the file split pattern established before touching the most fragile
 render/event internals.

@@ -20,6 +20,7 @@
 (require 'disco-view)
 (require 'disco-api)
 (require 'disco-channel-type)
+(require 'disco-customize)
 (require 'disco-gateway)
 (require 'disco-msg)
 (require 'disco-room)
@@ -28,7 +29,6 @@
 (require 'disco-permission)
 (require 'disco-root-layout)
 (require 'disco-root-view)
-(require 'disco-transient)
 
 (defconst disco-root-buffer-name "*disco*"
   "Main root buffer name.")
@@ -1882,6 +1882,52 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   (disco-root--search-ensure-draft)
   (transient-setup 'disco-root-search-transient nil nil :scope (current-buffer)))
 
+(defun disco-root-menu-reset-session-state ()
+  "Reset in-memory session state for disco.el."
+  (interactive)
+  (disco-gateway-stop)
+  (disco-state-reset)
+  (disco-api-reset-rate-limit-state)
+  (disco-http-reset-queue-state)
+  (message "disco: in-memory state reset"))
+
+(defun disco-root-menu-toggle-active-thread-prefetch ()
+  "Toggle `disco-fetch-guild-active-threads' and refresh root when relevant."
+  (interactive)
+  (setq disco-fetch-guild-active-threads (not disco-fetch-guild-active-threads))
+  (message "disco: active thread prefetch %s"
+           (if disco-fetch-guild-active-threads "enabled" "disabled"))
+  (when (derived-mode-p 'disco-root-mode)
+    (disco-root-refresh)))
+
+(defun disco-root-menu-set-thread-archive-fetch-limit (limit)
+  "Set archived thread fetch LIMIT in current session."
+  (interactive "nArchive thread fetch limit (2-100): ")
+  (setq disco-thread-archive-fetch-limit (max 2 (min 100 limit)))
+  (message "disco: archive thread fetch limit set to %d"
+           disco-thread-archive-fetch-limit))
+
+(transient-define-prefix disco-root-transient ()
+  "Root command menu for disco.el."
+  [["Refresh"
+    ("g" "Refresh root" disco-root-refresh)
+    ("A" "Archived threads..." disco-root-list-archived-threads)
+    ("t" "Toggle active thread prefetch"
+     disco-root-menu-toggle-active-thread-prefetch)
+    ("L" "Set archive fetch limit"
+     disco-root-menu-set-thread-archive-fetch-limit)]
+   ["View"
+    ("l" "Cycle layout" disco-root-cycle-layout)
+    ("V" "Set layout..." disco-root-set-layout)
+    ("s" "Search..." disco-root-search-transient)
+    ("U" "Toggle unread lens" disco-root-toggle-unread-lens)]
+   ["Inspect"
+    ("H" "HTTP queue" disco-http-describe-queue)
+    ("R" "Rate limits" disco-api-describe-rate-limits)
+    ("G" "Gateway status" disco-gateway-describe-status)]
+   ["Session"
+    ("x" "Reset session state" disco-root-menu-reset-session-state)
+    ("q" "Quit window" quit-window)]])
 
 (defun disco-root--search-tab-summary-chip (tab)
   "Return one summary chip string for root search TAB."
