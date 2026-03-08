@@ -1,215 +1,330 @@
-# disco-room incremental update plan
+# disco-room telega chatbuf alignment plan
+
+## Status
+
+This plan updates the older `disco-room` refactor outline to match the current
+shared goal for `disco.el` and `emacs-qq`.
+
+It complements these documents:
+
+- `emacs-qq/TELEGA-CHATBUF-ALIGNMENT-DESIGN.md`
+- `emacs-qq/INCREMENTAL-CHAT-PLAN.md`
+
+The earlier version of this file focused mostly on persistent EWOC and local
+message invalidation.  Much of that groundwork is already in place.  The main
+remaining gap is no longer timeline persistence; it is chatbuf/composer
+architecture.
 
 ## Goal
 
-Move `disco-room` closer to telega-style chatbuf behavior:
+Move `disco-room` toward the same telega-style chatbuf model now targeted for
+both clients:
 
-- keep composer/input undo-friendly
-- avoid full room rerenders for routine live updates
-- keep one persistent EWOC for the room timeline
-- update header, footer, prompt, and message nodes independently
-- make `emacs-qq` reuse the same infrastructure
+- one real tail input region in the buffer
+- prompt and footer updated independently from the input contents
+- reply/edit/forward-like state represented as aux state
+- structured input objects instead of text-only draft conventions
+- normal typing and undo behavior
+- a shared chatbuf core in `disco.el` that `disco-room` and `qq-chat` both use
+
+This is architectural alignment, not a visual clone of telega.
+
+## What changed from the old plan
+
+The following assumptions from the older plan no longer match the current
+objective:
+
+- the main blocker is not EWOC lifetime anymore; `disco-room` already keeps a
+  persistent EWOC and message-node table in practice
+- the next step is not "better footer composer updates"; the next step is to
+  stop treating the composer as editable footer text at all
+- attachment tokens should not be treated as the long-term model
+- shared infrastructure should grow beyond `disco-chat-input.el` into a richer
+  chatbuf core
+- `emacs-qq` should not merely reuse the old input layer; both clients should
+  converge on one chatbuf architecture
 
 ## What telega is doing differently
 
-Observed from `telega-chat.el` and `telega-core.el`:
+The important telega properties to align with are:
 
-- the chat buffer keeps a stable input marker
-- prompt/footer updates are incremental (`telega-chatbuf--footer-update`,
-  `telega-chatbuf--prompt-update`)
-- message area lives in a persistent EWOC
-- ordinary typing is not globally undo-disabled
-- special bulk UI mutations may locally avoid undo noise, but input itself keeps
-  normal editing semantics
+- the input region is the real tail of the chat buffer
+- prompt and footer are separate update surfaces
+- reply/edit live in a dedicated aux state object
+- input can contain structured objects via text properties
+- send logic parses the input region into backend-native payloads
+- prompt/footer changes do not require rebuilding the editable input region
 
 ## Current disco-room state
 
-Already present:
+### Already present
 
-- EWOC timeline
-- message node table
-- partial node helpers for insert/update/delete
-- shared chat input module: `disco-chat-input.el`
+`disco-room` already has substantial timeline groundwork:
 
-Still blocking telega-like behavior:
+- persistent EWOC timeline
+- persistent message-node table
+- render-context table keyed by message id
+- partial patching for ordinary message changes
+- point-preserving frame and timeline updates
+- local invalidation for several media and message dependency cases
+- initial shared chatbuf skeleton now lives in `disco-chatbuf.el`
 
-- `disco-room-render` recreates the EWOC and message-node table
-- header/footer/composer are rebuilt together with the whole room
-- message create/update/delete still falls back to full rerender because layout
-  context depends on neighboring messages
-- async avatar/preview/download updates often rerender more than necessary
+### Still misaligned with the target
+
+The remaining misalignment is concentrated in composer/input architecture:
+
+- editable input still comes from footer-composed text via `disco-chat-input.el`
+- prompt, footer, and input still behave like one coupled surface
+- reply/edit state is split across room-local variables instead of a common aux
+  state model
+- attachments still use visible draft tokens like `[file:n]`
+- send logic is still string-first and then strips token syntax back out
+- the shared input layer is still too weak to serve as the long-term core for
+  both `disco-room` and `qq-chat`
 
 ## Target architecture
 
-### 1. Stable room frame
+### 1. Shared chatbuf core in `disco.el`
 
-Keep these objects stable for the entire room buffer lifetime:
+A shared module, `disco-chatbuf.el`, becomes the default place for chatbuf
+composer behavior.
 
-- `disco-room--ewoc`
-- `disco-room--message-node-table`
-- `disco-room--render-context-by-message-id`
-- composer markers and footer properties
+It should own:
 
-Only recreate them on hard resets:
+- stable prompt/input markers
+- prompt button lifecycle
+- tail-input management
+- input history behavior
+- aux state lifecycle
+- input-options state lifecycle
+- structured input object insertion and repair
+- shared prompt/footer update primitives
 
-- opening a different room in the buffer
-- layout/filter mode changes that invalidate all rendered nodes
-- explicit full reset paths
+It should not own:
 
-### 2. Split rendering responsibilities
+- room timeline rendering details
+- Discord-specific permission logic
+- Discord-specific message serialization rules
 
-Break current `disco-room-render` into explicit update layers:
+### 2. Real tail input region
 
-- `disco-room--render-header`
-- `disco-room--render-footer`
-- `disco-room--render-composer`
-- `disco-room--render-full-timeline`
-- `disco-room--render-full`
+`disco-room` should stop rebuilding an editable draft region through EWOC footer
+properties.
 
-This makes it possible to refresh only the dirty surface.
+Instead:
 
-### 3. Localized timeline invalidation
+- the footer stays read-only UI
+- the prompt is inserted and updated independently
+- the editable input begins at a stable marker after the prompt
+- current draft contents are the real buffer text from input marker to point max
 
-Introduce neighborhood-aware invalidation helpers:
+This removes the need for:
 
-- `disco-room--message-prev-id`
-- `disco-room--message-next-id`
-- `disco-room--invalidate-message-neighborhood`
-- `disco-room--recompute-render-context-around`
+- footer-property rebinding for the input region
+- synthetic newline handling for empty drafts
+- special logical-end behavior caused by synthetic footer input
 
-Reason: grouping, date separators, and unread divider depend on nearby messages,
-not only on the current node.
+### 3. Prompt and footer split
 
-### 4. Dirty-region model
+Prompt and footer should become separate surfaces.
 
-Track which parts of the room must update:
+Prompt should reflect compact send identity and mode information.
+Footer should host read-only modules such as:
 
-- header dirty
-- footer dirty
-- composer dirty
-- timeline full dirty
-- message-id set dirty
+- typing indicator
+- restriction reason
+- aux summary when useful
+- room-specific status lines
+- future input options summary
 
-Then one dispatcher decides whether to do:
+### 4. Aux state becomes first-class
 
-- footer-only refresh
-- prompt/composer-only refresh
-- node invalidation for a small message neighborhood
-- full timeline refresh
+The current mix of `disco-room--pending-reply-to`, `disco-room--pending-edit`,
+and footer text should converge on a shared aux model.
 
-## Phases
+The shared aux object should cover at least:
 
-### Phase 0 - done
+- aux type
+- primary message/source object
+- optional aux metadata
+- saved draft state where needed
 
-- extract shared composer/input logic to `disco-chat-input.el`
-- switch `disco-room` and `emacs-qq` chat input to the shared module
+`disco-room` may keep compatibility wrappers while migrating, but send, cancel,
+and display should move toward aux-driven behavior.
 
-### Phase 1 - persistent composer/footer
+### 5. Structured input objects replace attachment tokens
 
-1. keep one EWOC instance alive after room creation
-2. replace EWOC footer text in place instead of recreating EWOC on every render
-3. make composer updates preserve point/window/input offsets
-4. ensure chat input undo stays intact during footer refreshes
+Visible attachment token syntax should be treated as transitional only.
 
-Expected win:
+The long-term model is telega-style structured input objects stored as text
+properties on inserted display text.
 
-- telega-like input behavior
-- much less undo pollution
-- less point jitter while typing
+For `disco-room`, likely object kinds include:
 
-### Phase 2 - persistent timeline container
+- attachment
+- forward stub or forward selection later
+- poll draft or poll option stub later
+- future send-option objects where useful
 
-1. stop recreating `disco-room--message-node-table` on ordinary render
-2. add explicit hard-reset path for true full rebuilds
-3. create helpers to reconcile displayed message ids with current state
-4. reuse existing nodes whenever message identity remains stable
+### 6. `disco-room` becomes a chatbuf adapter
 
-Expected win:
+After migration, `disco-room` should primarily provide:
 
-- avatars/previews/reactions can update existing nodes
-- less allocation and less flicker
+- room-specific prompt/footer content
+- room-specific aux rendering text
+- room-specific send serialization from chatbuf contents
+- room-specific permission and capability rules
+- room timeline rendering and invalidation
 
-### Phase 3 - neighborhood incremental updates
+The generic chatbuf mechanics should live below it.
 
-1. compute render context for one message from `(prev current next)`
-2. invalidate current node plus minimal affected neighbors
-3. use partial path for:
-   - message create
-   - message update
-   - message delete
-   - recall/edit-like events
-4. keep full rerender as fallback only when neighborhood reasoning fails
+## Migration phases
 
-Expected win:
+### Phase 0 - timeline groundwork mostly done
 
-- new messages no longer force full room redraw
-- compact grouping and date separators remain correct
+This phase is effectively already in place:
 
-### Phase 4 - async media/UI patching
+- persistent EWOC lifetime
+- message-node reuse
+- render-context tracking
+- partial message invalidation for many routine changes
 
-Convert these to node-local updates:
+These are no longer the critical path for telega alignment.
 
-- avatar fetch completion
-- attachment preview completion
-- download-state changes
-- spoiler reveal reset
-- reaction and poll changes
+### Phase 1 - shared chatbuf core skeleton
 
-Expected win:
+Status: started.
 
-- async resource completion no longer redraws the whole room
+Deliverables:
 
-### Phase 5 - history paging and jumps
+- `disco-chatbuf.el` exists
+- shared prompt/input/history/aux/object helpers exist
+- focused tests cover prompt lifecycle, object repair, history, and aux state
 
-1. prepend older messages into EWOC without full rebuild
-2. append newer history when needed without full rebuild
-3. preserve window anchor and input offsets during page merges
-4. keep unread divider logic correct after incremental history insertion
+This phase is about stabilizing the shared API shape before migration of larger
+buffers.
 
-Expected win:
+### Phase 2 - validate the shared core on the simpler client first
 
-- scrolling near room edges behaves more like telega
-
-### Phase 6 - expose reusable chat timeline API
-
-Once `disco-room` stabilizes, extract generic pieces for reuse by other clients:
-
-- persistent timeline container
-- node reconciliation helpers
-- neighborhood invalidation helpers
-- composer/footer updater hooks
-
-This is the point where `emacs-qq` can reuse not only the input layer, but also
-more of the timeline engine directly.
-
-## Immediate implementation order
-
-1. Phase 1 first
-2. then Phase 2
-3. then Phase 3
-4. only after that optimize media patch paths further
+For lowest risk, the first concrete consumer should be `emacs-qq`.
 
 Reason:
 
-- stable composer/footer is the biggest user-facing pain
-- stable EWOC lifetime is required before local message invalidation becomes
-  worth doing
-- async media optimizations are much safer once the container is persistent
+- `qq-chat` has fewer send variants
+- OneBot segments are already a natural structured input target
+- the shared core can be adjusted there before `disco-room` takes it on
+
+This means `disco-room` should not race ahead with a room-specific rewrite that
+bypasses the shared core.
+
+### Phase 3 - migrate `disco-room` to real tail input
+
+Deliverables:
+
+- `disco-room` stops creating editable input through EWOC footer text
+- prompt lifecycle moves to `disco-chatbuf.el`
+- footer becomes read-only UI only
+- room draft reads and writes go through the real tail input region
+
+Expected win:
+
+- simpler point handling
+- fewer input-specific footer hacks
+- closer telega alignment for normal typing behavior
+
+### Phase 4 - move reply/edit to aux-driven behavior
+
+Deliverables:
+
+- reply and edit state map cleanly onto shared aux state
+- cancel paths use common aux reset behavior
+- prompt/footer display is derived from aux state
+- room-local compatibility wrappers remain only where necessary
+
+Expected win:
+
+- cleaner room command model
+- easier parity with `qq-chat`
+- easier future extension for forward or richer compose modes
+
+### Phase 5 - replace attachment tokens with structured input objects
+
+Deliverables:
+
+- `disco-room-attach-file` inserts an input object instead of textual token
+- attachment listing, removal, and reorder operate on objects rather than token
+  syntax
+- draft display remains readable without exposing transport syntax
+
+Expected win:
+
+- no more token cleanup pass before send
+- cleaner send pipeline
+- much closer match to telega's input-object model
+
+### Phase 6 - adapt send logic to parsed chatbuf contents
+
+Deliverables:
+
+- send logic consumes parsed chatbuf contents plus aux state
+- string content, attachments, and future objects are serialized by a dedicated
+  room adapter layer
+- edit/send paths stop depending on token stripping
+
+Expected win:
+
+- cleaner send semantics
+- easier future support for richer object kinds
+- less incidental coupling between UI text and outbound payload shape
+
+### Phase 7 - cleanup and consolidation
+
+Deliverables:
+
+- old `disco-chat-input.el` paths become compatibility shims or are removed
+- prompt/footer update paths are clearly separate from timeline updates
+- common chatbuf invariants are tested independently from room rendering tests
+
+Expected win:
+
+- one obvious place to evolve composer behavior in the future
+- less duplicate work across `disco-room` and `qq-chat`
+
+## Immediate implementation order
+
+1. keep growing and testing `disco-chatbuf.el`
+2. validate its API shape in `emacs-qq` first
+3. migrate `disco-room` from footer-composed input to tail input
+4. move reply/edit to aux-driven behavior
+5. replace attachment tokens with structured objects
+6. adapt send/edit logic to parsed chatbuf contents
+7. only then remove old compatibility layers
+
+Reason:
+
+- shared API stability matters more than early room-specific cleverness
+- tail input migration is the key architectural shift
+- token removal is safest after tail input and aux state are already in place
 
 ## Risk areas
 
-- compact grouping is neighbor-sensitive
-- date separators are neighbor-sensitive
-- unread divider is globally sensitive to last-read state
-- filter mode may still require full timeline rebuilds
-- width changes and text scaling may still require full visible rerender
+- temporarily coexisting footer-composed and tail-input paths can make point
+  preservation tricky during migration
+- attachment editing and message editing have different backend constraints and
+  should not be conflated
+- `disco-room` has more send variants than `qq-chat`, so adapter boundaries
+  must be designed before object support expands too far
+- width changes and some structural view changes may still require full visible
+  rerender even after chatbuf migration
 
 ## Success criteria
 
-We can consider the refactor successful when all are true:
+We can consider this plan successful when all are true:
 
-- typing in `disco-room` keeps normal undo history
-- footer/prompt updates do not recreate EWOC
-- message create/update/delete usually invalidate only local nodes
-- avatar/preview completion usually invalidates only local nodes
-- `emacs-qq` can consume the same shared infrastructure with little or no copy
+- typing in `disco-room` no longer depends on footer-property rebound input
+- prompt and footer update independently from the editable input region
+- reply/edit behavior is aux-driven rather than footer-text-driven
+- attachments no longer depend on visible `[file:n]` tokens
+- room send logic is driven by parsed chatbuf contents rather than draft text
+  cleanup
+- `emacs-qq` and `disco-room` are clearly converging on one shared chatbuf core
