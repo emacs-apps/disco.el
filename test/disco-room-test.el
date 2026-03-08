@@ -36,7 +36,8 @@
     (disco-room--update-context-mode)
     (should disco-room-timeline-mode)
     (should (eq (key-binding (kbd "q") t) 'quit-window))
-    (should (eq (key-binding (kbd "r") t) 'disco-room-reply-to-message))))
+    (should (eq (key-binding (kbd "C-c m r") t) 'disco-room-reply-to-message))
+    (should (eq (key-binding (kbd "C-c m e") t) 'disco-room-edit-message))))
 
 (ert-deftest disco-room-ack-channel-pins-applies-state-on-success ()
   (with-temp-buffer

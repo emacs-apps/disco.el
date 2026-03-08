@@ -747,20 +747,20 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
 
 (defvar disco-room-timeline-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-room-refresh)
-    (define-key map (kbd "s") #'disco-room-search)
-    (define-key map (kbd "n") #'disco-room-search-next)
-    (define-key map (kbd "p") #'disco-room-search-prev)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Timeline-only keymap active when point is outside the room draft.")
+
+(defvar disco-room-message-prefix-map
+  (let ((map (make-sparse-keymap)))
     (define-key map (kbd "r") #'disco-room-reply-to-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
     (define-key map (kbd "d") #'disco-room-delete-message)
     (define-key map (kbd "!") #'disco-room-toggle-reaction)
     (define-key map (kbd "+") #'disco-room-add-reaction)
     (define-key map (kbd "-") #'disco-room-remove-reaction)
-    (define-key map (kbd "?") #'disco-room-transient)
-    (define-key map (kbd "q") #'quit-window)
     map)
-  "Timeline-only keymap active when point is outside the room draft.")
+  "Prefix map for message actions at point in `disco-room-mode'.")
 
 (define-minor-mode disco-room-timeline-mode
   "Buffer-local navigation bindings active outside the room draft."
@@ -6030,9 +6030,10 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--header-help-text (&optional channel)
   "Return header help text for room actions in CHANNEL."
   (concat
-   "M-<: older/more   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
-   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   C-c C-w: toggle breakline"
-   "   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end"
+   "M-<: older/more   C-c g/s/n/p: refresh/search/next/prev   M-g s/n/p: inplace search"
+   "   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
+   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   C-c m r/e/d/!/+/-: message actions"
+   "   C-c C-w: toggle breakline   C-c C-p s/+/-/t/v/c/e: poll actions"
    "   C-c C-P: ack pins   C-c C-f/C-F: attach/forward   C-c C-d: remove token"
    "   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments"
    "   C-c C-t o: open message thread   C-c C-t: thread ops"
@@ -6044,7 +6045,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                   "send"))
         "   type at >>>   M-p/M-n: history")
      "   C-c C-v: refetch avatars   [composer hidden]")
-   "   timeline g/s/n/p/r/e/d/!/+/-/q   C-c ?: menu"))
+   "   timeline q: quit   C-c ?: menu"))
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
@@ -8777,6 +8778,11 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "TAB") #'disco-room-complete-mention)
     (define-key map (kbd "<tab>") #'disco-room-complete-mention)
     (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
+    (define-key map (kbd "C-c g") #'disco-room-refresh)
+    (define-key map (kbd "C-c s") #'disco-room-search)
+    (define-key map (kbd "C-c n") #'disco-room-search-next)
+    (define-key map (kbd "C-c p") #'disco-room-search-prev)
+    (define-key map (kbd "C-c m") disco-room-message-prefix-map)
     (define-key map (kbd "M-<") #'disco-room-load-older-messages)
     (define-key map (kbd "RET") #'disco-room-return-dwim)
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)
