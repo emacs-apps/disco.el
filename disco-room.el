@@ -1034,13 +1034,13 @@ MIN-COUNT optionally requires at least that many queued attachments."
 (defun disco-room--poll-vote-unavailable-reason (&optional msg)
   "Return reason poll voting actions are unavailable for MSG, or nil."
   (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
-         (poll (and (listp msg) (disco-room--message-poll msg))))
+         (poll (and (listp msg) (disco-msg-poll msg))))
     (cond
      ((null msg)
       "point is not on a message")
      ((null poll)
       "point is not on a poll")
-     ((disco-room--poll-expired-p poll)
+     ((disco-msg-poll-expired-p poll)
       "poll is closed")
      (t
       (disco-room--room-send-restriction-reason)))))
@@ -1051,14 +1051,14 @@ MIN-COUNT optionally requires at least that many queued attachments."
          (base-reason (disco-room--poll-vote-unavailable-reason msg)))
     (or base-reason
         (let* ((target-id (alist-get 'id msg))
-               (poll (disco-room--message-poll msg))
+               (poll (disco-msg-poll msg))
                (staged (disco-room--poll-effective-selection target-id poll))
-               (committed (disco-room--poll-voted-answer-ids poll)))
+               (committed (disco-msg-poll-voted-answer-ids poll)))
           (cond
            ((null staged)
             "no staged poll selection")
-           ((equal (disco-room--poll-normalize-answer-id-list staged)
-                   (disco-room--poll-normalize-answer-id-list committed))
+           ((equal (disco-msg-poll-normalize-answer-id-list staged)
+                   (disco-msg-poll-normalize-answer-id-list committed))
             "no pending poll vote changes"))))))
 
 (defun disco-room--poll-clear-unavailable-reason (&optional msg)
@@ -1066,21 +1066,21 @@ MIN-COUNT optionally requires at least that many queued attachments."
   (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
          (base-reason (disco-room--poll-vote-unavailable-reason msg)))
     (or base-reason
-        (let* ((poll (and (listp msg) (disco-room--message-poll msg)))
-               (committed (and poll (disco-room--poll-voted-answer-ids poll))))
+        (let* ((poll (and (listp msg) (disco-msg-poll msg)))
+               (committed (and poll (disco-msg-poll-voted-answer-ids poll))))
           (unless committed
             "no existing poll vote to remove")))))
 
 (defun disco-room--poll-expire-unavailable-reason (&optional msg)
   "Return reason end-poll is unavailable for MSG, or nil."
   (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
-         (poll (and (listp msg) (disco-room--message-poll msg))))
+         (poll (and (listp msg) (disco-msg-poll msg))))
     (cond
      ((null msg)
       "point is not on a message")
      ((null poll)
       "point is not on a poll")
-     ((disco-room--poll-expired-p poll)
+     ((disco-msg-poll-expired-p poll)
       "poll is already closed")
      ((not (disco-room--poll-owned-by-current-user-p msg nil))
       "only poll author can end this poll")
@@ -1322,18 +1322,18 @@ If current user identity is unknown, return UNKNOWN-VALUE."
 
 (defun disco-room--poll-can-vote-p (msg)
   "Return non-nil when current user can vote in poll message MSG."
-  (let ((poll (disco-room--message-poll msg)))
+  (let ((poll (disco-msg-poll msg)))
     (and poll
-         (not (disco-room--poll-expired-p poll))
+         (not (disco-msg-poll-expired-p poll))
          (disco-permission-channel-has-all-p
           (disco-room--channel-object)
           (disco-room--poll-vote-required-permissions)))))
 
 (defun disco-room--poll-can-expire-p (msg)
   "Return non-nil when current user can end poll message MSG."
-  (let ((poll (disco-room--message-poll msg)))
+  (let ((poll (disco-msg-poll msg)))
     (and poll
-         (not (disco-room--poll-expired-p poll))
+         (not (disco-msg-poll-expired-p poll))
          (disco-room--poll-owned-by-current-user-p msg t)
          (disco-permission-channel-has-all-p
           (disco-room--channel-object)
@@ -2310,22 +2310,6 @@ updates, and keep draft cursor stable when point is in the composer."
       (or (plist-get disco-room--msg-filter :items) '())
     (or (disco-state-messages disco-room--channel-id) '())))
 
-(defun disco-room--normalize-id (value)
-  "Return normalized snowflake-like ID string from VALUE, or nil."
-  (disco-msg-normalize-id value))
-
-(defun disco-room--message-reference-id (msg)
-  "Return generic referenced message ID for MSG, or nil."
-  (disco-msg-reference-id msg))
-
-(defun disco-room--message-reference-channel-id (msg)
-  "Return generic referenced channel ID for MSG, or nil."
-  (disco-msg-reference-channel-id msg))
-
-(defun disco-room--message-reference-guild-id (msg)
-  "Return generic referenced guild ID for MSG, or nil."
-  (disco-msg-reference-guild-id msg))
-
 (defun disco-room--message-position (message-id)
   "Return buffer position for MESSAGE-ID in current room render, or nil."
   (when (and (stringp message-id) (not (string-empty-p message-id)))
@@ -2517,9 +2501,9 @@ message id and render that context before jumping."
                       (or (ignore-errors (disco-room--message-id-at-point))
                           ""))
          nil))
-  (let* ((target-id (disco-room--normalize-id message-id))
-         (target-channel (disco-room--normalize-id (or channel-id disco-room--channel-id)))
-         (current-channel (disco-room--normalize-id disco-room--channel-id)))
+  (let* ((target-id (disco-msg-normalize-id message-id))
+         (target-channel (disco-msg-normalize-id (or channel-id disco-room--channel-id)))
+         (current-channel (disco-msg-normalize-id disco-room--channel-id)))
     (unless (and (stringp target-id) (not (string-empty-p target-id)))
       (user-error "disco: message id is empty"))
     (if (or (null target-channel) (equal target-channel current-channel))
@@ -2833,32 +2817,6 @@ When PREFIX is a mutable prefix-state, consume first-prefix when CONSUME is
 non-nil. DEFAULT falls back to four spaces."
   (disco-ui-prefix-string prefix consume (or default "    ")))
 
-(defun disco-room--message-time (msg)
-  "Return decoded time for MSG timestamp, or nil when unavailable."
-  (let ((raw (alist-get 'timestamp msg)))
-    (when (and (stringp raw) (not (string-empty-p raw)))
-      (condition-case _
-          (date-to-time raw)
-        (error nil)))))
-
-(defun disco-room--message-time-epoch (msg)
-  "Return float epoch seconds for MSG timestamp, or nil."
-  (let ((time (disco-room--message-time msg)))
-    (and time (float-time time))))
-
-(defun disco-room--message-day-key (msg)
-  "Return local calendar day key string for MSG timestamp, or nil."
-  (let ((time (disco-room--message-time msg)))
-    (and time (format-time-string "%Y-%m-%d" time))))
-
-(defun disco-room--message-day-label (day-key)
-  "Return pretty date label for DAY-KEY (YYYY-MM-DD)."
-  (if (not (stringp day-key))
-      "Unknown date"
-    (condition-case _
-        (format-time-string "%A, %Y-%m-%d" (date-to-time (concat day-key "T00:00:00")))
-      (error day-key))))
-
 (defun disco-room--same-sender-p (left right)
   "Return non-nil when LEFT and RIGHT messages share sender identity."
   (let ((left-id (disco-room--message-author-id left))
@@ -2877,8 +2835,8 @@ non-nil. DEFAULT falls back to four spaces."
        (not (disco-room--message-system-divider-p previous))
        (not (disco-room--message-system-divider-p current))
        (disco-room--same-sender-p previous current)
-       (let ((previous-time (disco-room--message-time-epoch previous))
-             (current-time (disco-room--message-time-epoch current)))
+       (let ((previous-time (disco-msg-time-epoch previous))
+             (current-time (disco-msg-time-epoch current)))
          (and previous-time
               current-time
               (<= (abs (- current-time previous-time))
@@ -2929,7 +2887,7 @@ PROPERTIES is an optional plist of extra text properties."
 (defun disco-room--insert-date-separator-row (day-key)
   "Insert date separator row for DAY-KEY."
   (disco-room--insert-divider-row
-   (disco-room--message-day-label day-key)
+   (disco-msg-day-label day-key)
    'disco-room-date-separator))
 
 (defun disco-room--insert-unread-divider-row ()
@@ -2978,7 +2936,7 @@ avatar image is prepended when available."
 Type-21 thread starter rows should inherit author identity from the referenced
 source message, not the synthetic starter row itself."
   (let ((author (and (listp msg) (alist-get 'author msg))))
-    (if (= (disco-room--message-type msg) 21)
+    (if (= (disco-msg-type msg) 21)
         (let* ((thread-source (disco-room--thread-starter-reference-message msg))
                (source-author (and (listp thread-source)
                                    (alist-get 'author thread-source))))
@@ -4317,7 +4275,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
             (format "group:%s" name)
           (format "@%s" name)))
        ((disco-state-channel-thread-p channel)
-        (let* ((parent-id (disco-room--normalize-id (alist-get 'parent_id channel)))
+        (let* ((parent-id (disco-msg-normalize-id (alist-get 'parent_id channel)))
                (parent (and parent-id (disco-state-channel parent-id)))
                (parent-name (and parent
                                  (listp parent)
@@ -4330,12 +4288,12 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 
 (defun disco-room--forward-source-context (msg)
   "Return source context plist for forwarded MSG."
-  (let* ((ref-channel-id (disco-room--message-reference-channel-id msg))
-         (ref-guild-id (disco-room--message-reference-guild-id msg))
+  (let* ((ref-channel-id (disco-msg-reference-channel-id msg))
+         (ref-guild-id (disco-msg-reference-guild-id msg))
          (channel (and ref-channel-id (disco-state-channel ref-channel-id)))
          (resolved-guild-id
           (or ref-guild-id
-              (disco-room--normalize-id
+              (disco-msg-normalize-id
                (and (listp channel) (alist-get 'guild_id channel)))))
          (guild (and resolved-guild-id (disco-room--guild-by-id resolved-guild-id)))
          (guild-label
@@ -4427,27 +4385,13 @@ When TARGET-PATH is nil, prompt interactively for destination path."
           (format "[forwarded] %s" trimmed)
         "[forwarded message]"))))
 
-(defun disco-room--message-type (msg)
-  "Return numeric message type for MSG, defaulting to 0."
-  (let ((raw (alist-get 'type msg)))
-    (cond
-     ((integerp raw) raw)
-     ((and (stringp raw)
-           (string-match-p "\\`[0-9]+\\'" raw))
-      (string-to-number raw))
-     (t 0))))
-
-(defun disco-room--message-reply-type-p (msg)
-  "Return non-nil when MSG is a standard reply message."
-  (= (disco-room--message-type msg) 19))
-
 (defun disco-room--message-system-divider-p (msg)
   "Return non-nil when MSG should be rendered as a system divider line.
 
 Types 0 (DEFAULT), 19 (REPLY), 20 (CHAT_INPUT_COMMAND), 21
 (THREAD_STARTER_MESSAGE) and 23 (CONTEXT_MENU_COMMAND) are regular
 messages; everything else is a system event shown as a centered divider."
-  (not (memq (disco-room--message-type msg) '(0 19 20 21 23))))
+  (not (memq (disco-msg-type msg) '(0 19 20 21 23))))
 
 (defun disco-room--user-join-message (msg author)
   "Return rendered USER_JOIN (type 7) message for MSG and AUTHOR."
@@ -4468,10 +4412,10 @@ messages; everything else is a system event shown as a centered divider."
 (defun disco-room--thread-starter-reference-message (msg)
   "Resolve referenced source message object for thread starter MSG."
   (let* ((inline (and (listp msg) (alist-get 'referenced_message msg)))
-         (ref-id (disco-room--message-reference-id msg))
-         (ref-channel-id (or (disco-room--message-reference-channel-id msg)
+         (ref-id (disco-msg-reference-id msg))
+         (ref-channel-id (or (disco-msg-reference-channel-id msg)
                              disco-room--channel-id))
-         (self-id (disco-room--normalize-id (alist-get 'id msg))))
+         (self-id (disco-msg-normalize-id (alist-get 'id msg))))
     (cond
      ((listp inline)
       inline)
@@ -4484,7 +4428,7 @@ messages; everything else is a system event shown as a centered divider."
                            ref-id)))
             ;; Avoid treating the synthetic type-21 row as its own reference.
             (unless (and (listp fallback)
-                         (equal (disco-room--normalize-id (alist-get 'id fallback))
+                         (equal (disco-msg-normalize-id (alist-get 'id fallback))
                                 self-id))
               fallback)))))))
 
@@ -4499,7 +4443,7 @@ messages; everything else is a system event shown as a centered divider."
 
 (defun disco-room--message-guild-name (msg)
   "Return display guild name for MSG, or nil if unavailable."
-  (let* ((msg-guild-id (disco-room--normalize-id (alist-get 'guild_id msg)))
+  (let* ((msg-guild-id (disco-msg-normalize-id (alist-get 'guild_id msg)))
          (guild-id (or msg-guild-id disco-room--guild-id))
          (guild (and guild-id (disco-room--guild-by-id guild-id))))
     (when (listp guild)
@@ -4529,7 +4473,7 @@ messages; everything else is a system event shown as a centered divider."
 
 (defun disco-room--message-system-content (msg)
   "Return rendered system content for MSG type, or nil if not handled."
-  (let* ((type (disco-room--message-type msg))
+  (let* ((type (disco-msg-type msg))
          (author (disco-room--message-author msg))
          (content (string-trim (disco-util-unescape-markdown-punctuation
                                 (or (alist-get 'content msg) ""))))
@@ -4700,14 +4644,14 @@ messages; everything else is a system event shown as a centered divider."
                     (disco-room--message-spoilers-revealed-p message-id))))
          (attachments (disco-room--message-effective-attachments msg))
          (embeds (disco-room--message-effective-embeds msg))
-         (poll (disco-room--message-poll msg))
+         (poll (disco-msg-poll msg))
          (attachment-count (length attachments))
          (embed-count (length embeds))
          (poll-count (if poll 1 0))
          (showing-attachments (and disco-room-show-attachments (> attachment-count 0)))
          (showing-embeds (and disco-room-show-embeds (> embed-count 0)))
          (showing-poll (and disco-room-show-polls (> poll-count 0)))
-         (msg-type (disco-room--message-type msg))
+         (msg-type (disco-msg-type msg))
          (system-content (disco-room--message-system-content msg))
          (forwarded-summary (and (string-empty-p content)
                                  (not disco-room-use-rich-forward-cards)
@@ -4813,153 +4757,6 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
   (disco-embed-insert-message-embeds
    (disco-room--message-with-effective-embeds msg)))
 
-(defun disco-room--message-poll (msg)
-  "Return poll object from MSG, or nil when absent."
-  (let ((poll (alist-get 'poll msg)))
-    (and (listp poll) poll)))
-
-(defun disco-room--poll-results (poll)
-  "Return poll results object from POLL, or nil when unknown."
-  (let ((results (and (listp poll) (alist-get 'results poll))))
-    (and (listp results) results)))
-
-(defun disco-room--poll-answer-id (answer)
-  "Return normalized integer answer id from poll ANSWER, or nil."
-  (let ((raw (and (listp answer) (alist-get 'answer_id answer))))
-    (cond
-     ((integerp raw) raw)
-     ((and (stringp raw)
-           (string-match-p "\\`[0-9]+\\'" raw))
-      (string-to-number raw))
-     (t nil))))
-
-(defun disco-room--poll-answer-media (answer)
-  "Return poll media object for ANSWER."
-  (let ((media (and (listp answer) (alist-get 'poll_media answer))))
-    (and (listp media) media)))
-
-(defun disco-room--poll-answer-text (answer)
-  "Return display text for poll ANSWER."
-  (let* ((media (disco-room--poll-answer-media answer))
-         (text (and media (alist-get 'text media))))
-    (if (and (stringp text) (not (string-empty-p (string-trim text))))
-        (string-trim text)
-      "(no text)")))
-
-(defun disco-room--poll-answer-emoji (answer)
-  "Return emoji label for poll ANSWER, or nil."
-  (let* ((media (disco-room--poll-answer-media answer))
-         (emoji (and media (alist-get 'emoji media)))
-         (name (and (listp emoji) (alist-get 'name emoji))))
-    (and (stringp name)
-         (not (string-empty-p name))
-         name)))
-
-(defun disco-room--poll-question-text (poll)
-  "Return normalized question text for POLL."
-  (let* ((question (and (listp poll) (alist-get 'question poll)))
-         (text (cond
-                ((stringp question) question)
-                ((listp question) (alist-get 'text question))
-                (t nil))))
-    (if (and (stringp text) (not (string-empty-p (string-trim text))))
-        (string-trim text)
-      "(untitled poll)")))
-
-(defun disco-room--poll-answer-count-entry (poll answer-id)
-  "Return result count entry from POLL for ANSWER-ID, or nil."
-  (let ((counts (and (disco-room--poll-results poll)
-                     (alist-get 'answer_counts (disco-room--poll-results poll)))))
-    (seq-find
-     (lambda (entry)
-       (let ((entry-id (alist-get 'id entry)))
-         (or (and (integerp entry-id)
-                  (= entry-id answer-id))
-             (and (stringp entry-id)
-                  (string-match-p "\\`[0-9]+\\'" entry-id)
-                  (= (string-to-number entry-id) answer-id)))))
-     (or counts '()))))
-
-(defun disco-room--poll-answer-count (poll answer-id)
-  "Return vote count for ANSWER-ID in POLL."
-  (let* ((entry (disco-room--poll-answer-count-entry poll answer-id))
-         (count (and (listp entry) (alist-get 'count entry))))
-    (if (numberp count)
-        (max 0 count)
-      0)))
-
-(defun disco-room--poll-answer-me-voted-p (poll answer-id)
-  "Return non-nil when current user voted ANSWER-ID in POLL."
-  (let* ((entry (disco-room--poll-answer-count-entry poll answer-id))
-         (me-voted (and (listp entry) (alist-get 'me_voted entry))))
-    (disco-util-json-true-p me-voted)))
-
-(defun disco-room--poll-total-votes (poll)
-  "Return aggregate vote count from POLL results."
-  (let ((counts (and (disco-room--poll-results poll)
-                     (alist-get 'answer_counts (disco-room--poll-results poll))))
-        (total 0))
-    (dolist (entry (or counts '()) total)
-      (let ((count (and (listp entry) (alist-get 'count entry))))
-        (when (numberp count)
-          (setq total (+ total (max 0 count))))))))
-
-(defun disco-room--poll-multiselect-p (poll)
-  "Return non-nil when POLL allows multiple answers."
-  (disco-util-json-true-p (alist-get 'allow_multiselect poll)))
-
-(defun disco-room--poll-expired-p (poll)
-  "Return non-nil when POLL expiry is in the past."
-  (let ((expiry (and (listp poll) (alist-get 'expiry poll))))
-    (when (and (stringp expiry)
-               (not (string-empty-p expiry)))
-      (condition-case _
-          (<= (float-time (date-to-time expiry)) (float-time))
-        (error nil)))))
-
-(defun disco-room--poll-expiry-label (poll)
-  "Return formatted expiry text for POLL, or nil."
-  (let ((expiry (and (listp poll) (alist-get 'expiry poll))))
-    (when (and (stringp expiry)
-               (not (string-empty-p expiry)))
-      (condition-case _
-          (format-time-string disco-room-poll-date-format (date-to-time expiry))
-        (error nil)))))
-
-(defun disco-room--poll-state-label (poll)
-  "Return short status label for POLL."
-  (let* ((results (disco-room--poll-results poll))
-         (finalized (and (listp results)
-                         (disco-util-json-true-p (alist-get 'is_finalized results))))
-         (expired (disco-room--poll-expired-p poll)))
-    (cond
-     (finalized "finalized")
-     (expired "closed")
-     (t "open"))))
-
-(defun disco-room--poll-voted-answer-ids (poll)
-  "Return list of answer IDs voted by current user in POLL."
-  (let ((answers (or (alist-get 'answers poll) '()))
-        out)
-    (dolist (answer answers (nreverse out))
-      (let ((answer-id (disco-room--poll-answer-id answer)))
-        (when (and answer-id
-                   (disco-room--poll-answer-me-voted-p poll answer-id))
-          (push answer-id out))))))
-
-(defun disco-room--poll-normalize-answer-id-list (answer-ids)
-  "Return ANSWER-IDS normalized as deduped integer list."
-  (let (out)
-    (dolist (it (or answer-ids '()) (nreverse out))
-      (let ((id (cond
-                 ((integerp it) it)
-                 ((and (stringp it)
-                       (string-match-p "\\`[0-9]+\\'" it))
-                  (string-to-number it))
-                 (t nil))))
-        (when (and (integerp id) (> id 0) (not (member id out)))
-          (push id out))))))
-
 (defun disco-room--poll-draft-selection (message-id)
   "Return staged poll selection list for MESSAGE-ID.
 
@@ -4979,7 +4776,7 @@ This may return nil when a staged empty selection exists."
 
 (defun disco-room--poll-set-draft-selection (message-id answer-ids)
   "Store staged poll ANSWER-IDS for MESSAGE-ID and return normalized list."
-  (let ((normalized (disco-room--poll-normalize-answer-id-list answer-ids)))
+  (let ((normalized (disco-msg-poll-normalize-answer-id-list answer-ids)))
     (unless (hash-table-p disco-room--poll-selection-drafts)
       (setq disco-room--poll-selection-drafts (make-hash-table :test #'equal)))
     (if normalized
@@ -4998,14 +4795,14 @@ This may return nil when a staged empty selection exists."
 
 Staged selection takes precedence over committed vote state."
   (if (disco-room--poll-draft-selection-present-p message-id)
-      (disco-room--poll-normalize-answer-id-list
+      (disco-msg-poll-normalize-answer-id-list
        (disco-room--poll-draft-selection message-id))
-    (disco-room--poll-voted-answer-ids poll)))
+    (disco-msg-poll-voted-answer-ids poll)))
 
 (defun disco-room--poll-add-selection (message-id poll answer-id)
   "Return staged selection with ANSWER-ID added for MESSAGE-ID/POLL."
   (let ((current (copy-sequence (disco-room--poll-effective-selection message-id poll))))
-    (if (disco-room--poll-multiselect-p poll)
+    (if (disco-msg-poll-multiselect-p poll)
         (if (member answer-id current)
             current
           (append current (list answer-id)))
@@ -5015,7 +4812,7 @@ Staged selection takes precedence over committed vote state."
   "Return staged selection after toggling ANSWER-ID for MESSAGE-ID/POLL."
   (let* ((current (copy-sequence (disco-room--poll-effective-selection message-id poll)))
          (has (member answer-id current)))
-    (if (disco-room--poll-multiselect-p poll)
+    (if (disco-msg-poll-multiselect-p poll)
         (if has
             (delete answer-id current)
           (append current (list answer-id)))
@@ -5026,10 +4823,10 @@ Staged selection takes precedence over committed vote state."
 (defun disco-room--poll-draft-differs-p (message-id poll)
   "Return non-nil when staged selection differs from committed vote state."
   (let ((draft (disco-room--poll-draft-selection message-id))
-        (committed (disco-room--poll-voted-answer-ids poll)))
+        (committed (disco-msg-poll-voted-answer-ids poll)))
     (and (disco-room--poll-draft-selection-present-p message-id)
-         (not (equal (disco-room--poll-normalize-answer-id-list draft)
-                     (disco-room--poll-normalize-answer-id-list committed))))))
+         (not (equal (disco-msg-poll-normalize-answer-id-list draft)
+                     (disco-msg-poll-normalize-answer-id-list committed))))))
 
 (defun disco-room--poll-answer-selected-p (message-id poll answer-id)
   "Return non-nil when ANSWER-ID is selected in effective poll UI state."
@@ -5038,13 +4835,13 @@ Staged selection takes precedence over committed vote state."
 (defun disco-room--message-with-poll-vote-selection (msg selected-answer-ids)
   "Return MSG copy with current-user poll votes set to SELECTED-ANSWER-IDS."
   (let* ((updated (copy-tree msg))
-         (poll (copy-tree (disco-room--message-poll msg))))
+         (poll (copy-tree (disco-msg-poll msg))))
     (if (not (listp poll))
         updated
-      (let* ((results (copy-tree (or (disco-room--poll-results poll) '())))
+      (let* ((results (copy-tree (or (disco-msg-poll-results poll) '())))
              (counts (copy-tree (or (alist-get 'answer_counts results) '())))
              (selected (delete-dups (copy-sequence (or selected-answer-ids '()))))
-             (previous (disco-room--poll-voted-answer-ids poll)))
+             (previous (disco-msg-poll-voted-answer-ids poll)))
         (dolist (answer-id (delete-dups (append previous selected)))
           (let* ((existing (seq-find (lambda (it)
                                        (equal (alist-get 'id it) answer-id))
@@ -5080,10 +4877,10 @@ Staged selection takes precedence over committed vote state."
 ANSWER-ID is the poll answer receiving update. ADDP non-nil means add vote;
 otherwise remove. USER-ID is used to set `me_voted' when event is for self."
   (let* ((updated (copy-tree msg))
-         (poll (copy-tree (disco-room--message-poll msg))))
+         (poll (copy-tree (disco-msg-poll msg))))
     (if (not (and (listp poll) (integerp answer-id)))
         updated
-      (let* ((results (copy-tree (or (disco-room--poll-results poll) '())))
+      (let* ((results (copy-tree (or (disco-msg-poll-results poll) '())))
              (counts (copy-tree (or (alist-get 'answer_counts results) '())))
              (self-id (disco-gateway-current-user-id))
              (is-self (and self-id user-id
@@ -5151,13 +4948,15 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
 (defun disco-room--insert-message-poll (msg)
   "Insert poll detail block for MSG when present."
   (when disco-room-show-polls
-    (let* ((poll (disco-room--message-poll msg))
+    (let* ((poll (disco-msg-poll msg))
            (message-id (alist-get 'id msg))
-           (question (and poll (disco-room--poll-question-text poll)))
-           (state (and poll (disco-room--poll-state-label poll)))
-           (expiry-label (and poll (disco-room--poll-expiry-label poll)))
+           (question (and poll (disco-msg-poll-question-text poll)))
+           (state (and poll (disco-msg-poll-state-label poll)))
+           (expiry-label (and poll
+                              (disco-msg-poll-expiry-label
+                               poll disco-room-poll-date-format)))
            (answers (and poll (or (alist-get 'answers poll) '())))
-           (committed-selection (and poll (disco-room--poll-voted-answer-ids poll)))
+           (committed-selection (and poll (disco-msg-poll-voted-answer-ids poll)))
            (effective-selection (and poll (disco-room--poll-effective-selection message-id poll)))
            (draft-differs (and poll (disco-room--poll-draft-differs-p message-id poll)))
            (can-vote (and poll (disco-room--poll-can-vote-p msg)))
@@ -5173,14 +4972,14 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
              title-start (point) disco-room-poll-title-face))
           (let ((meta-start (point))
                 (parts (list (format "status=%s" state))))
-            (when (disco-room--poll-multiselect-p poll)
+            (when (disco-msg-poll-multiselect-p poll)
               (setq parts (append parts '("multi"))))
             (when (and disco-room-poll-show-total-votes
-                       (disco-room--poll-results poll))
+                       (disco-msg-poll-results poll))
               (setq parts
                     (append parts
                             (list (format "votes=%d"
-                                          (disco-room--poll-total-votes poll))))))
+                                          (disco-msg-poll-total-votes poll))))))
             (when expiry-label
               (setq parts (append parts (list (format "ends=%s" expiry-label)))))
             (insert (mapconcat #'identity parts "   ") "\n")
@@ -5190,13 +4989,13 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (disco-ui-append-face
              meta-start (point) disco-room-poll-meta-face))
           (dolist (answer answers)
-            (let* ((answer-id (disco-room--poll-answer-id answer))
+            (let* ((answer-id (disco-msg-poll-answer-id answer))
                    (selected (and answer-id
                                   (member answer-id effective-selection)))
                    (count (and answer-id
-                               (disco-room--poll-answer-count poll answer-id)))
-                   (emoji (disco-room--poll-answer-emoji answer))
-                   (label (disco-room--poll-answer-text answer))
+                               (disco-msg-poll-answer-count poll answer-id)))
+                   (emoji (disco-msg-poll-answer-emoji answer))
+                   (label (disco-msg-poll-answer-text answer))
                    (line-start (point)))
               (if (and can-vote answer-id disco-room-poll-auto-toggle-vote)
                   (disco-ui-insert-action-button
@@ -5266,38 +5065,12 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (disco-ui-append-face
              actions-start (point) disco-room-poll-meta-face)))))))
 
-(defun disco-room--reaction-emoji (reaction)
-  "Extract display emoji string from REACTION object."
-  (let* ((emoji (alist-get 'emoji reaction))
-         (name (and (listp emoji) (alist-get 'name emoji))))
-    (or name
-        (and (stringp emoji) emoji)
-        (alist-get 'emoji_name reaction)
-        "?")))
-
-(defun disco-room--reaction-count (reaction)
-  "Return integer count for REACTION object."
-  (or (alist-get 'count reaction)
-      (alist-get 'total_count reaction)
-      0))
-
-(defun disco-room--reaction-selected-p (reaction)
-  "Return non-nil when REACTION is selected by current user."
-  (or (disco-util-json-true-p (alist-get 'me reaction))
-      (disco-util-json-true-p (alist-get 'is_chosen reaction))))
-
-(defun disco-room--message-reactions (msg)
-  "Return normalized reactions list for MSG."
-  (or (alist-get 'reactions msg)
-      (alist-get 'reaction_counts msg)
-      '()))
-
 (defun disco-room--insert-message-reactions (msg &optional prefix)
   "Insert reaction chip line for MSG.
 
 PREFIX can be a fixed prefix string or mutable prefix-state."
   (when disco-room-show-reactions
-    (let ((reactions (disco-room--message-reactions msg))
+    (let ((reactions (disco-msg-reactions msg))
           (line-start (point))
           (first t))
       (when reactions
@@ -5306,10 +5079,10 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
             (insert " "))
           (setq first nil)
           (let ((chip (format "[%s %s]"
-                              (disco-room--reaction-emoji reaction)
-                              (disco-room--reaction-count reaction))))
+                              (disco-msg-reaction-emoji reaction)
+                              (disco-msg-reaction-count reaction))))
             (insert (propertize chip
-                                'face (if (disco-room--reaction-selected-p reaction)
+                                'face (if (disco-msg-reaction-selected-p reaction)
                                           'disco-room-reaction-selected
                                         'disco-room-reaction)))))
         (insert "\n")
@@ -5338,7 +5111,7 @@ Accepted forms: Unicode emoji, `name:id`, or `<:name:id>`/`<a:name:id>`."
          (target-name (plist-get spec :name))
          (emoji-obj (alist-get 'emoji reaction))
          (reaction-id (and (listp emoji-obj) (alist-get 'id emoji-obj)))
-         (reaction-name (disco-room--reaction-emoji reaction)))
+         (reaction-name (disco-msg-reaction-emoji reaction)))
     (if target-id
         (and reaction-id (equal (format "%s" reaction-id) (format "%s" target-id)))
       (equal reaction-name target-name))))
@@ -5346,9 +5119,9 @@ Accepted forms: Unicode emoji, `name:id`, or `<:name:id>`/`<a:name:id>`."
 (defun disco-room--message-has-own-reaction-p (msg emoji)
   "Return non-nil when MSG has current-user reaction EMOJI."
   (let ((found nil))
-    (dolist (reaction (disco-room--message-reactions msg))
+    (dolist (reaction (disco-msg-reactions msg))
       (when (and (disco-room--reaction-matches-input-p reaction emoji)
-                 (disco-room--reaction-selected-p reaction))
+                 (disco-msg-reaction-selected-p reaction))
         (setq found t)))
     found))
 
@@ -5358,7 +5131,7 @@ Accepted forms: Unicode emoji, `name:id`, or `<:name:id>`/`<a:name:id>`."
 When ADDP is non-nil, reaction count is increased and marked selected;
 otherwise selected flag is cleared and count is decreased."
   (let* ((updated (copy-tree msg))
-         (reactions (copy-tree (disco-room--message-reactions msg)))
+         (reactions (copy-tree (disco-msg-reactions msg)))
          (spec (disco-room--parse-reaction-input emoji))
          (target-id (plist-get spec :id))
          (target-name (plist-get spec :name))
@@ -5366,7 +5139,7 @@ otherwise selected flag is cleared and count is decreased."
          (next '()))
     (dolist (reaction reactions)
       (if (disco-room--reaction-matches-input-p reaction emoji)
-          (let* ((count (max 0 (or (disco-room--reaction-count reaction) 0)))
+          (let* ((count (max 0 (or (disco-msg-reaction-count reaction) 0)))
                  (next-count (if addp (1+ count) (max 0 (1- count))))
                  (item (copy-tree reaction)))
             (setq found t)
@@ -5424,7 +5197,7 @@ otherwise selected flag is cleared and count is decreased."
 (defun disco-room--message-removed-reaction-emoji (msg emoji)
   "Return MSG copy with reaction EMOJI removed completely."
   (let* ((updated (copy-tree msg))
-         (reactions (copy-tree (disco-room--message-reactions msg)))
+         (reactions (copy-tree (disco-msg-reactions msg)))
          (next '()))
     (dolist (reaction reactions)
       (unless (disco-room--reaction-matches-input-p reaction emoji)
@@ -5466,14 +5239,14 @@ Return non-nil when a local message update was applied."
 
 (defun disco-room--reply-reference-id (msg)
   "Return referenced message ID for reply MSG, or nil."
-  (when (disco-room--message-reply-type-p msg)
+  (when (disco-msg-reply-type-p msg)
     (or (and (listp (alist-get 'referenced_message msg))
              (alist-get 'id (alist-get 'referenced_message msg)))
-        (disco-room--message-reference-id msg))))
+        (disco-msg-reference-id msg))))
 
 (defun disco-room--reply-preview (msg)
   "Return one-line preview string of MSG reply target, or nil."
-  (when (disco-room--message-reply-type-p msg)
+  (when (disco-msg-reply-type-p msg)
     (let* ((ref (alist-get 'referenced_message msg))
            (ref-id (or (and (listp ref) (alist-get 'id ref))
                        (disco-room--reply-reference-id msg)))
@@ -5497,8 +5270,8 @@ When FACE is non-nil, use it for button text."
    :face (or face 'shadow)
    :help-echo (if (and (stringp channel-id)
                        (not (string-empty-p channel-id))
-                       (not (equal (disco-room--normalize-id channel-id)
-                                   (disco-room--normalize-id disco-room--channel-id))))
+                       (not (equal (disco-msg-normalize-id channel-id)
+                                   (disco-msg-normalize-id disco-room--channel-id))))
                   (format "Open channel %s and jump to message %s" channel-id message-id)
                 (format "Jump to message %s" message-id))))
 
@@ -5508,7 +5281,7 @@ When FACE is non-nil, use it for button text."
 PREFIX defaults to four spaces for room body alignment."
   (let ((line-start (point))
         (ref-id (disco-room--reply-reference-id msg))
-        (ref-channel (disco-room--message-reference-channel-id msg)))
+        (ref-channel (disco-msg-reference-channel-id msg)))
     (insert "↪ " reply)
     (when (and (stringp ref-id) (not (string-empty-p ref-id)))
       (insert " ")
@@ -5522,8 +5295,8 @@ PREFIX defaults to four spaces for room body alignment."
 
 When PREFIX is non-nil, use it for line indentation."
   (when (disco-room--message-forwarded-p msg)
-    (let ((ref-id (disco-room--message-reference-id msg))
-          (ref-channel (disco-room--message-reference-channel-id msg)))
+    (let ((ref-id (disco-msg-reference-id msg))
+          (ref-channel (disco-msg-reference-channel-id msg)))
       (when (and (stringp ref-id) (not (string-empty-p ref-id)))
         (let ((line-start (point)))
           (insert "↪ ")
@@ -5535,8 +5308,8 @@ When PREFIX is non-nil, use it for line indentation."
 
 (defun disco-room--insert-forward-card (msg)
   "Insert one rich forwarded-message card for MSG."
-  (let* ((ref-id (disco-room--message-reference-id msg))
-         (ref-channel (disco-room--message-reference-channel-id msg))
+  (let* ((ref-id (disco-msg-reference-id msg))
+         (ref-channel (disco-msg-reference-channel-id msg))
          (source (disco-room--forward-source-context msg))
          (guild (plist-get source :guild))
          (guild-label (or (plist-get source :guild-label) "direct message"))
@@ -5966,8 +5739,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--compute-message-render-context (previous-msg msg first-unread-id)
   "Return render context for MSG given PREVIOUS-MSG and FIRST-UNREAD-ID."
   (let* ((message-id (alist-get 'id msg))
-         (day-key (disco-room--message-day-key msg))
-         (previous-day (and previous-msg (disco-room--message-day-key previous-msg)))
+         (day-key (disco-msg-day-key msg))
+         (previous-day (and previous-msg (disco-msg-day-key previous-msg)))
          (insert-date (and disco-room-show-date-separators
                            (stringp day-key)
                            (not (equal day-key previous-day))
@@ -6068,10 +5841,10 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--message-reference-targets-current-room-p (msg)
   "Return non-nil when MSG references a message in the current room."
-  (let ((ref-channel-id (disco-room--message-reference-channel-id msg)))
+  (let ((ref-channel-id (disco-msg-reference-channel-id msg)))
     (or (null ref-channel-id)
-        (equal (disco-room--normalize-id ref-channel-id)
-               (disco-room--normalize-id disco-room--channel-id)))))
+        (equal (disco-msg-normalize-id ref-channel-id)
+               (disco-msg-normalize-id disco-room--channel-id)))))
 
 (defun disco-room--reply-reference-targets-current-room-p (msg)
   "Return non-nil when MSG replies to a message in the current room."
@@ -6083,7 +5856,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
     (dolist (msg ordered-messages)
       (let ((dependent-id (alist-get 'id msg)))
         (when (and dependent-id
-                   (disco-room--message-reply-type-p msg)
+                   (disco-msg-reply-type-p msg)
                    (disco-room--reply-reference-targets-current-room-p msg)
                    (equal (disco-room--reply-reference-id msg) message-id))
           (push dependent-id dependent-ids))))
@@ -6095,31 +5868,31 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
     (dolist (msg ordered-messages)
       (let ((dependent-id (alist-get 'id msg)))
         (when (and dependent-id
-                   (= (disco-room--message-type msg) 21)
+                   (= (disco-msg-type msg) 21)
                    (disco-room--message-reference-targets-current-room-p msg)
-                   (equal (disco-room--message-reference-id msg) message-id))
+                   (equal (disco-msg-reference-id msg) message-id))
           (push dependent-id dependent-ids))))
     (nreverse dependent-ids)))
 
 (defun disco-room--forward-source-dependent-message-ids (ordered-messages
                                                          &optional source-channel-id source-guild-id)
   "Return forwarded message ids depending on SOURCE-CHANNEL-ID or SOURCE-GUILD-ID."
-  (let ((normalized-channel-id (disco-room--normalize-id source-channel-id))
-        (normalized-guild-id (disco-room--normalize-id source-guild-id))
+  (let ((normalized-channel-id (disco-msg-normalize-id source-channel-id))
+        (normalized-guild-id (disco-msg-normalize-id source-guild-id))
         dependent-ids)
     (dolist (msg ordered-messages)
       (let* ((dependent-id (alist-get 'id msg))
-             (ref-channel-id (disco-room--message-reference-channel-id msg))
+             (ref-channel-id (disco-msg-reference-channel-id msg))
              (resolved-guild-id
-              (or (disco-room--message-reference-guild-id msg)
+              (or (disco-msg-reference-guild-id msg)
                   (and ref-channel-id
-                       (disco-room--normalize-id
+                       (disco-msg-normalize-id
                         (alist-get 'guild_id (disco-state-channel ref-channel-id)))))))
         (when (and dependent-id
                    (disco-room--message-forwarded-p msg)
                    (or (and normalized-channel-id
                             ref-channel-id
-                            (equal (disco-room--normalize-id ref-channel-id)
+                            (equal (disco-msg-normalize-id ref-channel-id)
                                    normalized-channel-id))
                        (and normalized-guild-id
                             resolved-guild-id
@@ -6788,10 +6561,10 @@ REASON is shown in the minibuffer."
 
 (defun disco-room--default-reaction-emoji (msg)
   "Return best default reaction emoji suggestion from MSG."
-  (let* ((reactions (disco-room--message-reactions msg))
-         (selected (seq-find #'disco-room--reaction-selected-p reactions))
+  (let* ((reactions (disco-msg-reactions msg))
+         (selected (seq-find #'disco-msg-reaction-selected-p reactions))
          (candidate (or selected (car reactions))))
-    (or (and candidate (disco-room--reaction-emoji candidate))
+    (or (and candidate (disco-msg-reaction-emoji candidate))
         "👍")))
 
 (defun disco-room--read-reaction-emoji (prompt &optional default)
@@ -6905,7 +6678,7 @@ REASON is shown in the minibuffer."
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (msg (or (disco-room--message-by-id target-id)
                   (user-error "disco: message not found in room state")))
-         (poll (disco-room--message-poll msg)))
+         (poll (disco-msg-poll msg)))
     (unless poll
       (user-error "disco: message %s has no poll" target-id))
     msg))
@@ -6927,14 +6700,14 @@ REASON is shown in the minibuffer."
   "Return completion choices for poll answers in MSG.
 
 Each item is (LABEL . ANSWER-ID)."
-  (let* ((poll (or (disco-room--message-poll msg) '()))
+  (let* ((poll (or (disco-msg-poll msg) '()))
          (answers (or (alist-get 'answers poll) '()))
          out)
     (dolist (answer answers (nreverse out))
-      (let ((answer-id (disco-room--poll-answer-id answer)))
+      (let ((answer-id (disco-msg-poll-answer-id answer)))
         (when answer-id
-          (let* ((emoji (disco-room--poll-answer-emoji answer))
-                 (text (disco-room--poll-answer-text answer))
+          (let* ((emoji (disco-msg-poll-answer-emoji answer))
+                 (text (disco-msg-poll-answer-text answer))
                  (label (format "%d: %s%s"
                                 answer-id
                                 (if emoji (concat emoji " ") "")
@@ -6967,7 +6740,7 @@ Each item is (LABEL . ANSWER-ID)."
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
          (target-id (alist-get 'id msg))
-         (normalized (disco-room--poll-normalize-answer-id-list selected-answer-ids)))
+         (normalized (disco-msg-poll-normalize-answer-id-list selected-answer-ids)))
     (disco-room--ensure-action-available
      (disco-room--poll-vote-unavailable-reason msg)
      "vote in polls")
@@ -7013,7 +6786,7 @@ In single-select polls, this replaces the staged selection."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg)))
+         (poll (disco-msg-poll msg)))
     (disco-room--ensure-action-available
      (disco-room--poll-vote-unavailable-reason msg)
      "stage poll votes")
@@ -7027,7 +6800,7 @@ In single-select polls, this replaces the staged selection."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg))
+         (poll (disco-msg-poll msg))
          (current (disco-room--poll-effective-selection target-id poll)))
     (disco-room--ensure-action-available
      (disco-room--poll-vote-unavailable-reason msg)
@@ -7047,7 +6820,7 @@ send votes to Discord."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg)))
+         (poll (disco-msg-poll msg)))
     (disco-room--ensure-action-available
      (disco-room--poll-vote-unavailable-reason msg)
      "toggle staged poll votes")
@@ -7061,16 +6834,16 @@ send votes to Discord."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg))
+         (poll (disco-msg-poll msg))
          (staged (disco-room--poll-effective-selection target-id poll))
-         (committed (disco-room--poll-voted-answer-ids poll)))
+         (committed (disco-msg-poll-voted-answer-ids poll)))
     (disco-room--ensure-action-available
      (disco-room--poll-submit-unavailable-reason msg)
      "submit poll votes")
     (when (null staged)
       (user-error "disco: select at least one answer before voting"))
-    (when (equal (disco-room--poll-normalize-answer-id-list staged)
-                 (disco-room--poll-normalize-answer-id-list committed))
+    (when (equal (disco-msg-poll-normalize-answer-id-list staged)
+                 (disco-msg-poll-normalize-answer-id-list committed))
       (user-error "disco: no pending poll vote changes"))
     (disco-room--submit-poll-vote target-id staged)))
 
@@ -7079,8 +6852,8 @@ send votes to Discord."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
          (target-id (alist-get 'id msg))
-         (poll (disco-room--message-poll msg))
-         (committed (disco-room--poll-voted-answer-ids poll)))
+         (poll (disco-msg-poll msg))
+         (committed (disco-msg-poll-voted-answer-ids poll)))
     (disco-room--ensure-action-available
      (disco-room--poll-clear-unavailable-reason msg)
      "clear poll votes")
@@ -7145,11 +6918,11 @@ send votes to Discord."
 
 (defun disco-room--forward-source-message (source-channel-id message-id)
   "Resolve SOURCE-CHANNEL-ID/MESSAGE-ID to a message object, or nil."
-  (let ((channel-id (disco-room--normalize-id source-channel-id))
-        (target-id (disco-room--normalize-id message-id)))
+  (let ((channel-id (disco-msg-normalize-id source-channel-id))
+        (target-id (disco-msg-normalize-id message-id)))
     (when (and channel-id target-id)
       (or (seq-find (lambda (msg)
-                      (equal (disco-room--normalize-id (alist-get 'id msg))
+                      (equal (disco-msg-normalize-id (alist-get 'id msg))
                              target-id))
                     (or (disco-state-messages channel-id) '()))
           (condition-case _
@@ -7223,7 +6996,7 @@ CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
         (setq idx (1+ idx))))
     (setq embed-choices (nreverse embed-choices))
     (dolist (attachment attachments)
-      (let* ((attachment-id (disco-room--normalize-id (alist-get 'id attachment)))
+      (let* ((attachment-id (disco-msg-normalize-id (alist-get 'id attachment)))
              (filename (or (alist-get 'filename attachment) "(unnamed)"))
              (label (and attachment-id
                          (format "%s %s" attachment-id filename))))
