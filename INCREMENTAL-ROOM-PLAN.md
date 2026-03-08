@@ -9,6 +9,7 @@ It complements these documents:
 
 - `emacs-qq/TELEGA-CHATBUF-ALIGNMENT-DESIGN.md`
 - `emacs-qq/INCREMENTAL-CHAT-PLAN.md`
+- `DISCO-ROOM-MODULE-SPLIT-PLAN.md`
 
 The earlier version of this file focused mostly on persistent EWOC and local
 message invalidation.  Much of that groundwork is already in place.  The main
