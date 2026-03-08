@@ -377,8 +377,11 @@ these modules rather than inventing `disco-room-attachment-render.el` too early.
 - create empty target files with `provide`
 - require them from `disco-room.el`
 - define one naming rule:
-  - room facade keeps `disco-room-*`
-  - internal module helpers may still use `disco-room--*`
+  - room facade keeps `disco-room-*` for public room commands and adapters
+  - extracted module internals should prefer module-specific prefixes such as
+    `disco-room-search--*` and `disco-room-transient--*`
+  - compatibility wrappers using older `disco-room--*` names may remain while
+    call sites, tests, and docs migrate
   - file ownership is documented in file header commentary
 - add one brief ownership note to each new file header
 
