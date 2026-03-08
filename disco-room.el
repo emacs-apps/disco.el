@@ -4159,102 +4159,102 @@ When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
     (make-directory (or (file-name-directory path) disco-room-attachment-download-directory) t)
     (let ((process
            (plz 'get
-             url
-             :as 'binary
-             :noquery t
-             :then
-             (lambda (data)
-               (let ((raw-bytes (if (multibyte-string-p data)
-                                    (encode-coding-string data 'binary)
-                                  data))
-                     (current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '()))))
-                 (if (and (numberp expected-size)
-                          (> expected-size 0)
-                          (<= (string-bytes raw-bytes) 0))
-                     (condition-case fallback-err
-                         (progn
-                           (url-copy-file url path t)
-                           (let ((actual-size (nth 7 (file-attributes path))))
-                             (when (and (numberp expected-size)
-                                        (> expected-size 0)
-                                        (numberp actual-size)
-                                        (<= actual-size 0))
-                               (error "empty download body (expected %d bytes)" expected-size)))
-                           (setq current (plist-put current :status 'downloaded))
-                           (setq current (plist-put current :path path))
+                url
+                :as 'binary
+                :noquery t
+                :then
+                (lambda (data)
+                  (let ((raw-bytes (if (multibyte-string-p data)
+                                       (encode-coding-string data 'binary)
+                                     data))
+                        (current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '()))))
+                    (if (and (numberp expected-size)
+                             (> expected-size 0)
+                             (<= (string-bytes raw-bytes) 0))
+                        (condition-case fallback-err
+                            (progn
+                              (url-copy-file url path t)
+                              (let ((actual-size (nth 7 (file-attributes path))))
+                                (when (and (numberp expected-size)
+                                           (> expected-size 0)
+                                           (numberp actual-size)
+                                           (<= actual-size 0))
+                                  (error "empty download body (expected %d bytes)" expected-size)))
+                              (setq current (plist-put current :status 'downloaded))
+                              (setq current (plist-put current :path path))
+                              (setq current (plist-put current :process nil))
+                              (setq current (plist-put current :cancel-requested nil))
+                              (setq current (plist-put current :error nil))
+                              (puthash key current disco-room--attachment-download-state-table)
+                              (disco-room--rerender-open-rooms)
+                              (message "disco: downloaded attachment -> %s (url fallback)" path)
+                              (when open-after
+                                (find-file path)))
+                          (error
+                           (setq current (plist-put current :status 'error))
                            (setq current (plist-put current :process nil))
                            (setq current (plist-put current :cancel-requested nil))
-                           (setq current (plist-put current :error nil))
+                           (setq current (plist-put current :error
+                                                    (disco-room--async-error-message fallback-err)))
                            (puthash key current disco-room--attachment-download-state-table)
                            (disco-room--rerender-open-rooms)
-                           (message "disco: downloaded attachment -> %s (url fallback)" path)
-                           (when open-after
-                             (find-file path)))
-                       (error
-                        (setq current (plist-put current :status 'error))
+                           (message "disco: attachment download failed: %s"
+                                    (or (plist-get current :error) "unknown error"))))
+                      (progn
+                        (with-temp-buffer
+                          (set-buffer-multibyte nil)
+                          (insert raw-bytes)
+                          (let ((coding-system-for-write 'binary))
+                            (write-region (point-min) (point-max) path nil 'silent)))
+                        (setq current (plist-put current :status 'downloaded))
+                        (setq current (plist-put current :path path))
                         (setq current (plist-put current :process nil))
                         (setq current (plist-put current :cancel-requested nil))
-                        (setq current (plist-put current :error
-                                                 (disco-room--async-error-message fallback-err)))
+                        (setq current (plist-put current :error nil))
                         (puthash key current disco-room--attachment-download-state-table)
                         (disco-room--rerender-open-rooms)
-                        (message "disco: attachment download failed: %s"
-                                 (or (plist-get current :error) "unknown error"))))
-                   (progn
-                     (with-temp-buffer
-                       (set-buffer-multibyte nil)
-                       (insert raw-bytes)
-                       (let ((coding-system-for-write 'binary))
-                         (write-region (point-min) (point-max) path nil 'silent)))
-                     (setq current (plist-put current :status 'downloaded))
-                     (setq current (plist-put current :path path))
-                     (setq current (plist-put current :process nil))
-                     (setq current (plist-put current :cancel-requested nil))
-                     (setq current (plist-put current :error nil))
-                     (puthash key current disco-room--attachment-download-state-table)
-                     (disco-room--rerender-open-rooms)
-                     (message "disco: downloaded attachment -> %s" path)
-                     (when open-after
-                       (find-file path)))))
-               :else
-               (lambda (err)
-                 (let* ((current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
-                        (cancel-requested (disco-util-json-true-p (plist-get current :cancel-requested)))
-                        (err-msg (unless cancel-requested
-                                   (disco-room--async-error-message err))))
-                   (if cancel-requested
-                       (progn
-                         (setq current (plist-put current :status 'canceled))
-                         (setq current (plist-put current :process nil))
-                         (setq current (plist-put current :cancel-requested nil))
-                         (setq current (plist-put current :error nil))
-                         (puthash key current disco-room--attachment-download-state-table)
-                         (disco-room--rerender-open-rooms)
-                         (message "disco: attachment download canceled"))
-                     (condition-case fallback-err
-                         (progn
-                           (url-copy-file url path t)
-                           (setq current (plist-put current :status 'downloaded))
-                           (setq current (plist-put current :path path))
+                        (message "disco: downloaded attachment -> %s" path)
+                        (when open-after
+                          (find-file path)))))
+                  :else
+                  (lambda (err)
+                    (let* ((current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
+                           (cancel-requested (disco-util-json-true-p (plist-get current :cancel-requested)))
+                           (err-msg (unless cancel-requested
+                                      (disco-room--async-error-message err))))
+                      (if cancel-requested
+                          (progn
+                            (setq current (plist-put current :status 'canceled))
+                            (setq current (plist-put current :process nil))
+                            (setq current (plist-put current :cancel-requested nil))
+                            (setq current (plist-put current :error nil))
+                            (puthash key current disco-room--attachment-download-state-table)
+                            (disco-room--rerender-open-rooms)
+                            (message "disco: attachment download canceled"))
+                        (condition-case fallback-err
+                            (progn
+                              (url-copy-file url path t)
+                              (setq current (plist-put current :status 'downloaded))
+                              (setq current (plist-put current :path path))
+                              (setq current (plist-put current :process nil))
+                              (setq current (plist-put current :cancel-requested nil))
+                              (setq current (plist-put current :error nil))
+                              (puthash key current disco-room--attachment-download-state-table)
+                              (disco-room--rerender-open-rooms)
+                              (message "disco: downloaded attachment -> %s (url fallback)" path)
+                              (when open-after
+                                (find-file path)))
+                          (error
+                           (setq current (plist-put current :status 'error))
                            (setq current (plist-put current :process nil))
                            (setq current (plist-put current :cancel-requested nil))
-                           (setq current (plist-put current :error nil))
+                           (setq current (plist-put current :error
+                                                    (or err-msg
+                                                        (disco-room--async-error-message fallback-err))))
                            (puthash key current disco-room--attachment-download-state-table)
                            (disco-room--rerender-open-rooms)
-                           (message "disco: downloaded attachment -> %s (url fallback)" path)
-                           (when open-after
-                             (find-file path)))
-                       (error
-                        (setq current (plist-put current :status 'error))
-                        (setq current (plist-put current :process nil))
-                        (setq current (plist-put current :cancel-requested nil))
-                        (setq current (plist-put current :error
-                                                 (or err-msg
-                                                     (disco-room--async-error-message fallback-err))))
-                        (puthash key current disco-room--attachment-download-state-table)
-                        (disco-room--rerender-open-rooms)
-                        (message "disco: attachment download failed: %s"
-                                 (or (plist-get current :error) "unknown error")))))))))))
+                           (message "disco: attachment download failed: %s"
+                                    (or (plist-get current :error) "unknown error")))))))))))
       (setq entry (plist-put entry :status 'downloading))
       (setq entry (plist-put entry :process process))
       (setq entry (plist-put entry :cancel-requested nil))
