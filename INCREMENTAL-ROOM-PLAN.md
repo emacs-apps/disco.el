@@ -18,16 +18,23 @@ architecture.
 ## Goal
 
 Move `disco-room` toward the same telega-style chatbuf model now targeted for
-both clients:
+both clients.
+
+The intended end state for `disco-room` is:
 
 - one real tail input region in the buffer
 - prompt and footer updated independently from the input contents
 - reply/edit/forward-like state represented as aux state
 - structured input objects instead of text-only draft conventions
 - normal typing and undo behavior
+- a chat buffer that no longer depends on `special-mode`
+- printable single-key room actions available contextually on the timeline,
+  without stealing ordinary typing from the input area
 - a shared chatbuf core in `disco.el` that `disco-room` and `qq-chat` both use
 
-This is architectural alignment, not a visual clone of telega.
+This is not a demand to clone telega's exact visuals, but it is a demand to
+follow telega's chatbuf behavior and structural model much more closely than the
+older disco footer-composer design.
 
 ## What changed from the old plan
 

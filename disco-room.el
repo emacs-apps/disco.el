@@ -21,7 +21,6 @@
 (require 'plz)
 (require 'svg nil t)
 (require 'disco-chatbuf)
-(require 'disco-chat-input)
 (require 'disco-ui)
 (require 'disco-util)
 (require 'disco-msg)
@@ -745,43 +744,6 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
    disco-room-author-color-7
    disco-room-author-color-8]
   "Palette used for deterministic per-author name coloring.")
-
-(defun disco-room--configure-input-map (map)
-  "Apply draft-input bindings to MAP and return MAP."
-  (disco-chat-input-configure-map
-   map
-   '(("TAB" . disco-room-complete-mention)
-     ("<tab>" . disco-room-complete-mention)
-     ("C-M-i" . disco-room-complete-mention)
-     ("RET" . disco-room-return-dwim)
-     ("C-c C-c" . disco-room-send-message)
-     ("C-c '" . disco-room-edit-draft)
-     ("M-p" . disco-room-draft-prev)
-     ("M-n" . disco-room-draft-next)
-     ("C-c C-k" . disco-room-cancel-reply)
-     ("C-c C-p s" . disco-room-send-poll)
-     ("C-c C-p +" . disco-room-vote-poll-answer)
-     ("C-c C-p -" . disco-room-remove-poll-vote)
-     ("C-c C-p t" . disco-room-toggle-poll-answer)
-     ("C-c C-p v" . disco-room-submit-poll-vote)
-     ("C-c C-p c" . disco-room-clear-poll-votes)
-     ("C-c C-p e" . disco-room-expire-poll)
-     ("C-c C-P" . disco-room-ack-channel-pins)
-     ("C-c C-f" . disco-room-attach-file)
-     ("C-c C-F" . disco-room-forward-message)
-     ("C-c C-d" . disco-room-remove-attachment-token-at-point)
-     ("C-c C-x" . disco-room-clear-attachments)
-     ("C-c M-l" . disco-room-list-attachments)
-     ("C-c M-e" . disco-room-edit-attachment-description)
-     ("C-c M-r" . disco-room-reorder-attachments)))
-  (define-key map [remap self-insert-command] #'disco-chatbuf-self-insert-command)
-  map)
-(defvar disco-room-input-map
-  (disco-room--configure-input-map (make-sparse-keymap))
-  "Keymap active when point is inside the room draft region.")
-
-;; Refresh bindings on reload since `defvar' preserves existing map objects.
-(disco-room--configure-input-map disco-room-input-map)
 
 (defvar disco-room-timeline-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1667,8 +1629,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
   (disco-chatbuf-point-in-prompt-p position))
 
 (defun disco-room--apply-input-text-properties ()
-  "Ensure current draft span stays editable and uses `disco-room-input-map'."
-  (disco-chatbuf-input-apply-text-properties disco-room-input-map)
+  "Normalize current draft text properties after redraws and edits."
+  (disco-chatbuf-input-apply-text-properties)
   (when-let* ((bounds (disco-room--input-region-bounds)))
     (with-silent-modifications
       (add-text-properties
@@ -1711,7 +1673,6 @@ When NO-RERENDER is non-nil, update local state without rendering."
   (disco-chatbuf-after-change
    beg end
    :rendering-p disco-room--rendering
-   :input-map disco-room-input-map
    :sync-function #'disco-room--sync-draft-from-buffer))
 
 (defun disco-room--set-draft (text)
@@ -8813,6 +8774,9 @@ When called interactively, empty input clears slowmode (sets to 0)."
 (defvar disco-room-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-l") #'recenter-top-bottom)
+    (define-key map (kbd "TAB") #'disco-room-complete-mention)
+    (define-key map (kbd "<tab>") #'disco-room-complete-mention)
+    (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
     (define-key map (kbd "M-<") #'disco-room-load-older-messages)
     (define-key map (kbd "RET") #'disco-room-return-dwim)
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)

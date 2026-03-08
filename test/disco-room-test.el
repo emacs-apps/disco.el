@@ -31,7 +31,7 @@
     (disco-room--update-context-mode)
     (should-not disco-room-timeline-mode)
     (should (eq (key-binding (kbd "q") t)
-                'disco-chatbuf-self-insert-command))
+                'self-insert-command))
     (goto-char (point-min))
     (disco-room--update-context-mode)
     (should disco-room-timeline-mode)
