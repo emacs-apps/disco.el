@@ -1005,6 +1005,80 @@
       (should (eq prompt-marker disco-room--input-prompt-marker))
       (should (string-match-p "> updated body" (buffer-string))))))
 
+(ert-deftest disco-room-sync-draft-from-buffer-preserves-attachment-input-objects ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (goto-char (point-max))
+    (disco-chatbuf-input-insert "hello ")
+    (disco-room--insert-attachment-input-object
+     (disco-room--make-attachment-input-object
+      "/tmp/a.txt"
+      :description "preview"))
+    (disco-room--sync-draft-from-buffer)
+    (should (disco-room--draft-has-input-objects-p))
+    (should (= 1 (length (disco-room--draft-input-objects))))
+    (should (equal "hello "
+                   (disco-room--draft-without-attachment-tokens)))
+    (should (equal '((:path "/tmp/a.txt"
+                      :filename "a.txt"
+                      :description "preview"))
+                   (disco-room--attachments-from-draft)))))
+
+(ert-deftest disco-room-send-message-parses-attachment-input-objects ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     `((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . ,(number-to-string (logior 2048 (ash 1 15))))))
+    (disco-room-render)
+    (let ((path (make-temp-file "disco-room-object-attach"))
+          sent-content
+          sent-attachments
+          refresh-called)
+      (unwind-protect
+          (progn
+            (goto-char (point-max))
+            (disco-chatbuf-input-insert "hello ")
+            (disco-room--insert-attachment-input-object
+             (disco-room--make-attachment-input-object
+              path
+              :description "preview"))
+            (cl-letf (((symbol-function 'disco-api-send-message-with-attachments-async)
+                       (lambda (_channel-id &rest args)
+                         (setq sent-content (plist-get args :content)
+                               sent-attachments (plist-get args :attachments))
+                         (funcall (plist-get args :on-success) nil)))
+                      ((symbol-function 'disco-room-refresh)
+                       (lambda ()
+                         (setq refresh-called t)))
+                      ((symbol-function 'disco-room--channel-buffer-p)
+                       (lambda (&rest _args) t))
+                      ((symbol-function 'message)
+                       (lambda (&rest _args) nil)))
+              (disco-room-send-message))
+            (should (equal "hello" sent-content))
+            (should (equal `((:path ,path
+                              :filename ,(file-name-nondirectory path)
+                              :description "preview"))
+                           sent-attachments))
+            (should refresh-called)
+            (should (equal "" disco-room--draft-input)))
+        (delete-file path)))))
+
 (ert-deftest disco-room-render-reuses-existing-message-nodes ()
   (with-temp-buffer
     (disco-room-mode)
@@ -1063,6 +1137,67 @@
     (let ((path (make-temp-file "disco-room-attach")))
       (unwind-protect
           (should-error (disco-room-attach-file path) :type 'user-error)
+        (delete-file path)))))
+
+(ert-deftest disco-room-attach-file-inserts-attachment-input-object ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "34816")))
+    (disco-room-render)
+    (let ((path (make-temp-file "disco-room-attach")))
+      (unwind-protect
+          (progn
+            (goto-char (point-max))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (&rest _args) nil)))
+              (disco-room-attach-file path "preview"))
+            (should (disco-room--draft-has-input-objects-p))
+            (should (equal `((:path ,path
+                              :filename ,(file-name-nondirectory path)
+                              :description "preview"))
+                           (disco-room--attachments-from-draft)))
+            (should (string-match-p (regexp-quote (format "[file] %s"
+                                                          (file-name-nondirectory path)))
+                                    (buffer-string))))
+        (delete-file path)))))
+
+(ert-deftest disco-room-remove-attachment-token-removes-attachment-input-object ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "34816")))
+    (disco-room-render)
+    (let ((path (make-temp-file "disco-room-attach")))
+      (unwind-protect
+          (progn
+            (goto-char (point-max))
+            (disco-chatbuf-input-insert "hello ")
+            (disco-room--insert-attachment-input-object
+             (disco-room--make-attachment-input-object path :description "preview"))
+            (goto-char (or (text-property-not-all (disco-room--input-start-position)
+                                                  (point-max)
+                                                  disco-chatbuf-input-object-property
+                                                  nil)
+                           (point-max)))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (&rest _args) nil)))
+              (disco-room-remove-attachment-token-at-point))
+            (should-not (disco-room--draft-has-input-objects-p))
+            (should (equal '() (disco-room--attachments-from-draft)))
+            (should (equal "hello " (disco-room--current-draft-text))))
         (delete-file path)))))
 
 (ert-deftest disco-room-remove-attachment-token-errors-while-editing ()
