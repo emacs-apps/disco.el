@@ -1,652 +1,661 @@
-# disco-room module split plan
+# ownership-first split plan for `disco-room`
 
 ## Purpose
 
-This document turns the high-level chatbuf alignment plan into a concrete file
-split plan for `disco-room`.
+This document replaces the earlier split plan for `disco-room`.
 
-It assumes these goals are already accepted:
+The old version improved file boundaries, but it still treated `disco-room` as
+if it were the default namespace for every extracted subsystem.  That is not the
+architecture we actually want.
 
-- `disco-room` should move closer to telega's chatbuf architecture
-- keybinding layout should track telega's binding clusters where features exist
-- the long-term composer model is shared chatbuf core + room adapter, not one
-  giant room file
+The new rule is:
 
-This plan is about module boundaries, migration order, ownership, and test
-strategy.
+- `disco-room` is a facade and public UI surface
+- `disco-room` is not the default owner prefix for new internals
+- code should move to the module that truly owns the behavior, even if it was
+  extracted from `disco-room.el`
 
-## Why split now
+This is closer to what is useful in telega: not file-name mimicry, but
+owner-based responsibility boundaries.
 
-`disco.el/disco-room.el` is currently a single file with several different jobs:
+## Core judgment
 
-- room mode and keymaps
-- composer state, draft parsing, attachments, send pipeline
-- message-at-point actions
-- search/filter/jump flows
-- thread management UI
-- render helpers and EWOC reconcile
-- avatar/media/forward card insertion helpers
-- gateway event handling and partial patching
-- transient menus
-- optimistic read state bookkeeping
+The main problem with `disco.el/disco-room.el` is not only that it is large.
+The bigger problem is that it became a historical bucket for code with very
+mixed ownership.
 
-That is much closer to a bundle of `telega-chat.el` + `telega-msg.el` +
-`telega-ins.el` + `telega-transient.el` + parts of `telega-tdlib-events.el`
-than to a single coherent module.
+Today it contains, in one file:
 
-The problem is not just size.  It is coupling:
+- room buffer lifecycle and mode wiring
+- shared chatbuf-like input mechanics
+- Discord-specific send/composer rules
+- message model helpers
+- thread prompts and thread update flows
+- room search and jump logic
+- timeline rendering and EWOC reconcile
+- event-driven partial patching
+- room menus and keymap glue
 
-- composer work risks breaking render/event code
-- keybinding cleanup risks touching unrelated thread/search/render code
-- partial patch logic is hard to audit because render ownership is diffuse
-- tests are forced into one integration-heavy file instead of matching
-  ownership boundaries
+If we split that file into a pile of `disco-room-*` modules, we improve file
+size but keep the wrong mental model: "all room-related code belongs to the
+room namespace".
 
-## Desired end state
+That is the part this new plan rejects.
 
-After the split, `disco-room.el` should be a facade/adaptor, not the home of
-all room logic.
+## The naming decision
 
-It should mostly own:
+`disco-room` should remain only where it actually means "room buffer public
+surface".
+
+That means:
+
+- keep `disco-room.el`
+- keep public commands such as `disco-room-open` and `disco-room-mode`
+- keep compatibility-facing command names where changing them would cause churn
+- do not use `disco-room-*` as the default namespace for newly isolated
+  internals
+
+In practice there are three naming layers:
+
+- `disco-` for package namespace
+- owner namespace such as `chatbuf`, `msg`, `thread`, `media`, `embed`,
+  `root`, or genuinely `room`
+- command compatibility names for public interactive entry points
+
+The second layer should drive the split.
+
+## What we learn from telega
+
+The useful lesson from telega is not "make more files named after chat".
+
+The useful lesson is:
+
+- chat buffer behavior has one owner
+- message behavior has one owner
+- insert/render helpers have one owner
+- root/list UI has one owner
+- event/update plumbing has one owner
+- transient is an implementation detail of those owners, not a top-level split
+  axis by itself
+
+So the telega-style move here is:
+
+- stop treating `disco-room.el` as the mother namespace
+- start assigning code to its real owner
+
+## Architectural target
+
+The long-term target is not "many `disco-room-*` files".
+
+The long-term target is:
+
+- `disco-room.el` becomes a thin room facade
+- shared chatbuf behavior grows under `disco-chatbuf`
+- shared message/domain helpers grow under `disco-msg`
+- shared thread helpers grow under `disco-thread`
+- media/embed rendering lives with `disco-media` and `disco-embed` when it is
+  not room-specific
+- only the irreducibly room-specific parts keep `room` ownership
+
+In other words:
+
+- shared owner first
+- room owner last
+
+## Ownership rules
+
+When a function currently lives in `disco-room.el`, ask these questions in
+order.
+
+### 1. Is it shared chatbuf behavior?
+
+If it is about editable tail input, prompt markers, draft history, aux state,
+input options, structured input objects, or chatbuf-local point discipline, it
+belongs under `disco-chatbuf`.
+
+Examples:
+
+- input markers and bounds
+- history navigation primitives
+- prompt installation/update primitives
+- aux state lifecycle
+- structured input object storage conventions
+
+It does not become room-owned just because `disco-room.el` happened to grow it
+first.
+
+### 2. Is it shared message/domain logic?
+
+If it is about message identity, references, previews, normalized accessors,
+forward/reply metadata, poll/reaction data shaping, or reusable message state
+helpers, it belongs under `disco-msg`.
+
+Examples:
+
+- message reference extraction
+- author/display derivation
+- compact preview generation
+- reusable poll/reaction state helpers
+
+Interactive room commands are different; those may still remain room-facing even
+if they call into `disco-msg` heavily.
+
+### 3. Is it shared thread logic?
+
+If it is about thread predicates, status derivation, prompt choices, update
+application, or thread metadata shaping, it belongs under `disco-thread`.
+
+Examples:
+
+- archived/locked/private predicates
+- auto-archive duration prompt helpers
+- declarative thread update helpers
+
+Only room-specific orchestration should remain outside that module.
+
+### 4. Is it media/embed rendering that is not room-specific?
+
+If the code is really about rendering one attachment/embed card or normalizing
+that content, it should move toward `disco-media.el` or `disco-embed.el`
+instead of creating more room-prefixed files.
+
+### 5. Is it truly room-specific UI/render/update behavior?
+
+Only after the earlier answers are no should code remain room-owned.
+
+That usually means things such as:
+
+- room EWOC lifecycle
+- room timeline reconcile
+- room-specific incremental patching
+- room buffer keymap/context switching
+- room buffer lifecycle glue
+- room-only header/footer composition that depends on timeline state
+
+This is the category where `room` still makes sense.
+
+## What `disco-room` should own
+
+`disco-room` should own the room UI surface, not every implementation detail.
+
+Good long-term responsibilities for `disco-room`:
 
 - `disco-room-mode`
-- room-local vars that define public state shape
-- the top-level keymap assembly
-- `disco-room-open` and buffer lifecycle setup/teardown
-- thin forwarding wrappers where compatibility is needed
-- requires/provides wiring for the room subsystem
-
-Everything else should live in smaller files with tighter ownership.
-
-Target outcome:
-
-- `disco-room.el` becomes the adapter layer for room buffers
-- composer code is isolated from render/event code
-- message-local actions are isolated from composer and thread settings
-- render and event patch logic are separately reviewable
-- tests are moved to module-level suites with one smaller room integration suite
-
-## Design principles
-
-- Split by ownership, not by arbitrary line count.
-- Prefer telega-like ownership boundaries over Discord endpoint groupings.
-- Keep migration steps behavior-preserving whenever possible.
-- Add forwarding wrappers before deleting old definitions.
-- Move low-risk leaves before high-risk reconcile logic.
-- Keep docs/help text synchronized with the binding cluster they describe.
-- Avoid introducing new cycles between room modules.
-
-## Telega correspondence
-
-The goal is not file-name mimicry.  The goal is to copy telega's responsibility
-layout where it makes sense for Discord.
-
-One important consequence: `disco-transient.el` should not be treated as a
-catch-all home for root or room menus.  In telega, `telega-transient.el`
-mainly owns transient infrastructure and stateful operation transients.
-Root-local command menus belong with the root subsystem, and room transients
-should usually live with the module that owns the underlying operation.
-
-| disco target | Main responsibility | Telega reference | Notes |
-| --- | --- | --- | --- |
-| `disco-room.el` | room facade/adaptor | `telega-chat.el` chatbuf entrypoints | thin shell only |
-| `disco-room-compose.el` | composer, draft, attach, send, input options | `telega-chat.el` chatbuf input/attach/send | highest priority |
-| `disco-room-message.el` | message-at-point actions and local key semantics | `telega-msg.el` + message commands in `telega-chat.el` | reply/edit/forward/delete/reactions |
-| `disco-room-render.el` | message insertion and header/footer composition | `telega-ins.el` + render parts of `telega-chat.el` | may later split again |
-| `disco-room-events.el` | gateway-driven updates and local patch application | `telega-tdlib-events.el` + `telega-chat.el` dirtiness/update code | keep partial patching here |
-| `disco-room-search.el` | filter search, inplace search, jump flows, draft-history search | search/filter sections of `telega-chat.el` | message search is its own concern |
-| `disco-room-thread-ui.el` | room-level thread commands and prompts | thread/topic command areas in `telega-chat.el` | should build on `disco-thread.el` |
-| `disco-transient.el` (optional later) | shared transient classes/helpers only | infrastructure portions of `telega-transient.el` | add only when support code is truly shared |
-| `disco-room-avatar.el` (optional) | avatar cache/fetch/render helpers | avatar/media helpers spread across telega | only if render remains too large |
-| `disco-room-read-state.el` (optional) | optimistic ack/read bookkeeping | read-state update helpers in telega chat/events | optional follow-up |
-
-## Proposed module boundaries
-
-### 1. `disco-room.el`
-
-Owns:
-
-- room mode definition and setup/teardown
-- room-local state variable declarations
-- top-level keymap assembly
-- requires/provides for room subsystem
-- high-level public entry points that other modules call back into:
-  - `disco-room-open`
-  - `disco-room-refresh`
-  - `disco-room-render`
-  - facade wrappers kept for compatibility
-
-Should not own long implementations for:
-
-- send paths
-- render section insertion
-- gateway event dispatch
-- search/filter algorithms
-- thread setting prompts
-- operation-specific transient UIs that belong to compose/message/thread modules
-
-### 2. `disco-room-compose.el`
-
-Owns all composer and send-pipeline logic.
-
-Move here first:
-
-- composer availability and permission helpers directly tied to input/send
-- aux-state entry/exit helpers:
-  - `disco-room--composer-*`
-  - `disco-room-cancel-reply`
-  - `disco-room-return-dwim`
-- draft/input helpers:
-  - `disco-room--copy-draft`
-  - `disco-room--current-draft*`
-  - `disco-room--input-*`
-  - `disco-room--sync-draft-from-buffer`
-  - `disco-room-draft-prev`
-  - `disco-room-draft-next`
-  - `disco-room-edit-draft`
-  - `disco-room-draft-history-search`
-- structured input object and attachment helpers:
-  - `disco-room--attachment-input-object-*`
-  - `disco-room--attachment-refs`
-  - `disco-room--parse-draft-input`
-  - `disco-room-list-attachments`
-  - `disco-room-edit-attachment-description`
-  - `disco-room-reorder-attachments`
-  - `disco-room-remove-attachment-token-at-point`
-  - `disco-room-clear-attachments`
-  - `disco-room-attach-file`
-  - `disco-room-attach-clipboard`
-  - `disco-room-attach-transient`
-- input option state and option commands:
-  - `disco-room--current-input-options-state`
-  - `disco-room--sync-shared-input-options-state`
-  - `disco-room-toggle-send-on-return`
-  - `disco-room-cycle-long-message-action`
-  - `disco-room-cycle-allowed-mentions`
-  - `disco-room-toggle-reply-mention-replied-user`
-  - `disco-room-reset-input-options`
-  - `disco-room-input-options-transient`
-  - `disco-room-input-formatting-set`
-  - `disco-room-input-preview`
-- send pipeline:
-  - `disco-room--send-allowed-mentions`
-  - long-message split/file helpers
-  - `disco-room-send-message`
-  - `disco-room-send-poll`
-
-Dependency rule:
-
-- may depend on `disco-chatbuf.el`, `disco-api.el`, `disco-thread.el`,
-  `disco-msg.el`, `disco-permission.el`
-- must not depend on low-level render internals
-- should talk to rendering through facade calls only, such as
-  `disco-room--update-frame-preserving-point` and `disco-room-refresh`
-
-### 3. `disco-room-message.el`
-
-Owns message-at-point actions and message-local interaction semantics.
-
-Move here:
-
-- message-id/message-at-point helpers used by actions
-- reply/edit/forward/delete commands:
-  - `disco-room-reply-to-message`
-  - `disco-room-forward-message`
-  - `disco-room-edit-message`
-  - `disco-room-delete-message`
-- forward-only prompt helpers
-- reaction commands and helpers:
-  - `disco-room-add-reaction`
-  - `disco-room-remove-reaction`
-  - `disco-room-toggle-reaction`
-  - reaction input parsing helpers
-- message prefix keymap / message-local bare keys
-- open-thread-from-message command
-- poll vote/submit/clear/expire commands if we keep message interaction grouped
-
-Telega correspondence:
-
-- this should become the closest disco equivalent to `telega-msg.el`
-- bare timeline keys should be documented here as the primary message-local
-  layer, with `C-c m ...` as prefix fallback
-
-### 4. `disco-room-search.el`
-
-Owns room search and filtering.
-
-Move here:
-
-- message text extraction used only for searching
-- filter search state helpers and API dispatch
-- inplace search state and movement helpers
-- sender search candidate helpers
-- jump-to-message flow and fetch-around logic
-- search UI commands:
-  - `disco-room-filter-search`
-  - `disco-room-filter-refresh`
-  - `disco-room-filter-load-more`
-  - `disco-room-filter-cancel`
-  - `disco-room-inplace-search*`
-  - `disco-room-search*`
-  - `disco-room-jump-to-message`
-  - `disco-room-search-channel`
-
-Dependency rule:
-
-- may depend on state/api/msg helpers and room facade render hooks
-- should not own message render context or gateway event logic
-
-### 5. `disco-room-thread-ui.el`
-
-Owns room commands that manage Discord thread settings and lifecycle.
-
-Move here:
-
-- thread availability checks that are room-UI specific
-- thread prompts not already generic in `disco-thread.el`
-- commands:
-  - `disco-room-create-thread-from-message`
-  - `disco-room-create-thread`
-  - `disco-room-join-thread`
-  - `disco-room-leave-thread`
-  - `disco-room-toggle-thread-archived`
-  - `disco-room-rename-thread`
-  - `disco-room-toggle-thread-locked`
-  - `disco-room-set-thread-slowmode`
-  - `disco-room-set-thread-auto-archive-duration`
-  - `disco-room-set-thread-muted`
-  - `disco-room-edit-thread-settings`
-  - `disco-room-open-parent-archived-threads`
-
-At the same time, expand `disco-thread.el` only for helpers that are genuinely
-shared between root/room/other UIs.
-
-### 6. `disco-room-render.el`
-
-Owns the room's textual/visual rendering and EWOC reconcile.
-
-Move here in two sublayers.
-
-Render leaf layer first:
-
-- layout/fill/alignment helpers
-- divider and prefix insertion helpers
-- author/avatar/forward/media/poll/reaction insertion helpers
-- `disco-room--insert-message-*` family
-- header/footer/prompt text composition
-- message preview rendering helpers
-
-Then render core:
-
-- EWOC create/update/clear helpers
-- render-context computation and invalidation
-- timeline reconcile / node upsert/delete
-- `disco-room-render`
-- `disco-room--render-preserving-point`
-- `disco-room--update-frame-preserving-point`
-
-Preferred internal split if needed:
-
-- keep `disco-room-render.el` as orchestrator
-- extract avatar-heavy cache/fetch code later into `disco-room-avatar.el`
-  only if render remains too large after the first pass
-
-Telega correspondence:
-
-- this is the nearest disco equivalent to `telega-ins.el`
-- high churn risk; do this after compose/search split patterns and owner
-  boundaries are established
-
-### 7. `disco-room-events.el`
-
-Owns event-driven updates and local partial patch logic.
-
-Move here:
-
-- optimistic read/ack state helpers
-- local message update helpers
-- partial patch helpers:
-  - live message/reaction/poll/read-state patching
-  - forward-source dependency invalidation
-  - composer-context invalidation decisions
-- gateway attachment and handler lifecycle:
-  - `disco-room--handle-gateway-event`
-  - `disco-room--attach-live-updates`
-  - `disco-room--detach-live-updates`
-- around-fetch/jump resolve if left coupled to event/update state
-
-Telega correspondence:
-
-- nearest disco equivalent to `telega-tdlib-events.el`
-- keep this module centered on incremental updates, not on initial full render
-
-### 8. Transient placement rule
-
-Transient is an implementation detail, not a top-level split axis.
-
-Rules:
-
-- keep root command menus in `disco-root.el` or another root-owned module
-- keep room-wide command menus in `disco-room.el` temporarily, unless a more
-  specific owner already exists
-- move composer transients into `disco-room-compose.el`
-- move message operation transients into `disco-room-message.el`
-- introduce or expand `disco-transient.el` only for shared transient classes,
-  infix/suffix helpers, or compatibility glue used by multiple subsystems
-
-Do not create standalone `disco-room-transient.el` or
-`disco-root-transient.el` files unless they later accumulate enough
-owner-specific support code to justify their own module boundary.
-
-## Existing shared modules to expand instead of adding room-specific files
-
-### `disco-chatbuf.el`
-
-Continue growing this for shared chatbuf mechanics only:
-
-- prompt lifecycle
-- input markers
-- input history ring primitives
-- aux/input-options state storage
+- `disco-room-open`
+- room-local state shape that defines buffer identity
+- top-level room keymap assembly
+- compatibility-facing public commands
+- thin wrappers that route to the real owners
+- room-level coordination between chatbuf, render, and event owners
+
+Bad long-term responsibilities for `disco-room`:
+
+- generic input-history internals
+- structured input object storage semantics
+- reusable message helpers
+- generic thread prompt/update helpers
+- attachment/embed rendering that is not actually room-specific
+- every helper named `disco-room--something` just because the file is old
+
+## Public API versus owner namespace
+
+The split plan should distinguish these two things explicitly.
+
+### Public API
+
+Public interactive names may stay room-facing for stability.
+
+Examples that can remain:
+
+- `disco-room-open`
+- `disco-room-mode`
+- `disco-room-send-message`
+- `disco-room-filter-search`
+- `disco-room-reply-to-message`
+
+This is about user-facing and compatibility-facing surface area.
+
+### Owner namespace
+
+Internal helpers should be named after the owner, not after the historical file
+of origin.
+
+Examples of the desired direction:
+
+- `disco-chatbuf-*` for shared input mechanics
+- `disco-msg-*` for shared message/domain helpers
+- `disco-thread-*` for shared thread helpers
+- `disco-room-render-*` for room timeline rendering internals
+- `disco-room-events-*` for room live-update internals
+
+Compatibility wrappers may keep older names during migration, but they should no
+longer define the architecture.
+
+## File strategy
+
+Do not start by inventing a large family of `disco-room-*` files.
+
+Start by expanding existing owners.
+
+### Existing owners to grow first
+
+#### `disco-chatbuf.el`
+
+This is the first place to put shared chat-buffer behavior.
+
+Grow it with:
+
+- stable prompt/input marker behavior
+- input history state and navigation primitives
+- aux state lifecycle
+- input options state lifecycle
 - structured input object primitives
+- prompt/footer update primitives that are generic enough to reuse
 
-Do not move Discord-specific send rules or room permission logic here.
+If this file becomes too large, a sibling such as `disco-chatbuf-input.el` is a
+better direction than defaulting to `disco-room-compose.el`.
 
-### `disco-msg.el`
+#### `disco-msg.el`
 
-Expand this for shared message model helpers, not room UI commands.
+This should grow for shared message semantics.
 
-Good candidates:
+Grow it with:
 
-- more message identity/reference helpers
-- normalized author/title/preview helpers
-- reusable forward/reference predicates
+- more normalized message accessors
+- forward/reply/reference helpers
+- reusable preview helpers
+- poll/reaction data shaping when not UI-specific
 
-Do not move room-specific interactive commands here until a broader message UI
-layer exists.
+Do not turn it into a bag of room interactive commands, but do move pure message
+logic here aggressively.
 
-### `disco-thread.el`
+#### `disco-thread.el`
 
-Expand this for shared thread predicates and declarative update helpers.
+This should absorb shared thread semantics.
 
-Good candidates:
+Grow it with:
 
-- thread status derivation
-- shared prompt choice helpers
-- update application helpers
+- more thread status and capability derivation
+- thread prompt choice helpers
+- thread update application helpers
 
-Keep room command flows in `disco-room-thread-ui.el`.
+Room commands can still call into it.
 
-### `disco-media.el` / `disco-embed.el`
+#### `disco-media.el` and `disco-embed.el`
 
-If some attachment/embed insertion logic becomes generic enough, move it into
-these modules rather than inventing `disco-room-attachment-render.el` too early.
+Move reusable render/normalize logic here instead of making everything a room
+render helper.
+
+### Room-owned files that still make sense
+
+Only a small number of room-owned files are structurally justified.
+
+#### `disco-room.el`
+
+This remains the facade and public surface.
+
+#### `disco-room-render.el`
+
+This is justified because EWOC/timeline rendering is room-specific.
+
+It should own:
+
+- message row insertion orchestration
+- room header/footer composition tied to timeline state
+- render-context computation
+- EWOC node reconcile and rerender flow
+
+#### `disco-room-events.el`
+
+This is justified because room live updates are tied to room buffer rendering
+and invalidation policy.
+
+It should own:
+
+- gateway update hookup
+- partial patch application
+- room-local invalidation and rerender decisions
+- optimistic room read/ack flows if they remain buffer-coupled
+
+### Transitional files
+
+A file extracted from `disco-room.el` is not automatically the right long-term
+name.
+
+Current example:
+
+- `disco-room-search.el` is acceptable as an intermediate extraction boundary
+- it should not be treated as proof that every future subsystem must be
+  `disco-room-*`
+- over time, shared pieces from that file should move to the real owners if
+  they prove reusable
+
+The point of a first extraction is decoupling, not freezing the final namespace.
+
+## Modules we should not create by default
+
+The old plan leaned too much toward names such as these:
+
+- `disco-room-compose.el`
+- `disco-room-message.el`
+- `disco-room-thread-ui.el`
+- transient-only files like `disco-room-transient.el`
+
+This new plan does not treat those as default targets.
+
+They are only justified if, after moving shared code into existing owners, there
+is still a coherent room-only subsystem left over.
+
+That means:
+
+- do not create `disco-room-compose.el` just because compose code lived in
+  `disco-room.el`; first separate shared chatbuf mechanics from Discord-specific
+  send orchestration
+- do not create `disco-room-message.el` just because many commands operate on a
+  message; first move pure message logic into `disco-msg.el`
+- do not create `disco-room-thread-ui.el` just because thread commands are long;
+  first expand `disco-thread.el`
+- do not create transient-only ownerless files; transient should stay with the
+  subsystem that owns the operation
+
+## Recommended ownership map for current `disco-room.el`
+
+This is the practical answer to "where should the code go?"
+
+| Current responsibility in `disco-room.el` | Real owner | Preferred destination |
+| --- | --- | --- |
+| input markers, prompt/input region rules, history mechanics | shared chatbuf | `disco-chatbuf.el` |
+| aux state and input-options lifecycle | shared chatbuf | `disco-chatbuf.el` |
+| structured input object storage conventions | shared chatbuf | `disco-chatbuf.el` |
+| Discord payload shaping for send/edit/attach | room facade plus shared helpers | keep facade wrappers, push reusable parts down |
+| message identity/reference/preview helpers | shared message domain | `disco-msg.el` |
+| thread status, prompt parsing, update shaping | shared thread domain | `disco-thread.el` |
+| attachment/embed card normalization and reusable render bits | media/embed owners | `disco-media.el`, `disco-embed.el` |
+| room search/jump/filter orchestration | transitional room adapter plus shared helpers | `disco-room-search.el` for now, then reevaluate |
+| EWOC/timeline render orchestration | room-specific | `disco-room-render.el` |
+| live update patching and invalidation | room-specific | `disco-room-events.el` |
+| keymap assembly and public commands | room facade | `disco-room.el` |
+
+## Migration strategy
+
+The migration strategy changes substantially under this ownership-first model.
+
+The old instinct was: create more `disco-room-*` files.
+
+The new instinct is:
+
+1. move shared code into existing owners first
+2. create room-owned files only for room-specific leftovers
+3. keep `disco-room` as facade/compat surface while internals relocate
 
 ## Recommended migration order
 
-### Milestone 0 - establish facade and conventions
+### Milestone 0 - define the ownership rule
 
-- create empty target files with `provide`
-- require them from `disco-room.el`
-- define one naming rule:
-  - room facade keeps `disco-room-*` for public room commands and adapters
-  - extracted module internals should prefer module-specific prefixes such as
-    `disco-room-search--*`, `disco-room-compose--*`, or `disco-room-menu--*`
-  - compatibility wrappers using older `disco-room--*` names may remain while
-    call sites, tests, and docs migrate
-  - file ownership is documented in file header commentary
-- add one brief ownership note to each new file header
+- accept that `disco-room` is facade/public API, not the mother namespace
+- document this rule in file headers and planning docs
+- allow compatibility wrappers while ownership moves underneath
 
 Acceptance:
 
-- no behavior change
-- load path and requires are stable
+- contributors can answer "why does this live here?" in terms of owner, not
+  historical source file
 
-### Milestone 1 - extract search first
+### Milestone 1 - keep extracting low-risk leaves, but do not canonize the prefix
 
-Why first:
-
-- lowest coupling
-- easiest way to validate module style
-- least likely to break composer/render
-
-Move:
-
-- `disco-room-search*`, filter/inplace helpers, jump helpers
+- keep `disco-room-search.el` as a decoupling step
+- rename internals by owner where that helps readability
+- avoid assuming the current file name is the final architecture
 
 Acceptance:
 
-- search behavior unchanged
-- tests split into `test/disco-room-search-test.el` or equivalent focused cases
-- room/root command menus remain behavior-compatible while ownership is still
-  being sorted
+- behavior stays stable
+- extraction lowers coupling even if the file name is temporary
 
-### Milestone 2 - extract composer core
+### Milestone 2 - grow `disco-chatbuf.el` aggressively
 
-Move:
+Move or factor shared chatbuf behavior out of `disco-room.el`:
 
-- aux bridge
-- draft/input helpers
-- structured input object helpers
-- attachment manipulation UI
-- history search / preview / input options
+- input region ownership
+- draft/history primitives
+- aux/input-options storage
+- structured input object primitives
+- prompt/footer update primitives that are not Discord-specific
 
 Acceptance:
 
-- all current rich draft and attachment object tests pass
-- no loss of text properties across redraw/send failure/edit cancel
-- keybinding docs still match actual bindings
+- rich draft behavior remains intact
+- attachment input objects still preserve text properties
+- room code reads more like adapter code and less like chatbuf core
 
-### Milestone 3 - extract send pipeline
+### Milestone 3 - move pure message logic into `disco-msg.el`
 
-Move:
+Move or factor shared message helpers out of room:
 
-- send allowed_mentions
-- long-message helpers
-- send-message / send-poll
-- attach commands and attach transient
-
-Acceptance:
-
-- send tests remain green
-- edit restore state still works
-- object-based attachment send path remains the only advertised path
-
-### Milestone 4 - extract message-at-point actions
-
-Move:
-
-- reply/edit/forward/delete
-- reactions
-- poll voting actions if grouped here
-- message-local keymap helpers
+- reference accessors
+- preview helpers
+- author/display helpers
+- reusable poll/reaction/forward state shaping
 
 Acceptance:
 
-- bare timeline keys still work only outside composer
-- message prefix fallback still works
-- forward flow remains compatible with current Discord API behavior
+- room interactive commands become thinner
+- message semantics stop being hidden inside room code
 
-### Milestone 5 - extract thread UI commands
+### Milestone 4 - move shared thread logic into `disco-thread.el`
 
-Move:
+Move or factor shared thread helpers out of room:
 
-- thread create/manage/join/leave/archive/settings commands
-- parent archived thread opener
-
-Acceptance:
-
-- thread tests move with the code
-- no room composer regressions
-
-### Milestone 6 - extract render leaf helpers
-
-Move first:
-
-- layout/prefix/alignment helpers
-- author/avatar/media/embed/forward/reply section insertion helpers
-- header/footer/prompt help text
+- prompt parsing
+- status/capability derivation
+- update shaping helpers
 
 Acceptance:
 
-- byte-for-byte visible output should stay as close as practical
-- render-specific tests remain green
-- no event logic moved yet
+- thread UI commands become orchestration wrappers instead of state owners
 
-### Milestone 7 - extract render core and event patchers
+### Milestone 5 - isolate room-specific render ownership
 
-Move:
+Create or expand `disco-room-render.el` for the code that is truly room-local:
 
 - EWOC lifecycle
-- render-context recomputation
-- node reconcile
-- local partial patch helpers
-- gateway event handler wiring
-- optimistic read/ack helpers if still coupled
+- room render contexts
+- message row orchestration
+- room header/footer rendering that depends on room state
 
 Acceptance:
 
-- integration tests for live update patching remain green
-- full rerender fallback still works when partial patch cannot apply
+- render code is reviewable without wading through composer/search/thread logic
 
-### Milestone 8 - shrink `disco-room.el` to facade
+### Milestone 6 - isolate room-specific live updates
 
-After all major moves:
+Create or expand `disco-room-events.el` for:
 
-- remove long implementations from `disco-room.el`
-- keep only facade wrappers where external call sites still expect old symbol
-  locations
-- review whether some wrappers can be dropped after one compatibility cycle
+- gateway callbacks
+- partial update application
+- invalidation policies
+- optimistic room read/ack patching when buffer-coupled
+
+Acceptance:
+
+- event logic is reviewable without mixing it into rendering and input code
+
+### Milestone 7 - revisit transitional room-owned extractions
+
+After shared owners and room-specific owners stabilize:
+
+- review `disco-room-search.el`
+- review remaining room-prefixed helper families
+- move shared pieces again if they are not truly room-owned
+
+Acceptance:
+
+- room-prefixed files are room-owned by design, not by accident
+
+### Milestone 8 - shrink `disco-room.el` to a real facade
+
+At the end:
+
+- keep room mode, open, keymap assembly, public command routing, and
+  compatibility wrappers in `disco-room.el`
+- remove deep implementation blocks that belong to other owners
 
 Success criterion:
 
-- `disco-room.el` is primarily mode wiring + public adapter layer
-- module ownership is obvious from file names and headers
+- `disco-room.el` feels like a front door, not like the whole house
 
-## Dependency rules
+## Naming rules for new code
 
-To prevent a new spaghetti graph, use these rules.
+Use these rules for new internals.
 
-- `disco-room.el` may require every room submodule.
-- `disco-room-compose.el` may call facade render hooks but must not require
-  low-level render internals.
-- `disco-room-render.el` should not depend on composer parsing internals.
-- `disco-room-events.el` may depend on render facade and message helpers, but
-  should not own attach/send logic.
-- `disco-room-search.el` may depend on state/api/facade render hooks, but not
-  on render section insertion helpers.
-- transient helpers should depend on public commands or owner-local helpers
-  only; shared transient infrastructure belongs in `disco-transient.el` only
-  when multiple subsystems actually need it.
+- keep `disco-room-*` only for public room commands, room mode, room facade
+  helpers, and truly room-specific owners
+- prefer `disco-chatbuf-*` for shared chatbuf mechanics
+- prefer `disco-msg-*` for shared message/domain helpers
+- prefer `disco-thread-*` for shared thread helpers
+- prefer `disco-media-*` / `disco-embed-*` when the code is really about those
+  content types
+- use a room-prefixed internal namespace only when the implementation is tied to
+  room EWOC, room live updates, or room buffer-specific coordination
 
-If a helper is needed by both compose and render, prefer moving it into a shared
-module (`disco-chatbuf.el`, `disco-msg.el`, `disco-thread.el`) instead of
-creating circular room-module dependencies.
+When in doubt, ask:
 
-## Test split plan
+- would this code still make sense if `disco-room.el` disappeared and room were
+  rebuilt as a thin adapter?
 
-Current tests are concentrated in `test/disco-room-test.el`.  After extraction,
-create focused test files while keeping a smaller room integration suite.
+If yes, it probably should not be owned by `disco-room`.
 
-Recommended files:
+## Transient rule
 
-- `test/disco-room-compose-test.el`
-- `test/disco-room-search-test.el`
-- `test/disco-room-message-test.el`
-- `test/disco-room-thread-ui-test.el`
-- `test/disco-room-events-test.el`
-- `test/disco-room-render-test.el`
-- `test/disco-room-test.el` kept as cross-module smoke/integration suite
+Transient is not an owner.
+
+Keep transient definitions with the subsystem that owns the underlying action.
+
+That means:
+
+- room-wide menus can stay in `disco-room.el` while room is still the facade
+- compose-related transients belong with chatbuf/compose ownership
+- message-operation transients belong with the message-action owner
+- root transients belong with root ownership
+- `disco-transient.el` should only contain shared transient infrastructure when
+  such infrastructure is actually shared
+
+## Test strategy
+
+Tests should follow ownership, not historical filename origin.
+
+That means the target test layout is not automatically a mirror of
+`disco-room-*` files.
+
+Preferred direction:
+
+- expand `test/disco-chatbuf-test.el` for shared chatbuf mechanics
+- add or expand `test/disco-msg-test.el` when message-domain helpers grow enough
+- add or expand `test/disco-thread-test.el` when thread helper coverage grows
+- keep room integration tests in `test/disco-room-test.el`
+- add room-specific render/event suites only for code that remains truly
+  room-owned
 
 Rule:
 
-- move tests with the code at the same milestone the code moves
-- only keep end-to-end interaction tests in `test/disco-room-test.el`
+- if code moves to a shared owner, its tests should move there too
+- `test/disco-room-test.el` should become integration-heavy, not the default
+  home for every detail
 
-## Risk register
+## Risks
 
-### 1. Cyclic dependencies
+### 1. Keeping the old architecture under new filenames
 
-Most likely between compose, render, and events.
+Risk:
 
-Mitigation:
-
-- keep room facade as the only cross-module rendezvous when possible
-- move shared pure helpers into `disco-chatbuf.el`, `disco-msg.el`, or
-  `disco-thread.el`
-
-### 2. Draft property loss
-
-Composer extraction can accidentally strip text properties or object boundaries.
+- we create more files but still think in one giant `disco-room` namespace
 
 Mitigation:
 
-- add explicit tests for property-preserving draft copies
-- keep send failure/edit cancel coverage in compose tests
+- review each move by asking for the real owner, not just a destination file
 
-### 3. Partial patch regressions
+### 2. Polluting shared modules with room-specific orchestration
 
-Render/event split can silently break local invalidation.
+Risk:
 
-Mitigation:
-
-- do not split event patchers before render ownership is clear
-- keep integration tests for gateway create/update/delete/reaction/poll flows
-
-### 4. Keybinding drift
-
-New module layout can desynchronize docs/help text/keymaps.
+- in reaction to the old problem, we move too much imperative UI glue into
+  `disco-chatbuf.el`, `disco-msg.el`, or `disco-thread.el`
 
 Mitigation:
 
-- keep keymap comments in the owning module
-- update README/help text in the same patch as binding changes
-- add binding assertions to tests for the primary telega-aligned slots
+- only move code downward when the ownership is genuinely shared
+- leave room-specific orchestration at the room facade/render/events layers
 
-### 5. Over-fragmentation
+### 3. Namespace churn without user value
 
-Too many tiny files can make room logic harder to follow.
+Risk:
+
+- we rename public commands too early and create needless compatibility churn
 
 Mitigation:
 
-- target files in the rough range of 500-1500 lines where practical
-- only create optional modules like `disco-room-avatar.el` when there is a real
-  ownership seam, not just because a section is long
+- keep public `disco-room-*` entry points stable while internals are reorganized
+
+### 4. Transitional files becoming permanent by inertia
+
+Risk:
+
+- an intermediate extraction such as `disco-room-search.el` gets treated as the
+  final architecture simply because it already exists
+
+Mitigation:
+
+- explicitly mark transitional files as provisional in their headers and plans
+- revisit them after shared owners stabilize
+
+### 5. Cyclic dependencies
+
+Risk:
+
+- facade, render, events, and shared owners start to require each other
+
+Mitigation:
+
+- keep the facade as the coordinator
+- move pure helpers downward into shared owners
+- keep room render and room events separate from generic chatbuf internals
 
 ## What not to do
 
-- do not split one file per command if they still share one state machine
-- do not move Discord-specific send logic into `disco-chatbuf.el`
-- do not make `disco-room-render.el` call deep composer internals directly
-- do not create standalone transient files just because a command uses
-  `transient`; keep the code with the owning subsystem unless support code is
-  genuinely shared
-- do not remove compatibility wrappers until docs/tests and call sites are all
-  updated
+- do not split by line count alone
+- do not assume extracted code must keep a `disco-room-*` name
+- do not create `disco-room-compose.el`, `disco-room-message.el`, or
+  `disco-room-thread-ui.el` by reflex
+- do not use transient as a top-level split axis
+- do not move Discord-specific room orchestration into shared owners just to
+  avoid the word `room`
+- do not rename public commands aggressively when a compatibility wrapper will
+  do
 
-## Recommended first concrete patch series
+## Immediate practical guidance
 
-If work starts immediately, the lowest-risk sequence is:
+For the next round of work, the right question is not:
 
-1. add this plan reference from `INCREMENTAL-ROOM-PLAN.md`
-2. create `disco-room-search.el` and move filter/inplace/jump logic
-3. create `disco-room-compose.el` and move draft/object/preview/options helpers
-4. move send pipeline into the same compose module
-5. create `disco-room-message.el` and move reply/forward/edit/delete/reaction
-   actions
-6. move transient UIs into the compose/message owners only when those owners
-   exist, instead of introducing a transient-only module first
+- "what should be the next `disco-room-*` file?"
 
-That gets the file split pattern established before touching the most fragile
-render/event internals.
+The right questions are:
+
+- what in `disco-room.el` is really `disco-chatbuf`?
+- what in `disco-room.el` is really `disco-msg`?
+- what in `disco-room.el` is really `disco-thread`?
+- what remains room-specific after those moves?
+
+Only the remainder deserves new room-owned files.
 
 ## Exit criteria
 
-This split plan is considered complete when:
+This plan is complete when all of the following are true:
 
-- `disco-room.el` is mostly facade code
-- major responsibilities each have one obvious home
-- keybinding clusters are documented by module ownership
-- tests are split by ownership with one smaller integration suite
-- future telega-parity work can happen inside the right module without opening a
-  9000-line file every time
+- `disco-room.el` is primarily facade and public room API
+- shared chatbuf behavior has an obvious home under `disco-chatbuf`
+- shared message semantics have an obvious home under `disco-msg`
+- shared thread semantics have an obvious home under `disco-thread`
+- room-prefixed files exist only where the code is truly room-specific
+- file names and helper prefixes reflect ownership instead of extraction origin
+- future work no longer requires opening one giant room file just to change a
+  shared behavior
