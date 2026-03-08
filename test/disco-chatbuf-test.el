@@ -72,6 +72,26 @@
     (should-not disco-chatbuf--input-idx)
     (should-not disco-chatbuf--input-pending)))
 
+(ert-deftest disco-chatbuf-input-map-stays-active-at-logical-end ()
+  (save-window-excursion
+    (let ((buffer (get-buffer-create " *disco-chatbuf-input*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer buffer)
+            (erase-buffer)
+            (disco-chatbuf-init-state 8)
+            (disco-chatbuf-install-prompt ">>> ")
+            (let ((map (make-sparse-keymap)))
+              (set-keymap-parent map (current-global-map))
+              (define-key map [remap self-insert-command]
+                          #'disco-chatbuf-self-insert-command)
+              (disco-chatbuf-input-apply-text-properties map))
+            (goto-char (or (disco-chatbuf-input-logical-end-position) (point-max)))
+            (execute-kbd-macro "qs")
+            (should (equal "qs" (disco-chatbuf-input-string))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest disco-chatbuf-aux-state-roundtrip ()
   (with-temp-buffer
     (disco-chatbuf-init-state)

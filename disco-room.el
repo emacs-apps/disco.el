@@ -773,7 +773,9 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
      ("C-c C-x" . disco-room-clear-attachments)
      ("C-c M-l" . disco-room-list-attachments)
      ("C-c M-e" . disco-room-edit-attachment-description)
-     ("C-c M-r" . disco-room-reorder-attachments))))
+     ("C-c M-r" . disco-room-reorder-attachments)))
+  (define-key map [remap self-insert-command] #'disco-chatbuf-self-insert-command)
+  map)
 (defvar disco-room-input-map
   (disco-room--configure-input-map (make-sparse-keymap))
   "Keymap active when point is inside the room draft region.")
@@ -6125,11 +6127,16 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   "Ensure the persistent tail input region exists and matches current draft."
   (disco-chatbuf-init-state disco-room-input-history-size)
   (disco-room--sync-shared-aux-state)
-  (disco-room--clear-input-region-markers)
-  (when (disco-room--composer-visible-p)
+  (if (not (disco-room--composer-visible-p))
+      (disco-room--clear-input-region-markers)
     (save-excursion
       (goto-char (point-max))
-      (disco-chatbuf-install-prompt (disco-room--prompt-text)))
+      (if (and (markerp disco-room--input-marker)
+               (eq (marker-buffer disco-room--input-marker) (current-buffer))
+               (markerp disco-room--input-prompt-marker)
+               (eq (marker-buffer disco-room--input-prompt-marker) (current-buffer)))
+          (disco-chatbuf-prompt-update (disco-room--prompt-text))
+        (disco-chatbuf-install-prompt (disco-room--prompt-text))))
     (disco-chatbuf-input-set-text disco-room--draft-input)
     (disco-room--apply-input-text-properties)))
 
@@ -6195,8 +6202,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
              #'disco-room--ewoc-printer
              (disco-room--header-text channel)
              (disco-room--footer-text draft)
-             t))
-      (disco-room--bind-input-region-from-footer))))
+             t)))))
 
 (defun disco-room--set-ewoc-frame (&optional channel draft)
   "Update current room EWOC header/footer in place."
@@ -6204,6 +6210,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (let ((disco-room--rendering t)
         (inhibit-read-only t)
         (buffer-undo-list t))
+    (disco-room--clear-input-region-markers)
     (ewoc-set-hf disco-room--ewoc
                  (disco-room--header-text channel)
                  (disco-room--footer-text draft)))
@@ -6727,13 +6734,10 @@ Return non-nil when handled without full room rerender."
           (disco-room--set-ewoc-frame channel draft)
           ;; API returns newest-first by default; reverse for chat-like display.
           (disco-room--reconcile-timeline (reverse messages))
-          (disco-room--bind-input-region-from-footer)
           (when (markerp disco-room--input-marker)
-            ;; Keep typing position at end of draft text, not sentinel newline.
             (let ((logical-end (disco-room--input-logical-end-position)))
               (when logical-end
-                (goto-char logical-end)))
-            (disco-room--sync-draft-from-buffer)))
+                (goto-char logical-end)))))
       (disco-media-set-preview-fetch-budget nil)
       (setq disco-room--rendering nil))))
 
@@ -7798,7 +7802,6 @@ When called with prefix argument, force draft edit in minibuffer first."
    (if (disco-room--composer-edit-active-p)
        "save edits"
      "send messages"))
-  (disco-room--sync-draft-from-buffer)
   (cond
    (disco-room--send-in-flight
     (message "disco: send already in progress"))

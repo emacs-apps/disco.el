@@ -122,52 +122,65 @@ markers and rings are reused when already present."
     (when (<= start (point-max))
       (cons start (point-max)))))
 
-(defun disco-chatbuf--empty-placeholder-active-p ()
-  "Return non-nil when the current input consists only of a hidden placeholder."
+(defun disco-chatbuf--input-placeholder-position ()
+  "Return trailing hidden placeholder position, or nil when absent."
   (when-let* ((start (disco-chatbuf-input-start-position)))
-    (and (= (point-max) (1+ start))
-         (get-text-property start disco-chatbuf-empty-placeholder-property))))
+    (let ((end (point-max)))
+      (when (and (> end start)
+                 (get-text-property (1- end)
+                                    disco-chatbuf-empty-placeholder-property))
+        (1- end)))))
+
+(defun disco-chatbuf--empty-placeholder-active-p ()
+  "Return non-nil when current input contains only the hidden placeholder."
+  (when-let* ((start (disco-chatbuf-input-start-position)))
+    (let ((placeholder-pos (disco-chatbuf--input-placeholder-position)))
+      (and placeholder-pos
+           (= placeholder-pos start)))))
 
 (defun disco-chatbuf--ensure-empty-placeholder ()
-  "Ensure an empty input region still has one hidden placeholder character."
+  "Ensure current input ends with one hidden placeholder character."
   (when-let* ((start (disco-chatbuf-input-start-position)))
-    (cond
-     ((= start (point-max))
-      (let ((inhibit-read-only t))
-        (with-silent-modifications
-          (goto-char start)
+    (let ((inhibit-read-only t)
+          (point-pos (point))
+          (pos start)
+          (limit (point-max)))
+      (with-silent-modifications
+        (while (< pos limit)
+          (if (get-text-property pos disco-chatbuf-empty-placeholder-property)
+              (if (= pos (1- limit))
+                  (setq pos (1+ pos))
+                (delete-region pos (1+ pos))
+                (setq limit (point-max)))
+            (setq pos (1+ pos))))
+        (unless (disco-chatbuf--input-placeholder-position)
+          (goto-char (point-max))
           (insert (propertize " "
                               disco-chatbuf-empty-placeholder-property t
                               'display ""
-                              'read-only nil)))))
-     ((disco-chatbuf--empty-placeholder-active-p)
-      nil)
-     (t
-      (let ((inhibit-read-only t)
-            (pos start)
-            (limit (point-max)))
-        (with-silent-modifications
-          (while (< pos limit)
-            (if (get-text-property pos disco-chatbuf-empty-placeholder-property)
-                (progn
-                  (delete-region pos (1+ pos))
-                  (setq limit (1- limit)))
-              (setq pos (1+ pos))))))))))
+                              'read-only nil))))
+      (goto-char (min (or (disco-chatbuf-input-logical-end-position) (point-max))
+                      (max start point-pos))))))
 
 (defun disco-chatbuf--clear-empty-placeholder ()
-  "Remove the hidden empty-input placeholder when it is currently active."
-  (when (disco-chatbuf--empty-placeholder-active-p)
+  "Remove hidden placeholder characters from the current input region."
+  (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
     (let ((inhibit-read-only t)
-          (start (disco-chatbuf-input-start-position)))
+          (pos (car bounds))
+          (limit (cdr bounds)))
       (with-silent-modifications
-        (delete-region start (1+ start))))))
+        (while (< pos limit)
+          (if (get-text-property pos disco-chatbuf-empty-placeholder-property)
+              (progn
+                (delete-region pos (1+ pos))
+                (setq limit (point-max)))
+            (setq pos (1+ pos))))))))
 
 (defun disco-chatbuf-input-logical-end-position ()
   "Return logical end position of the current editable input region."
   (when-let* ((start (disco-chatbuf-input-start-position)))
-    (if (disco-chatbuf--empty-placeholder-active-p)
-        start
-      (point-max))))
+    (or (disco-chatbuf--input-placeholder-position)
+        (point-max))))
 
 (defun disco-chatbuf-prompt-button-live-p ()
   "Return non-nil when the current prompt button is live in this buffer."
@@ -199,16 +212,33 @@ markers and rings are reused when already present."
          (< pos input-start))))
 
 (defun disco-chatbuf-post-command-clamp-point ()
-  "Keep point out of the prompt glyph span."
+  "Keep point out of the prompt glyph span and trailing placeholder."
   (when (disco-chatbuf-point-in-prompt-p)
     (when-let* ((input-start (disco-chatbuf-input-start-position)))
-      (goto-char input-start))))
+      (goto-char input-start)))
+  (when-let* ((logical-end (disco-chatbuf-input-logical-end-position)))
+    (when (and (disco-chatbuf-point-in-input-p)
+               (> (point) logical-end))
+      (goto-char logical-end))))
 
 (defun disco-chatbuf--ensure-point-after-input-start ()
-  "Move point to the end of buffer when it is before input start."
+  "Move point into the logical input tail when it is before input start."
   (when-let* ((input-start (disco-chatbuf-input-start-position)))
     (when (< (point) input-start)
-      (goto-char (point-max)))))
+      (goto-char (or (disco-chatbuf-input-logical-end-position)
+                     input-start)))))
+
+(defun disco-chatbuf-self-insert-command (n)
+  "Insert the typed character into the current chatbuf input region."
+  (interactive "p")
+  (disco-chatbuf--ensure-point-after-input-start)
+  (when-let* ((logical-end (disco-chatbuf-input-logical-end-position)))
+    (when (> (point) logical-end)
+      (goto-char logical-end)))
+  (self-insert-command n)
+  (when-let* ((logical-end (disco-chatbuf-input-logical-end-position)))
+    (when (> (point) logical-end)
+      (goto-char logical-end))))
 
 (defun disco-chatbuf--restore-input-point (input-offset)
   "Restore point inside the input region using INPUT-OFFSET when possible."
@@ -273,17 +303,29 @@ point is restored relative to the input start when it was inside the input."
 
 (defun disco-chatbuf-has-input-p ()
   "Return non-nil when the current chat buffer has some input text."
-  (when-let* ((input-start (disco-chatbuf-input-start-position)))
-    (< input-start (point-max))))
+  (when-let* ((input-start (disco-chatbuf-input-start-position))
+              (logical-end (disco-chatbuf-input-logical-end-position)))
+    (< input-start logical-end)))
+
+(defun disco-chatbuf--strip-placeholder-chars (text)
+  "Return TEXT without hidden placeholder characters, preserving properties."
+  (let ((pos 0)
+        (limit (length text))
+        chunks)
+    (while (< pos limit)
+      (let ((next (or (next-single-property-change
+                       pos disco-chatbuf-empty-placeholder-property text limit)
+                      limit)))
+        (unless (get-text-property pos disco-chatbuf-empty-placeholder-property text)
+          (push (substring text pos next) chunks))
+        (setq pos next)))
+    (apply #'concat (nreverse chunks))))
 
 (defun disco-chatbuf-input-string ()
   "Return the current editable input string, preserving text properties."
   (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
-    (let ((text (buffer-substring (car bounds) (cdr bounds))))
-      (if (and (= (length text) 1)
-               (get-text-property 0 disco-chatbuf-empty-placeholder-property text))
-          ""
-        text))))
+    (disco-chatbuf--strip-placeholder-chars
+     (buffer-substring (car bounds) (cdr bounds)))))
 
 (defun disco-chatbuf-input-delete ()
   "Delete all current input contents."
@@ -311,8 +353,7 @@ point is restored relative to the input start when it was inside the input."
 When INPUT-MAP is non-nil, install it as `local-map' for the full input region
 and on the dedicated input overlay so empty input still uses input bindings."
   (disco-chatbuf-init-state)
-  (save-excursion
-    (disco-chatbuf--ensure-empty-placeholder))
+  (disco-chatbuf--ensure-empty-placeholder)
   (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
     (move-overlay disco-chatbuf--input-overlay (car bounds) (cdr bounds) (current-buffer))
     (overlay-put disco-chatbuf--input-overlay 'keymap input-map)
@@ -342,6 +383,9 @@ SYNC-FUNCTION when non-nil."
         (disco-chatbuf-input-apply-text-properties input-map)
         (when prune-broken-objects
           (disco-chatbuf-input-prune-broken-objects))
+        (when-let* ((logical-end (disco-chatbuf-input-logical-end-position)))
+          (when (> (point) logical-end)
+            (goto-char logical-end)))
         (when (functionp sync-function)
           (funcall sync-function))))))
 
