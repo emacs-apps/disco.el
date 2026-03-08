@@ -751,12 +751,21 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
 (defvar disco-room-timeline-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "r") #'disco-room-reply-to-message)
+    (define-key map (kbd "f") #'disco-room-forward-message)
+    (define-key map (kbd "e") #'disco-room-edit-message)
+    (define-key map (kbd "d") #'disco-room-delete-message)
+    (define-key map (kbd "!") #'disco-room-toggle-reaction)
+    (define-key map (kbd "+") #'disco-room-add-reaction)
+    (define-key map (kbd "-") #'disco-room-remove-reaction)
+    (define-key map (kbd "T") #'disco-room-open-thread-from-message-at-point)
     map)
   "Timeline-only keymap active when point is outside the room draft.")
 
 (defvar disco-room-message-prefix-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "r") #'disco-room-reply-to-message)
+    (define-key map (kbd "f") #'disco-room-forward-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
     (define-key map (kbd "d") #'disco-room-delete-message)
     (define-key map (kbd "!") #'disco-room-toggle-reaction)
@@ -6279,9 +6288,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (concat
    "M-<: older/more   C-c g/s/n/p: refresh/search/next/prev   M-g s/n/p: inplace search"
    "   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
-   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   C-c m r/e/d/!/+/-: message actions"
+   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline r/f/e/d/!/+/-/T: message actions"
    "   C-c C-w: toggle breakline   C-c C-p s/+/-/t/v/c/e: poll actions"
-   "   C-c C-P: ack pins   C-c C-f/C-F: attach/forward   C-c C-d: remove token"
+   "   C-c C-P: ack pins   C-c C-a/C-f: attach   C-c C-d: remove attachment"
    "   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments"
    "   C-c C-t o: open message thread   C-c C-t: thread ops"
    (if (disco-room--composer-visible-p channel)
@@ -8934,7 +8943,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if disco-room--send-message-unavailable-reason)
     ("f" "Attach file" disco-room-attach-file
      :inapt-if disco-room--attach-unavailable-reason)
-    ("D" "Remove attach token" disco-room-remove-attachment-token-at-point
+    ("D" "Remove attachment" disco-room-remove-attachment-token-at-point
      :inapt-if (lambda ()
                  (disco-room--attachment-token-action-unavailable-reason 1)))
     ("x" "Clear attachments" disco-room-clear-attachments
@@ -8943,7 +8952,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("v" "List attachments" disco-room-list-attachments
      :inapt-if (lambda ()
                  (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("V" "Edit attach desc" disco-room-edit-attachment-description
+    ("V" "Edit attachment desc" disco-room-edit-attachment-description
      :inapt-if (lambda ()
                  (disco-room--attachment-token-action-unavailable-reason 1)))
     ("O" "Reorder attachments" disco-room-reorder-attachments
@@ -9070,6 +9079,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
     (define-key map (kbd "C-c C-P") #'disco-room-ack-channel-pins)
     (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+    (define-key map (kbd "C-c C-a") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-F") #'disco-room-forward-message)
     (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
@@ -9086,12 +9096,12 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-t r") #'disco-room-rename-thread)
     (define-key map (kbd "C-c C-t k") #'disco-room-toggle-thread-locked)
     (define-key map (kbd "C-c C-t s") #'disco-room-set-thread-slowmode)
-    (define-key map (kbd "C-c C-t a") #'disco-room-set-thread-auto-archive-duration)
+    (define-key map (kbd "C-c C-t a") #'disco-room-toggle-thread-archived)
+    (define-key map (kbd "C-c C-t A") #'disco-room-set-thread-auto-archive-duration)
     (define-key map (kbd "C-c C-t e") #'disco-room-edit-thread-settings)
     (define-key map (kbd "C-c C-t u") #'disco-room-set-thread-muted)
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
-    (define-key map (kbd "C-c C-a") #'disco-room-toggle-thread-archived)
     (define-key map (kbd "C-c C-v") #'disco-room-refetch-avatars)
     (define-key map (kbd "C-c ?") #'disco-room-transient)
     map)

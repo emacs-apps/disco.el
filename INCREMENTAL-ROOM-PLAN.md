@@ -62,6 +62,58 @@ The important telega properties to align with are:
 - send logic parses the input region into backend-native payloads
 - prompt/footer changes do not require rebuilding the editable input region
 
+### Keybinding alignment rules
+
+For `disco-room`, telega alignment should also apply to keybinding layout, not
+just buffer architecture.
+
+Rules:
+
+- copy telega's binding clusters before inventing new top-level shortcuts
+- distinguish telega's three chat interaction layers and mirror them where
+  possible:
+  - chatbuf-global keys for composer/filter/navigation
+  - message-local keys for point-on-message actions
+  - transient menus for richer multi-step operations
+- keep chatbuf-core keys aligned where the feature exists: `RET`, `M-RET`,
+  `M-p`, `M-n`, `M-r`, `C-c C-k`
+- keep attach/options keys aligned where possible: `C-c C-a`, `C-c C-f`,
+  `C-c C-v`, `C-c C-e`, `C-c C-o`
+- keep filtering/navigation keys aligned where possible: `C-c /`, `C-c C-c`,
+  `C-c C-r`, `C-c C-s`, `M-g ...`
+- keep message-at-point actions aligned with telega's button-map style where
+  features exist: prefer bare `r`, `f`, `e`, `d`, `!`, `+`, `-`, `T` when
+  point is outside the composer, with `C-c m ...` as a compatibility/prefix
+  layer rather than the primary design
+- for read-only list buffers such as `disco-root`, prefer telega-style
+  single-key navigation/action design (`n`/`p`/`TAB`, `RET`, `q`, `?`, `v`,
+  `M-g`, `/`, `\`) over `C-c`-heavy command sets
+- if `disco-room` does not yet implement telega's corresponding feature,
+  prefer reserving the key over assigning an unrelated command to it
+- legacy compatibility bindings may remain temporarily, but help text and docs
+  should advertise the telega-aligned key first
+- documentation should be organized by the same binding clusters telega uses,
+  so keymap comments, help text, and README sections stay synchronized
+
+Current high-value follow-ups:
+
+- `C-c C-a` should become the primary attachment entry point
+- `C-c C-f` should evolve toward telega-like media/file attach semantics
+- message-at-point bare keys should be preferred whenever room is in timeline
+  context, matching telega's button-map style
+- `C-c m f` should be the primary prefix fallback for forward, with legacy
+  global binding treated as compatibility only
+- `C-c C-v` should eventually be freed for clipboard/media attach rather than
+  unrelated room maintenance actions
+- `M-RET`, `M-r`, `C-c C-e`, and `C-c C-o` should stay reserved for telega-like
+  preview, input-history search, formatting, and input options until room has
+  matching semantics
+- `C-c C-c` needs an explicit long-term decision: either converge toward
+  telega's filter-cancel usage or remain a documented divergence because room
+  treats it as a send alias
+- `disco-root` and other read-only overview buffers should be reviewed against
+  `telega-root-mode-map`, not designed independently from the chatbuf model
+
 ## Current disco-room state
 
 ### Already present

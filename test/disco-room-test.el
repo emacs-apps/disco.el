@@ -36,7 +36,12 @@
     (disco-room--update-context-mode)
     (should disco-room-timeline-mode)
     (should (eq (key-binding (kbd "q") t) 'quit-window))
+    (should (eq (key-binding (kbd "r") t) 'disco-room-reply-to-message))
+    (should (eq (key-binding (kbd "f") t) 'disco-room-forward-message))
+    (should (eq (key-binding (kbd "T") t) 'disco-room-open-thread-from-message-at-point))
+    (should (eq (key-binding (kbd "C-c C-a") t) 'disco-room-attach-file))
     (should (eq (key-binding (kbd "C-c m r") t) 'disco-room-reply-to-message))
+    (should (eq (key-binding (kbd "C-c m f") t) 'disco-room-forward-message))
     (should (eq (key-binding (kbd "C-c m e") t) 'disco-room-edit-message))))
 
 (ert-deftest disco-room-ack-channel-pins-applies-state-on-success ()

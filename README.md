@@ -21,8 +21,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room timeline supports telega-inspired compact same-sender grouping, date separators, and unread divider rendering.
 - Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
 - Send plain text message with `C-c C-c` in room buffer.
-- Send file attachments from room buffer (multipart upload) with draft tokens: add via `C-c C-f`, remove token at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
-- Reply/edit/delete/forward message from room buffer (`r`, `e`, `d`, `C-c C-F`) and load older history (`M-<`).
+- Send file attachments from room buffer (multipart upload) with structured composer objects: add via `C-c C-a` or `C-c C-f`, remove attachment at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
+- Reply/edit/delete/forward message from room buffer with telega-like timeline keys `r`/`f`/`e`/`d` when point is outside the composer, or via `C-c m r/f/e/d`; legacy `C-c C-F` still works for forward. Load older history with `M-<`.
 - Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
 - Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, URL actions, and transfer state actions: Download/Cancel/Open Local/Save As, plus inline image preview loading).
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
@@ -37,7 +37,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Draft input supports dynamic `TAB` completion for `@`/`#` tokens (users, roles, `@everyone`/`@here`, and guild channels) and inserts Discord mention syntax; company/Corfu rows can show username/id/avatar metadata.
 - Room provides `C-c C-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
-- In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
+- In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-t a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
 - Live room updates with create/update/delete dispatch from Discord Gateway websocket events.
 - Root buffer now live-syncs guild/channel/thread structure from gateway create/update/delete dispatch.
 - Root channel labels show unread state plus mention badges (`[@N]`), aligned with Discord read-state semantics (not per-channel unread message counts).
@@ -131,20 +131,21 @@ built-in tree/activity layouts, return an `items` view spec instead:
 - Root buffer: `RET` on forum/media opens parent-thread list; that list fetches active threads via `/channels/{id}/threads/search` (`archived=false`) on open and on `g`.
 - Archived thread buffer: `g` refreshes from first page, `n` loads next page, `RET`/mouse opens selected thread.
 - Archived thread fetch only queries the `private` source when `MANAGE_THREADS` is present, and also suppresses expected permission-denied (`Missing Access`) source noise.
-- Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-a` toggle archived state.
-- Thread room buffer: `C-c C-t r` rename, `C-c C-t k` toggle locked, `C-c C-t s` set slowmode, `C-c C-t a` set auto-archive duration, `C-c C-t e` edit multi-field settings, `C-c C-t u` set thread mute.
+- Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-t a` toggle archived state.
+- Thread room buffer: `C-c C-t r` rename, `C-c C-t k` toggle locked, `C-c C-t s` set slowmode, `C-c C-t A` set auto-archive duration, `C-c C-t e` edit multi-field settings, `C-c C-t u` set thread mute.
 - Parent room buffer: `C-c C-t m` creates from message, `C-c C-t c` creates detached thread.
 - Room transient (`?`): includes message send/refresh plus thread create/join/leave/archive/rename/lock/slowmode/auto-archive/settings/mute actions.
 
 ## Message Commands
 
 - Room buffer: `r` set reply target from message-at-point, `C-c C-k` clears pending reply.
-- Room buffer: `C-c C-F` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`) chosen from source message entries. In picker prompts, press `RET` on empty input to skip one side. Manual fallback is off by default (`disco-room-forward-only-manual-fallback`).
+- Room buffer: `C-c m f` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`) chosen from source message entries. Legacy `C-c C-F` still works. In picker prompts, press `RET` on empty input to skip one side. Manual fallback is off by default (`disco-room-forward-only-manual-fallback`).
 - If API rejects forward comments in your session, `disco-room-forward-comment-rejection-action` controls fallback (`split` sends comment + forward as two messages).
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
-- Room buffer draft: attachment tokens can be removed at point with `C-c C-d`.
+- Room buffer draft: attachment objects can be removed at point with `C-c C-d`.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
+- Room timeline keys outside the composer follow telega-style message actions where available: `r` reply, `f` forward, `e` edit, `d` delete, `!` toggle reaction, `+` add reaction, `-` remove reaction, `T` open thread.
 - Room poll actions: `C-c C-p s` send poll, `C-c C-p +` select answer, `C-c C-p -` unselect answer, `C-c C-p t` toggle staged answer, `C-c C-p v` submit staged vote, `C-c C-p c` remove own vote, `C-c C-p e` end poll.
 - Room transient (`?`): includes attachment/forward and reaction/poll actions (`f`, `F`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).
