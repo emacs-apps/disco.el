@@ -15,6 +15,29 @@
     (disco-room-mode)
     (should-not (derived-mode-p 'special-mode))))
 
+(ert-deftest disco-room-contextual-bindings-follow-point-location ()
+  (with-temp-buffer
+    (disco-state-reset)
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (goto-char (or (disco-room--input-logical-end-position) (point-max)))
+    (disco-room--update-context-mode)
+    (should-not disco-room-timeline-mode)
+    (should (eq (key-binding (kbd "q") t)
+                'disco-chatbuf-self-insert-command))
+    (goto-char (point-min))
+    (disco-room--update-context-mode)
+    (should disco-room-timeline-mode)
+    (should (eq (key-binding (kbd "q") t) 'quit-window))
+    (should (eq (key-binding (kbd "r") t) 'disco-room-reply-to-message))))
+
 (ert-deftest disco-room-ack-channel-pins-applies-state-on-success ()
   (with-temp-buffer
     (disco-state-reset)

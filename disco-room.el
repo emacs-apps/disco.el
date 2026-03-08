@@ -783,6 +783,29 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
 ;; Refresh bindings on reload since `defvar' preserves existing map objects.
 (disco-room--configure-input-map disco-room-input-map)
 
+(defvar disco-room-timeline-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'disco-room-refresh)
+    (define-key map (kbd "s") #'disco-room-search)
+    (define-key map (kbd "n") #'disco-room-search-next)
+    (define-key map (kbd "p") #'disco-room-search-prev)
+    (define-key map (kbd "r") #'disco-room-reply-to-message)
+    (define-key map (kbd "e") #'disco-room-edit-message)
+    (define-key map (kbd "d") #'disco-room-delete-message)
+    (define-key map (kbd "!") #'disco-room-toggle-reaction)
+    (define-key map (kbd "+") #'disco-room-add-reaction)
+    (define-key map (kbd "-") #'disco-room-remove-reaction)
+    (define-key map (kbd "?") #'disco-room-transient)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Timeline-only keymap active when point is outside the room draft.")
+
+(define-minor-mode disco-room-timeline-mode
+  "Buffer-local navigation bindings active outside the room draft."
+  :init-value nil
+  :lighter nil
+  :keymap disco-room-timeline-mode-map)
+
 (defun disco-room--channel-object ()
   "Return current room channel object from state."
   (disco-state-channel disco-room--channel-id))
@@ -1652,6 +1675,12 @@ When NO-RERENDER is non-nil, update local state without rendering."
        (car bounds) (cdr bounds)
        '(disco-room-input t)))))
 
+(defun disco-room--update-context-mode ()
+  "Enable timeline bindings only when point is outside the room draft."
+  (let ((timeline-p (not (disco-room--point-in-input-p))))
+    (unless (eq disco-room-timeline-mode timeline-p)
+      (disco-room-timeline-mode (if timeline-p 1 -1)))))
+
 (defun disco-room--post-command ()
   "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
   (unless disco-room--rendering
@@ -1664,7 +1693,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
                              disco-room--revealed-spoiler-message-id)))
         (let ((previous disco-room--revealed-spoiler-message-id))
           (setq disco-room--revealed-spoiler-message-id nil)
-          (disco-room--invalidate-message-node previous))))))
+          (disco-room--invalidate-message-node previous))))
+    (disco-room--update-context-mode)))
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
@@ -6039,19 +6069,21 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--header-help-text (&optional channel)
   "Return header help text for room actions in CHANNEL."
   (concat
-   "g: refresh   M-<: older/more   s/n/p: inplace search   C-c /: filter search"
-   "   C-c C-r/C-s: inplace query back/forward   C-c C-/: cancel filter"
-   "   C-c C-g: jump msg-id   r/e/d: reply/edit/delete   C-c C-w: toggle breakline"
-   "   !/+/-: reactions   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end"
+   "M-<: older/more   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
+   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   C-c C-w: toggle breakline"
+   "   C-c C-p s/+/-/t/v/c/e: poll send/select/unselect/toggle/vote/remove/end"
    "   C-c C-P: ack pins   C-c C-f/C-F: attach/forward   C-c C-d: remove token"
    "   C-c C-x: clear attachments   C-c M-l/M-e/M-r: list/edit/reorder attachments"
    "   C-c C-t o: open message thread   C-c C-t: thread ops"
    (if (disco-room--composer-visible-p channel)
-       (format "   RET/C-c C-c: %s   TAB: @/# complete   C-c C-v: refetch avatars   type at >>>   M-p/M-n: history   q: quit"
-               (if (disco-room--composer-edit-active-p)
-                   "save edit"
-                 "send"))
-     "   C-c C-v: refetch avatars   [composer hidden]   q: quit")))
+       (concat
+        (format "   RET/C-c C-c: %s   TAB: @/# complete   C-c C-v: refetch avatars"
+                (if (disco-room--composer-edit-active-p)
+                    "save edit"
+                  "send"))
+        "   type at >>>   M-p/M-n: history")
+     "   C-c C-v: refetch avatars   [composer hidden]")
+   "   timeline g/s/n/p/r/e/d/!/+/-/q   C-c ?: menu"))
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
@@ -6739,7 +6771,8 @@ Return non-nil when handled without full room rerender."
               (when logical-end
                 (goto-char logical-end)))))
       (disco-media-set-preview-fetch-budget nil)
-      (setq disco-room--rendering nil))))
+      (setq disco-room--rendering nil)
+      (disco-room--update-context-mode))))
 
 (defun disco-room-refresh ()
   "Fetch and redraw latest messages for current room asynchronously."
@@ -8779,15 +8812,12 @@ When called interactively, empty input clears slowmode (sets to 0)."
 
 (defvar disco-room-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-room-refresh)
+    (define-key map (kbd "C-l") #'recenter-top-bottom)
     (define-key map (kbd "M-<") #'disco-room-load-older-messages)
     (define-key map (kbd "RET") #'disco-room-return-dwim)
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)
     (define-key map (kbd "M-p") #'disco-room-draft-prev)
     (define-key map (kbd "M-n") #'disco-room-draft-next)
-    (define-key map (kbd "s") #'disco-room-search)
-    (define-key map (kbd "n") #'disco-room-search-next)
-    (define-key map (kbd "p") #'disco-room-search-prev)
     (define-key map (kbd "M-g s") #'disco-room-inplace-search)
     (define-key map (kbd "M-g n") #'disco-room-inplace-search-next)
     (define-key map (kbd "M-g p") #'disco-room-inplace-search-prev)
@@ -8796,12 +8826,6 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c /") #'disco-room-filter-search)
     (define-key map (kbd "C-c C-/") #'disco-room-filter-cancel)
     (define-key map (kbd "C-c M-/") #'disco-room-search-channel)
-    (define-key map (kbd "r") #'disco-room-reply-to-message)
-    (define-key map (kbd "e") #'disco-room-edit-message)
-    (define-key map (kbd "d") #'disco-room-delete-message)
-    (define-key map (kbd "!") #'disco-room-toggle-reaction)
-    (define-key map (kbd "+") #'disco-room-add-reaction)
-    (define-key map (kbd "-") #'disco-room-remove-reaction)
     (define-key map (kbd "C-c C-p s") #'disco-room-send-poll)
     (define-key map (kbd "C-c C-p +") #'disco-room-vote-poll-answer)
     (define-key map (kbd "C-c C-p -") #'disco-room-remove-poll-vote)
@@ -8834,8 +8858,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
     (define-key map (kbd "C-c C-a") #'disco-room-toggle-thread-archived)
     (define-key map (kbd "C-c C-v") #'disco-room-refetch-avatars)
-    (define-key map (kbd "?") #'disco-room-transient)
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "C-c ?") #'disco-room-transient)
     map)
   "Keymap for `disco-room-mode'.")
 
@@ -8895,7 +8918,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (add-hook 'display-line-numbers-mode-hook #'disco-room--on-window-size-change nil t)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
-  (add-hook 'post-command-hook #'disco-room--post-command nil t))
+  (add-hook 'post-command-hook #'disco-room--post-command nil t)
+  (disco-room--update-context-mode))
 
 (defun disco-room-open (channel-id channel-name)
   "Open room for CHANNEL-ID with CHANNEL-NAME."
