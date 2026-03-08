@@ -113,6 +113,11 @@ markers and rings are reused when already present."
     (when (<= start (point-max))
       (cons start (point-max)))))
 
+(defun disco-chatbuf-input-logical-end-position ()
+  "Return logical end position of the current editable input region."
+  (when (disco-chatbuf-input-start-position)
+    (point-max)))
+
 (defun disco-chatbuf-prompt-button-live-p ()
   "Return non-nil when the current prompt button is live in this buffer."
   (let ((prompt-start (disco-chatbuf-prompt-start-position))
@@ -226,6 +231,38 @@ point is restored relative to the input start when it was inside the input."
       (goto-char input-start)
       (insert (or text ""))))
   (goto-char (point-max)))
+
+(defun disco-chatbuf-input-apply-text-properties (&optional input-map)
+  "Apply editable-region properties to current input text.
+
+When INPUT-MAP is non-nil, install it as `local-map' for the full input region."
+  (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
+    (with-silent-modifications
+      (add-text-properties
+       (car bounds) (cdr bounds)
+       (append
+        '(read-only nil
+          rear-nonsticky (read-only local-map))
+        (when input-map
+          (list 'local-map input-map)))))))
+
+(cl-defun disco-chatbuf-after-change
+    (beg end &key rendering-p input-map sync-function prune-broken-objects)
+  "Maintain shared input-region invariants after a buffer change.
+
+BEG and END describe the changed region.  When RENDERING-P is non-nil, do
+nothing.  Otherwise, if the change overlaps the current input region, re-apply
+input properties, optionally prune broken structured objects, and then call
+SYNC-FUNCTION when non-nil."
+  (unless rendering-p
+    (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
+      (when (and (< beg (cdr bounds))
+                 (> end (car bounds)))
+        (disco-chatbuf-input-apply-text-properties input-map)
+        (when prune-broken-objects
+          (disco-chatbuf-input-prune-broken-objects))
+        (when (functionp sync-function)
+          (funcall sync-function))))))
 
 (cl-defun disco-chatbuf-input-insert (content &key object properties)
   "Insert CONTENT into the current input region.
