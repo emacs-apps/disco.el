@@ -10,6 +10,11 @@
 (require 'disco-room)
 (require 'disco-state)
 
+(ert-deftest disco-room-mode-is-not-special-mode ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (should-not (derived-mode-p 'special-mode))))
+
 (ert-deftest disco-room-ack-channel-pins-applies-state-on-success ()
   (with-temp-buffer
     (disco-state-reset)

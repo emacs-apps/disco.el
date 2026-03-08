@@ -104,6 +104,17 @@ markers and rings are reused when already present."
   (unless (local-variable-p 'disco-chatbuf--rendering)
     (setq-local disco-chatbuf--rendering nil)))
 
+(defun disco-chatbuf-mode-setup ()
+  "Apply telega-like chat buffer defaults in the current buffer."
+  (setq-local switch-to-buffer-preserve-window-point nil)
+  (setq-local window-point-insertion-type t)
+  (setq-local next-line-add-newlines nil)
+  (setq-local next-screen-context-lines 0)
+  (when (fboundp 'cursor-intangible-mode)
+    (cursor-intangible-mode 1))
+  (when (fboundp 'cursor-sensor-mode)
+    (cursor-sensor-mode 1)))
+
 (defun disco-chatbuf-prompt-start-position ()
   "Return current prompt start position, or nil when prompt is unavailable."
   (and (markerp disco-chatbuf--prompt-marker)

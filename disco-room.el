@@ -8839,9 +8839,9 @@ When called interactively, empty input clears slowmode (sets to 0)."
     map)
   "Keymap for `disco-room-mode'.")
 
-(define-derived-mode disco-room-mode special-mode "Disco-Room"
+(define-derived-mode disco-room-mode nil "Disco-Room"
   "Major mode for disco.el room buffers."
-  (setq buffer-read-only nil)
+  (disco-chatbuf-mode-setup)
   (disco-room--apply-breakline-settings)
   ;; Avoid visible seams between vertically sliced inline images.
   (setq-local line-spacing 0)
@@ -8890,8 +8890,6 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--optimistic-read-ack-seq 0)
   (setq-local disco-room--pending-optimistic-read-ack nil)
   (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
-  (when (fboundp 'cursor-intangible-mode)
-    (cursor-intangible-mode 1))
   (funcall #'disco-company-setup-room-buffer)
   (add-hook 'window-size-change-functions #'disco-room--on-window-size-change nil t)
   (add-hook 'display-line-numbers-mode-hook #'disco-room--on-window-size-change nil t)
