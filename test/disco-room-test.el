@@ -115,27 +115,24 @@
       (should-not disco-room--pending-reply-to)
       (should-not (disco-chatbuf-aux-active-p)))))
 
-(ert-deftest disco-room-composer-aux-state-prefers-synced-shared-state-but-falls-back-on-divergence ()
+(ert-deftest disco-room-composer-aux-state-uses-shared-chatbuf-state-only ()
   (with-temp-buffer
     (disco-room-mode)
-    (setq-local disco-room--pending-reply-to "m1")
+    (disco-room--set-composer-aux-state nil "m1")
     (disco-chatbuf-aux-set
      '(:aux-type reply :message-id "m1" :aux-msg ((id . "m1") (content . "shared"))))
-    (let ((aux (disco-room--composer-aux-state)))
+    (let ((aux (disco-chatbuf-aux-state)))
       (should (eq 'reply (plist-get aux :aux-type)))
       (should (equal "m1" (plist-get aux :message-id)))
       (should (equal "shared"
                      (alist-get 'content (plist-get aux :aux-msg)))))
     (setq-local disco-room--pending-reply-to "m2")
-    (let ((aux (disco-room--composer-aux-state)))
-      (should (equal "m2" (plist-get aux :message-id)))
-      (should-not (equal "shared"
-                         (alist-get 'content (plist-get aux :aux-msg)))))
-    (setq-local disco-room--pending-reply-to nil)
-    (let ((aux (disco-room--composer-aux-state)))
+    (let ((aux (disco-chatbuf-aux-state)))
       (should (equal "m1" (plist-get aux :message-id)))
       (should (equal "shared"
-                     (alist-get 'content (plist-get aux :aux-msg)))))))
+                     (alist-get 'content (plist-get aux :aux-msg)))))
+    (disco-chatbuf-aux-reset)
+    (should-not (disco-chatbuf-aux-state))))
 
 (ert-deftest disco-room-input-preview-renders-parsed-attachments ()
   (with-temp-buffer
@@ -525,7 +522,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (setq-local disco-room--pending-reply-to "m1")
+    (disco-room--set-composer-aux-state nil "m1")
     (setq-local disco-room--draft-input "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
@@ -954,7 +951,7 @@
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
     (setq-local disco-room--draft-input "hello")
-    (setq-local disco-room--pending-reply-to "m42")
+    (disco-room--set-composer-aux-state nil "m42")
     (setq-local disco-room--pending-attachments
                 '((:token-id 1 :path "/tmp/a.txt")
                   (:token-id 2 :path "/tmp/b.png" :description "preview")))
@@ -984,7 +981,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "readonly")
     (setq-local disco-room--channel-name "readonly")
-    (setq-local disco-room--pending-reply-to "m42")
+    (disco-room--set-composer-aux-state nil "m42")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "readonly")
@@ -1394,7 +1391,7 @@
     (setq-local disco-room--channel-id "chat")
     (disco-state-reset)
     (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
-    (setq-local disco-room--pending-edit '(:type edit :message-id "m1" :saved-state nil))
+    (disco-room--set-composer-aux-state '(:type edit :message-id "m1" :saved-state nil) nil)
     (let ((path (make-temp-file "disco-room-attach")))
       (unwind-protect
           (should-error (disco-room-attach-file path) :type 'user-error)
@@ -1468,7 +1465,7 @@
 (ert-deftest disco-room-remove-attachment-token-errors-while-editing ()
   (with-temp-buffer
     (disco-room-mode)
-    (setq-local disco-room--pending-edit '(:type edit :message-id "m1" :saved-state nil))
+    (disco-room--set-composer-aux-state '(:type edit :message-id "m1" :saved-state nil) nil)
     (setq-local disco-room--draft-input "[file:1]")
     (should-error (disco-room-remove-attachment-token-at-point) :type 'user-error)))
 
@@ -1601,7 +1598,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
-    (setq-local disco-room--pending-reply-to "m1")
+    (disco-room--set-composer-aux-state nil "m1")
     (disco-state-reset)
     (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "562949953423360")))
     (should-error (disco-room-send-poll "Q" '("a" "b") 24 nil nil)
@@ -1611,7 +1608,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
-    (setq-local disco-room--pending-reply-to "m1")
+    (disco-room--set-composer-aux-state nil "m1")
     (disco-state-reset)
     (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
     (should-error (disco-room-forward-message "m2" "src" nil nil)
@@ -1635,7 +1632,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
-    (setq-local disco-room--pending-reply-to "m1")
+    (disco-room--set-composer-aux-state nil "m1")
     (let ((msg '((id . "m2")
                  (channel_id . "chat")
                  (content . "body")

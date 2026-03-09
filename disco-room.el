@@ -888,42 +888,27 @@ EXTRA-PERMISSIONS augments the base send permission set for this room."
           :message-id disco-room--pending-reply-to))
    (t nil)))
 
-(defun disco-room--composer-aux-state ()
-  "Return effective composer aux plist.
-
-Prefer the shared chatbuf aux state when it matches the room-local aux source.
-If the two diverge, fall back to the room-local state to avoid stale reads
-while migration is still in progress."
-  (let ((room-state (disco-room--current-composer-aux-state))
-        (shared-state (and (disco-chatbuf-aux-active-p)
-                           (disco-chatbuf-aux-state))))
-    (cond
-     ((and shared-state room-state
-           (equal (plist-get shared-state :aux-type)
-                  (plist-get room-state :aux-type))
-           (equal (plist-get shared-state :message-id)
-                  (plist-get room-state :message-id)))
-      shared-state)
-     (room-state room-state)
-     (shared-state shared-state)
-     (t nil))))
+(defun disco-room--composer-reply-message-id ()
+  "Return target message id for active composer reply, or nil."
+  (when (eq (plist-get (disco-chatbuf-aux-state) :aux-type) 'reply)
+    (plist-get (disco-chatbuf-aux-state) :message-id)))
 
 (defun disco-room--composer-edit-active-p ()
   "Return non-nil when room composer is editing an existing message."
-  (eq (plist-get (disco-room--composer-aux-state) :aux-type) 'edit))
+  (eq (plist-get (disco-chatbuf-aux-state) :aux-type) 'edit))
 
 (defun disco-room--composer-edit-message-id ()
   "Return target message id for active composer edit, or nil."
   (and (disco-room--composer-edit-active-p)
-       (plist-get (disco-room--composer-aux-state) :message-id)))
+       (plist-get (disco-chatbuf-aux-state) :message-id)))
 
 (defun disco-room--composer-aux-active-p ()
   "Return non-nil when room composer currently has reply/edit context."
-  (not (null (disco-room--composer-aux-state))))
+  (not (null (disco-chatbuf-aux-state))))
 
 (defun disco-room--composer-aux-context-name ()
   "Return human-readable name for active composer aux context, or nil."
-  (pcase (plist-get (disco-room--composer-aux-state) :aux-type)
+  (pcase (plist-get (disco-chatbuf-aux-state) :aux-type)
     ('edit "editing a message")
     ('reply "replying to a message")
     (_ nil)))
@@ -981,7 +966,7 @@ If ownership cannot be determined, return UNKNOWN-VALUE."
   "Return reason entering composer edit mode for MSG is unavailable, or nil."
   (or (when (disco-room--composer-edit-active-p)
         "already editing a message")
-      (when disco-room--pending-reply-to
+      (when (disco-room--composer-reply-message-id)
         "cancel the active reply before editing a message")
       (disco-room--edit-permission-reason msg)))
 
@@ -1008,7 +993,7 @@ MIN-COUNT optionally requires at least that many queued attachments."
   "Return reason send-message action is unavailable, or nil."
   (let* ((draft (disco-room--current-draft))
          (has-attachments (not (null (disco-room--attachments-from-draft draft))))
-         (reply-to disco-room--pending-reply-to)
+         (reply-to (disco-room--composer-reply-message-id))
          (edit-message-id (disco-room--composer-edit-message-id))
          (edit-message (and edit-message-id
                             (disco-room--composer-context-message edit-message-id))))
@@ -1239,7 +1224,7 @@ creation permission."
 (defun disco-room--composer-edit-saved-state ()
   "Capture composer state to be restored after edit cancel/success."
   (list :draft (disco-chatbuf-copy-string (disco-room--current-draft))
-        :reply-to disco-room--pending-reply-to
+        :reply-to (disco-room--composer-reply-message-id)
         :attachment-token-seq disco-room--attachment-token-seq
         :attachment-token-entries (disco-room--copy-attachment-token-table)))
 
@@ -4928,7 +4913,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
-  (let* ((aux-state (disco-room--composer-aux-state))
+  (let* ((aux-state (disco-chatbuf-aux-state))
          (aux-type (plist-get aux-state :aux-type))
          (message-id (plist-get aux-state :message-id)))
     (concat
@@ -5313,7 +5298,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--message-affects-composer-context-p (message-id)
   "Return non-nil when MESSAGE-ID is used by current composer context."
-  (or (equal message-id disco-room--pending-reply-to)
+  (or (equal message-id (disco-room--composer-reply-message-id))
       (equal message-id (disco-room--composer-edit-message-id))))
 
 (defun disco-room--mutate-timeline-preserving-point (mutator)
@@ -6512,7 +6497,7 @@ enabled, include `replied_user'."
          (content (string-trim-right (or (plist-get parsed :content) "")))
          (attachments (or (plist-get parsed :attachments) '()))
          (buf (get-buffer-create "*disco-room-preview*"))
-         (mode-label (pcase (plist-get (disco-room--composer-aux-state) :aux-type)
+         (mode-label (pcase (plist-get (disco-chatbuf-aux-state) :aux-type)
                        ('edit "edit")
                        ('reply "reply")
                        (_ "message"))))
@@ -6851,7 +6836,7 @@ When called with prefix argument, force draft edit in minibuffer first."
             (message "disco: draft is empty")
           (let* ((room-buffer (current-buffer))
                  (channel-id disco-room--channel-id)
-                 (reply-to disco-room--pending-reply-to)
+                 (reply-to (disco-room--composer-reply-message-id))
                  (allowed-mentions (disco-room--send-allowed-mentions
                                     (not (null reply-to))))
                  (attachments (copy-tree parsed-attachments))
@@ -7264,7 +7249,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
     (disco-room--composer-edit-clear t)
     (disco-room--update-frame-preserving-point)
     (message "disco: edit target cleared"))
-   (disco-room--pending-reply-to
+   ((disco-room--composer-reply-message-id)
     (disco-room--set-composer-aux-state nil nil)
     (disco-room--update-frame-preserving-point)
     (message "disco: reply target cleared"))
