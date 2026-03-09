@@ -65,6 +65,24 @@
                    (disco-chatbuf-string-plain-text
                     (disco-room--current-draft))))))
 
+(ert-deftest disco-room-current-draft-prefers-live-input-region ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-chatbuf-input-cache-set-state "cached")
+    (disco-room-render)
+    (disco-chatbuf-input-set-text "live")
+    (should (equal "live"
+                   (disco-chatbuf-string-plain-text
+                    (disco-room--current-draft))))))
+
 (ert-deftest disco-room-draft-history-prev-next-restores-structured-pending-draft ()
   (with-temp-buffer
     (disco-room-mode)
@@ -77,23 +95,25 @@
              (concat "pending "
                      (disco-room--attachment-input-object-string
                       (disco-room--make-attachment-input-object path :filename "a.txt"))))
-            (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
-                       (lambda (&rest _args)
-                         (setq render-calls (1+ render-calls)))))
-              (disco-room-draft-prev)
-              (should (equal "older draft"
-                             (disco-chatbuf-string-plain-text
-                              (disco-room--current-draft))))
-              (should-not (disco-chatbuf-string-has-objects-p
-                           (disco-room--current-draft)))
-              (disco-room-draft-next)
-              (should (disco-chatbuf-string-has-objects-p
-                       (disco-room--current-draft)))
-              (should (= 1 (length disco-room--pending-attachments)))
-              (should (equal "a.txt"
-                             (plist-get (car disco-room--pending-attachments)
-                                        :filename)))
-              (should (= 2 render-calls))))
+            (let ((orig-update (symbol-function 'disco-room--update-frame-preserving-point)))
+              (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
+                         (lambda (&rest args)
+                           (setq render-calls (1+ render-calls))
+                           (apply orig-update args))))
+                (disco-room-draft-prev)
+                (should (equal "older draft"
+                               (disco-chatbuf-string-plain-text
+                                (disco-room--current-draft))))
+                (should-not (disco-chatbuf-string-has-objects-p
+                             (disco-room--current-draft)))
+                (disco-room-draft-next)
+                (should (disco-chatbuf-string-has-objects-p
+                         (disco-room--current-draft)))
+                (should (= 1 (length disco-room--pending-attachments)))
+                (should (equal "a.txt"
+                               (plist-get (car disco-room--pending-attachments)
+                                          :filename)))
+                (should (= 2 render-calls)))))
         (delete-file path)))))
 
 (ert-deftest disco-room-reply-and-cancel-sync-shared-aux-state ()
@@ -127,10 +147,32 @@
     (setq-local disco-room-long-message-action 'split)
     (setq-local disco-room-allowed-mentions 'all)
     (setq-local disco-room-reply-mention-replied-user nil)
+    (should (eq t (plist-get (disco-room--input-options-state) :send-on-return)))
     (should (disco-room--input-option-send-on-return))
     (should (eq 'file (disco-room--input-option-long-message-action)))
     (should (eq 'none (disco-room--input-option-allowed-mentions)))
     (should (disco-room--input-option-reply-mention-replied-user))))
+
+(ert-deftest disco-room-input-options-write-path-syncs-shared-state ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest _args) nil)))
+      (disco-room-toggle-send-on-return)
+      (should-not disco-room-send-on-return)
+      (should-not (disco-room--input-option-send-on-return))
+      (disco-room-cycle-long-message-action)
+      (should (eq 'file disco-room-long-message-action))
+      (should (eq 'file (disco-room--input-option-long-message-action)))
+      (disco-room-cycle-allowed-mentions)
+      (should (eq 'none disco-room-allowed-mentions))
+      (should (eq 'none (disco-room--input-option-allowed-mentions)))
+      (disco-room-toggle-reply-mention-replied-user)
+      (should disco-room-reply-mention-replied-user)
+      (should (disco-room--input-option-reply-mention-replied-user))
+      (disco-room-reset-input-options)
+      (should (equal (disco-room--current-input-options-state)
+                     (disco-room--input-options-state))))))
 
 (ert-deftest disco-room-composer-aux-state-uses-shared-chatbuf-state-only ()
   (with-temp-buffer
@@ -540,7 +582,7 @@
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
     (disco-room--set-composer-aux-state nil "m1")
-    (setq-local disco-room--draft-input "hello")
+    (disco-chatbuf-input-cache-set-state "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "chat")
@@ -932,7 +974,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "readonly")
     (setq-local disco-room--channel-name "readonly")
-    (setq-local disco-room--draft-input "hello")
+    (disco-chatbuf-input-cache-set-state "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "readonly")
@@ -967,7 +1009,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (setq-local disco-room--draft-input "hello")
+    (disco-chatbuf-input-cache-set-state "hello")
     (disco-room--set-composer-aux-state nil "m42")
     (setq-local disco-room--pending-attachments
                 '((:token-id 1 :path "/tmp/a.txt")
@@ -1021,7 +1063,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (setq-local disco-room--draft-input "saved draft")
+    (disco-chatbuf-input-cache-set-state "saved draft")
     (let ((msg '((id . "m1")
                  (channel_id . "chat")
                  (content . "old body")
@@ -1044,7 +1086,9 @@
       (should (equal "m1" (disco-room--composer-edit-message-id)))
       (should (eq 'edit (disco-chatbuf-aux-type)))
       (should (equal "m1" (disco-chatbuf-aux-message-id)))
-      (should (equal "old body" disco-room--draft-input))
+      (should (equal "old body"
+                     (disco-chatbuf-string-plain-text
+                      (disco-room--current-draft))))
       (should (string-match-p "Editing alice \\[m1\\]"
                               (buffer-string)))
       (should (string-match-p "> old body"
@@ -1068,7 +1112,7 @@
          (guild_id . "g1")
          (permissions . "2048")))
       (disco-state-put-messages "chat" (list msg))
-      (setq-local disco-room--draft-input "saved draft [file:1]")
+      (disco-chatbuf-input-cache-set-state "saved draft [file:1]")
       (puthash "1" '(:token-id "1" :path "/tmp/a.txt") disco-room--attachment-token-table)
       (setq-local disco-room--attachment-token-seq 1)
       (disco-room--sync-pending-attachments-from-draft)
@@ -1105,11 +1149,12 @@
         (should-not send-called)
         (should-not (disco-room--composer-edit-active-p))
         (should-not (disco-chatbuf-aux-active-p))
-        (should (equal "saved draft [file:1]" disco-room--draft-input))
-        (should-not disco-room--pending-reply-to)
-        (should (equal '("1")
-                       (disco-room--attachment-token-ids-in-text
-                        disco-room--draft-input)))
+        (let ((restored-draft (disco-chatbuf-input-cache-state)))
+          (should (equal "saved draft [file:1]"
+                         (disco-chatbuf-string-plain-text restored-draft)))
+          (should-not disco-room--pending-reply-to)
+          (should (equal '("1")
+                         (disco-room--attachment-token-ids-in-text restored-draft))))
         (should (= 1 (hash-table-count disco-room--attachment-token-table)))))))
 
 (ert-deftest disco-room-render-shows-composer-when-send-permission-present ()
@@ -1117,7 +1162,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (setq-local disco-room--draft-input "hello")
+    (disco-chatbuf-input-cache-set-state "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "chat")
@@ -1134,7 +1179,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (setq-local disco-room--draft-input "hello")
+    (disco-chatbuf-input-cache-set-state "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "chat")
@@ -1144,12 +1189,39 @@
     (disco-room-render)
     (let ((ewoc disco-room--ewoc)
           (input-marker disco-chatbuf--input-marker)
-          (prompt-marker disco-chatbuf--prompt-marker))
-      (disco-room--set-draft "updated body")
+          (prompt-marker disco-chatbuf--prompt-marker)
+          frame-update-called)
+      (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
+                 (lambda (&rest _args)
+                   (setq frame-update-called t))))
+        (disco-room--set-draft "updated body"))
       (should (eq ewoc disco-room--ewoc))
       (should (eq input-marker disco-chatbuf--input-marker))
       (should (eq prompt-marker disco-chatbuf--prompt-marker))
+      (should-not frame-update-called)
       (should (string-match-p "> updated body" (buffer-string))))))
+
+(ert-deftest disco-room-set-draft-rerenders-when-attachment-footer-state-changes ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (let ((frame-update-called nil))
+      (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
+                 (lambda (&rest _args)
+                   (setq frame-update-called t))))
+        (disco-room--set-draft
+         (disco-room--attachment-input-object-string
+          (disco-room--make-attachment-input-object "/tmp/a.txt"))))
+      (should frame-update-called)
+      (should (= 1 (length disco-room--pending-attachments))))))
 
 (ert-deftest disco-room-sync-draft-from-buffer-preserves-attachment-input-objects ()
   (with-temp-buffer
@@ -1223,7 +1295,9 @@
                               :description "preview"))
                            sent-attachments))
             (should refresh-called)
-            (should (equal "" disco-room--draft-input)))
+            (should (equal ""
+                           (disco-chatbuf-string-plain-text
+                            (disco-room--current-draft)))))
         (delete-file path)))))
 
 (ert-deftest disco-room-render-reuses-existing-message-nodes ()
@@ -1483,7 +1557,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (disco-room--set-composer-aux-state '(:type edit :message-id "m1" :saved-state nil) nil)
-    (setq-local disco-room--draft-input "[file:1]")
+    (disco-chatbuf-input-cache-set-state "[file:1]")
     (should-error (disco-room-remove-attachment-token-at-point) :type 'user-error)))
 
 (ert-deftest disco-room-delete-message-errors-without-manage-messages ()
@@ -1635,7 +1709,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "sysdm")
-    (setq-local disco-room--draft-input "hello")
+    (disco-chatbuf-input-cache-set-state "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "sysdm")
@@ -1794,7 +1868,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chan")
-    (setq-local disco-room--draft-input "first line\nsecond line\nthird line")
+    (disco-chatbuf-input-cache-set-state "first line\nsecond line\nthird line")
     (disco-state-reset)
     (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "2048")))
     (let ((disco-api--message-content-limit 12)
@@ -1821,7 +1895,9 @@
                        (nreverse sent)))
         (should refreshed)
         (should-not disco-room--send-in-flight)
-        (should (equal "" disco-room--draft-input))))))
+        (should (equal ""
+                       (disco-chatbuf-string-plain-text
+                        (disco-room--current-draft))))))))
 
 (ert-deftest disco-room-send-message-sends-overlong-content-as-file-when-configured ()
   (with-temp-buffer
@@ -1833,7 +1909,7 @@
            sent-content
            sent-attachments
            captured-file-body)
-      (setq-local disco-room--draft-input long-text)
+      (disco-chatbuf-input-cache-set-state long-text)
       (disco-room--sync-shared-input-options-state)
       (disco-state-reset)
       (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "2048")))
@@ -1864,22 +1940,24 @@
                        (plist-get (car sent-attachments) :filename)))
         (should (equal long-text captured-file-body))
         (should-not disco-room--send-in-flight)
-        (should (equal "" disco-room--draft-input))))))
+        (should (equal ""
+                       (disco-chatbuf-string-plain-text
+                        (disco-room--current-draft))))))))
 
 (ert-deftest disco-room-send-message-rejects-overlong-content-before-send-state ()
   (let ((disco-room-long-message-action 'file))
     (with-temp-buffer
       (disco-room-mode)
       (setq-local disco-room--channel-id "chan")
-      (setq-local disco-room--draft-input
-                  (make-string (1+ disco-api--message-content-limit) ?a))
+      (disco-chatbuf-input-cache-set-state
+       (make-string (1+ disco-api--message-content-limit) ?a))
       (disco-room--sync-shared-input-options-state)
       (disco-state-reset)
       (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "0")))
       (should-error (disco-room-send-message) :type 'error)
       (should-not disco-room--send-in-flight)
       (should (= (1+ disco-api--message-content-limit)
-                 (length disco-room--draft-input))))))
+                 (length (disco-room--current-draft)))))))
 
 (ert-deftest disco-room-send-poll-rejects-overlong-content-before-send-state ()
   (with-temp-buffer

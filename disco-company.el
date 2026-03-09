@@ -44,7 +44,6 @@ completion row height stays stable across CAPF/Corfu and company popups."
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--typing-users nil)
-(defvar-local disco-room--draft-input "")
 
 (defun disco-company--as-list (value)
   "Return VALUE normalized as a proper list."
@@ -103,8 +102,7 @@ completion row height stays stable across CAPF/Corfu and company popups."
       (funcall #'disco-room--sync-draft-from-buffer)
     (let ((bounds (disco-chatbuf-input-region-bounds)))
       (when bounds
-        (disco-chatbuf-input-cache-set
-         'disco-room--draft-input
+        (disco-chatbuf-input-cache-set-state
          (replace-regexp-in-string
           "[\n\r]+\\'"
           ""

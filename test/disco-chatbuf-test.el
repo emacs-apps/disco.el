@@ -95,6 +95,28 @@
         (should (= 2 disco-chatbuf--input-idx))
         (should (equal "keep" disco-chatbuf--input-pending))))))
 
+(ert-deftest disco-chatbuf-input-cache-current-prefers-live-input-region ()
+  (with-temp-buffer
+    (disco-chatbuf-init-state 8)
+    (setq-local disco-chatbuf-test--cached-input "cached")
+    (should (equal "cached"
+                   (disco-chatbuf-input-cache-current
+                    'disco-chatbuf-test--cached-input)))
+    (disco-chatbuf-install-prompt ">>> ")
+    (disco-chatbuf-input-set-text "live")
+    (should (equal "live"
+                   (disco-chatbuf-input-cache-current
+                    'disco-chatbuf-test--cached-input)))))
+
+(ert-deftest disco-chatbuf-input-replace-preserves-relative-point-offset ()
+  (with-temp-buffer
+    (disco-chatbuf-install-prompt ">>> ")
+    (disco-chatbuf-input-set-text "hello world")
+    (goto-char (+ (disco-chatbuf-input-start-position) 5))
+    (disco-chatbuf-input-replace "goodbye")
+    (should (equal "goodbye" (disco-chatbuf-input-string)))
+    (should (= 5 (- (point) (disco-chatbuf-input-start-position))))))
+
 (ert-deftest disco-chatbuf-prompt-update-preserves-input-and-point-offset ()
   (with-temp-buffer
     (insert "timeline\n")

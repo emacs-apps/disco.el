@@ -35,6 +35,8 @@
 (defconst disco-chatbuf-input-object-end-property 'disco-chatbuf-input-object-end
   "Text property marking the last character of a structured input object.")
 
+(defvar disco-chatbuf--input-cache)
+
 (defun disco-chatbuf-copy-string (value)
   "Return VALUE copied, preserving text properties when it is a string."
   (if (stringp value)
@@ -56,8 +58,8 @@
   "Store VALUE in CACHE-SYMBOL, preserving text properties.
 
 CACHE-SYMBOL should name a buffer-local cached input variable owned by the
-caller, for example `disco-room--draft-input'.  When RESET-HISTORY-P is
-non-nil, also clear shared history navigation state.  Return the stored value."
+caller.  When RESET-HISTORY-P is non-nil, also clear shared history
+navigation state.  Return the stored value."
   (set cache-symbol (disco-chatbuf-copy-string value))
   (when reset-history-p
     (disco-chatbuf-input-history-reset))
@@ -69,6 +71,45 @@ non-nil, also clear shared history navigation state.  Return the stored value."
 When RESET-HISTORY-P is non-nil, also clear shared history navigation state.
 Return the stored empty string."
   (disco-chatbuf-input-cache-set cache-symbol "" :reset-history-p reset-history-p))
+
+(defun disco-chatbuf-input-cache-state ()
+  "Return shared cached chatbuf input, preserving text properties."
+  (disco-chatbuf-copy-string disco-chatbuf--input-cache))
+
+(cl-defun disco-chatbuf-input-cache-set-state (value &key reset-history-p)
+  "Store shared cached input VALUE."
+  (disco-chatbuf-input-cache-set
+   'disco-chatbuf--input-cache value
+   :reset-history-p reset-history-p))
+
+(cl-defun disco-chatbuf-input-cache-clear-state (&key reset-history-p)
+  "Clear shared cached input."
+  (disco-chatbuf-input-cache-set-state ""
+                                       :reset-history-p reset-history-p))
+
+(defun disco-chatbuf-input-cache-current-state ()
+  "Return current live input, or shared cached input when input is absent."
+  (let ((live-input (disco-chatbuf-input-string)))
+    (if (stringp live-input)
+        (disco-chatbuf-copy-string live-input)
+      (disco-chatbuf-copy-string disco-chatbuf--input-cache))))
+
+(defun disco-chatbuf-input-cache-sync-state-from-buffer ()
+  "Sync shared cached input from live input."
+  (disco-chatbuf-input-cache-sync-from-buffer 'disco-chatbuf--input-cache))
+
+(defun disco-chatbuf-input-cache-current (cache-symbol)
+  "Return current live input text, or cached CACHE-SYMBOL when input is absent.
+
+This prefers the actual tail input region when it exists, matching telega-like
+chatbuf behavior where visible input is the primary read surface and cache is a
+fallback for hidden or temporarily unbound input regions."
+  (let ((live-input (disco-chatbuf-input-string)))
+    (if (stringp live-input)
+        (disco-chatbuf-copy-string live-input)
+      (disco-chatbuf-copy-string
+       (and (boundp cache-symbol)
+            (symbol-value cache-symbol))))))
 
 (defun disco-chatbuf-input-cache-sync-from-buffer (cache-symbol)
   "Sync CACHE-SYMBOL from current input region and return sync metadata.
@@ -105,6 +146,9 @@ navigation state is reset."
 (defvar-local disco-chatbuf--input-pending nil
   "Input remembered before entering history navigation.")
 
+(defvar-local disco-chatbuf--input-cache ""
+  "Cached chatbuf input used when live tail input is temporarily unavailable.")
+
 (defvar-local disco-chatbuf--aux-plist nil
   "Current aux state plist for the active chat buffer.")
 
@@ -140,6 +184,8 @@ markers and rings are reused when already present."
     (setq-local disco-chatbuf--input-idx nil))
   (unless (local-variable-p 'disco-chatbuf--input-pending)
     (setq-local disco-chatbuf--input-pending nil))
+  (unless (local-variable-p 'disco-chatbuf--input-cache)
+    (setq-local disco-chatbuf--input-cache ""))
   (unless (local-variable-p 'disco-chatbuf--aux-plist)
     (setq-local disco-chatbuf--aux-plist nil))
   (unless (local-variable-p 'disco-chatbuf--input-options-plist)
@@ -164,6 +210,7 @@ RING-SIZE overrides `disco-chatbuf-input-ring-size' when non-nil."
               (make-ring (max 1 (or ring-size disco-chatbuf-input-ring-size))))
   (setq-local disco-chatbuf--input-idx nil)
   (setq-local disco-chatbuf--input-pending nil)
+  (setq-local disco-chatbuf--input-cache "")
   (setq-local disco-chatbuf--aux-plist nil)
   (setq-local disco-chatbuf--input-options-plist nil)
   (setq-local disco-chatbuf--rendering nil))
@@ -328,6 +375,17 @@ point is restored relative to the input start when it was inside the input."
       (goto-char input-start)
       (insert (or text ""))))
   (goto-char (point-max)))
+
+(defun disco-chatbuf-input-replace (text)
+  "Replace current input contents with TEXT, preserving point inside input.
+
+If point was inside the input region before replacement, restore its relative
+offset from the input start when possible."
+  (let* ((input-start (disco-chatbuf-input-start-position))
+         (in-input (and input-start (disco-chatbuf-point-in-input-p)))
+         (input-offset (and in-input (- (point) input-start))))
+    (disco-chatbuf-input-set-text text)
+    (disco-chatbuf--restore-input-point input-offset)))
 
 (cl-defun disco-chatbuf-bind-input-region (&key visible-p prompt input-text post-bind-function)
   "Ensure the tail input region matches VISIBLE-P, PROMPT and INPUT-TEXT.
