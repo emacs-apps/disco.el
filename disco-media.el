@@ -73,11 +73,16 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-placeholder-image-cache (make-hash-table :test #'equal)
   "Cache of decoded attachment placeholder image objects.")
 
+(defvar disco-media--attachment-decorated-preview-cache (make-hash-table :test #'equal)
+  "Cache of SVG-decorated preview images keyed by source/spec/mode.")
+
 (defun disco-media-clear-preview-memory-cache ()
   "Clear in-memory preview image cache without touching disk files."
   (clrhash disco-media--attachment-preview-image-cache)
   (clrhash disco-media--attachment-preview-fetching)
-  (clrhash disco-media--attachment-spoiler-preview-cache))
+  (clrhash disco-media--attachment-spoiler-preview-cache)
+  (clrhash disco-media--attachment-placeholder-image-cache)
+  (clrhash disco-media--attachment-decorated-preview-cache))
 
 (defun disco-media-inline-image-rendering-available-p ()
   "Return non-nil when current frame supports inline image rendering."
@@ -452,14 +457,23 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                     (buffer-string))))
     (apply #'create-image svg-data 'svg t props)))
 
-(defun disco-media--svg-append-spoiler-node (svg node-id)
+(defun disco-media--spoiler-displacement-scale (width height)
+  "Return telega-like spoiler displacement scale for WIDTH and HEIGHT."
+  (let ((base (float (max 24 (min (or width 120) (or height 120))))))
+    (format "%.1f" (max 10.0 (min 28.0 (/ base 5.0))))))
+
+(defun disco-media--svg-append-spoiler-node (svg node-id &optional width height)
   "Append telega-like spoiler turbulence filter with NODE-ID into SVG."
   (when (and (fboundp 'svg--append)
              (fboundp 'dom-node))
     (svg--append
      svg
      (dom-node 'filter
-               `((id . ,node-id))
+               `((id . ,node-id)
+                 (x . "-20%")
+                 (y . "-20%")
+                 (width . "140%")
+                 (height . "140%"))
                (dom-node 'feTurbulence
                          `((type . "turbulence")
                            (result . "NOISE")
@@ -469,15 +483,16 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                            (in2 . "NOISE")
                            (xChannelSelector . "R")
                            (yChannelSelector . "G")
-                           ,@disco-media--spoiler-displacement-attrs))))))
+                           (scale . ,(disco-media--spoiler-displacement-scale
+                                      width height))))))))
 
-(defun disco-media--svg-spoiler-filter-ref (svg)
+(defun disco-media--svg-spoiler-filter-ref (svg &optional width height)
   "Return spoiler filter ref string for SVG, appending node when possible."
   (when (and svg
              (fboundp 'svg--append)
              (fboundp 'dom-node))
     (let ((node-id "disco-spoiler-noise"))
-      (disco-media--svg-append-spoiler-node svg node-id)
+      (disco-media--svg-append-spoiler-node svg node-id width height)
       (format "url(#%s)" node-id))))
 
 (defun disco-media--svg-append-spoiler-video-icon (svg width height)
@@ -506,16 +521,137 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                    :fill-opacity 0.75))))
 
 (defun disco-media--svg-append-spoiler-overlay (svg width height &optional video-p)
-  "Append telega-like spoiler visuals to SVG of WIDTH by HEIGHT.
+  "Append telega-like spoiler overlay chrome to SVG of WIDTH by HEIGHT.
 
-This prefers turbulence/displacement noise instead of a plain dark cover.
-When VIDEO-P is non-nil, also overlay a play indicator." 
+The actual spoiler distortion comes from the turbulence/displacement filter.
+This overlay only darkens slightly and optionally adds a video play marker."
   (when (fboundp 'svg-rectangle)
     (svg-rectangle svg 0 0 width height
                    :fill "#000000"
-                   :fill-opacity 0.12))
+                   :fill-opacity 0.08))
   (when video-p
     (disco-media--svg-append-spoiler-video-icon svg width height)))
+
+(defun disco-media--preview-image-display-props (preview-image)
+  "Return safe display-only image properties derived from PREVIEW-IMAGE."
+  (let* ((props (cdr-safe preview-image))
+         (slices (or (plist-get props :disco-nslices)
+                     (plist-get props :telega-nslices)
+                     (disco-media-image-slice-count preview-image)))
+         (height (plist-get props :height))
+         (width (plist-get props :width))
+         (scale (plist-get props :scale))
+         (ascent (plist-get props :ascent))
+         (mask (plist-get props :mask))
+         result)
+    (when height
+      (setq result (plist-put result :height height)))
+    (when width
+      (setq result (plist-put result :width width)))
+    (when slices
+      (setq result (plist-put result :disco-nslices slices)))
+    (setq result (plist-put result :scale (or scale 1.0)))
+    (setq result (plist-put result :ascent (or ascent 'center)))
+    (when mask
+      (setq result (plist-put result :mask mask)))
+    result))
+
+(defun disco-media--preview-image-source-spec (preview-image)
+  "Return source plist for PREVIEW-IMAGE usable by SVG overlay builders."
+  (let* ((props (cdr-safe preview-image))
+         (file (plist-get props :file))
+         (data (plist-get props :data))
+         (type (plist-get props :type))
+         (mime (cond
+                ((and (stringp file) (file-exists-p file))
+                 (disco-media--image-mime-type file))
+                ((eq type 'svg) "image/svg+xml")
+                ((eq type 'png) "image/png")
+                ((memq type '(jpeg jpg)) "image/jpeg")
+                ((eq type 'gif) "image/gif")
+                ((eq type 'webp) "image/webp")
+                (t nil))))
+    (cond
+     ((and (stringp file) mime)
+      (list :source file :data-p nil :mime mime))
+     ((and (stringp data) mime)
+      (list :source data :data-p t :mime mime))
+     (t nil))))
+
+(cl-defun disco-media--decorated-preview-cache-key (preview-image &key spoiler-filter-p
+                                                                  video-p dim-opacity)
+  "Return stable cache key for decorated PREVIEW-IMAGE."
+  (let* ((props (cdr-safe preview-image))
+         (source (or (plist-get props :file)
+                     (plist-get props :data)
+                     preview-image))
+         (display-size (ignore-errors (image-size preview-image t (selected-frame)))))
+    (list source
+          (and (consp display-size) (car display-size))
+          (and (consp display-size) (cdr display-size))
+          (plist-get props :height)
+          (plist-get props :width)
+          (plist-get props :disco-nslices)
+          (plist-get props :telega-nslices)
+          spoiler-filter-p
+          video-p
+          dim-opacity)))
+
+(cl-defun disco-media--decorate-preview-image (preview-image &key spoiler-filter-p
+                                                             video-p dim-opacity)
+  "Return SVG-decorated PREVIEW-IMAGE with optional spoiler/video chrome."
+  (when (and (disco-media-image-object-valid-p preview-image)
+             (image-type-available-p 'svg)
+             (fboundp 'svg-create)
+             (fboundp 'svg-embed)
+             (fboundp 'svg-print))
+    (let* ((cache-key (disco-media--decorated-preview-cache-key
+                       preview-image
+                       :spoiler-filter-p spoiler-filter-p
+                       :video-p video-p
+                       :dim-opacity dim-opacity))
+           (cached (gethash cache-key disco-media--attachment-decorated-preview-cache))
+           (source-spec (disco-media--preview-image-source-spec preview-image)))
+      (or (and (disco-media-image-object-valid-p cached) cached)
+          (when source-spec
+            (let* ((display-size (ignore-errors
+                                   (image-size preview-image t (selected-frame))))
+                   (svg-width (max 1 (round (or (and (consp display-size)
+                                                     (car display-size))
+                                                64))))
+                   (svg-height (max 1 (round (or (and (consp display-size)
+                                                      (cdr display-size))
+                                                 64))))
+                   (props (disco-media--preview-image-display-props preview-image))
+                   (svg (svg-create svg-width svg-height))
+                   (filter-ref (and spoiler-filter-p
+                                    (disco-media--svg-spoiler-filter-ref
+                                     svg svg-width svg-height))))
+              (svg-embed svg
+                         (plist-get source-spec :source)
+                         (plist-get source-spec :mime)
+                         (plist-get source-spec :data-p)
+                         :x 0 :y 0 :width svg-width :height svg-height
+                         :filter filter-ref)
+              (when (and (numberp dim-opacity)
+                         (> dim-opacity 0)
+                         (fboundp 'svg-rectangle))
+                (svg-rectangle svg 0 0 svg-width svg-height
+                               :fill "#000000"
+                               :fill-opacity dim-opacity))
+              (when video-p
+                (disco-media--svg-append-spoiler-video-icon svg svg-width svg-height))
+              (let ((image (apply #'disco-media--svg-image svg props)))
+                (when (disco-media-image-object-valid-p image)
+                  (puthash cache-key image disco-media--attachment-decorated-preview-cache)
+                  image))))))))
+
+(defun disco-media-attachment-video-display-image (preview-image)
+  "Return PREVIEW-IMAGE decorated with a play marker for normal video preview."
+  (disco-media--decorate-preview-image preview-image
+                                       :spoiler-filter-p nil
+                                       :video-p t
+                                       :dim-opacity 0.0))
 
 (defun disco-media--attachment-spoiler-preview-cache-key (cache-file preview-image)
   "Return cache key for spoiler preview built from CACHE-FILE and PREVIEW-IMAGE."
@@ -547,20 +683,15 @@ When VIDEO-P is non-nil, also overlay a play indicator."
                                          (cdr (or (disco-media--image-file-size-pixels cache-file)
                                                   '(1 . 1)))))))
            (mime (disco-media--image-mime-type cache-file))
-           (props (copy-sequence (cdr-safe preview-image)))
-           (slices (or (plist-get props :disco-nslices)
-                       (plist-get props :telega-nslices)
-                       (disco-media-image-slice-count preview-image)))
+           (props (disco-media--preview-image-display-props preview-image))
            (svg (and mime (svg-create svg-width svg-height)))
-           (filter-ref (and svg (disco-media--svg-spoiler-filter-ref svg))))
+           (filter-ref (and svg (disco-media--svg-spoiler-filter-ref
+                                 svg svg-width svg-height))))
       (when svg
         (svg-embed svg cache-file mime nil
                    :x 0 :y 0 :width svg-width :height svg-height
                    :filter filter-ref)
         (disco-media--svg-append-spoiler-overlay svg svg-width svg-height video-p)
-        (setq props (plist-put props :disco-nslices slices))
-        (setq props (plist-put props :scale 1.0))
-        (setq props (plist-put props :ascent 'center))
         (apply #'disco-media--svg-image svg props)))))
 
 (defun disco-media--attachment-placeholder-version (attachment)
@@ -747,7 +878,8 @@ When SPOILER-P is non-nil, return a spoiler-obscured variant."
                 a-channel decoded-a)
           (let* ((svg (svg-create pixel-width pixel-height))
                  (filter-ref (and spoiler-p
-                                  (disco-media--svg-spoiler-filter-ref svg)))
+                                  (disco-media--svg-spoiler-filter-ref
+                                   svg pixel-width pixel-height)))
                  (target-group (and filter-ref
                                     (fboundp 'dom-node)
                                     (dom-node 'g `((filter . ,filter-ref))))))
@@ -833,20 +965,13 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
                 image)))))))
 
 (defun disco-media-attachment-spoiler-placeholder-image (attachment)
-  "Return spoiler-obscured placeholder image for ATTACHMENT, or nil."
-  (let ((cache-key (disco-media--attachment-placeholder-cache-key attachment t)))
-    (when (and (disco-media-inline-image-rendering-available-p)
-               (or (disco-media--attachment-image-p attachment)
-                   (disco-media--attachment-video-p attachment))
-               cache-key)
-      (let ((cached (gethash cache-key disco-media--attachment-placeholder-image-cache)))
-        (or (and (disco-media-image-object-valid-p cached) cached)
-            (let ((image (disco-media--thumbhash->svg-image
-                          (alist-get 'placeholder attachment)
-                          attachment t)))
-              (when (disco-media-image-object-valid-p image)
-                (puthash cache-key image disco-media--attachment-placeholder-image-cache)
-                image)))))))
+  "Return spoiler placeholder image for ATTACHMENT without extra distortion."
+  (when-let* ((placeholder-image (disco-media-attachment-placeholder-image attachment)))
+    (disco-media--decorate-preview-image
+     placeholder-image
+     :spoiler-filter-p nil
+     :video-p (eq (disco-media-attachment-kind attachment) 'video)
+     :dim-opacity 0.10)))
 
 (defun disco-media--attachment-real-spoiler-preview-image (attachment)
   "Return obscured real preview image for ATTACHMENT, or nil."
@@ -854,21 +979,13 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
          (video-like (disco-media--attachment-video-p attachment))
          (preview-image (and (or image-like video-like)
                              (disco-media--attachment-real-preview-image
-                              attachment image-like video-like)))
-         (cache-key (and (or image-like video-like)
-                         (disco-media-attachment-preview-cache-key attachment)))
-         (cache-file (and cache-key
-                          (disco-media-attachment-preview-cache-existing-file cache-key))))
-    (when (and cache-file (disco-media-image-object-valid-p preview-image))
-      (let* ((spoiler-key (disco-media--attachment-spoiler-preview-cache-key
-                           cache-file preview-image))
-             (cached (gethash spoiler-key disco-media--attachment-spoiler-preview-cache)))
-        (or (and (disco-media-image-object-valid-p cached) cached)
-            (let ((image (disco-media--make-attachment-spoiler-preview-image
-                          cache-file preview-image video-like)))
-              (when (disco-media-image-object-valid-p image)
-                (puthash spoiler-key image disco-media--attachment-spoiler-preview-cache)
-                image)))))))
+                              attachment image-like video-like))))
+    (when (disco-media-image-object-valid-p preview-image)
+      (disco-media--decorate-preview-image
+       preview-image
+       :spoiler-filter-p t
+       :video-p video-like
+       :dim-opacity 0.08))))
 
 (defun disco-media-attachment-spoiler-preview-image (attachment)
   "Return obscured preview image for spoiler ATTACHMENT, or nil."
@@ -984,12 +1101,10 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
                               "-y"
                               "-loglevel"
                               "error"
-                              "-ss"
-                              "00:00:01"
                               "-i"
                               url
                               "-vf"
-                              "thumbnail,scale=960:-2:force_original_aspect_ratio=decrease"
+                              "thumbnail=24,scale=960:-2:force_original_aspect_ratio=decrease"
                               "-frames:v"
                               "1"
                               target-file)

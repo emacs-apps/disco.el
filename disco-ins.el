@@ -381,7 +381,12 @@ When REQUIRED is non-nil, insert a placeholder line when preview output cannot
 be shown yet."
   (let* ((kind (or kind (disco-media-attachment-kind attachment)))
          (video-p (eq kind 'video))
-         (preview (disco-media-attachment-preview-image attachment))
+         (preview-source (disco-media-attachment-preview-image attachment))
+         (preview (if (and video-p
+                           (disco-media-image-object-valid-p preview-source))
+                      (or (disco-media-attachment-video-display-image preview-source)
+                          preview-source)
+                    preview-source))
          (preview-url (or (disco-media-attachment-preview-url attachment)
                           (disco-media-attachment-download-url attachment)))
          (rendering-ok (disco-media-attachment-preview-rendering-available-p))

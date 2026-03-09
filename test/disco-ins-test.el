@@ -241,7 +241,8 @@
 
 (ert-deftest disco-ins-insert-attachment-video-renders-play-button-and-playable-preview ()
   (let ((video-file (make-temp-file "disco-ins-video" nil ".mp4"))
-        played)
+        played
+        decorated)
     (unwind-protect
         (with-temp-buffer
           (cl-letf (((symbol-function 'disco-media-attachment-download-state)
@@ -250,6 +251,13 @@
                     ((symbol-function 'disco-media-attachment-preview-image)
                      (lambda (_attachment)
                        :fake-preview))
+                    ((symbol-function 'disco-media-image-object-valid-p)
+                     (lambda (image)
+                       (memq image '(:fake-preview :decorated-preview))))
+                    ((symbol-function 'disco-media-attachment-video-display-image)
+                     (lambda (image)
+                       (setq decorated image)
+                       :decorated-preview))
                     ((symbol-function 'disco-media-insert-image-slices)
                      (lambda (_image &optional _url _prefix _fallback)
                        (insert "[video-preview]")))
@@ -266,6 +274,7 @@
              :title-face 'bold
              :meta-face 'shadow
              :action-face 'link)
+            (should (eq :fake-preview decorated))
             (should (string-match-p (regexp-quote "[video] clip.mp4") (buffer-string)))
             (should (string-match-p (regexp-quote "[video-preview]") (buffer-string)))
             (goto-char (point-min))
