@@ -1168,6 +1168,32 @@
                      disco-room--displayed-message-ids))
       (should (string-match-p "two updated" (buffer-string))))))
 
+(ert-deftest disco-room-render-shows-plain-attachment-lines-when-rich-cards-disabled ()
+  (with-temp-buffer
+    (let ((disco-room-use-rich-attachment-cards nil)
+          (disco-room-show-attachment-urls t))
+      (disco-room-mode)
+      (setq-local disco-room--channel-id "chat")
+      (setq-local disco-room--channel-name "chat")
+      (disco-state-reset)
+      (disco-state-upsert-channel
+       '((id . "chat")
+         (type . 0)
+         (guild_id . "g1")
+         (permissions . "2048")))
+      (disco-state-put-messages
+       "chat"
+       '(((id . "m1")
+          (channel_id . "chat")
+          (content . "see file")
+          (attachments . (((id . "a1")
+                           (filename . "doc.txt")
+                           (url . "https://example.invalid/doc.txt")))))))
+      (disco-room-render)
+      (should (string-match-p (regexp-quote "[file] doc.txt") (buffer-string)))
+      (should (string-match-p (regexp-quote "https://example.invalid/doc.txt")
+                              (buffer-string))))))
+
 (ert-deftest disco-room-composer-visible-p-hides-archived-thread ()
   (with-temp-buffer
     (disco-room-mode)
