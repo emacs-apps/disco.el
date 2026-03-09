@@ -35,6 +35,23 @@
 (defconst disco-chatbuf-input-object-end-property 'disco-chatbuf-input-object-end
   "Text property marking the last character of a structured input object.")
 
+(defun disco-chatbuf-copy-string (value)
+  "Return VALUE copied, preserving text properties when it is a string."
+  (if (stringp value)
+      (copy-sequence value)
+    ""))
+
+(defun disco-chatbuf-string-plain-text (value)
+  "Return VALUE without text properties, or an empty string."
+  (substring-no-properties (or value "")))
+
+(defun disco-chatbuf-string-has-objects-p (value)
+  "Return non-nil when VALUE contains structured input objects."
+  (and (stringp value)
+       (text-property-not-all 0 (length value)
+                              disco-chatbuf-input-object-property nil
+                              value)))
+
 (defvar-local disco-chatbuf--input-marker nil
   "Marker pointing to the start of the editable input region.")
 
@@ -94,6 +111,27 @@ markers and rings are reused when already present."
     (setq-local disco-chatbuf--input-options-plist nil))
   (unless (local-variable-p 'disco-chatbuf--rendering)
     (setq-local disco-chatbuf--rendering nil)))
+
+(defun disco-chatbuf-reset-state (&optional ring-size)
+  "Reset shared chat buffer state in the current buffer.
+
+This recreates prompt/input markers, clears prompt button state, allocates a
+fresh input history ring, and resets aux/input-options/rendering state.
+RING-SIZE overrides `disco-chatbuf-input-ring-size' when non-nil."
+  (when (markerp disco-chatbuf--input-marker)
+    (set-marker disco-chatbuf--input-marker nil))
+  (when (markerp disco-chatbuf--prompt-marker)
+    (set-marker disco-chatbuf--prompt-marker nil))
+  (setq-local disco-chatbuf--input-marker (make-marker))
+  (setq-local disco-chatbuf--prompt-marker (make-marker))
+  (setq-local disco-chatbuf--prompt-button nil)
+  (setq-local disco-chatbuf--input-ring
+              (make-ring (max 1 (or ring-size disco-chatbuf-input-ring-size))))
+  (setq-local disco-chatbuf--input-idx nil)
+  (setq-local disco-chatbuf--input-pending nil)
+  (setq-local disco-chatbuf--aux-plist nil)
+  (setq-local disco-chatbuf--input-options-plist nil)
+  (setq-local disco-chatbuf--rendering nil))
 
 (defun disco-chatbuf-mode-setup ()
   "Apply telega-like chat buffer defaults in the current buffer."
@@ -398,17 +436,24 @@ PROPERTIES are appended to the inserted text properties."
 
 When INPUT is nil, use current input contents.  Structured-object input is not
 stored yet because history semantics for mixed object/text entries are not
-finalized."
-  (let ((value (or input (disco-chatbuf-input-string))))
+finalized.  When INPUT is non-nil, object detection uses INPUT's text
+properties instead of inspecting the live buffer contents."
+  (let* ((value (or input (disco-chatbuf-input-string)))
+         (has-objects (and value
+                           (if input
+                               (text-property-not-all
+                                0 (length value)
+                                disco-chatbuf-input-object-property nil
+                                value)
+                             (disco-chatbuf-input-has-objects-p)))))
     (unless (or (null value)
-                (disco-chatbuf-input-has-objects-p)
+                has-objects
                 (string-empty-p (string-trim-right (substring-no-properties value)))
                 (and (ring-p disco-chatbuf--input-ring)
                      (> (ring-length disco-chatbuf--input-ring) 0)
                      (equal value (ring-ref disco-chatbuf--input-ring 0))))
       (ring-insert disco-chatbuf--input-ring value)))
-  (setq disco-chatbuf--input-idx nil)
-  (setq disco-chatbuf--input-pending nil))
+  (disco-chatbuf-input-history-reset))
 
 (defun disco-chatbuf-input-history-goto (index)
   "Replace current input with history entry INDEX.
@@ -426,6 +471,19 @@ When INDEX is nil, restore pending input remembered before history navigation."
     (user-error "disco-chatbuf: history index %s is out of range" index))
    (t
     (disco-chatbuf-input-set-text (ring-ref disco-chatbuf--input-ring index)))))
+
+(defun disco-chatbuf-input-history-elements ()
+  "Return current input history entries from newest to oldest."
+  (let (items)
+    (when (ring-p disco-chatbuf--input-ring)
+      (dotimes (idx (ring-length disco-chatbuf--input-ring))
+        (push (ring-ref disco-chatbuf--input-ring idx) items)))
+    (nreverse items)))
+
+(defun disco-chatbuf-input-history-reset ()
+  "Clear shared input-history navigation state without altering history items."
+  (setq disco-chatbuf--input-idx nil)
+  (setq disco-chatbuf--input-pending nil))
 
 (defun disco-chatbuf-input-history-prev (&optional n)
   "Replace input with N previous entries from input history."

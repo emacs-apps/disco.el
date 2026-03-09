@@ -19,6 +19,42 @@
     (should (disco-chatbuf-has-input-p))
     (should (equal "hello" (disco-chatbuf-input-string)))))
 
+(ert-deftest disco-chatbuf-string-helpers-preserve-and-inspect-properties ()
+  (let ((text (copy-sequence "[file] a.txt")))
+    (add-text-properties 0 (length text)
+                         (list disco-chatbuf-input-object-property
+                               '(:kind attachment :path "/tmp/a.txt"))
+                         text)
+    (should (disco-chatbuf-string-has-objects-p text))
+    (should (equal "[file] a.txt"
+                   (disco-chatbuf-string-plain-text text)))
+    (let ((copy (disco-chatbuf-copy-string text)))
+      (should-not (eq copy text))
+      (should (disco-chatbuf-string-has-objects-p copy)))))
+
+(ert-deftest disco-chatbuf-reset-state-reinitializes-history-and-markers ()
+  (with-temp-buffer
+    (disco-chatbuf-init-state 8)
+    (let ((old-input-marker disco-chatbuf--input-marker)
+          (old-prompt-marker disco-chatbuf--prompt-marker))
+      (disco-chatbuf-aux-set '(:aux-type reply))
+      (disco-chatbuf-input-options-set '(:send-on-return t))
+      (disco-chatbuf-input-history-push "hello")
+      (setq-local disco-chatbuf--prompt-button 'dummy)
+      (disco-chatbuf-reset-state 3)
+      (should (markerp disco-chatbuf--input-marker))
+      (should (markerp disco-chatbuf--prompt-marker))
+      (should-not (eq old-input-marker disco-chatbuf--input-marker))
+      (should-not (eq old-prompt-marker disco-chatbuf--prompt-marker))
+      (should (ring-p disco-chatbuf--input-ring))
+      (should (= 3 (ring-size disco-chatbuf--input-ring)))
+      (should (= 0 (ring-length disco-chatbuf--input-ring)))
+      (should-not disco-chatbuf--input-idx)
+      (should-not disco-chatbuf--input-pending)
+      (should-not disco-chatbuf--aux-plist)
+      (should-not disco-chatbuf--input-options-plist)
+      (should-not disco-chatbuf--prompt-button))))
+
 (ert-deftest disco-chatbuf-prompt-update-preserves-input-and-point-offset ()
   (with-temp-buffer
     (insert "timeline\n")
@@ -60,6 +96,8 @@
     (disco-chatbuf-input-history-push)
     (disco-chatbuf-input-set-text "second")
     (disco-chatbuf-input-history-push)
+    (should (equal '("second" "first")
+                   (disco-chatbuf-input-history-elements)))
     (disco-chatbuf-input-set-text "pending")
     (disco-chatbuf-input-history-prev)
     (should (equal "second" (disco-chatbuf-input-string)))
@@ -71,6 +109,16 @@
     (should (equal "pending" (disco-chatbuf-input-string)))
     (should-not disco-chatbuf--input-idx)
     (should-not disco-chatbuf--input-pending)))
+
+(ert-deftest disco-chatbuf-input-history-push-explicit-text-ignores-live-object-buffer ()
+  (with-temp-buffer
+    (disco-chatbuf-init-state 8)
+    (disco-chatbuf-install-prompt ">>> ")
+    (disco-chatbuf-input-insert "[file:a.txt]"
+                                :object '(:type file :path "/tmp/a.txt"))
+    (disco-chatbuf-input-history-push "plain text")
+    (should (equal '("plain text")
+                   (disco-chatbuf-input-history-elements)))))
 
 (ert-deftest disco-chatbuf-empty-input-remains-editable-at-point-max ()
   (save-window-excursion

@@ -59,9 +59,6 @@
 (defvar-local disco-room--refresh-in-flight nil)
 (defvar-local disco-room--older-in-flight nil)
 (defvar-local disco-room--draft-input "")
-(defvar-local disco-room--input-ring nil)
-(defvar-local disco-room--input-index nil)
-(defvar-local disco-room--input-pending nil)
 (defvar-local disco-room--send-in-flight nil)
 (defvar-local disco-room--last-search-query nil)
 (defvar-local disco-room--msg-filter nil)
@@ -69,8 +66,6 @@
 (defvar-local disco-room--filter-in-flight nil)
 (defvar-local disco-room--inplace-search-filter nil)
 (defvar-local disco-room--inplace-search-generation 0)
-(defvar-local disco-room--input-marker nil)
-(defvar-local disco-room--input-prompt-marker nil)
 (defvar-local disco-room--rendering nil)
 (defvar-local disco-room--ewoc nil)
 (defvar-local disco-room--message-node-table nil)
@@ -1215,22 +1210,21 @@ creation permission."
 
 (defun disco-room--composer-edit-saved-state ()
   "Capture composer state to be restored after edit cancel/success."
-  (list :draft (disco-room--copy-draft (disco-room--current-draft))
+  (list :draft (disco-chatbuf-copy-string (disco-room--current-draft))
         :reply-to disco-room--pending-reply-to
         :attachment-token-seq disco-room--attachment-token-seq
         :attachment-token-entries (disco-room--copy-attachment-token-table)))
 
 (defun disco-room--composer-edit-restore-state (state)
   "Restore composer STATE captured by `disco-room--composer-edit-saved-state'."
-  (let ((draft (disco-room--copy-draft (plist-get state :draft))))
+  (let ((draft (disco-chatbuf-copy-string (plist-get state :draft))))
     (setq disco-room--pending-reply-to (plist-get state :reply-to))
     (setq disco-room--attachment-token-seq
           (or (plist-get state :attachment-token-seq) 0))
     (disco-room--restore-attachment-token-table
      (plist-get state :attachment-token-entries))
     (setq disco-room--draft-input draft)
-    (setq disco-room--input-index nil)
-    (setq disco-room--input-pending nil)
+    (disco-chatbuf-input-history-reset)
     (disco-room--prune-unused-attachment-tokens draft)
     (disco-room--sync-pending-attachments-from-draft draft)))
 
@@ -1281,8 +1275,7 @@ state that was present before edit mode was entered."
                 :saved-state saved-state))
     (setq disco-room--pending-reply-to nil)
     (setq disco-room--draft-input old-content)
-    (setq disco-room--input-index nil)
-    (setq disco-room--input-pending nil)
+    (disco-chatbuf-input-history-reset)
     (setq disco-room--pending-attachments nil)
     (setq disco-room--attachment-token-seq 0)
     (when (hash-table-p disco-room--attachment-token-table)
@@ -1533,27 +1526,9 @@ When NO-RERENDER is non-nil, update local state without rendering."
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)))))
 
-(defun disco-room--copy-draft (draft)
-  "Return copy of DRAFT, preserving any text properties."
-  (if (stringp draft)
-      (copy-sequence draft)
-    ""))
-
 (defun disco-room--current-draft ()
   "Return current room draft string, preserving text properties."
   (or disco-room--draft-input ""))
-
-(defun disco-room--current-draft-text (&optional draft)
-  "Return DRAFT as plain text without room input object properties."
-  (substring-no-properties (or draft (disco-room--current-draft))))
-
-(defun disco-room--draft-has-input-objects-p (&optional draft)
-  "Return non-nil when DRAFT contains structured input objects."
-  (let ((text (or draft (disco-room--current-draft))))
-    (and (stringp text)
-         (text-property-not-all 0 (length text)
-                                disco-chatbuf-input-object-property nil
-                                text))))
 
 (defun disco-room--attachment-input-object-p (object)
   "Return non-nil when OBJECT is a queued attachment input object."
@@ -1603,8 +1578,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
 (defun disco-room--insert-attachment-input-object (attachment)
   "Insert ATTACHMENT as one structured composer object at point."
   (let ((object (copy-tree attachment)))
-    (when (and (disco-room--point-in-input-p)
-               (> (point) (or (disco-room--input-start-position) (point-min)))
+    (when (and (disco-chatbuf-point-in-input-p)
+               (> (point) (or (disco-chatbuf-input-start-position) (point-min)))
                (let ((before (char-before)))
                  (and before (not (memq before '(?\s ?\t ?\n))))))
       (disco-chatbuf-input-insert " "))
@@ -1839,34 +1814,10 @@ When NO-RERENDER is non-nil, update local state without rendering."
            (remhash token-id disco-room--attachment-token-table)))
        disco-room--attachment-token-table))))
 
-(defun disco-room--input-region-bounds ()
-  "Return current writable draft region as (START . END), or nil."
-  (disco-chatbuf-input-region-bounds))
-
-(defun disco-room--input-start-position ()
-  "Return draft input start position for current room buffer, or nil."
-  (disco-chatbuf-input-start-position))
-
-(defun disco-room--input-prompt-start-position ()
-  "Return prompt start position preceding current draft input, or nil."
-  (disco-chatbuf-prompt-start-position))
-
-(defun disco-room--input-logical-end-position ()
-  "Return logical draft end position for the tail input region."
-  (disco-chatbuf-input-logical-end-position))
-
-(defun disco-room--point-in-input-p (&optional position)
-  "Return non-nil when POSITION (or point) is inside draft input region."
-  (disco-chatbuf-point-in-input-p position))
-
-(defun disco-room--point-in-prompt-p (&optional position)
-  "Return non-nil when POSITION (or point) is inside prompt glyph span."
-  (disco-chatbuf-point-in-prompt-p position))
-
 (defun disco-room--apply-input-text-properties ()
   "Normalize current draft text properties after redraws and edits."
   (disco-chatbuf-input-apply-text-properties)
-  (when-let* ((bounds (disco-room--input-region-bounds)))
+  (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
     (with-silent-modifications
       (add-text-properties
        (car bounds) (cdr bounds)
@@ -1874,7 +1825,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--update-context-mode ()
   "Enable timeline bindings only when point is outside the room draft."
-  (let ((timeline-p (not (disco-room--point-in-input-p))))
+  (let ((timeline-p (not (disco-chatbuf-point-in-input-p))))
     (unless (eq disco-room-timeline-mode timeline-p)
       (disco-room-timeline-mode (if timeline-p 1 -1)))))
 
@@ -1895,11 +1846,10 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
-  (let ((text (disco-room--copy-draft (or (disco-chatbuf-input-string) ""))))
+  (let ((text (disco-chatbuf-copy-string (or (disco-chatbuf-input-string) ""))))
     (unless (equal-including-properties text disco-room--draft-input)
       (setq disco-room--draft-input text)
-      (setq disco-room--input-index nil)
-      (setq disco-room--input-pending nil))
+      (disco-chatbuf-input-history-reset))
     (disco-room--prune-unused-attachment-tokens text)
     (disco-room--sync-pending-attachments-from-draft text)))
 
@@ -1913,7 +1863,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--set-draft (text)
   "Set room draft TEXT and refresh the room composer frame."
-  (setq disco-room--draft-input (disco-room--copy-draft text))
+  (setq disco-room--draft-input (disco-chatbuf-copy-string text))
   (disco-room--prune-unused-attachment-tokens disco-room--draft-input)
   (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
   (disco-room--update-frame-preserving-point))
@@ -1922,29 +1872,22 @@ When NO-RERENDER is non-nil, update local state without rendering."
   "Clear room draft and reset draft history navigation state."
   (setq disco-room--draft-input "")
   (setq disco-room--pending-attachments nil)
-  (setq disco-room--input-index nil)
-  (setq disco-room--input-pending nil))
+  (disco-chatbuf-input-history-reset))
 
 (defun disco-room--input-history-push (input)
-  "Push INPUT into draft history ring when non-empty and distinct."
-  (let ((normalized (string-trim-right (disco-room--current-draft-text input))))
-    (unless (or (string-empty-p normalized)
-                (and disco-room--input-ring
-                     (> (ring-length disco-room--input-ring) 0)
-                     (equal normalized (ring-ref disco-room--input-ring 0))))
-      (ring-insert disco-room--input-ring normalized)))
-  (setq disco-room--input-index nil)
-  (setq disco-room--input-pending nil))
+  "Push INPUT into draft history using shared chatbuf history rules."
+  (let ((normalized (string-trim-right (disco-chatbuf-string-plain-text input))))
+    (disco-chatbuf-input-history-push normalized)))
 
 (defun disco-room--input-history-goto (index)
   "Switch draft view to history entry INDEX.
 
 When INDEX is nil, restore pending draft text."
-  (setq disco-room--input-index index)
+  (setq disco-chatbuf--input-idx index)
   (if (null index)
-      (setq disco-room--draft-input (disco-room--copy-draft disco-room--input-pending))
-    (setq disco-room--draft-input (disco-room--copy-draft
-                                   (ring-ref disco-room--input-ring index))))
+      (setq disco-room--draft-input (disco-chatbuf-copy-string disco-chatbuf--input-pending))
+    (setq disco-room--draft-input (disco-chatbuf-copy-string
+                                   (ring-ref disco-chatbuf--input-ring index))))
   (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
   (disco-room--update-frame-preserving-point))
 
@@ -1952,24 +1895,24 @@ When INDEX is nil, restore pending draft text."
   "Replace draft with N previous entries from draft history."
   (interactive "p")
   (let* ((step (max 1 (or n 1)))
-         (ring-size (and disco-room--input-ring (ring-length disco-room--input-ring))))
+         (ring-size (and disco-chatbuf--input-ring (ring-length disco-chatbuf--input-ring))))
     (cond
      ((or (null ring-size) (= ring-size 0))
       (message "disco: draft history is empty"))
      (t
-      (unless (integerp disco-room--input-index)
-        (setq disco-room--input-pending (disco-room--current-draft))
-        (setq disco-room--input-index -1))
-      (let ((target (min (1- ring-size) (+ disco-room--input-index step))))
+      (unless (integerp disco-chatbuf--input-idx)
+        (setq disco-chatbuf--input-pending (disco-room--current-draft))
+        (setq disco-chatbuf--input-idx -1))
+      (let ((target (min (1- ring-size) (+ disco-chatbuf--input-idx step))))
         (disco-room--input-history-goto target))))))
 
 (defun disco-room-draft-next (&optional n)
   "Replace draft with N newer entries from draft history."
   (interactive "p")
   (let ((step (max 1 (or n 1))))
-    (if (not (integerp disco-room--input-index))
+    (if (not (integerp disco-chatbuf--input-idx))
         (message "disco: already at latest draft")
-      (let ((target (- disco-room--input-index step)))
+      (let ((target (- disco-chatbuf--input-idx step)))
         (if (< target 0)
             (disco-room--input-history-goto nil)
           (disco-room--input-history-goto target))))))
@@ -1977,11 +1920,12 @@ When INDEX is nil, restore pending draft text."
 (defun disco-room-edit-draft ()
   "Edit current room draft in minibuffer and re-render room."
   (interactive)
-  (when (disco-room--draft-has-input-objects-p)
+  (when (disco-chatbuf-string-has-objects-p (disco-room--current-draft))
     (user-error "disco: minibuffer draft editing is unavailable for structured input objects"))
-  (let ((updated (read-from-minibuffer "Draft: " (disco-room--current-draft-text))))
-    (setq disco-room--input-index nil)
-    (setq disco-room--input-pending nil)
+  (let ((updated (read-from-minibuffer
+                  "Draft: "
+                  (disco-chatbuf-string-plain-text (disco-room--current-draft)))))
+    (disco-chatbuf-input-history-reset)
     (disco-room--set-draft updated)))
 
 (defun disco-room--read-state-snapshot-fields (state)
@@ -2203,7 +2147,7 @@ Message lines carry the `disco-message-id' text property."
 
 (defun disco-room--capture-window-input-offsets ()
   "Return (WINDOW . OFFSET) pairs for windows currently in draft input."
-  (let ((bounds (disco-room--input-region-bounds))
+  (let ((bounds (disco-chatbuf-input-region-bounds))
         offsets)
     (when bounds
       (let ((start (car bounds))
@@ -2217,8 +2161,8 @@ Message lines carry the `disco-message-id' text property."
 
 (defun disco-room--restore-window-input-offsets (offsets)
   "Restore window points in OFFSETS relative to current draft input start."
-  (let ((start (disco-room--input-start-position))
-        (logical-end (disco-room--input-logical-end-position)))
+  (let ((start (disco-chatbuf-input-start-position))
+        (logical-end (disco-chatbuf-input-logical-end-position)))
     (when (and (number-or-marker-p start)
                (number-or-marker-p logical-end))
       (dolist (entry offsets)
@@ -2234,7 +2178,7 @@ Message lines carry the `disco-message-id' text property."
 (defun disco-room--at-message-bottom-p ()
   "Return non-nil when point is at timeline bottom, outside draft input."
   (and (= (point) (point-max))
-       (not (disco-room--point-in-input-p))))
+       (not (disco-chatbuf-point-in-input-p))))
 
 (defun disco-room--render-preserving-point ()
   "Rerender room while preserving message reading position.
@@ -2242,16 +2186,16 @@ Message lines carry the `disco-message-id' text property."
 This follows telega-like behavior: preserve anchor + viewport for passive
 updates, and keep draft cursor stable when point is in the composer."
   (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
-         (input-start (disco-room--input-start-position))
+         (input-start (disco-chatbuf-input-start-position))
          (in-input (and (number-or-marker-p input-start)
-                        (disco-room--point-in-input-p)))
+                        (disco-chatbuf-point-in-input-p)))
          (input-offset (and in-input (- (point) input-start))))
     (unwind-protect
         (if (and in-input (numberp input-offset))
             (progn
               (disco-room-render)
-              (let ((new-start (disco-room--input-start-position))
-                    (logical-end (disco-room--input-logical-end-position)))
+              (let ((new-start (disco-chatbuf-input-start-position))
+                    (logical-end (disco-chatbuf-input-logical-end-position)))
                 (when (and (number-or-marker-p new-start)
                            (number-or-marker-p logical-end))
                   (goto-char (min logical-end
@@ -5492,10 +5436,6 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   "Return visible prompt text for the current room buffer."
   ">>> ")
 
-(defun disco-room--clear-input-region-markers ()
-  "Detach current room composer markers during hard resets only."
-  (disco-chatbuf-clear-prompt-and-input))
-
 (defun disco-room--sync-shared-aux-state ()
   "Mirror room reply/edit context into shared chatbuf aux state."
   (cond
@@ -5531,13 +5471,10 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (disco-room--sync-shared-aux-state)
   (disco-room--sync-shared-input-options-state)
   (if (not (disco-room--composer-visible-p))
-      (disco-room--clear-input-region-markers)
+      (disco-chatbuf-clear-prompt-and-input)
     (save-excursion
       (goto-char (point-max))
-      (if (and (markerp disco-room--input-marker)
-               (eq (marker-buffer disco-room--input-marker) (current-buffer))
-               (markerp disco-room--input-prompt-marker)
-               (eq (marker-buffer disco-room--input-prompt-marker) (current-buffer)))
+      (if (disco-chatbuf-prompt-button-live-p)
           (disco-chatbuf-prompt-update (disco-room--prompt-text))
         (disco-chatbuf-install-prompt (disco-room--prompt-text))))
     (disco-chatbuf-input-set-text disco-room--draft-input)
@@ -5613,7 +5550,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (let ((disco-room--rendering t)
         (inhibit-read-only t)
         (buffer-undo-list t))
-    (disco-room--clear-input-region-markers)
+    (disco-chatbuf-clear-prompt-and-input)
     (ewoc-set-hf disco-room--ewoc
                  (disco-room--header-text channel)
                  (disco-room--footer-text draft)))
@@ -5853,9 +5790,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--mutate-timeline-preserving-point (mutator)
   "Run MUTATOR while preserving chat reading and composer position."
   (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
-         (input-start (disco-room--input-start-position))
+         (input-start (disco-chatbuf-input-start-position))
          (in-input (and (number-or-marker-p input-start)
-                        (disco-room--point-in-input-p)))
+                        (disco-chatbuf-point-in-input-p)))
          (input-offset (and in-input (- (point) input-start)))
          (at-bottom (and (not in-input) (disco-room--at-message-bottom-p)))
          (snapshot (and (not in-input)
@@ -5868,8 +5805,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
           (funcall mutator)
           (cond
            ((and in-input (numberp input-offset))
-            (let ((new-start (disco-room--input-start-position))
-                  (logical-end (disco-room--input-logical-end-position)))
+            (let ((new-start (disco-chatbuf-input-start-position))
+                  (logical-end (disco-chatbuf-input-logical-end-position)))
               (when (and (number-or-marker-p new-start)
                          (number-or-marker-p logical-end))
                 (goto-char (min logical-end
@@ -5982,9 +5919,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--update-frame-preserving-point ()
   "Refresh room header/footer while preserving message and input position."
   (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
-         (input-start (disco-room--input-start-position))
+         (input-start (disco-chatbuf-input-start-position))
          (in-input (and (number-or-marker-p input-start)
-                        (disco-room--point-in-input-p)))
+                        (disco-chatbuf-point-in-input-p)))
          (input-offset (and in-input (- (point) input-start)))
          (anchor-at-point (and (not in-input)
                                (or (get-text-property (point) 'disco-message-id)
@@ -5998,8 +5935,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
         (progn
           (disco-room--set-ewoc-frame)
           (if (and in-input (numberp input-offset))
-              (let ((new-start (disco-room--input-start-position))
-                    (logical-end (disco-room--input-logical-end-position)))
+              (let ((new-start (disco-chatbuf-input-start-position))
+                    (logical-end (disco-chatbuf-input-logical-end-position)))
                 (when (and (number-or-marker-p new-start)
                            (number-or-marker-p logical-end))
                   (goto-char (min logical-end
@@ -6137,8 +6074,8 @@ Return non-nil when handled without full room rerender."
           (disco-room--set-ewoc-frame channel draft)
           ;; API returns newest-first by default; reverse for chat-like display.
           (disco-room--reconcile-timeline (reverse messages))
-          (when (markerp disco-room--input-marker)
-            (let ((logical-end (disco-room--input-logical-end-position)))
+          (when (disco-chatbuf-input-start-position)
+            (let ((logical-end (disco-chatbuf-input-logical-end-position)))
               (when logical-end
                 (goto-char logical-end)))))
       (disco-media-set-preview-fetch-budget nil)
@@ -6345,10 +6282,10 @@ REASON is shown in the minibuffer."
 
 (defun disco-room--attachment-token-bounds-at-point ()
   "Return bounds of attachment token around point in input region, or nil."
-  (let ((bounds (disco-room--input-region-bounds))
+  (let ((bounds (disco-chatbuf-input-region-bounds))
         (pos (point))
         found)
-    (when (and bounds (disco-room--point-in-input-p pos))
+    (when (and bounds (disco-chatbuf-point-in-input-p pos))
       (save-excursion
         (goto-char (car bounds))
         (while (and (not found)
@@ -7011,14 +6948,6 @@ enabled, include `replied_user'."
           (setq base `((replied_user . ,value))))))
     base))
 
-(defun disco-room--input-history-elements ()
-  "Return room draft history entries from newest to oldest."
-  (let (items)
-    (when (ring-p disco-room--input-ring)
-      (dotimes (idx (ring-length disco-room--input-ring))
-        (push (ring-ref disco-room--input-ring idx) items)))
-    (nreverse items)))
-
 (defun disco-room-draft-history-search (regexp)
   "Load one draft-history entry matching REGEXP."
   (interactive
@@ -7026,7 +6955,7 @@ enabled, include `replied_user'."
                       nil
                       'disco-room-draft-history-search-history)))
   (let* ((entries (cl-delete-duplicates
-                   (disco-room--input-history-elements)
+                   (disco-chatbuf-input-history-elements)
                    :test #'equal))
          (matches (seq-filter (lambda (entry)
                                 (and (stringp entry)
@@ -7040,8 +6969,7 @@ enabled, include `replied_user'."
                         (car matches)
                       (completing-read "Matching draft: " matches nil t nil nil
                                        (car matches)))))
-        (setq disco-room--input-index nil)
-        (setq disco-room--input-pending nil)
+        (disco-chatbuf-input-history-reset)
         (disco-room--set-draft picked)
         (message "disco: loaded draft history match"))))))
 
@@ -7257,16 +7185,16 @@ DESCRIPTION is optional per-file description."
   (let ((attachment (disco-room--make-attachment-input-object
                      path
                      :description description)))
-    (if (disco-room--input-start-position)
+    (if (disco-chatbuf-input-start-position)
         (progn
-          (unless (disco-room--point-in-input-p)
-            (goto-char (or (disco-room--input-logical-end-position) (point-max))))
+          (unless (disco-chatbuf-point-in-input-p)
+            (goto-char (or (disco-chatbuf-input-logical-end-position) (point-max))))
           (disco-room--insert-attachment-input-object attachment)
           (disco-room--sync-draft-from-buffer))
       (let* ((draft (disco-room--current-draft))
-             (separator (if (or (string-empty-p (disco-room--current-draft-text draft))
+             (separator (if (or (string-empty-p (disco-chatbuf-string-plain-text draft))
                                 (string-match-p "[ \t\n]\\'"
-                                                (disco-room--current-draft-text draft)))
+                                                (disco-chatbuf-string-plain-text draft)))
                             ""
                           " ")))
         (disco-room--set-draft
@@ -7366,7 +7294,7 @@ When called with prefix argument, force draft edit in minibuffer first."
     (message "disco: send already in progress"))
    (t
     (let* ((current-draft (disco-room--current-draft))
-           (current-draft-text (disco-room--current-draft-text current-draft))
+           (current-draft-text (disco-chatbuf-string-plain-text current-draft))
            (initial-has-attachments
             (not (null (disco-room--attachments-from-draft current-draft))))
            (prompt-edit-p
@@ -7374,7 +7302,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                 (and (string-empty-p (string-trim-right current-draft-text))
                      (not initial-has-attachments)))))
       (when (and current-prefix-arg
-                 (disco-room--draft-has-input-objects-p current-draft))
+                 (disco-chatbuf-string-has-objects-p current-draft))
         (user-error "disco: minibuffer send-edit is unavailable for structured input objects"))
       (let* ((content (if prompt-edit-p
                           (read-from-minibuffer "Message: " current-draft-text)
@@ -8445,20 +8373,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--draft-input "")
   (setq-local disco-room--pending-reply-to nil)
   (setq-local disco-room--pending-edit nil)
-  (setq-local disco-room--input-ring (make-ring (max 1 disco-room-input-history-size)))
-  (setq-local disco-room--input-index nil)
-  (setq-local disco-room--input-pending nil)
-  (setq-local disco-room--input-marker (make-marker))
-  (setq-local disco-room--input-prompt-marker (make-marker))
-  (setq-local disco-chatbuf--input-marker disco-room--input-marker)
-  (setq-local disco-chatbuf--prompt-marker disco-room--input-prompt-marker)
-  (setq-local disco-chatbuf--input-ring disco-room--input-ring)
-  (setq-local disco-chatbuf--input-idx disco-room--input-index)
-  (setq-local disco-chatbuf--input-pending disco-room--input-pending)
-  (setq-local disco-chatbuf--prompt-button nil)
-  (disco-chatbuf-init-state disco-room-input-history-size)
-  (disco-chatbuf-aux-reset)
-  (disco-chatbuf-input-options-reset)
+  (disco-chatbuf-reset-state disco-room-input-history-size)
   (setq-local disco-room--send-in-flight nil)
   (setq-local disco-room--pending-jump-message-id nil)
   (setq-local disco-room--jump-in-flight nil)

@@ -11,7 +11,10 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'disco-chatbuf)
+(require 'disco-msg)
 (require 'disco-state)
+(require 'disco-thread)
 (require 'svg nil t)
 
 (defvar company-mode)
@@ -41,7 +44,6 @@ completion row height stays stable across CAPF/Corfu and company popups."
 (defvar-local disco-room--channel-id nil)
 (defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--typing-users nil)
-(defvar-local disco-room--input-marker nil)
 (defvar-local disco-room--draft-input "")
 
 (defun disco-company--as-list (value)
@@ -69,32 +71,9 @@ completion row height stays stable across CAPF/Corfu and company popups."
       (setq-local company-backends
                   (cons 'disco-room-company-completion filtered-backends)))))
 
-(defun disco-company--input-region-bounds ()
-  "Return writable room draft region as (START . END), or nil."
-  (when (and (markerp disco-room--input-marker)
-             (eq (marker-buffer disco-room--input-marker) (current-buffer)))
-    (let ((start (marker-position disco-room--input-marker)))
-      (when (<= start (point-max))
-        (cons start (point-max))))))
-
-(defun disco-company--point-in-input-p (&optional position)
-  "Return non-nil when POSITION (or point) is inside the room draft input."
-  (let* ((bounds (disco-company--input-region-bounds))
-         (pos (or position (point))))
-    (and bounds
-         (<= (car bounds) pos)
-         (<= pos (cdr bounds)))))
-
 (defun disco-company--normalize-id (value)
   "Return normalized snowflake-like ID string from VALUE, or nil."
-  (let ((normalized
-         (cond
-          ((stringp value) (string-trim value))
-          ((integerp value) (number-to-string value))
-          (t nil))))
-    (when (and (stringp normalized)
-               (not (string-empty-p normalized)))
-      normalized)))
+  (disco-msg-normalize-id value))
 
 (defun disco-company--normalize-list-sequence (value)
   "Normalize VALUE into a list, preserving list/vector elements."
@@ -109,8 +88,7 @@ completion row height stays stable across CAPF/Corfu and company popups."
 
 (defun disco-company--thread-channel-p (&optional channel)
   "Return non-nil when CHANNEL (or current room channel) is a thread."
-  (let ((target (or channel (disco-company--channel-object))))
-    (and target (disco-state-channel-thread-p target))))
+  (disco-thread-channel-p (or channel (disco-company--channel-object))))
 
 (defun disco-company--guild-by-id (guild-id)
   "Return guild object for GUILD-ID, or nil."
@@ -123,7 +101,7 @@ completion row height stays stable across CAPF/Corfu and company popups."
   "Sync room draft state after completion insertion."
   (if (fboundp 'disco-room--sync-draft-from-buffer)
       (funcall #'disco-room--sync-draft-from-buffer)
-    (let ((bounds (disco-company--input-region-bounds)))
+    (let ((bounds (disco-chatbuf-input-region-bounds)))
       (when bounds
         (setq-local disco-room--draft-input
                     (replace-regexp-in-string
@@ -142,7 +120,7 @@ completion row height stays stable across CAPF/Corfu and company popups."
 
 Returned plist contains :start, :end, :trigger, :raw and :query.
 Supported trigger characters are `@' and `#'."
-  (when (disco-company--point-in-input-p)
+  (when (disco-chatbuf-point-in-input-p)
     (save-excursion
       (let ((end (point)))
         (skip-chars-backward "A-Za-z0-9._-")
@@ -754,7 +732,7 @@ This function is suitable for `completion-at-point-functions'."
        (funcall 'company-begin-backend 'disco-room-company-completion)))
     ('prefix
      (when (and (derived-mode-p 'disco-room-mode)
-                (disco-company--point-in-input-p))
+                (disco-chatbuf-point-in-input-p))
        (disco-company--company-prefix)))
     ('sorted t)
     ('require-match 'never)

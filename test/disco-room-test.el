@@ -27,7 +27,7 @@
        (guild_id . "g1")
        (permissions . "2048")))
     (disco-room-render)
-    (goto-char (or (disco-room--input-logical-end-position) (point-max)))
+    (goto-char (or (disco-chatbuf-input-logical-end-position) (point-max)))
     (disco-room--update-context-mode)
     (should-not disco-room-timeline-mode)
     (should (eq (key-binding (kbd "q") t)
@@ -53,14 +53,17 @@
 (ert-deftest disco-room-draft-history-search-loads-match ()
   (with-temp-buffer
     (disco-room-mode)
-    (setq-local disco-room--input-ring (make-ring 5))
-    (ring-insert disco-room--input-ring "deploy status")
-    (ring-insert disco-room--input-ring "hello world")
-    (ring-insert disco-room--input-ring "alpha beta")
+    (let ((ring (make-ring 5)))
+      (setq-local disco-chatbuf--input-ring ring)
+      (ring-insert ring "deploy status")
+      (ring-insert ring "hello world")
+      (ring-insert ring "alpha beta"))
     (cl-letf (((symbol-function 'message)
                (lambda (&rest _args) nil)))
       (disco-room-draft-history-search "hello"))
-    (should (equal "hello world" (disco-room--current-draft-text)))))
+    (should (equal "hello world"
+                   (disco-chatbuf-string-plain-text
+                    (disco-room--current-draft))))))
 
 (ert-deftest disco-room-input-preview-renders-parsed-attachments ()
   (with-temp-buffer
@@ -852,7 +855,7 @@
        (permissions . "0")))
     (disco-room-render)
     (should-not (text-property-any (point-min) (point-max) 'disco-room-input t))
-    (should-not (marker-buffer disco-room--input-marker))
+    (should-not (marker-buffer disco-chatbuf--input-marker))
     (should (string-match-p "composer hidden: missing SEND_MESSAGES"
                             (buffer-string)))
     (should-not (string-match-p "type at >>>" (buffer-string)))))
@@ -1032,7 +1035,7 @@
        (permissions . "2048")))
     (disco-room-render)
     (should (text-property-any (point-min) (point-max) 'disco-room-input t))
-    (should (markerp disco-room--input-marker))
+    (should (markerp disco-chatbuf--input-marker))
     (should (string-match-p "type at >>>" (buffer-string)))))
 
 (ert-deftest disco-room-set-draft-preserves-ewoc-and-input-markers ()
@@ -1049,12 +1052,12 @@
        (permissions . "2048")))
     (disco-room-render)
     (let ((ewoc disco-room--ewoc)
-          (input-marker disco-room--input-marker)
-          (prompt-marker disco-room--input-prompt-marker))
+          (input-marker disco-chatbuf--input-marker)
+          (prompt-marker disco-chatbuf--prompt-marker))
       (disco-room--set-draft "updated body")
       (should (eq ewoc disco-room--ewoc))
-      (should (eq input-marker disco-room--input-marker))
-      (should (eq prompt-marker disco-room--input-prompt-marker))
+      (should (eq input-marker disco-chatbuf--input-marker))
+      (should (eq prompt-marker disco-chatbuf--prompt-marker))
       (should (string-match-p "> updated body" (buffer-string))))))
 
 (ert-deftest disco-room-sync-draft-from-buffer-preserves-attachment-input-objects ()
@@ -1076,7 +1079,8 @@
       "/tmp/a.txt"
       :description "preview"))
     (disco-room--sync-draft-from-buffer)
-    (should (disco-room--draft-has-input-objects-p))
+    (should (disco-chatbuf-string-has-objects-p
+             (disco-room--current-draft)))
     (should (= 1 (length (disco-room--draft-input-objects))))
     (should (equal "hello "
                    (disco-room--draft-without-attachment-tokens)))
@@ -1210,7 +1214,8 @@
             (cl-letf (((symbol-function 'message)
                        (lambda (&rest _args) nil)))
               (disco-room-attach-file path "preview"))
-            (should (disco-room--draft-has-input-objects-p))
+            (should (disco-chatbuf-string-has-objects-p
+                     (disco-room--current-draft)))
             (should (equal `((:path ,path
                               :filename ,(file-name-nondirectory path)
                               :description "preview"))
@@ -1239,7 +1244,7 @@
             (disco-chatbuf-input-insert "hello ")
             (disco-room--insert-attachment-input-object
              (disco-room--make-attachment-input-object path :description "preview"))
-            (goto-char (or (text-property-not-all (disco-room--input-start-position)
+            (goto-char (or (text-property-not-all (disco-chatbuf-input-start-position)
                                                   (point-max)
                                                   disco-chatbuf-input-object-property
                                                   nil)
@@ -1247,9 +1252,12 @@
             (cl-letf (((symbol-function 'message)
                        (lambda (&rest _args) nil)))
               (disco-room-remove-attachment-token-at-point))
-            (should-not (disco-room--draft-has-input-objects-p))
+            (should-not (disco-chatbuf-string-has-objects-p
+                         (disco-room--current-draft)))
             (should (equal '() (disco-room--attachments-from-draft)))
-            (should (equal "hello " (disco-room--current-draft-text))))
+            (should (equal "hello "
+                           (disco-chatbuf-string-plain-text
+                            (disco-room--current-draft)))))
         (delete-file path)))))
 
 (ert-deftest disco-room-remove-attachment-token-errors-while-editing ()
