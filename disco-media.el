@@ -130,26 +130,20 @@ Values are image objects or the symbol `:missing'.")
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
-(defcustom disco-media-video-preview-play-icon-min-radius 6.0
-  "Minimum radius in pixels for video preview play-icon circle."
+(defcustom disco-media-video-preview-play-icon-radius-divisor 8.0
+  "Height divisor used to derive the telega-style video play-icon radius."
   :type 'number
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
-(defcustom disco-media-video-preview-play-icon-radius-divisor 6.0
-  "Preview-size divisor used to derive video play-icon circle radius."
+(defcustom disco-media-video-preview-play-icon-circle-opacity 0.65
+  "Fill opacity used for the telega-style black play-icon circle."
   :type 'number
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
-(defcustom disco-media-video-preview-play-icon-circle-opacity 0.82
-  "Fill opacity used for the video preview play-icon circle."
-  :type 'number
-  :set #'disco-media--visual-custom-set
-  :group 'disco-media)
-
-(defcustom disco-media-video-preview-play-icon-triangle-opacity 0.75
-  "Fill opacity used for the video preview play-icon triangle."
+(defcustom disco-media-video-preview-play-icon-triangle-opacity 0.65
+  "Fill opacity used for the telega-style white play-icon triangle."
   :type 'number
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
@@ -585,30 +579,30 @@ VALUE should be nil for uncapped mode or a non-negative integer."
       (format "url(#%s)" node-id))))
 
 (defun disco-media--svg-append-spoiler-video-icon (svg width height)
-  "Append spoiler video play icon into SVG of WIDTH by HEIGHT."
+  "Append telega-style video play icon into SVG of WIDTH by HEIGHT.
+
+This matches `telega-svg-white-play-triangle-in-circle': a black circle with a
+white triangle, sized from preview height and slightly shifted right."
   (when (and (fboundp 'svg-circle)
              (fboundp 'svg-polygon))
     (let* ((cx (/ width 2.0))
            (cy (/ height 2.0))
-           (radius (max (float disco-media-video-preview-play-icon-min-radius)
-                        (min (/ width (max 0.1 (float disco-media-video-preview-play-icon-radius-divisor)))
-                             (/ height (max 0.1 (float disco-media-video-preview-play-icon-radius-divisor))))))
-           (tri-w (* radius 0.95))
-           (tri-h (* radius 1.10))
-           (x1 (- cx (/ tri-w 3.0)))
-           (x2 (- cx (/ tri-w 3.0)))
-           (x3 (+ cx (* tri-w 0.67)))
-           (y1 (- cy (/ tri-h 2.0)))
-           (y2 (+ cy (/ tri-h 2.0)))
-           (y3 cy))
-      (svg-circle svg cx cy radius
-                  :fill "#ffffff"
+           (play-size (/ height
+                         (max 0.1
+                              (float disco-media-video-preview-play-icon-radius-divisor))))
+           (xoff (/ play-size 8.0))
+           (left (+ xoff (/ (- width play-size) 2.0)))
+           (right (+ xoff (/ (+ width play-size) 2.0)))
+           (top (/ (- height play-size) 2.0))
+           (bottom (/ (+ height play-size) 2.0)))
+      (svg-circle svg cx cy play-size
+                  :fill "#000000"
                   :fill-opacity disco-media-video-preview-play-icon-circle-opacity)
       (svg-polygon svg
-                   (list (cons x1 y1)
-                         (cons x2 y2)
-                         (cons x3 y3))
-                   :fill "#000000"
+                   (list (cons left top)
+                         (cons left bottom)
+                         (cons right cy))
+                   :fill "#ffffff"
                    :fill-opacity disco-media-video-preview-play-icon-triangle-opacity))))
 
 (defun disco-media--svg-append-spoiler-overlay (svg width height &optional video-p dim-opacity)
