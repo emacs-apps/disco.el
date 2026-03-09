@@ -28,6 +28,21 @@
                   "hi"
                   '((parse . ["users"]))))))
 
+(ert-deftest disco-api-normalize-allowed-mentions-rejects-plist ()
+  (should-error (disco-api--normalize-allowed-mentions '(:parse ["users"]))
+                :type 'error))
+
+(ert-deftest disco-api-normalize-message-reference-rejects-plist ()
+  (should-error (disco-api--normalize-message-reference
+                 '(:type forward :message_id "1" :channel_id "2")
+                 nil)
+                :type 'error))
+
+(ert-deftest disco-api-normalize-forward-only-rejects-plist ()
+  (should-error (disco-api--normalize-message-forward-only
+                 '(:embed_indices [0]))
+                :type 'error))
+
 (ert-deftest disco-api-normalize-message-content-length-limit ()
   (let ((max (make-string disco-api--message-content-limit ?a))
         (too-long (make-string (1+ disco-api--message-content-limit) ?a)))

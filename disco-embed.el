@@ -63,20 +63,20 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--type (embed)
   "Return short embed type string for EMBED object."
-  (let ((raw (disco-util-object-get embed 'type)))
+  (let ((raw (alist-get 'type embed)))
     (if (and (stringp raw) (not (string-empty-p raw)))
         (downcase raw)
       "rich")))
 
 (defun disco-embed--summary (embed)
   "Return embed summary string for EMBED object."
-  (let* ((author (disco-util-object-get embed 'author))
-         (provider (disco-util-object-get embed 'provider))
-         (title (or (disco-util-object-get embed 'title)
-                    (and (listp author) (disco-util-object-get author 'name))
-                    (and (listp provider) (disco-util-object-get provider 'name))
-                    (disco-util-object-get embed 'description)
-                    (disco-util-object-get embed 'url)
+  (let* ((author (alist-get 'author embed))
+         (provider (alist-get 'provider embed))
+         (title (or (alist-get 'title embed)
+                    (and (listp author) (alist-get 'name author))
+                    (and (listp provider) (alist-get 'name provider))
+                    (alist-get 'description embed)
+                    (alist-get 'url embed)
                     "embed"))
          (headline (or (disco-embed--stringify title) "embed")))
     (format "[%s] %s"
@@ -85,7 +85,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--color-hex (embed)
   "Return hexadecimal color string for EMBED, or nil."
-  (let ((value (disco-util-object-get embed 'color)))
+  (let ((value (alist-get 'color embed)))
     (cond
      ((and (integerp value) (>= value 0) (<= value #xFFFFFF))
       (format "#%06x" value))
@@ -143,19 +143,19 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--meta-line (embed)
   "Return compact metadata line for EMBED object."
-  (let* ((provider (disco-util-object-get embed 'provider))
-         (author (disco-util-object-get embed 'author))
+  (let* ((provider (alist-get 'provider embed))
+         (author (alist-get 'author embed))
          (provider-name (and (listp provider)
                              (disco-embed--stringify
-                              (disco-util-object-get provider 'name))))
+                              (alist-get 'name provider))))
          (author-name (and (listp author)
                            (disco-embed--stringify
-                            (disco-util-object-get author 'name))))
-         (timestamp (disco-util-object-get embed 'timestamp))
+                            (alist-get 'name author))))
+         (timestamp (alist-get 'timestamp embed))
          (timestamp-text (and (stringp timestamp)
                               (not (string-empty-p timestamp))
                               (format "time=%s" (disco-util-format-time timestamp))))
-         (fields (or (disco-util-object-get embed 'fields) '()))
+         (fields (or (alist-get 'fields embed) '()))
          (color (disco-embed--color-hex embed))
          (parts (delq nil
                       (list (format "type=%s" (disco-embed--type embed))
@@ -178,7 +178,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
   (when (and (stringp filename) (not (string-empty-p filename)))
     (seq-find
      (lambda (attachment)
-       (equal (disco-util-object-get attachment 'filename) filename))
+       (equal (alist-get 'filename attachment) filename))
      (or (alist-get 'attachments msg) '()))))
 
 (defun disco-embed--resolve-attachment-scheme-url (msg url)
@@ -196,33 +196,33 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--author-object (embed)
   "Return author object for EMBED, or nil."
-  (let ((author (disco-util-object-get embed 'author)))
+  (let ((author (alist-get 'author embed)))
     (and (consp author) author)))
 
 (defun disco-embed--provider-object (embed)
   "Return provider object for EMBED, or nil."
-  (let ((provider (disco-util-object-get embed 'provider)))
+  (let ((provider (alist-get 'provider embed)))
     (and (consp provider) provider)))
 
 (defun disco-embed--author-url (msg embed)
   "Return author URL for EMBED in MSG, if available."
   (let* ((author (disco-embed--author-object embed))
-         (raw-url (and author (disco-util-object-get author 'url))))
+         (raw-url (and author (alist-get 'url author))))
     (disco-embed--resolve-attachment-scheme-url msg raw-url)))
 
 (defun disco-embed--provider-url (msg embed)
   "Return provider URL for EMBED in MSG, if available."
   (let* ((provider (disco-embed--provider-object embed))
-         (raw-url (and provider (disco-util-object-get provider 'url))))
+         (raw-url (and provider (alist-get 'url provider))))
     (disco-embed--resolve-attachment-scheme-url msg raw-url)))
 
 (defun disco-embed--author-icon-url (msg embed)
   "Return author icon URL for EMBED in MSG, if available."
   (let* ((author (disco-embed--author-object embed))
          (raw-url (and author
-                       (or (disco-util-object-get author 'proxy_icon_url 'proxyIconUrl)
-                           (disco-util-object-get author 'icon_url 'iconUrl)
-                           (disco-util-object-get author 'icon_canonical_url 'iconCanonicalUrl)))))
+                       (or (alist-get 'proxy_icon_url author)
+                           (alist-get 'icon_url author)
+                           (alist-get 'icon_canonical_url author)))))
     (disco-embed--resolve-attachment-scheme-url msg raw-url)))
 
 (defun disco-embed--author-icon-attachment (msg embed embed-index)
@@ -284,23 +284,23 @@ Keeps original line breaks and applies markdown renderer pipeline."
   "Return primary URL for EMBED in MSG, resolving attachment:// links."
   (or (disco-embed--resolve-attachment-scheme-url
        msg
-       (or (disco-util-object-get embed 'url)
-           (disco-util-object-get embed 'canonical_url 'canonicalUrl)))
+       (or (alist-get 'url embed)
+           (alist-get 'canonical_url embed)))
       (disco-embed--author-url msg embed)
       (disco-embed--provider-url msg embed)))
 
 (defun disco-embed--embed-url-key (embed)
   "Return normalized URL key for EMBED dedup/grouping logic."
-  (let ((raw-url (or (disco-util-object-get embed 'url)
-                     (disco-util-object-get embed 'canonical_url 'canonicalUrl))))
+  (let ((raw-url (or (alist-get 'url embed)
+                     (alist-get 'canonical_url embed))))
     (and (disco-embed--url-present-p raw-url)
          (string-trim raw-url))))
 
 (defun disco-embed--image-object-key (image)
   "Return stable de-dup key for IMAGE object."
-  (let ((raw-url (or (disco-util-object-get image 'proxy_url 'proxyUrl)
-                     (disco-util-object-get image 'url)
-                     (disco-util-object-get image 'canonical_url 'canonicalUrl))))
+  (let ((raw-url (or (alist-get 'proxy_url image)
+                     (alist-get 'url image)
+                     (alist-get 'canonical_url image))))
     (or (and (disco-embed--url-present-p raw-url)
              (string-trim raw-url))
         (format "raw:%s" (sxhash image)))))
@@ -319,8 +319,8 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--embed-image-objects (embed)
   "Return all image objects for EMBED, including merged `images' entries."
-  (let* ((single (disco-util-object-get embed 'image))
-         (images (disco-util-object-get embed 'images))
+  (let* ((single (alist-get 'image embed))
+         (images (alist-get 'images embed))
          (image-list (cond
                       ((vectorp images) (append images nil))
                       ((listp images) images)
@@ -330,9 +330,9 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--image-object-url (msg image)
   "Return best resolved URL for IMAGE object in MSG."
-  (let* ((proxy-url (disco-util-object-get image 'proxy_url 'proxyUrl))
-         (source-url (or (disco-util-object-get image 'url)
-                         (disco-util-object-get image 'canonical_url 'canonicalUrl)))
+  (let* ((proxy-url (alist-get 'proxy_url image))
+         (source-url (or (alist-get 'url image)
+                         (alist-get 'canonical_url image)))
          (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
          (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url)))
     (or (and (disco-embed--url-present-p resolved-proxy)
@@ -364,23 +364,23 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--trailing-image-embed-p (embed url-key)
   "Return non-nil when EMBED is a mergeable trailing image-only embed."
-  (let* ((description (disco-util-object-get embed 'description))
+  (let* ((description (alist-get 'description embed))
          (description-present
           (and description
                (not (and (stringp description)
                          (string-empty-p description)))))
-         (fields (disco-util-object-get embed 'fields))
+         (fields (alist-get 'fields embed))
          (images (disco-embed--embed-image-objects embed)))
     (and (disco-embed--url-present-p url-key)
          (equal (disco-embed--embed-url-key embed) url-key)
-         (null (disco-util-object-get embed 'timestamp))
-         (null (disco-util-object-get embed 'author))
-         (null (disco-util-object-get embed 'color))
+         (null (alist-get 'timestamp embed))
+         (null (alist-get 'author embed))
+         (null (alist-get 'color embed))
          (not description-present)
          (disco-embed--seq-empty-p fields)
-         (null (disco-util-object-get embed 'thumbnail))
-         (null (disco-util-object-get embed 'video))
-         (null (disco-util-object-get embed 'footer))
+         (null (alist-get 'thumbnail embed))
+         (null (alist-get 'video embed))
+         (null (alist-get 'footer embed))
          (= (length images) 1))))
 
 (defun disco-embed--normalize-embeds (embeds)
@@ -421,10 +421,10 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--media-entry (embed)
   "Return media entry cons for EMBED as (KIND . OBJECT), or nil."
-  (let ((image (disco-util-object-get embed 'image))
-        (thumbnail (disco-util-object-get embed 'thumbnail))
-        (video (disco-util-object-get embed 'video))
-        (images (disco-util-object-get embed 'images)))
+  (let ((image (alist-get 'image embed))
+        (thumbnail (alist-get 'thumbnail embed))
+        (video (alist-get 'video embed))
+        (images (alist-get 'images embed)))
     (cond
      ((consp image) (cons 'image image))
      ((and (listp images) (consp (car images))) (cons 'image (car images)))
@@ -442,11 +442,10 @@ Keeps original line breaks and applies markdown renderer pipeline."
   (let* ((media-entry (disco-embed--media-entry embed))
          (media (cdr media-entry))
          (proxy-url (and (listp media)
-                         (or (disco-util-object-get media 'proxy_url)
-                             (disco-util-object-get media 'proxyUrl))))
+                         (alist-get 'proxy_url media)))
          (source-url (and (listp media)
-                          (or (disco-util-object-get media 'url)
-                              (disco-util-object-get media 'canonical_url 'canonicalUrl))))
+                          (or (alist-get 'url media)
+                              (alist-get 'canonical_url media))))
          (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
          (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url))
          (main-url (disco-embed--main-url msg embed)))
@@ -460,13 +459,12 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--video-url (msg embed)
   "Return best video URL for EMBED in MSG, resolving attachment:// links."
-  (let* ((video (disco-util-object-get embed 'video))
+  (let* ((video (alist-get 'video embed))
          (proxy-url (and (listp video)
-                         (or (disco-util-object-get video 'proxy_url)
-                             (disco-util-object-get video 'proxyUrl))))
+                         (alist-get 'proxy_url video)))
          (source-url (and (listp video)
-                          (or (disco-util-object-get video 'url)
-                              (disco-util-object-get video 'canonical_url 'canonicalUrl))))
+                          (or (alist-get 'url video)
+                              (alist-get 'canonical_url video))))
          (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
          (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url)))
     (or (and (disco-embed--url-present-p resolved-proxy)
@@ -496,8 +494,8 @@ Keeps original line breaks and applies markdown renderer pipeline."
                            "image/embed"))
         (url . ,media-url)
         (proxy_url . ,media-url)
-        (width . ,(and (listp media) (disco-util-object-get media 'width)))
-        (height . ,(and (listp media) (disco-util-object-get media 'height)))))))
+        (width . ,(and (listp media) (alist-get 'width media)))
+        (height . ,(and (listp media) (alist-get 'height media)))))))
 
 (defun disco-embed--image-preview-attachment (msg embed-index image-index image image-url)
   "Build pseudo attachment object used to render one embed IMAGE preview."
@@ -513,13 +511,13 @@ Keeps original line breaks and applies markdown renderer pipeline."
         (content_type . "image/embed")
         (url . ,image-url)
         (proxy_url . ,image-url)
-        (width . ,(and (listp image) (disco-util-object-get image 'width)))
-        (height . ,(and (listp image) (disco-util-object-get image 'height)))))))
+        (width . ,(and (listp image) (alist-get 'width image)))
+        (height . ,(and (listp image) (alist-get 'height image)))))))
 
 (defun disco-embed--description-line (embed)
   "Return embed description for EMBED, preserving original formatting."
   (let ((text (disco-embed--stringify
-               (disco-util-object-get embed 'description))))
+               (alist-get 'description embed))))
     (disco-embed--truncate-text text disco-room-embed-description-limit)))
 
 (defun disco-embed--insert-action-button (label callback help-echo)
@@ -533,10 +531,10 @@ Keeps original line breaks and applies markdown renderer pipeline."
 (defun disco-embed--insert-field-row (field embed prefix-str)
   "Insert one field row for FIELD object."
   (let* ((name (disco-embed--stringify
-                (disco-util-object-get field 'name)))
+                (alist-get 'name field)))
          (value (disco-embed--stringify
-                 (disco-util-object-get field 'value)))
-         (inline (disco-util-json-true-p (disco-util-object-get field 'inline))))
+                 (alist-get 'value field)))
+         (inline (disco-util-json-true-p (alist-get 'inline field))))
     (when (or name value)
       (let ((content-start (point)))
         (insert (if name name "(unnamed field)"))
@@ -798,28 +796,28 @@ Keeps original line breaks and applies markdown renderer pipeline."
   (let* ((summary (disco-embed--summary embed))
          (meta-fallback (disco-embed--meta-line embed))
          (description (disco-embed--description-line embed))
-         (fields (or (disco-util-object-get embed 'fields) '()))
+         (fields (or (alist-get 'fields embed) '()))
          (author (disco-embed--author-object embed))
          (author-name (and (listp author)
                            (disco-embed--stringify
-                            (disco-util-object-get author 'name))))
+                            (alist-get 'name author))))
          (author-url (disco-embed--author-url msg embed))
          (author-icon-url (disco-embed--author-icon-url msg embed))
          (author-icon-image (disco-embed--author-icon-image msg embed embed-index))
          (provider (disco-embed--provider-object embed))
          (provider-name (and (listp provider)
                              (disco-embed--stringify
-                              (disco-util-object-get provider 'name))))
+                              (alist-get 'name provider))))
          (provider-url (disco-embed--provider-url msg embed))
          (main-url (disco-embed--main-url msg embed))
-         (timestamp (disco-util-object-get embed 'timestamp))
+         (timestamp (alist-get 'timestamp embed))
          (timestamp-text (and (stringp timestamp)
                               (not (string-empty-p timestamp))
                               (disco-util-format-time timestamp)))
-         (footer (disco-util-object-get embed 'footer))
+         (footer (alist-get 'footer embed))
          (footer-text (and (listp footer)
                            (disco-embed--stringify
-                            (disco-util-object-get footer 'text))))
+                            (alist-get 'text footer))))
          (footer-line (let ((parts (delq nil (list footer-text timestamp-text))))
                         (and parts (string-join parts "  -  "))))
          (media-entry (disco-embed--media-entry embed))
@@ -827,8 +825,8 @@ Keeps original line breaks and applies markdown renderer pipeline."
          (media (cdr media-entry))
          (media-url (disco-embed--media-url msg embed))
          (video-url (disco-embed--video-url msg embed))
-         (media-width (and (listp media) (disco-util-object-get media 'width)))
-         (media-height (and (listp media) (disco-util-object-get media 'height)))
+         (media-width (and (listp media) (alist-get 'width media)))
+         (media-height (and (listp media) (alist-get 'height media)))
          (media-dims (when (and (numberp media-width) (numberp media-height))
                        (format "%dx%d" media-width media-height)))
          (meta-parts (delq nil

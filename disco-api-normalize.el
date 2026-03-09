@@ -586,6 +586,11 @@ When POLL is nil, return nil."
            source)))
     (vconcat normalized)))
 
+(defun disco-api--alist-object-p (value)
+  "Return non-nil when VALUE is an alist-style JSON object."
+  (and (listp value)
+       (cl-every #'consp value)))
+
 (defun disco-api--normalize-allowed-mentions (allowed-mentions)
   "Normalize ALLOWED-MENTIONS payload to Discord structure or nil."
   (cond
@@ -594,15 +599,13 @@ When POLL is nil, return nil."
     '((parse . [])))
    ((eq allowed-mentions 'all)
     '((parse . ["users" "roles" "everyone"])))
-   ((not (listp allowed-mentions))
-    (user-error "disco: allowed_mentions must be nil, symbol, or alist/plist"))
+   ((not (disco-api--alist-object-p allowed-mentions))
+    (user-error "disco: allowed_mentions must be nil, symbol, or alist"))
    (t
-    (let* ((parse (disco-util-object-get allowed-mentions 'parse))
-           (roles (disco-util-object-get allowed-mentions 'roles))
-           (users (disco-util-object-get allowed-mentions 'users))
-           (replied-user (disco-util-object-get allowed-mentions
-                                                'replied_user
-                                                'replied-user))
+    (let* ((parse (alist-get 'parse allowed-mentions))
+           (roles (alist-get 'roles allowed-mentions))
+           (users (alist-get 'users allowed-mentions))
+           (replied-user (alist-get 'replied_user allowed-mentions))
            payload)
       (when parse
         (push `(parse . ,(disco-api--normalize-allowed-mentions-parse-types parse)) payload))
@@ -626,14 +629,10 @@ When POLL is nil, return nil."
 (defun disco-api--normalize-message-forward-only (forward-only)
   "Normalize FORWARD-ONLY payload for message reference forwarding."
   (when forward-only
-    (unless (listp forward-only)
-      (user-error "disco: message_reference.forward_only must be an alist/plist"))
-    (let* ((embed-indices (disco-util-object-get forward-only
-                                                 'embed_indices
-                                                 'embed-indices))
-           (attachment-ids (disco-util-object-get forward-only
-                                                  'attachment_ids
-                                                  'attachment-ids))
+    (unless (disco-api--alist-object-p forward-only)
+      (user-error "disco: message_reference.forward_only must be an alist"))
+    (let* ((embed-indices (alist-get 'embed_indices forward-only))
+           (attachment-ids (alist-get 'attachment_ids forward-only))
            payload)
       (when embed-indices
         (let* ((source (cond
@@ -706,28 +705,18 @@ REPLY-TO-MESSAGE-ID remains as backwards-compatible shorthand for replies."
     `((message_id . ,(disco-api--normalize-id-string
                       message-reference
                       "message_reference.message_id"))))
-   ((not (listp message-reference))
-    (user-error "disco: message-reference must be nil, string, or alist/plist"))
+   ((not (disco-api--alist-object-p message-reference))
+    (user-error "disco: message-reference must be nil, string, or alist"))
    (t
     (let* ((type (disco-api--normalize-message-reference-type
-                  (disco-util-object-get message-reference 'type)))
-           (message-id (disco-util-object-get message-reference
-                                              'message_id
-                                              'message-id))
-           (channel-id (disco-util-object-get message-reference
-                                              'channel_id
-                                              'channel-id))
-           (guild-id (disco-util-object-get message-reference
-                                            'guild_id
-                                            'guild-id))
-           (fail-if-not-exists (disco-util-object-get message-reference
-                                                      'fail_if_not_exists
-                                                      'fail-if-not-exists))
+                  (alist-get 'type message-reference)))
+           (message-id (alist-get 'message_id message-reference))
+           (channel-id (alist-get 'channel_id message-reference))
+           (guild-id (alist-get 'guild_id message-reference))
+           (fail-if-not-exists (alist-get 'fail_if_not_exists message-reference))
            (forward-only
             (disco-api--normalize-message-forward-only
-             (disco-util-object-get message-reference
-                                    'forward_only
-                                    'forward-only)))
+             (alist-get 'forward_only message-reference)))
            payload)
       (push `(message_id . ,(disco-api--normalize-id-string
                              message-id

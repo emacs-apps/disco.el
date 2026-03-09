@@ -189,7 +189,7 @@ active."
   "Default allowed mentions payload used when sending or editing messages.
 
 Nil delegates to Discord defaults. `none' suppresses all mention parsing.
-`all' explicitly enables users/roles/everyone parsing. Any alist/plist value is
+`all' explicitly enables users/roles/everyone parsing. Any alist value is
 forwarded as raw `allowed_mentions' object."
   :type '(choice
           (const :tag "Use Discord defaults" nil)
@@ -895,6 +895,21 @@ EXTRA-PERMISSIONS augments the base send permission set for this room."
    (disco-room--pending-reply-to "replying to a message")
    (t nil)))
 
+(defun disco-room--current-composer-aux-state ()
+  "Return current room composer aux plist for shared chatbuf state, or nil."
+  (cond
+   ((and (listp disco-room--pending-edit)
+         (eq (plist-get disco-room--pending-edit :type) 'edit))
+    (let ((message-id (plist-get disco-room--pending-edit :message-id)))
+      (list :aux-type 'edit
+            :aux-msg (disco-room--composer-context-message message-id)
+            :message-id message-id)))
+   (disco-room--pending-reply-to
+    (list :aux-type 'reply
+          :aux-msg (disco-room--composer-context-message disco-room--pending-reply-to)
+          :message-id disco-room--pending-reply-to))
+   (t nil)))
+
 (defun disco-room--message-owned-by-current-user-p (msg &optional unknown-value)
   "Return non-nil when MSG belongs to current user.
 
@@ -1213,7 +1228,7 @@ creation permission."
 (defun disco-room--composer-edit-restore-state (state)
   "Restore composer STATE captured by `disco-room--composer-edit-saved-state'."
   (let ((draft (disco-chatbuf-copy-string (plist-get state :draft))))
-    (setq disco-room--pending-reply-to (plist-get state :reply-to))
+    (disco-room--set-composer-aux-state nil (plist-get state :reply-to))
     (setq disco-room--attachment-token-seq
           (or (plist-get state :attachment-token-seq) 0))
     (disco-room--restore-attachment-token-table
@@ -1230,7 +1245,7 @@ When RESTORE-STATE is non-nil, also restore the saved draft/reply/attachment
 state that was present before edit mode was entered."
   (when (disco-room--composer-edit-active-p)
     (let ((saved-state (plist-get disco-room--pending-edit :saved-state)))
-      (setq disco-room--pending-edit nil)
+      (disco-room--set-composer-aux-state nil nil)
       (when restore-state
         (disco-room--composer-edit-restore-state saved-state)))
     t))
@@ -1264,11 +1279,11 @@ state that was present before edit mode was entered."
       (user-error "disco: message id is unavailable for edit"))
     (when (disco-room--composer-edit-active-p)
       (disco-room--composer-edit-clear t))
-    (setq disco-room--pending-edit
-          (list :type 'edit
-                :message-id message-id
-                :saved-state saved-state))
-    (setq disco-room--pending-reply-to nil)
+    (disco-room--set-composer-aux-state
+     (list :type 'edit
+           :message-id message-id
+           :saved-state saved-state)
+     nil)
     (disco-chatbuf-input-cache-set
      'disco-room--draft-input old-content :reset-history-p t)
     (setq disco-room--pending-attachments nil)
@@ -3903,8 +3918,8 @@ messages; everything else is a system event shown as a centered divider."
 (defun disco-room--message-system-auto-moderation-content (msg)
   "Return human-readable auto moderation line for MSG."
   (let* ((embed (car (disco-room--message-effective-embeds msg)))
-         (title (and (listp embed) (disco-util-object-get embed 'title)))
-         (description (and (listp embed) (disco-util-object-get embed 'description)))
+         (title (and (listp embed) (alist-get 'title embed)))
+         (description (and (listp embed) (alist-get 'description embed)))
          (title-text (and (stringp title) (string-trim title)))
          (desc-text (and (stringp description) (string-trim description))))
     (cond
@@ -3967,15 +3982,14 @@ messages; everything else is a system event shown as a centered divider."
       (25
        (let* ((role-subscription
                (and (listp msg)
-                    (disco-util-object-get msg 'role_subscription_data)))
+                    (alist-get 'role_subscription_data msg)))
               (tier-name (and (listp role-subscription)
-                              (disco-util-object-get role-subscription 'tier_name)))
+                              (alist-get 'tier_name role-subscription)))
               (months (and (listp role-subscription)
-                           (disco-util-object-get role-subscription
-                                                  'total_months_subscribed)))
+                           (alist-get 'total_months_subscribed role-subscription)))
               (renewal (and (listp role-subscription)
                             (disco-util-json-true-p
-                             (disco-util-object-get role-subscription 'is_renewal))))
+                             (alist-get 'is_renewal role-subscription))))
               (tier-label (if (and (stringp tier-name)
                                    (not (string-empty-p tier-name)))
                               tier-name
@@ -4014,9 +4028,9 @@ messages; everything else is a system event shown as a centered divider."
          (format "%s changed the Stage topic: %s" author content)))
       (32
        (let* ((application (and (listp msg)
-                                (disco-util-object-get msg 'application)))
+                                (alist-get 'application msg)))
               (app-name (and (listp application)
-                             (disco-util-object-get application 'name))))
+                             (alist-get 'name application))))
          (format "%s upgraded %s to premium for this server!"
                  author
                  (if (and (stringp app-name) (not (string-empty-p app-name)))
@@ -4034,15 +4048,12 @@ messages; everything else is a system event shown as a centered divider."
        (format "%s reported a false alarm in %s." author guild-name))
       (44
        (let* ((purchase-notification (and (listp msg)
-                                          (disco-util-object-get msg
-                                                                 'purchase_notification)))
+                                          (alist-get 'purchase_notification msg)))
               (guild-product-purchase
                (and (listp purchase-notification)
-                    (disco-util-object-get purchase-notification
-                                           'guild_product_purchase)))
+                    (alist-get 'guild_product_purchase purchase-notification)))
               (product-name (and (listp guild-product-purchase)
-                                 (disco-util-object-get guild-product-purchase
-                                                        'product_name))))
+                                 (alist-get 'product_name guild-product-purchase))))
          (if (and (stringp product-name) (not (string-empty-p product-name)))
              (format "%s has purchased %s!" author product-name)
            (format "%s completed a guild product purchase." author))))
@@ -4899,23 +4910,22 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
-  (concat
-   (cond
-    ((disco-room--composer-edit-active-p)
-     (disco-room--composer-context-text
-      "Editing"
-      (disco-room--composer-edit-message-id)))
-    (disco-room--pending-reply-to
-     (disco-room--composer-context-text
-      "Replying to"
-      disco-room--pending-reply-to))
-    (t ""))
-   (if disco-room--pending-attachments
-       (format "Queued attachments: %s\n"
-               (mapconcat #'identity
-                          (disco-room--pending-attachment-labels)
-                          ", "))
-     "")))
+  (let* ((aux-state (disco-room--current-composer-aux-state))
+         (aux-type (plist-get aux-state :aux-type))
+         (message-id (plist-get aux-state :message-id)))
+    (concat
+     (pcase aux-type
+       ('edit
+        (disco-room--composer-context-text "Editing" message-id))
+       ('reply
+        (disco-room--composer-context-text "Replying to" message-id))
+       (_ ""))
+     (if disco-room--pending-attachments
+         (format "Queued attachments: %s\n"
+                 (mapconcat #'identity
+                            (disco-room--pending-attachment-labels)
+                            ", "))
+       ""))))
 
 (defun disco-room--input-footer-text ()
   "Build read-only EWOC footer text shown above the room prompt."
@@ -4948,21 +4958,15 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--sync-shared-aux-state ()
   "Mirror room reply/edit context into shared chatbuf aux state."
-  (cond
-   ((and (listp disco-room--pending-edit)
-         (eq (plist-get disco-room--pending-edit :type) 'edit))
-    (let ((message-id (plist-get disco-room--pending-edit :message-id)))
-      (disco-chatbuf-aux-set
-       (list :aux-type 'edit
-             :aux-msg (disco-room--composer-context-message message-id)
-             :message-id message-id))))
-   (disco-room--pending-reply-to
-    (disco-chatbuf-aux-set
-     (list :aux-type 'reply
-           :aux-msg (disco-room--composer-context-message disco-room--pending-reply-to)
-           :message-id disco-room--pending-reply-to)))
-   (t
-    (disco-chatbuf-aux-reset))))
+  (if-let* ((aux-state (disco-room--current-composer-aux-state)))
+      (disco-chatbuf-aux-set aux-state)
+    (disco-chatbuf-aux-reset)))
+
+(defun disco-room--set-composer-aux-state (pending-edit pending-reply-to)
+  "Set room composer PENDING-EDIT and PENDING-REPLY-TO, then sync aux state."
+  (setq disco-room--pending-edit pending-edit
+        disco-room--pending-reply-to pending-reply-to)
+  (disco-room--sync-shared-aux-state))
 
 (defun disco-room--current-input-options-state ()
   "Return current room input-options plist for shared chatbuf state."
@@ -6442,13 +6446,15 @@ enabled, include `replied_user'."
          (pcase disco-room-allowed-mentions
            ('none '((parse . [])))
            ('all '((parse . ["users" "roles" "everyone"])))
-           ((pred listp) (copy-tree disco-room-allowed-mentions))
+           ((pred listp)
+            (if (cl-every #'consp disco-room-allowed-mentions)
+                (copy-tree disco-room-allowed-mentions)
+              (user-error "disco: disco-room-allowed-mentions custom value must be an alist")))
            (_ nil))))
     (when (and replying-p disco-room-reply-mention-replied-user)
       (let ((value t))
         (if (listp base)
-            (let ((cell (or (assq 'replied_user base)
-                            (assq 'replied-user base))))
+            (let ((cell (assq 'replied_user base)))
               (if cell
                   (setcdr cell value)
                 (setq base (append base `((replied_user . ,value))))))
@@ -6488,10 +6494,10 @@ enabled, include `replied_user'."
          (content (string-trim-right (or (plist-get parsed :content) "")))
          (attachments (or (plist-get parsed :attachments) '()))
          (buf (get-buffer-create "*disco-room-preview*"))
-         (mode-label (cond
-                      ((disco-room--composer-edit-active-p) "edit")
-                      (disco-room--pending-reply-to "reply")
-                      (t "message"))))
+         (mode-label (pcase (plist-get (disco-room--current-composer-aux-state) :aux-type)
+                       ('edit "edit")
+                       ('reply "reply")
+                       (_ "message"))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -6925,7 +6931,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                             (when (room-active-p)
                               (with-current-buffer room-buffer
                                 (setq disco-room--send-in-flight nil)
-                                (setq disco-room--pending-reply-to nil)
+                                (disco-room--set-composer-aux-state nil nil)
                                 (when has-attachments
                                   (disco-room--clear-pending-attachment-state))
                                 (disco-room-refresh)
@@ -6939,7 +6945,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                                       (disco-chatbuf-input-cache-set
                                        'disco-room--draft-input
                                        (mapconcat #'identity remaining "\n\n"))
-                                      (setq disco-room--pending-reply-to nil)
+                                      (disco-room--set-composer-aux-state nil nil)
                                       (when has-attachments
                                         (disco-room--clear-pending-attachment-state))
                                       (disco-room--update-frame-preserving-point)
@@ -6979,7 +6985,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                             (when (room-active-p)
                               (with-current-buffer room-buffer
                                 (setq disco-room--send-in-flight nil)
-                                (setq disco-room--pending-reply-to nil)
+                                (disco-room--set-composer-aux-state nil nil)
                                 (when has-attachments
                                   (disco-room--clear-pending-attachment-state))
                                 (disco-room-refresh)
@@ -7005,7 +7011,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                       (when (room-active-p)
                         (with-current-buffer room-buffer
                           (setq disco-room--send-in-flight nil)
-                          (setq disco-room--pending-reply-to nil)
+                          (disco-room--set-composer-aux-state nil nil)
                           (when has-attachments
                             (disco-room--clear-pending-attachment-state))
                           (disco-room-refresh)
@@ -7099,7 +7105,7 @@ When called interactively, defaults to message under point."
    "start replies")
   (when (disco-room--composer-edit-active-p)
     (disco-room--composer-edit-clear t))
-  (setq disco-room--pending-reply-to message-id)
+  (disco-room--set-composer-aux-state nil message-id)
   (disco-room--update-frame-preserving-point)
   (message "disco: next message will reply to %s" message-id))
 
@@ -7241,7 +7247,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
     (disco-room--update-frame-preserving-point)
     (message "disco: edit target cleared"))
    (disco-room--pending-reply-to
-    (setq disco-room--pending-reply-to nil)
+    (disco-room--set-composer-aux-state nil nil)
     (disco-room--update-frame-preserving-point)
     (message "disco: reply target cleared"))
    (t
@@ -7883,9 +7889,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
               #'disco-room--buffer-substring-filter)
   (disco-room--typing-cancel-expire-timer)
   (disco-chatbuf-input-cache-clear 'disco-room--draft-input)
-  (setq-local disco-room--pending-reply-to nil)
-  (setq-local disco-room--pending-edit nil)
   (disco-chatbuf-reset-state disco-room-input-history-size)
+  (disco-room--set-composer-aux-state nil nil)
   (setq-local disco-room--send-in-flight nil)
   (setq-local disco-room--pending-jump-message-id nil)
   (setq-local disco-room--jump-in-flight nil)

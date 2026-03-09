@@ -854,19 +854,19 @@ code spans and fenced code blocks."
 (defun disco-markdown--message-context-key (message)
   "Return stable cache context key for MESSAGE, or nil."
   (when (listp message)
-    (let* ((id (disco-markdown--normalize-id (disco-util-object-get message 'id)))
-           (mentions (disco-util-object-get message 'mentions))
-           (mention-roles (disco-util-object-get message 'mention_roles 'mentionRoles))
-           (mention-channels (disco-util-object-get message 'mention_channels 'mentionChannels))
-           (resolved (disco-util-object-get message 'resolved))
+    (let* ((id (disco-markdown--normalize-id (alist-get 'id message)))
+           (mentions (alist-get 'mentions message))
+           (mention-roles (alist-get 'mention_roles message))
+           (mention-channels (alist-get 'mention_channels message))
+           (resolved (alist-get 'resolved message))
            (snapshot-key (list id mentions mention-roles mention-channels resolved)))
       (md5 (prin1-to-string snapshot-key)))))
 
 (defun disco-markdown--user-display-name (user)
   "Return best display name for USER object."
-  (let* ((global-name (disco-util-object-get user 'global_name 'globalName))
-         (username (disco-util-object-get user 'username 'name))
-         (user-id (disco-markdown--normalize-id (disco-util-object-get user 'id))))
+  (let* ((global-name (alist-get 'global_name user))
+         (username (alist-get 'username user))
+         (user-id (disco-markdown--normalize-id (alist-get 'id user))))
     (or (and (disco-markdown--string-present-p global-name) global-name)
         (and (disco-markdown--string-present-p username) username)
         (and user-id (format "user:%s" user-id))
@@ -893,8 +893,8 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
   "Return hash map of mention user-id -> display name from MESSAGE."
   (let ((table (make-hash-table :test #'equal)))
     (dolist (user (disco-markdown--sequence-list
-                   (disco-util-object-get message 'mentions)))
-      (let ((id (disco-markdown--normalize-id (disco-util-object-get user 'id))))
+                   (alist-get 'mentions message)))
+      (let ((id (disco-markdown--normalize-id (alist-get 'id user))))
         (disco-markdown--hash-put-id-name
          table
          id
@@ -907,7 +907,7 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
              (fboundp 'disco-state-channel))
     (let ((channel (ignore-errors (funcall 'disco-state-channel channel-id))))
       (when (listp channel)
-        (let ((name (disco-util-object-get channel 'name)))
+        (let ((name (alist-get 'name channel)))
           (if (disco-markdown--string-present-p name)
               name
             (format "channel:%s" channel-id)))))))
@@ -916,33 +916,32 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
   "Return hash map of mentioned channel-id -> display name from MESSAGE."
   (let ((table (make-hash-table :test #'equal)))
     (dolist (channel (disco-markdown--sequence-list
-                      (disco-util-object-get message 'mention_channels
-                                             'mentionChannels)))
-      (let ((id (disco-markdown--normalize-id (disco-util-object-get channel 'id)))
-            (name (disco-util-object-get channel 'name)))
+                      (alist-get 'mention_channels message)))
+      (let ((id (disco-markdown--normalize-id (alist-get 'id channel)))
+            (name (alist-get 'name channel)))
         (disco-markdown--hash-put-id-name table id name)))
-    (let* ((resolved (disco-util-object-get message 'resolved))
+    (let* ((resolved (alist-get 'resolved message))
            (resolved-channels (and (listp resolved)
-                                   (disco-util-object-get resolved 'channels))))
+                                   (alist-get 'channels resolved))))
       (dolist (entry (disco-markdown--sequence-list resolved-channels))
         (let* ((object (disco-markdown--entry-object entry))
-               (id (or (disco-markdown--normalize-id (disco-util-object-get object 'id))
+               (id (or (disco-markdown--normalize-id (alist-get 'id object))
                        (disco-markdown--normalize-id (car-safe entry))))
-               (name (disco-util-object-get object 'name)))
+               (name (alist-get 'name object)))
           (disco-markdown--hash-put-id-name table id name))))
     table))
 
 (defun disco-markdown--build-role-name-map (message)
   "Return hash map of role-id -> role name from MESSAGE."
   (let ((table (make-hash-table :test #'equal))
-        (resolved (disco-util-object-get message 'resolved)))
+        (resolved (alist-get 'resolved message)))
     (when (listp resolved)
-      (let ((resolved-roles (disco-util-object-get resolved 'roles)))
+      (let ((resolved-roles (alist-get 'roles resolved)))
         (dolist (entry (disco-markdown--sequence-list resolved-roles))
           (let* ((object (disco-markdown--entry-object entry))
-                 (id (or (disco-markdown--normalize-id (disco-util-object-get object 'id))
+                 (id (or (disco-markdown--normalize-id (alist-get 'id object))
                          (disco-markdown--normalize-id (car-safe entry))))
-                 (name (disco-util-object-get object 'name)))
+                 (name (alist-get 'name object)))
             (disco-markdown--hash-put-id-name table id name)))))
     table))
 
