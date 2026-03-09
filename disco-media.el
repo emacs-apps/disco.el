@@ -191,8 +191,8 @@ Values are image objects or the symbol `:missing'.")
   "Insert IMAGE as line slices with optional URL open behavior."
   (let* ((slice-count (disco-media-image-slice-count image))
          (slice-height-px (max 1
-                              (or (ignore-errors (line-pixel-height))
-                                  (frame-char-height))))
+                               (or (ignore-errors (line-pixel-height))
+                                   (frame-char-height))))
          (label (or fallback "[image]")))
     (dotimes (slice-index slice-count)
       (when (> slice-index 0)
@@ -824,97 +824,97 @@ When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
                     t)
     (let ((process
            (plz 'get
-                url
-                :as 'binary
-                :noquery t
-                :then
-                (lambda (data)
-                  (let ((raw-bytes (if (multibyte-string-p data)
-                                       (encode-coding-string data 'binary)
-                                     data))
-                        (current (copy-tree (or (gethash key disco-media--attachment-download-state-table)
-                                                '()))))
-                    (if (and (numberp expected-size)
-                             (> expected-size 0)
-                             (<= (string-bytes raw-bytes) 0))
-                        (condition-case fallback-err
-                            (progn
-                              (url-copy-file url path t)
-                              (let ((actual-size (nth 7 (file-attributes path))))
-                                (when (and (numberp expected-size)
-                                           (> expected-size 0)
-                                           (numberp actual-size)
-                                           (<= actual-size 0))
-                                  (error "empty download body (expected %d bytes)" expected-size)))
-                              (setq current (plist-put current :status 'downloaded))
-                              (setq current (plist-put current :path path))
-                              (setq current (plist-put current :process nil))
-                              (setq current (plist-put current :cancel-requested nil))
-                              (setq current (plist-put current :error nil))
-                              (puthash key current disco-media--attachment-download-state-table)
-                              (disco-media--notify-state-updated)
-                              (message "disco: downloaded attachment -> %s (url fallback)" path)
-                              (when open-after
-                                (find-file path)))
-                          (error
-                           (setq current (plist-put current :status 'error))
+             url
+             :as 'binary
+             :noquery t
+             :then
+             (lambda (data)
+               (let ((raw-bytes (if (multibyte-string-p data)
+                                    (encode-coding-string data 'binary)
+                                  data))
+                     (current (copy-tree (or (gethash key disco-media--attachment-download-state-table)
+                                             '()))))
+                 (if (and (numberp expected-size)
+                          (> expected-size 0)
+                          (<= (string-bytes raw-bytes) 0))
+                     (condition-case fallback-err
+                         (progn
+                           (url-copy-file url path t)
+                           (let ((actual-size (nth 7 (file-attributes path))))
+                             (when (and (numberp expected-size)
+                                        (> expected-size 0)
+                                        (numberp actual-size)
+                                        (<= actual-size 0))
+                               (error "empty download body (expected %d bytes)" expected-size)))
+                           (setq current (plist-put current :status 'downloaded))
+                           (setq current (plist-put current :path path))
                            (setq current (plist-put current :process nil))
                            (setq current (plist-put current :cancel-requested nil))
-                           (setq current (plist-put current :error
-                                                    (disco-media--attachment-error-message fallback-err)))
+                           (setq current (plist-put current :error nil))
                            (puthash key current disco-media--attachment-download-state-table)
                            (disco-media--notify-state-updated)
-                           (message "disco: attachment download failed: %s"
-                                    (plist-get current :error))))
-                      (with-temp-buffer
-                        (set-buffer-multibyte nil)
-                        (insert raw-bytes)
-                        (let ((coding-system-for-write 'binary))
-                          (write-region (point-min) (point-max) path nil 'silent)))
-                      (setq current (plist-put current :status 'downloaded))
-                      (setq current (plist-put current :path path))
-                      (setq current (plist-put current :process nil))
-                      (setq current (plist-put current :cancel-requested nil))
-                      (setq current (plist-put current :error nil))
-                      (puthash key current disco-media--attachment-download-state-table)
-                      (disco-media--notify-state-updated)
-                      (message "disco: downloaded attachment -> %s" path)
-                      (when open-after
-                        (find-file path)))))
-                :else
-                (lambda (err)
-                  (let* ((current (copy-tree (or (gethash key disco-media--attachment-download-state-table)
-                                                '())))
-                         (cancel-requested (plist-get current :cancel-requested)))
-                    (setq current (plist-put current :process nil))
-                    (setq current (plist-put current :cancel-requested nil))
-                    (if cancel-requested
-                        (progn
-                          (setq current (plist-put current :status 'not-downloaded))
-                          (setq current (plist-put current :error nil))
-                          (puthash key current disco-media--attachment-download-state-table)
-                          (disco-media--notify-state-updated)
-                          (message "disco: attachment download canceled"))
-                      (condition-case fallback-err
-                          (progn
-                            (url-copy-file url path t)
-                            (setq current (plist-put current :status 'downloaded))
-                            (setq current (plist-put current :path path))
-                            (setq current (plist-put current :error nil))
-                            (puthash key current disco-media--attachment-download-state-table)
-                            (disco-media--notify-state-updated)
-                            (message "disco: downloaded attachment -> %s (url fallback)" path)
-                            (when open-after
-                              (find-file path)))
-                        (error
-                         (setq current (plist-put current :status 'error))
-                         (setq current (plist-put current :error
-                                                  (or (disco-media--attachment-error-message err)
-                                                      (disco-media--attachment-error-message fallback-err))))
+                           (message "disco: downloaded attachment -> %s (url fallback)" path)
+                           (when open-after
+                             (find-file path)))
+                       (error
+                        (setq current (plist-put current :status 'error))
+                        (setq current (plist-put current :process nil))
+                        (setq current (plist-put current :cancel-requested nil))
+                        (setq current (plist-put current :error
+                                                 (disco-media--attachment-error-message fallback-err)))
+                        (puthash key current disco-media--attachment-download-state-table)
+                        (disco-media--notify-state-updated)
+                        (message "disco: attachment download failed: %s"
+                                 (plist-get current :error))))
+                   (with-temp-buffer
+                     (set-buffer-multibyte nil)
+                     (insert raw-bytes)
+                     (let ((coding-system-for-write 'binary))
+                       (write-region (point-min) (point-max) path nil 'silent)))
+                   (setq current (plist-put current :status 'downloaded))
+                   (setq current (plist-put current :path path))
+                   (setq current (plist-put current :process nil))
+                   (setq current (plist-put current :cancel-requested nil))
+                   (setq current (plist-put current :error nil))
+                   (puthash key current disco-media--attachment-download-state-table)
+                   (disco-media--notify-state-updated)
+                   (message "disco: downloaded attachment -> %s" path)
+                   (when open-after
+                     (find-file path)))))
+             :else
+             (lambda (err)
+               (let* ((current (copy-tree (or (gethash key disco-media--attachment-download-state-table)
+                                              '())))
+                      (cancel-requested (plist-get current :cancel-requested)))
+                 (setq current (plist-put current :process nil))
+                 (setq current (plist-put current :cancel-requested nil))
+                 (if cancel-requested
+                     (progn
+                       (setq current (plist-put current :status 'not-downloaded))
+                       (setq current (plist-put current :error nil))
+                       (puthash key current disco-media--attachment-download-state-table)
+                       (disco-media--notify-state-updated)
+                       (message "disco: attachment download canceled"))
+                   (condition-case fallback-err
+                       (progn
+                         (url-copy-file url path t)
+                         (setq current (plist-put current :status 'downloaded))
+                         (setq current (plist-put current :path path))
+                         (setq current (plist-put current :error nil))
                          (puthash key current disco-media--attachment-download-state-table)
                          (disco-media--notify-state-updated)
-                         (message "disco: attachment download failed: %s"
-                                  (plist-get current :error))))))))))
+                         (message "disco: downloaded attachment -> %s (url fallback)" path)
+                         (when open-after
+                           (find-file path)))
+                     (error
+                      (setq current (plist-put current :status 'error))
+                      (setq current (plist-put current :error
+                                               (or (disco-media--attachment-error-message err)
+                                                   (disco-media--attachment-error-message fallback-err))))
+                      (puthash key current disco-media--attachment-download-state-table)
+                      (disco-media--notify-state-updated)
+                      (message "disco: attachment download failed: %s"
+                               (plist-get current :error))))))))))
       (setq entry (plist-put entry :status 'downloading))
       (setq entry (plist-put entry :process process))
       (setq entry (plist-put entry :cancel-requested nil))
