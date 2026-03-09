@@ -115,6 +115,23 @@
       (should-not disco-room--pending-reply-to)
       (should-not (disco-chatbuf-aux-active-p)))))
 
+(ert-deftest disco-room-input-options-use-shared-chatbuf-state-only ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-chatbuf-input-options-set
+     '(:send-on-return t
+       :long-message-action file
+       :allowed-mentions none
+       :reply-mention-replied-user t))
+    (setq-local disco-room-send-on-return nil)
+    (setq-local disco-room-long-message-action 'split)
+    (setq-local disco-room-allowed-mentions 'all)
+    (setq-local disco-room-reply-mention-replied-user nil)
+    (should (disco-room--input-option-send-on-return))
+    (should (eq 'file (disco-room--input-option-long-message-action)))
+    (should (eq 'none (disco-room--input-option-allowed-mentions)))
+    (should (disco-room--input-option-reply-mention-replied-user))))
+
 (ert-deftest disco-room-composer-aux-state-uses-shared-chatbuf-state-only ()
   (with-temp-buffer
     (disco-room-mode)
@@ -1817,6 +1834,7 @@
            sent-attachments
            captured-file-body)
       (setq-local disco-room--draft-input long-text)
+      (disco-room--sync-shared-input-options-state)
       (disco-state-reset)
       (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "2048")))
       (cl-letf (((symbol-function 'disco-room--channel-object)
@@ -1855,6 +1873,7 @@
       (setq-local disco-room--channel-id "chan")
       (setq-local disco-room--draft-input
                   (make-string (1+ disco-api--message-content-limit) ?a))
+      (disco-room--sync-shared-input-options-state)
       (disco-state-reset)
       (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "0")))
       (should-error (disco-room-send-message) :type 'error)

@@ -4972,11 +4972,34 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (disco-room--sync-shared-aux-state))
 
 (defun disco-room--current-input-options-state ()
-  "Return current room input-options plist for shared chatbuf state."
+  "Return current room-local input-options plist for shared chatbuf state."
   (list :send-on-return disco-room-send-on-return
         :long-message-action disco-room-long-message-action
         :allowed-mentions (copy-tree disco-room-allowed-mentions)
         :reply-mention-replied-user disco-room-reply-mention-replied-user))
+
+(defun disco-room--input-options-state ()
+  "Return composer input-options plist from shared chatbuf state, or nil."
+  (disco-chatbuf-input-options-state))
+
+(defun disco-room--input-option-send-on-return ()
+  "Return effective send-on-return option from shared chatbuf state."
+  (eq t (plist-get (disco-room--input-options-state) :send-on-return)))
+
+(defun disco-room--input-option-long-message-action ()
+  "Return effective long-message action from shared chatbuf state."
+  (plist-get (disco-room--input-options-state) :long-message-action))
+
+(defun disco-room--input-option-allowed-mentions ()
+  "Return effective allowed-mentions option from shared chatbuf state."
+  (let ((state (disco-room--input-options-state)))
+    (when (plist-member state :allowed-mentions)
+      (copy-tree (plist-get state :allowed-mentions)))))
+
+(defun disco-room--input-option-reply-mention-replied-user ()
+  "Return effective reply-mention option from shared chatbuf state."
+  (eq t (plist-get (disco-room--input-options-state)
+                   :reply-mention-replied-user)))
 
 (defun disco-room--sync-shared-input-options-state ()
   "Mirror room-local input option state into shared chatbuf state."
@@ -6443,18 +6466,20 @@ CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
 (defun disco-room--send-allowed-mentions (&optional replying-p)
   "Return normalized allowed_mentions payload for outgoing message send/edit.
 
-When REPLYING-P is non-nil and `disco-room-reply-mention-replied-user' is
-enabled, include `replied_user'."
-  (let ((base
-         (pcase disco-room-allowed-mentions
-           ('none '((parse . [])))
-           ('all '((parse . ["users" "roles" "everyone"])))
-           ((pred listp)
-            (if (cl-every #'consp disco-room-allowed-mentions)
-                (copy-tree disco-room-allowed-mentions)
-              (user-error "disco: disco-room-allowed-mentions custom value must be an alist")))
-           (_ nil))))
-    (when (and replying-p disco-room-reply-mention-replied-user)
+When REPLYING-P is non-nil and reply-mention is enabled, include
+`replied_user'."
+  (let* ((allowed-mentions (disco-room--input-option-allowed-mentions))
+         (base
+          (pcase allowed-mentions
+            ('none '((parse . [])))
+            ('all '((parse . ["users" "roles" "everyone"])))
+            ((pred listp)
+             (if (cl-every #'consp allowed-mentions)
+                 (copy-tree allowed-mentions)
+               (user-error "disco: disco-room-allowed-mentions custom value must be an alist")))
+            (_ nil))))
+    (when (and replying-p
+               (disco-room--input-option-reply-mention-replied-user))
       (let ((value t))
         (if (listp base)
             (let ((cell (assq 'replied_user base)))
@@ -6534,10 +6559,11 @@ enabled, include `replied_user'."
 (defun disco-room-toggle-send-on-return ()
   "Toggle whether `RET' sends the current room draft."
   (interactive)
-  (setq-local disco-room-send-on-return (not disco-room-send-on-return))
+  (setq-local disco-room-send-on-return
+              (not (disco-room--input-option-send-on-return)))
   (disco-room--sync-shared-input-options-state)
   (message "disco: RET now %s"
-           (if disco-room-send-on-return
+           (if (disco-room--input-option-send-on-return)
                "sends messages"
              "opens draft editor")))
 
@@ -6545,12 +6571,12 @@ enabled, include `replied_user'."
   "Cycle long-message send behavior for current room buffer."
   (interactive)
   (setq-local disco-room-long-message-action
-              (pcase disco-room-long-message-action
+              (pcase (disco-room--input-option-long-message-action)
                 ('split 'file)
                 (_ 'split)))
   (disco-room--sync-shared-input-options-state)
   (message "disco: long messages now %s"
-           (pcase disco-room-long-message-action
+           (pcase (disco-room--input-option-long-message-action)
              ('file "send as file")
              (_ "split across messages"))))
 
@@ -6558,13 +6584,13 @@ enabled, include `replied_user'."
   "Cycle allowed-mentions policy for current room buffer."
   (interactive)
   (setq-local disco-room-allowed-mentions
-              (pcase disco-room-allowed-mentions
+              (pcase (disco-room--input-option-allowed-mentions)
                 ('none 'all)
                 ('all nil)
                 (_ 'none)))
   (disco-room--sync-shared-input-options-state)
   (message "disco: allowed mentions now %s"
-           (pcase disco-room-allowed-mentions
+           (pcase (disco-room--input-option-allowed-mentions)
              ('none "disabled")
              ('all "explicitly enabled")
              (_ "Discord defaults"))))
@@ -6573,10 +6599,10 @@ enabled, include `replied_user'."
   "Toggle whether replies mention the replied user in current room."
   (interactive)
   (setq-local disco-room-reply-mention-replied-user
-              (not disco-room-reply-mention-replied-user))
+              (not (disco-room--input-option-reply-mention-replied-user)))
   (disco-room--sync-shared-input-options-state)
   (message "disco: reply mention of replied user %s"
-           (if disco-room-reply-mention-replied-user
+           (if (disco-room--input-option-reply-mention-replied-user)
                "enabled"
              "disabled")))
 
@@ -6842,7 +6868,9 @@ When called with prefix argument, force draft edit in minibuffer first."
                  (attachments (copy-tree parsed-attachments))
                  (edit-message (and edit-message-id
                                     (disco-room--composer-context-message edit-message-id)))
-                 (long-message-action (and over-limit-p disco-room-long-message-action))
+                 (long-message-action
+                  (and over-limit-p
+                       (disco-room--input-option-long-message-action)))
                  (needs-attach-files-p (or has-attachments
                                            (eq long-message-action 'file)))
                  (required-permissions
@@ -7259,10 +7287,10 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
 (defun disco-room-return-dwim ()
   "RET behavior for room buffer.
 
-When `disco-room-send-on-return' is non-nil, send current draft.
-Otherwise open draft editor."
+When send-on-return is enabled, send current draft.  Otherwise open the draft
+editor."
   (interactive)
-  (if disco-room-send-on-return
+  (if (disco-room--input-option-send-on-return)
       (disco-room-send-message)
     (disco-room-edit-draft)))
 
@@ -7894,6 +7922,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (disco-chatbuf-input-cache-clear 'disco-room--draft-input)
   (disco-chatbuf-reset-state disco-room-input-history-size)
   (disco-room--set-composer-aux-state nil nil)
+  (disco-room--sync-shared-input-options-state)
   (setq-local disco-room--send-in-flight nil)
   (setq-local disco-room--pending-jump-message-id nil)
   (setq-local disco-room--jump-in-flight nil)
