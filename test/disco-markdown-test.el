@@ -419,6 +419,51 @@
                  (get-text-property 0 'face rendered)
                  (cdr entry)))))))
 
+(ert-deftest disco-markdown-render-fenced-code-protects-block-content ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let* ((disco-markdown-backend 'markdown-mode)
+         (rendered (disco-markdown-render
+                    "```elisp\n# Title\n-# subtitle\nhttps://example.com\n<@123>\n```"
+                    :context 'test-fence-protect
+                    :spoiler-message-id "m1"))
+         (plain (substring-no-properties rendered))
+         (heading-pos (string-match "# Title" plain))
+         (subtitle-pos (string-match "-# subtitle" plain))
+         (url-pos (string-match "https://example.com" plain))
+         (mention-pos (string-match "<@123>" plain)))
+    (should (equal "# Title\n-# subtitle\nhttps://example.com\n<@123>\n" plain))
+    (dolist (pos (list heading-pos subtitle-pos url-pos mention-pos))
+      (should (disco-markdown--face-match-p
+               (get-text-property pos 'face rendered)
+               'markdown-code-face)))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property heading-pos 'face rendered)
+                 'disco-markdown-heading-1-face))
+    (should-not (get-text-property url-pos 'disco-markdown-url rendered))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property url-pos 'face rendered)
+                 'disco-markdown-link-face))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property mention-pos 'face rendered)
+                 'disco-markdown-mention-face))))
+
+(ert-deftest disco-markdown-render-fenced-code-keeps-indented-hash-lines-literal ()
+  (skip-unless (disco-markdown--markdown-mode-available-p))
+  (let* ((disco-markdown-backend 'markdown-mode)
+         (rendered (disco-markdown-render
+                    "```nix\n      # Can use ssh instead of password on system\n```"
+                    :context 'test-fence-indented-hash))
+         (plain (substring-no-properties rendered))
+         (pos (string-match "# Can use ssh instead of password on system" plain)))
+    (should (equal "      # Can use ssh instead of password on system\n" plain))
+    (should pos)
+    (should (disco-markdown--face-match-p
+             (get-text-property pos 'face rendered)
+             'markdown-code-face))
+    (should-not (disco-markdown--face-match-p
+                 (get-text-property pos 'face rendered)
+                 'disco-markdown-heading-1-face))))
+
 (provide 'disco-markdown-test)
 
 ;;; disco-markdown-test.el ends here

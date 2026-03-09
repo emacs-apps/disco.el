@@ -563,8 +563,10 @@ return visible spoiler contents; otherwise return masked text."
            (eq (aref text (1- start)) ?<)
            (eq (aref text end) ?>))))
 
-(defun disco-markdown--apply-visible-url-properties (text)
-  "Attach open actions to visible URL substrings in TEXT."
+(defun disco-markdown--apply-visible-url-properties (text &optional backend)
+  "Attach open actions to visible URL substrings in TEXT.
+
+BACKEND controls whether URLs inside protected/code spans are skipped."
   (let ((copy (copy-sequence text)))
     (with-temp-buffer
       (insert copy)
@@ -578,9 +580,8 @@ return visible spoiler contents; otherwise return masked text."
                    (<= (point) beg)
                    (disco-markdown--string-present-p url))
               (progn
-                (unless (or (get-text-property (1- beg)
-                                               'disco-markdown-protected
-                                               copy)
+                (unless (or (disco-markdown--position-protected-p
+                             backend (1- beg) copy)
                             (get-text-property (1- beg)
                                                'disco-markdown-spoiler-message-id
                                                copy)
@@ -680,17 +681,25 @@ LINE-START and LINE-END delimit the line contents in the current buffer."
   "Normalize heading presentation in rendered TEXT.
 
 This remaps markdown-mode heading faces to disco-local ones and strips any
-visible ATX marker fallback so all heading levels render consistently."
+visible ATX marker fallback so all heading levels render consistently outside
+code spans and fenced code blocks."
   (with-temp-buffer
     (insert text)
     (goto-char (point-min))
     (while (< (point) (point-max))
       (let* ((line-start (line-beginning-position))
              (line-end (line-end-position))
-             (face (get-text-property line-start 'face))
-             (level (disco-markdown--heading-level-from-face face)))
+             (protected-line-p
+              (disco-markdown--position-protected-p 'markdown-mode line-start))
+             (face (and (not protected-line-p)
+                        (get-text-property line-start 'face)))
+             (level (and (not protected-line-p)
+                         (disco-markdown--heading-level-from-face face))))
         (goto-char line-start)
-        (when (looking-at disco-markdown--regexp-heading-marker)
+        (when (and (not protected-line-p)
+                   (looking-at disco-markdown--regexp-heading-marker)
+                   (not (disco-markdown--position-protected-p
+                         'markdown-mode (match-beginning 2))))
           (setq level (or level
                           (min 6 (length (match-string-no-properties 2)))))
           (delete-region (match-beginning 2) (match-end 0))
@@ -809,7 +818,7 @@ visible ATX marker fallback so all heading levels render consistently."
     (setq rendered (disco-markdown--apply-internal-link-replacements rendered))
     (setq rendered (disco-markdown--apply-inline-emphasis rendered))
     (setq rendered (disco-markdown--apply-heading-lines rendered))
-    (disco-markdown--apply-visible-url-properties rendered)))
+    (disco-markdown--apply-visible-url-properties rendered 'internal)))
 
 (defun disco-markdown--render-with-markdown-mode (text)
   "Render TEXT through markdown-mode and return visible propertized string."
@@ -825,7 +834,8 @@ visible ATX marker fallback so all heading levels render consistently."
      (disco-markdown--normalize-heading-lines
       (disco-markdown--apply-markdown-mode-link-properties
        (disco-markdown--sanitize-face-properties
-        (filter-buffer-substring (point-min) (point-max) nil)))))))
+        (filter-buffer-substring (point-min) (point-max) nil))))
+     'markdown-mode)))
 
 (defun disco-markdown--render-legacy (text)
   "Render TEXT with legacy markdown punctuation unescape behavior."
@@ -1008,20 +1018,24 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
         (and (symbolp face)
              (string-match-p "\\`markdown-.*\\(code\\|pre\\)" (symbol-name face))))))
 
-(defun disco-markdown--position-in-code-face-p (position)
-  "Return non-nil when POSITION in current buffer belongs to a code face."
-  (let ((face (get-text-property position 'face)))
+(defun disco-markdown--position-in-code-face-p (position &optional object)
+  "Return non-nil when POSITION in OBJECT belongs to a code face.
+
+OBJECT defaults to the current buffer when nil and may also be a string."
+  (let ((face (get-text-property position 'face object)))
     (if (listp face)
         (seq-some #'disco-markdown--code-face-p face)
       (disco-markdown--code-face-p face))))
 
-(defun disco-markdown--position-protected-p (backend position)
-  "Return non-nil when POSITION should be skipped for BACKEND transforms."
+(defun disco-markdown--position-protected-p (backend position &optional object)
+  "Return non-nil when POSITION in OBJECT should be skipped for BACKEND transforms.
+
+OBJECT defaults to the current buffer when nil and may also be a string."
   (pcase backend
     ('markdown-mode
-     (disco-markdown--position-in-code-face-p position))
+     (disco-markdown--position-in-code-face-p position object))
     ('internal
-     (get-text-property position 'disco-markdown-protected))
+     (get-text-property position 'disco-markdown-protected object))
     (_ nil)))
 
 (defun disco-markdown--word-constituent-char-p (char)
