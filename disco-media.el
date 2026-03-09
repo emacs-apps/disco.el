@@ -13,6 +13,7 @@
 (require 'cl-lib)
 (require 'browse-url)
 (require 'url-handlers)
+(require 'svg nil t)
 (require 'plz)
 
 (defvar disco-room-show-attachment-image-previews)
@@ -56,10 +57,14 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-download-state-table (make-hash-table :test #'equal)
   "Attachment download state keyed by stable attachment download key.")
 
+(defvar disco-media--attachment-spoiler-preview-cache (make-hash-table :test #'equal)
+  "Cache of spoiler-preview image objects keyed by preview cache identity.")
+
 (defun disco-media-clear-preview-memory-cache ()
   "Clear in-memory preview image cache without touching disk files."
   (clrhash disco-media--attachment-preview-image-cache)
-  (clrhash disco-media--attachment-preview-fetching))
+  (clrhash disco-media--attachment-preview-fetching)
+  (clrhash disco-media--attachment-spoiler-preview-cache))
 
 (defun disco-media-inline-image-rendering-available-p ()
   "Return non-nil when current frame supports inline image rendering."
@@ -414,6 +419,99 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                              disco-room-attachment-preview-max-height
                            360))))
     (disco-media-preview-image-from-file file max-width max-height)))
+
+(defun disco-media--image-mime-type (file)
+  "Return MIME type string for image FILE extension, or nil."
+  (let ((ext (downcase (or (file-name-extension file) ""))))
+    (pcase ext
+      ("png" "image/png")
+      ((or "jpg" "jpeg") "image/jpeg")
+      ("gif" "image/gif")
+      ("webp" "image/webp")
+      ("svg" "image/svg+xml")
+      (_ nil))))
+
+(defun disco-media--svg-image (svg &rest props)
+  "Return image object created from SVG with PROPS."
+  (let ((svg-data (with-temp-buffer
+                    (insert "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    (svg-print svg)
+                    (buffer-string))))
+    (apply #'create-image svg-data 'svg t props)))
+
+(defun disco-media--attachment-spoiler-preview-cache-key (cache-file preview-image)
+  "Return cache key for spoiler preview built from CACHE-FILE and PREVIEW-IMAGE."
+  (let* ((attrs (and (stringp cache-file) (file-exists-p cache-file)
+                     (file-attributes cache-file)))
+         (mtime (and attrs (file-attribute-modification-time attrs)))
+         (props (cdr-safe preview-image)))
+    (list cache-file
+          mtime
+          (plist-get props :height)
+          (plist-get props :width)
+          (plist-get props :disco-nslices)
+          (plist-get props :telega-nslices))))
+
+(defun disco-media--make-attachment-spoiler-preview-image (cache-file preview-image)
+  "Return obscured spoiler preview image for CACHE-FILE using PREVIEW-IMAGE sizing."
+  (when (and (stringp cache-file)
+             (file-exists-p cache-file)
+             (disco-media-image-object-valid-p preview-image)
+             (image-type-available-p 'svg)
+             (fboundp 'svg-create)
+             (fboundp 'svg-embed)
+             (fboundp 'svg-rectangle)
+             (fboundp 'svg-print))
+    (let* ((display-size (ignore-errors (image-size preview-image t (selected-frame))))
+           (svg-width (max 1 (round (or (and (consp display-size) (car display-size))
+                                        (car (or (disco-media--image-file-size-pixels cache-file)
+                                                 '(1 . 1)))))))
+           (svg-height (max 1 (round (or (and (consp display-size) (cdr display-size))
+                                         (cdr (or (disco-media--image-file-size-pixels cache-file)
+                                                  '(1 . 1)))))))
+           (mime (disco-media--image-mime-type cache-file))
+           (props (copy-sequence (cdr-safe preview-image)))
+           (slices (or (plist-get props :disco-nslices)
+                       (plist-get props :telega-nslices)
+                       (disco-media-image-slice-count preview-image)))
+           (svg (and mime (svg-create svg-width svg-height))))
+      (when svg
+        (svg-embed svg cache-file mime nil
+                   :x 0 :y 0 :width svg-width :height svg-height)
+        (svg-rectangle svg 0 0 svg-width svg-height
+                       :fill "#000000"
+                       :fill-opacity 0.58)
+        (when (fboundp 'svg-text)
+          (svg-text svg "SPOILER"
+                    :x (/ svg-width 2.0)
+                    :y (/ svg-height 2.0)
+                    :text-anchor "middle"
+                    :dominant-baseline "middle"
+                    :font-weight "bold"
+                    :font-size (max 12 (floor (/ svg-height 6.0)))
+                    :fill "#ffffff"
+                    :fill-opacity 0.95))
+        (setq props (plist-put props :disco-nslices slices))
+        (setq props (plist-put props :scale 1.0))
+        (setq props (plist-put props :ascent 'center))
+        (apply #'disco-media--svg-image svg props)))))
+
+(defun disco-media-attachment-spoiler-preview-image (attachment)
+  "Return obscured preview image for spoiler ATTACHMENT, or nil."
+  (let* ((preview-image (disco-media-attachment-preview-image attachment))
+         (cache-key (disco-media-attachment-preview-cache-key attachment))
+         (cache-file (and cache-key
+                          (disco-media-attachment-preview-cache-existing-file cache-key))))
+    (when (and cache-file (disco-media-image-object-valid-p preview-image))
+      (let* ((spoiler-key (disco-media--attachment-spoiler-preview-cache-key
+                           cache-file preview-image))
+             (cached (gethash spoiler-key disco-media--attachment-spoiler-preview-cache)))
+        (or (and (disco-media-image-object-valid-p cached) cached)
+            (let ((image (disco-media--make-attachment-spoiler-preview-image
+                          cache-file preview-image)))
+              (when (disco-media-image-object-valid-p image)
+                (puthash spoiler-key image disco-media--attachment-spoiler-preview-cache)
+                image)))))))
 
 (defun disco-media--notify-state-updated ()
   "Notify UI after media state/cache updates."

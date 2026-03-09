@@ -162,8 +162,7 @@ span as (START . END), or nil when SUMMARY is empty."
                                                 action help-echo)
   "Insert TEXT as one prefixed line with optional ACTION and FACE."
   (let ((start (point)))
-    (insert (or text "") "
-")
+    (insert (or text "") "\n")
     (when (and (functionp action)
                (> (point) start))
       (disco-media-add-action-properties
@@ -223,8 +222,7 @@ span as (START . END), or nil when SUMMARY is empty."
   "Insert clickable attachment URL line when URL is non-empty."
   (when (disco-media-url-present-p url)
     (let ((start (point)))
-      (insert url "
-")
+      (insert url "\n")
       (disco-media-add-open-url-properties start (max start (1- (point))) url)
       (disco-ui-apply-line-prefix start (point) (or prefix "    "))
       (when face
@@ -233,32 +231,60 @@ span as (START . END), or nil when SUMMARY is empty."
 
 (cl-defun disco-ins-insert-attachment-spoiler-placeholder
     (attachment &key prefix border-face line-face button-face
-                     toggle-action toggle-help-echo reveal-label)
-  "Insert hidden spoiler placeholder for ATTACHMENT."
+                toggle-action toggle-help-echo reveal-label)
+  "Insert hidden spoiler block for ATTACHMENT.
+
+When a cached media preview exists, show an obscured preview tile similar to
+telega; otherwise fall back to a text placeholder line."
   (let* ((prefix-state (disco-ins--attachment-prefix-state prefix border-face))
          (label (disco-media-attachment-spoiler-label attachment))
-         (start (point))
-         (help (or toggle-help-echo "Reveal spoiler")))
-    (insert label)
-    (when (functionp toggle-action)
-      (disco-media-add-action-properties
-       start (point)
-       (lambda (&optional _event)
-         (interactive)
-         (funcall toggle-action))
-       help)
-      (insert " ")
-      (disco-ui-insert-action-button
-       (or reveal-label "[Reveal spoiler]")
-       toggle-action
-       :face button-face
-       :help-echo help))
-    (insert "
-")
-    (disco-ui-apply-line-prefix start (point) prefix-state)
-    (when line-face
-      (disco-ui-append-face start (point) line-face))
-    (cons start (point))))
+         (help (or toggle-help-echo "Reveal spoiler"))
+         (preview (disco-media-attachment-spoiler-preview-image attachment)))
+    (if (disco-media-image-object-valid-p preview)
+        (let ((preview-start (point)))
+          (disco-media-insert-image-slices preview nil nil label)
+          (when (functionp toggle-action)
+            (disco-media-add-action-properties
+             preview-start (point)
+             (lambda (&optional _event)
+               (interactive)
+               (funcall toggle-action))
+             help))
+          (insert "\n")
+          (disco-ui-apply-line-prefix preview-start (point) prefix-state)
+          (let ((action-start (point)))
+            (if (functionp toggle-action)
+                (disco-ui-insert-action-button
+                 (or reveal-label "[Reveal spoiler]")
+                 toggle-action
+                 :face button-face
+                 :help-echo help)
+              (insert (or reveal-label "[Reveal spoiler]")))
+            (insert "\n")
+            (disco-ui-apply-line-prefix action-start (point) prefix-state)
+            (when line-face
+              (disco-ui-append-face action-start (point) line-face)))
+          (cons preview-start (point)))
+      (let ((start (point)))
+        (insert label)
+        (when (functionp toggle-action)
+          (disco-media-add-action-properties
+           start (point)
+           (lambda (&optional _event)
+             (interactive)
+             (funcall toggle-action))
+           help)
+          (insert " ")
+          (disco-ui-insert-action-button
+           (or reveal-label "[Reveal spoiler]")
+           toggle-action
+           :face button-face
+           :help-echo help))
+        (insert "\n")
+        (disco-ui-apply-line-prefix start (point) prefix-state)
+        (when line-face
+          (disco-ui-append-face start (point) line-face))
+        (cons start (point))))))
 
 (cl-defun disco-ins-insert-attachment-transfer-line (attachment &key prefix face
                                                                 action-face kind)
@@ -341,8 +367,7 @@ span as (START . END), or nil when SUMMARY is empty."
                         "Download attachment to chosen path"))
          (unless (or has-url has-local inserted-action)
            (insert "[No URL]"))))
-      (insert "
-")
+      (insert "\n")
       (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
       (when face
         (disco-ui-append-face line-start (point) face))
@@ -407,8 +432,7 @@ be shown yet."
                                "[video preview unavailable]"
                              "[image unavailable]")))))
           (insert placeholder))
-        (insert "
-")
+        (insert "\n")
         (disco-ui-apply-line-prefix start (point) (or prefix "    "))
         (when (and face apply-face)
           (disco-ui-append-face start (point) face))
@@ -416,7 +440,9 @@ be shown yet."
 
 (cl-defun disco-ins-insert-attachment-document (attachment &key prefix border-face
                                                            title-face meta-face
-                                                           action-face show-url)
+                                                           action-face show-url
+                                                           spoiler-hidden
+                                                           spoiler-toggle-action)
   "Insert one document-style attachment block for ATTACHMENT."
   (let* ((kind (disco-media-attachment-kind attachment))
          (name (disco-media-attachment-display-name attachment))
@@ -428,7 +454,8 @@ be shown yet."
                          name
                          (disco-ins--attachment-detail-text details)))
          (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
-         (open-info (disco-ins--attachment-open-info attachment))
+         (open-info (unless spoiler-hidden
+                      (disco-ins--attachment-open-info attachment)))
          (card-start (point)))
     (disco-ins--insert-prefixed-line
      header
@@ -449,20 +476,30 @@ be shown yet."
     (disco-ins-insert-attachment-transfer-line
      attachment :prefix prefix-state :face meta-face :action-face action-face
      :kind kind)
-    (disco-ins-insert-attachment-preview-block
-     attachment :prefix prefix-state :face meta-face :kind kind :required nil)
-    (disco-ins-insert-attachment-caption-line
-     (alist-get 'description attachment) :prefix prefix-state :face meta-face)
-    (when show-url
-      (disco-ins-insert-attachment-url-line
-       (disco-media-attachment-download-url attachment)
-       :prefix prefix-state
-       :face 'shadow))
+    (if spoiler-hidden
+        (disco-ins-insert-attachment-spoiler-placeholder
+         attachment
+         :prefix prefix-state
+         :line-face meta-face
+         :button-face action-face
+         :toggle-action spoiler-toggle-action)
+      (progn
+        (disco-ins-insert-attachment-preview-block
+         attachment :prefix prefix-state :face meta-face :kind kind :required nil)
+        (disco-ins-insert-attachment-caption-line
+         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+        (when show-url
+          (disco-ins-insert-attachment-url-line
+           (disco-media-attachment-download-url attachment)
+           :prefix prefix-state
+           :face 'shadow))))
     (cons card-start (point))))
 
 (cl-defun disco-ins-insert-attachment-photo (attachment &key prefix border-face
                                                         title-face meta-face
-                                                        action-face show-url)
+                                                        action-face show-url
+                                                        spoiler-hidden
+                                                        spoiler-toggle-action)
   "Insert one photo-style attachment block for ATTACHMENT."
   (let* ((name (disco-media-attachment-display-name attachment))
          (meta-parts (delq nil (list (disco-media-attachment-dimensions-label attachment)
@@ -470,7 +507,8 @@ be shown yet."
                                      (when (disco-media-attachment-ephemeral-p attachment)
                                        "ephemeral"))))
          (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
-         (open-info (disco-ins--attachment-open-info attachment))
+         (open-info (unless spoiler-hidden
+                      (disco-ins--attachment-open-info attachment)))
          (card-start (point)))
     (disco-ins--insert-prefixed-line
      (format "%s %s" (disco-ins--attachment-kind-tag 'photo) name)
@@ -486,20 +524,30 @@ be shown yet."
     (disco-ins-insert-attachment-transfer-line
      attachment :prefix prefix-state :face meta-face :action-face action-face
      :kind 'photo)
-    (disco-ins-insert-attachment-preview-block
-     attachment :prefix prefix-state :face meta-face :kind 'photo :required t)
-    (disco-ins-insert-attachment-caption-line
-     (alist-get 'description attachment) :prefix prefix-state :face meta-face)
-    (when show-url
-      (disco-ins-insert-attachment-url-line
-       (disco-media-attachment-download-url attachment)
-       :prefix prefix-state
-       :face 'shadow))
+    (if spoiler-hidden
+        (disco-ins-insert-attachment-spoiler-placeholder
+         attachment
+         :prefix prefix-state
+         :line-face meta-face
+         :button-face action-face
+         :toggle-action spoiler-toggle-action)
+      (progn
+        (disco-ins-insert-attachment-preview-block
+         attachment :prefix prefix-state :face meta-face :kind 'photo :required t)
+        (disco-ins-insert-attachment-caption-line
+         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+        (when show-url
+          (disco-ins-insert-attachment-url-line
+           (disco-media-attachment-download-url attachment)
+           :prefix prefix-state
+           :face 'shadow))))
     (cons card-start (point))))
 
 (cl-defun disco-ins-insert-attachment-video (attachment &key prefix border-face
                                                         title-face meta-face
-                                                        action-face show-url)
+                                                        action-face show-url
+                                                        spoiler-hidden
+                                                        spoiler-toggle-action)
   "Insert one video-style attachment block for ATTACHMENT."
   (let* ((name (disco-media-attachment-display-name attachment))
          (details (delq nil (list (disco-media-attachment-dimensions-label attachment)
@@ -508,7 +556,8 @@ be shown yet."
                                   (when (disco-media-attachment-ephemeral-p attachment)
                                     "ephemeral"))))
          (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
-         (open-info (disco-ins--attachment-open-info attachment))
+         (open-info (unless spoiler-hidden
+                      (disco-ins--attachment-open-info attachment)))
          (card-start (point)))
     (disco-ins--insert-prefixed-line
      (format "%s %s%s"
@@ -522,15 +571,23 @@ be shown yet."
     (disco-ins-insert-attachment-transfer-line
      attachment :prefix prefix-state :face meta-face :action-face action-face
      :kind 'video)
-    (disco-ins-insert-attachment-preview-block
-     attachment :prefix prefix-state :face meta-face :kind 'video :required t)
-    (disco-ins-insert-attachment-caption-line
-     (alist-get 'description attachment) :prefix prefix-state :face meta-face)
-    (when show-url
-      (disco-ins-insert-attachment-url-line
-       (disco-media-attachment-download-url attachment)
-       :prefix prefix-state
-       :face 'shadow))
+    (if spoiler-hidden
+        (disco-ins-insert-attachment-spoiler-placeholder
+         attachment
+         :prefix prefix-state
+         :line-face meta-face
+         :button-face action-face
+         :toggle-action spoiler-toggle-action)
+      (progn
+        (disco-ins-insert-attachment-preview-block
+         attachment :prefix prefix-state :face meta-face :kind 'video :required t)
+        (disco-ins-insert-attachment-caption-line
+         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+        (when show-url
+          (disco-ins-insert-attachment-url-line
+           (disco-media-attachment-download-url attachment)
+           :prefix prefix-state
+           :face 'shadow))))
     (cons card-start (point))))
 
 (cl-defun disco-ins-insert-forward-card (&key source-text sent-at content

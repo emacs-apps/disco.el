@@ -141,6 +141,34 @@
       (goto-char (point-min))
       (should (stringp (get-text-property (point) 'help-echo))))))
 
+(ert-deftest disco-ins-insert-attachment-spoiler-placeholder-prefers-obscured-preview ()
+  (with-temp-buffer
+    (let (revealed)
+      (cl-letf (((symbol-function 'disco-media-attachment-spoiler-preview-image)
+                 (lambda (_attachment)
+                   :spoiler-preview))
+                ((symbol-function 'disco-media-image-object-valid-p)
+                 (lambda (image)
+                   (eq image :spoiler-preview)))
+                ((symbol-function 'disco-media-insert-image-slices)
+                 (lambda (_image &optional _url _prefix _fallback)
+                   (insert "[spoiler-preview]"))))
+        (disco-ins-insert-attachment-spoiler-placeholder
+         '((filename . "SPOILER_cat.png"))
+         :prefix "    "
+         :line-face 'shadow
+         :button-face 'link
+         :toggle-action (lambda ()
+                          (setq revealed t)))
+        (should (string-match-p (regexp-quote "[spoiler-preview]")
+                                (buffer-string)))
+        (goto-char (point-min))
+        (should (string-match-p "Reveal spoiler"
+                                (or (get-text-property (point) 'help-echo) "")))
+        (search-forward "[Reveal spoiler]")
+        (button-activate (button-at (match-beginning 0)))
+        (should revealed)))))
+
 (ert-deftest disco-ins-insert-attachment-document-renders-header-and-transfer-buttons ()
   (with-temp-buffer
     (let (downloaded saved)

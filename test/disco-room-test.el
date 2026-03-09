@@ -1238,12 +1238,17 @@
   (with-temp-buffer
     (let ((disco-room-use-rich-attachment-cards t)
           (disco-room--revealed-spoiler-message-id nil)
-          typed-called
+          spoiler-hidden
           toggled-id)
       (cl-letf (((symbol-function 'disco-ins-insert-attachment-photo)
-                 (lambda (&rest _args)
-                   (setq typed-called t)
-                   (insert "[photo-block]\n")))
+                 (lambda (_attachment &rest args)
+                   (setq spoiler-hidden (plist-get args :spoiler-hidden))
+                   (insert "[photo-card]\n")
+                   (insert-text-button
+                    "[Reveal spoiler]"
+                    'action (lambda (_button)
+                              (disco-room-toggle-message-spoilers "m1")))
+                   (insert "\n")))
                 ((symbol-function 'disco-room-toggle-message-spoilers)
                  (lambda (message-id)
                    (setq toggled-id message-id))))
@@ -1251,9 +1256,8 @@
          '((id . "m1")
            (attachments . (((filename . "SPOILER_cat.png")
                             (flags . 8))))))
-        (should-not typed-called)
-        (should (string-match-p (regexp-quote "[spoiler image hidden]")
-                                (buffer-string)))
+        (should spoiler-hidden)
+        (should (string-match-p (regexp-quote "[photo-card]") (buffer-string)))
         (goto-char (point-min))
         (search-forward "[Reveal spoiler]")
         (button-activate (button-at (match-beginning 0)))
