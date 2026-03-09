@@ -82,6 +82,46 @@
     (should (string-match-p (regexp-quote "duration=1:01") meta))
     (should (string-match-p (regexp-quote "ephemeral") meta))))
 
+(ert-deftest disco-media-svg-append-spoiler-node-adds-noise-filter ()
+  (skip-unless (and (fboundp 'svg-create)
+                    (fboundp 'svg-print)
+                    (fboundp 'svg--append)
+                    (fboundp 'dom-node)))
+  (let ((svg (svg-create 8 8)))
+    (disco-media--svg-append-spoiler-node svg "noise")
+    (let ((xml (with-temp-buffer
+                 (svg-print svg)
+                 (buffer-string))))
+      (should (string-match-p "feTurbulence" xml))
+      (should (string-match-p "feDisplacementMap" xml))
+      (should (string-match-p "id=\"noise\"" xml)))))
+
+(ert-deftest disco-media-attachment-preview-image-falls-back-to-placeholder ()
+  (cl-letf (((symbol-function 'disco-media-attachment-preview-rendering-available-p)
+             (lambda () t))
+            ((symbol-function 'disco-media--attachment-image-p)
+             (lambda (_attachment) t))
+            ((symbol-function 'disco-media--attachment-video-p)
+             (lambda (_attachment) nil))
+            ((symbol-function 'disco-media--attachment-real-preview-image)
+             (lambda (&rest _args) nil))
+            ((symbol-function 'disco-media-attachment-placeholder-image)
+             (lambda (_attachment) :placeholder)))
+    (should (eq :placeholder
+                (disco-media-attachment-preview-image
+                 '((filename . "cat.png") (placeholder . "abcd")))))))
+
+(ert-deftest disco-media-attachment-spoiler-preview-image-falls-back-to-placeholder ()
+  (cl-letf (((symbol-function 'disco-media-attachment-preview-rendering-available-p)
+             (lambda () t))
+            ((symbol-function 'disco-media--attachment-real-spoiler-preview-image)
+             (lambda (_attachment) nil))
+            ((symbol-function 'disco-media-attachment-spoiler-placeholder-image)
+             (lambda (_attachment) :spoiler-placeholder)))
+    (should (eq :spoiler-placeholder
+                (disco-media-attachment-spoiler-preview-image
+                 '((filename . "SPOILER_cat.png") (placeholder . "abcd")))))))
+
 (ert-deftest disco-media-attachment-download-state-detects-existing-file ()
   (let ((tmpdir (make-temp-file "disco-media-downloads" t))
         (disco-media--attachment-download-state-table (make-hash-table :test #'equal)))

@@ -13,6 +13,7 @@
 (require 'cl-lib)
 (require 'browse-url)
 (require 'url-handlers)
+(require 'dom)
 (require 'svg nil t)
 (require 'plz)
 
@@ -30,6 +31,15 @@
 
 (defconst disco-media--attachment-flag-is-spoiler (ash 1 3)
   "Attachment flag bit marking spoiler attachments.")
+
+(defconst disco-media--spoiler-turbulence-attrs
+  '((baseFrequency . "0.1 0.1")
+    (numOctaves . "2"))
+  "Attributes for spoiler `feTurbulence' SVG node.")
+
+(defconst disco-media--spoiler-displacement-attrs
+  '((scale . "80"))
+  "Attributes for spoiler `feDisplacementMap' SVG node.")
 
 (defvar disco-media--attachment-preview-image-cache (make-hash-table :test #'equal)
   "Preview image cache keyed by attachment preview cache key.
@@ -59,6 +69,9 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-media--attachment-spoiler-preview-cache (make-hash-table :test #'equal)
   "Cache of spoiler-preview image objects keyed by preview cache identity.")
+
+(defvar disco-media--attachment-placeholder-image-cache (make-hash-table :test #'equal)
+  "Cache of decoded attachment placeholder image objects.")
 
 (defun disco-media-clear-preview-memory-cache ()
   "Clear in-memory preview image cache without touching disk files."
@@ -439,6 +452,71 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                     (buffer-string))))
     (apply #'create-image svg-data 'svg t props)))
 
+(defun disco-media--svg-append-spoiler-node (svg node-id)
+  "Append telega-like spoiler turbulence filter with NODE-ID into SVG."
+  (when (and (fboundp 'svg--append)
+             (fboundp 'dom-node))
+    (svg--append
+     svg
+     (dom-node 'filter
+               `((id . ,node-id))
+               (dom-node 'feTurbulence
+                         `((type . "turbulence")
+                           (result . "NOISE")
+                           ,@disco-media--spoiler-turbulence-attrs))
+               (dom-node 'feDisplacementMap
+                         `((in . "SourceGraphic")
+                           (in2 . "NOISE")
+                           (xChannelSelector . "R")
+                           (yChannelSelector . "G")
+                           ,@disco-media--spoiler-displacement-attrs))))))
+
+(defun disco-media--svg-spoiler-filter-ref (svg)
+  "Return spoiler filter ref string for SVG, appending node when possible."
+  (when (and svg
+             (fboundp 'svg--append)
+             (fboundp 'dom-node))
+    (let ((node-id "disco-spoiler-noise"))
+      (disco-media--svg-append-spoiler-node svg node-id)
+      (format "url(#%s)" node-id))))
+
+(defun disco-media--svg-append-spoiler-video-icon (svg width height)
+  "Append spoiler video play icon into SVG of WIDTH by HEIGHT."
+  (when (and (fboundp 'svg-circle)
+             (fboundp 'svg-polygon))
+    (let* ((cx (/ width 2.0))
+           (cy (/ height 2.0))
+           (radius (max 6.0 (min (/ width 6.0) (/ height 6.0))))
+           (tri-w (* radius 0.95))
+           (tri-h (* radius 1.10))
+           (x1 (- cx (/ tri-w 3.0)))
+           (x2 (- cx (/ tri-w 3.0)))
+           (x3 (+ cx (* tri-w 0.67)))
+           (y1 (- cy (/ tri-h 2.0)))
+           (y2 (+ cy (/ tri-h 2.0)))
+           (y3 cy))
+      (svg-circle svg cx cy radius
+                  :fill "#ffffff"
+                  :fill-opacity 0.82)
+      (svg-polygon svg
+                   (list (cons x1 y1)
+                         (cons x2 y2)
+                         (cons x3 y3))
+                   :fill "#000000"
+                   :fill-opacity 0.75))))
+
+(defun disco-media--svg-append-spoiler-overlay (svg width height &optional video-p)
+  "Append telega-like spoiler visuals to SVG of WIDTH by HEIGHT.
+
+This prefers turbulence/displacement noise instead of a plain dark cover.
+When VIDEO-P is non-nil, also overlay a play indicator." 
+  (when (fboundp 'svg-rectangle)
+    (svg-rectangle svg 0 0 width height
+                   :fill "#000000"
+                   :fill-opacity 0.12))
+  (when video-p
+    (disco-media--svg-append-spoiler-video-icon svg width height)))
+
 (defun disco-media--attachment-spoiler-preview-cache-key (cache-file preview-image)
   "Return cache key for spoiler preview built from CACHE-FILE and PREVIEW-IMAGE."
   (let* ((attrs (and (stringp cache-file) (file-exists-p cache-file)
@@ -452,7 +530,7 @@ VALUE should be nil for uncapped mode or a non-negative integer."
           (plist-get props :disco-nslices)
           (plist-get props :telega-nslices))))
 
-(defun disco-media--make-attachment-spoiler-preview-image (cache-file preview-image)
+(defun disco-media--make-attachment-spoiler-preview-image (cache-file preview-image &optional video-p)
   "Return obscured spoiler preview image for CACHE-FILE using PREVIEW-IMAGE sizing."
   (when (and (stringp cache-file)
              (file-exists-p cache-file)
@@ -460,7 +538,6 @@ VALUE should be nil for uncapped mode or a non-negative integer."
              (image-type-available-p 'svg)
              (fboundp 'svg-create)
              (fboundp 'svg-embed)
-             (fboundp 'svg-rectangle)
              (fboundp 'svg-print))
     (let* ((display-size (ignore-errors (image-size preview-image t (selected-frame))))
            (svg-width (max 1 (round (or (and (consp display-size) (car display-size))
@@ -474,32 +551,312 @@ VALUE should be nil for uncapped mode or a non-negative integer."
            (slices (or (plist-get props :disco-nslices)
                        (plist-get props :telega-nslices)
                        (disco-media-image-slice-count preview-image)))
-           (svg (and mime (svg-create svg-width svg-height))))
+           (svg (and mime (svg-create svg-width svg-height)))
+           (filter-ref (and svg (disco-media--svg-spoiler-filter-ref svg))))
       (when svg
         (svg-embed svg cache-file mime nil
-                   :x 0 :y 0 :width svg-width :height svg-height)
-        (svg-rectangle svg 0 0 svg-width svg-height
-                       :fill "#000000"
-                       :fill-opacity 0.58)
-        (when (fboundp 'svg-text)
-          (svg-text svg "SPOILER"
-                    :x (/ svg-width 2.0)
-                    :y (/ svg-height 2.0)
-                    :text-anchor "middle"
-                    :dominant-baseline "middle"
-                    :font-weight "bold"
-                    :font-size (max 12 (floor (/ svg-height 6.0)))
-                    :fill "#ffffff"
-                    :fill-opacity 0.95))
+                   :x 0 :y 0 :width svg-width :height svg-height
+                   :filter filter-ref)
+        (disco-media--svg-append-spoiler-overlay svg svg-width svg-height video-p)
         (setq props (plist-put props :disco-nslices slices))
         (setq props (plist-put props :scale 1.0))
         (setq props (plist-put props :ascent 'center))
         (apply #'disco-media--svg-image svg props)))))
 
-(defun disco-media-attachment-spoiler-preview-image (attachment)
-  "Return obscured preview image for spoiler ATTACHMENT, or nil."
-  (let* ((preview-image (disco-media-attachment-preview-image attachment))
-         (cache-key (disco-media-attachment-preview-cache-key attachment))
+(defun disco-media--attachment-placeholder-version (attachment)
+  "Return normalized placeholder version for ATTACHMENT, or nil."
+  (let ((raw (alist-get 'placeholder_version attachment)))
+    (cond
+     ((integerp raw) raw)
+     ((and (stringp raw)
+           (string-match-p "\\`[0-9]+\\'" raw))
+      (string-to-number raw))
+     (t nil))))
+
+(defun disco-media-attachment-placeholder-present-p (attachment)
+  "Return non-nil when ATTACHMENT carries a decodable placeholder."
+  (let ((placeholder (alist-get 'placeholder attachment))
+        (version (disco-media--attachment-placeholder-version attachment)))
+    (and (stringp placeholder)
+         (not (string-empty-p (string-trim placeholder)))
+         (or (null version) (= version 1)))))
+
+(defun disco-media--thumbhash-normalize-string (value)
+  "Return VALUE normalized as padded base64/base64url string."
+  (let* ((trimmed (replace-regexp-in-string "[[:space:]]+" "" (string-trim value)))
+         (base64url (replace-regexp-in-string "_" "/"
+                                              (replace-regexp-in-string "-" "+" trimmed)))
+         (pad (mod (- 4 (mod (length base64url) 4)) 4)))
+    (concat base64url (make-string pad ?=))))
+
+(defun disco-media--thumbhash-bytes (value)
+  "Decode thumbhash string VALUE into an unibyte string, or nil."
+  (when (and (stringp value) (not (string-empty-p (string-trim value))))
+    (condition-case _
+        (let ((decoded (base64-decode-string
+                        (disco-media--thumbhash-normalize-string value))))
+          (encode-coding-string decoded 'binary))
+      (error nil))))
+
+(defun disco-media--thumbhash-aspect-ratio (bytes)
+  "Return approximate aspect ratio represented by thumbhash BYTES."
+  (when (and (stringp bytes) (>= (length bytes) 5))
+    (let* ((header24 (+ (aref bytes 0)
+                        (ash (aref bytes 1) 8)
+                        (ash (aref bytes 2) 16)))
+           (header16 (+ (aref bytes 3)
+                        (ash (aref bytes 4) 8)))
+           (has-alpha (not (zerop (logand header24 (ash 1 23)))))
+           (is-landscape (not (zerop (logand header16 (ash 1 15)))))
+           (long-count (if has-alpha 5 7))
+           (short-count (max 3 (logand header16 7)))
+           (lx (if is-landscape long-count short-count))
+           (ly (if is-landscape short-count long-count)))
+      (/ (float lx) (float (max 1 ly))))))
+
+(defun disco-media--thumbhash-output-size (ratio)
+  "Return decode output size cons for thumbhash aspect RATIO."
+  (let* ((safe-ratio (if (and (numberp ratio) (> ratio 0)) ratio 1.0))
+         (max-side 32))
+    (if (>= safe-ratio 1.0)
+        (cons max-side (max 1 (round (/ max-side safe-ratio))))
+      (cons (max 1 (round (* max-side safe-ratio))) max-side))))
+
+(defun disco-media--attachment-placeholder-source-size (attachment ratio)
+  "Return source pixel size cons for ATTACHMENT placeholder display."
+  (let ((width (alist-get 'width attachment))
+        (height (alist-get 'height attachment)))
+    (if (and (numberp width) (> width 0)
+             (numberp height) (> height 0))
+        (cons width height)
+      (disco-media--thumbhash-output-size ratio))))
+
+(defun disco-media--attachment-placeholder-height-chars (attachment ratio)
+  "Return display height in text lines for ATTACHMENT placeholder."
+  (let* ((safe-max-width (max 64
+                              (if (numberp disco-room-attachment-preview-max-width)
+                                  disco-room-attachment-preview-max-width
+                                460)))
+         (safe-max-height (max 64
+                               (if (numberp disco-room-attachment-preview-max-height)
+                                   disco-room-attachment-preview-max-height
+                                 360))))
+    (disco-media--preview-height-chars
+     (disco-media--attachment-placeholder-source-size attachment ratio)
+     safe-max-width
+     safe-max-height)))
+
+(defun disco-media--thumbhash-decode-channel (bytes start nx ny dc scale)
+  "Decode one thumbhash channel from BYTES at START with NX by NY coefficients."
+  (let* ((count (max 1 (* nx ny)))
+         (channel (make-vector count 0.0))
+         (nibbles (max 0 (1- count))))
+    (aset channel 0 dc)
+    (dotimes (i nibbles)
+      (let* ((byte-index (+ start (ash i -1)))
+             (byte (if (< byte-index (length bytes))
+                       (aref bytes byte-index)
+                     0))
+             (nibble (if (zerop (logand i 1))
+                         (logand byte #x0F)
+                       (ash byte -4))))
+        (aset channel (1+ i)
+              (* scale (- (/ (float nibble) 7.5) 1.0)))))
+    (cons channel (+ start (/ (+ nibbles 1) 2)))))
+
+(defun disco-media--thumbhash-channel-value (channel nx ny x y width height)
+  "Return reconstructed channel sample at X,Y from CHANNEL coefficients."
+  (let ((sum 0.0)
+        (index 0)
+        (xfactor (/ (* float-pi (+ x 0.5)) (float (max 1 width))))
+        (yfactor (/ (* float-pi (+ y 0.5)) (float (max 1 height))))
+        (cy 0))
+    (while (< cy ny)
+      (let ((yc (cos (* yfactor cy)))
+            (cx 0))
+        (while (< cx nx)
+          (setq sum (+ sum (* (aref channel index)
+                              yc
+                              (cos (* xfactor cx)))))
+          (setq index (1+ index))
+          (setq cx (1+ cx))))
+      (setq cy (1+ cy)))
+    sum))
+
+(defun disco-media--clamp-unit (value)
+  "Clamp VALUE into [0, 1] float range."
+  (max 0.0 (min 1.0 (float value))))
+
+(defun disco-media--thumbhash->svg-image (thumbhash attachment &optional spoiler-p)
+  "Decode THUMBHASH for ATTACHMENT and return placeholder SVG image.
+
+When SPOILER-P is non-nil, return a spoiler-obscured variant."
+  (let* ((bytes (disco-media--thumbhash-bytes thumbhash))
+         (ratio (and bytes (disco-media--thumbhash-aspect-ratio bytes))))
+    (when (and bytes
+               ratio
+               (image-type-available-p 'svg)
+               (fboundp 'svg-create)
+               (fboundp 'svg-rectangle)
+               (fboundp 'svg-print))
+      (let* ((header24 (+ (aref bytes 0)
+                          (ash (aref bytes 1) 8)
+                          (ash (aref bytes 2) 16)))
+             (header16 (+ (aref bytes 3)
+                          (ash (aref bytes 4) 8)))
+             (has-alpha (not (zerop (logand header24 (ash 1 23)))))
+             (is-landscape (not (zerop (logand header16 (ash 1 15)))))
+             (long-count (if has-alpha 5 7))
+             (short-count (max 3 (logand header16 7)))
+             (lx (if is-landscape long-count short-count))
+             (ly (if is-landscape short-count long-count))
+             (l-dc (/ (float (logand header24 63)) 63.0))
+             (p-dc (- (/ (float (logand (ash header24 -6) 63)) 31.5) 1.0))
+             (q-dc (- (/ (float (logand (ash header24 -12) 63)) 31.5) 1.0))
+             (l-scale (/ (float (logand (ash header24 -18) 31)) 31.0))
+             (p-scale (/ (float (logand (ash header16 -3) 63)) 63.0))
+             (q-scale (/ (float (logand (ash header16 -9) 63)) 63.0))
+             (a-dc (if has-alpha
+                       (/ (float (logand (aref bytes 5) 15)) 15.0)
+                     1.0))
+             (a-scale (if has-alpha
+                          (/ (float (ash (aref bytes 5) -4)) 15.0)
+                        0.0))
+             (offset (if has-alpha 6 5))
+             (pixel-size (disco-media--thumbhash-output-size ratio))
+             (pixel-width (max 1 (car pixel-size)))
+             (pixel-height (max 1 (cdr pixel-size)))
+             (display-lines (disco-media--attachment-placeholder-height-chars
+                             attachment ratio))
+             (height-spec (disco-media--ch-height-spec display-lines))
+             (kind (disco-media-attachment-kind attachment))
+             l-channel p-channel q-channel a-channel)
+        (pcase-let* ((`(,decoded-l . ,offset-1)
+                      (disco-media--thumbhash-decode-channel bytes offset lx ly l-dc l-scale))
+                     (`(,decoded-p . ,offset-2)
+                      (disco-media--thumbhash-decode-channel bytes offset-1 3 3 p-dc p-scale))
+                     (`(,decoded-q . ,offset-3)
+                      (disco-media--thumbhash-decode-channel bytes offset-2 3 3 q-dc q-scale))
+                     (`(,decoded-a . ,_offset-4)
+                      (if has-alpha
+                          (disco-media--thumbhash-decode-channel bytes offset-3 lx ly a-dc a-scale)
+                        (cons nil offset-3))))
+          (setq l-channel decoded-l
+                p-channel decoded-p
+                q-channel decoded-q
+                a-channel decoded-a)
+          (let* ((svg (svg-create pixel-width pixel-height))
+                 (filter-ref (and spoiler-p
+                                  (disco-media--svg-spoiler-filter-ref svg)))
+                 (target-group (and filter-ref
+                                    (fboundp 'dom-node)
+                                    (dom-node 'g `((filter . ,filter-ref))))))
+            (dotimes (y pixel-height)
+              (dotimes (x pixel-width)
+                (let* ((l (disco-media--thumbhash-channel-value
+                           l-channel lx ly x y pixel-width pixel-height))
+                       (p (disco-media--thumbhash-channel-value
+                           p-channel 3 3 x y pixel-width pixel-height))
+                       (q (disco-media--thumbhash-channel-value
+                           q-channel 3 3 x y pixel-width pixel-height))
+                       (a (if has-alpha
+                              (disco-media--thumbhash-channel-value
+                               a-channel lx ly x y pixel-width pixel-height)
+                            1.0))
+                       (r (disco-media--clamp-unit (+ l (/ p 3.0) (/ q 2.0))))
+                       (g (disco-media--clamp-unit (+ l (/ p 3.0) (/ q -2.0))))
+                       (b (disco-media--clamp-unit (- l (/ (* 2.0 p) 3.0))))
+                       (alpha (disco-media--clamp-unit a))
+                       (fill (format "#%02x%02x%02x"
+                                     (round (* r 255.0))
+                                     (round (* g 255.0))
+                                     (round (* b 255.0)))))
+                  (if target-group
+                      (dom-append-child
+                       target-group
+                       (dom-node 'rect
+                                 `((x . ,(number-to-string x))
+                                   (y . ,(number-to-string y))
+                                   (width . "1")
+                                   (height . "1")
+                                   (fill . ,fill)
+                                   (fill-opacity . ,(format "%.4f" alpha)))))
+                    (svg-rectangle svg x y 1 1
+                                   :fill fill
+                                   :fill-opacity alpha)))))
+            (when target-group
+              (svg--append svg target-group))
+            (when spoiler-p
+              (disco-media--svg-append-spoiler-overlay
+               svg pixel-width pixel-height (eq kind 'video)))
+            (disco-media--svg-image
+             svg
+             :scale 1.0
+             :height height-spec
+             :disco-nslices display-lines
+             :ascent 'center)))))))
+
+(defun disco-media--attachment-placeholder-cache-key (attachment &optional spoiler-p)
+  "Return stable cache key for ATTACHMENT placeholder image.
+
+When SPOILER-P is non-nil, key the spoilerized placeholder variant."
+  (let ((placeholder (alist-get 'placeholder attachment))
+        (version (disco-media--attachment-placeholder-version attachment)))
+    (when (and (stringp placeholder)
+               (not (string-empty-p (string-trim placeholder))))
+      (list placeholder
+            version
+            spoiler-p
+            (alist-get 'width attachment)
+            (alist-get 'height attachment)
+            (max 64 (if (numberp disco-room-attachment-preview-max-width)
+                        disco-room-attachment-preview-max-width
+                      460))
+            (max 64 (if (numberp disco-room-attachment-preview-max-height)
+                        disco-room-attachment-preview-max-height
+                      360))))))
+
+(defun disco-media-attachment-placeholder-image (attachment)
+  "Return decoded placeholder image for ATTACHMENT, or nil."
+  (let ((cache-key (disco-media--attachment-placeholder-cache-key attachment nil)))
+    (when (and (disco-media-inline-image-rendering-available-p)
+               (or (disco-media--attachment-image-p attachment)
+                   (disco-media--attachment-video-p attachment))
+               cache-key)
+      (let ((cached (gethash cache-key disco-media--attachment-placeholder-image-cache)))
+        (or (and (disco-media-image-object-valid-p cached) cached)
+            (let ((image (disco-media--thumbhash->svg-image
+                          (alist-get 'placeholder attachment)
+                          attachment nil)))
+              (when (disco-media-image-object-valid-p image)
+                (puthash cache-key image disco-media--attachment-placeholder-image-cache)
+                image)))))))
+
+(defun disco-media-attachment-spoiler-placeholder-image (attachment)
+  "Return spoiler-obscured placeholder image for ATTACHMENT, or nil."
+  (let ((cache-key (disco-media--attachment-placeholder-cache-key attachment t)))
+    (when (and (disco-media-inline-image-rendering-available-p)
+               (or (disco-media--attachment-image-p attachment)
+                   (disco-media--attachment-video-p attachment))
+               cache-key)
+      (let ((cached (gethash cache-key disco-media--attachment-placeholder-image-cache)))
+        (or (and (disco-media-image-object-valid-p cached) cached)
+            (let ((image (disco-media--thumbhash->svg-image
+                          (alist-get 'placeholder attachment)
+                          attachment t)))
+              (when (disco-media-image-object-valid-p image)
+                (puthash cache-key image disco-media--attachment-placeholder-image-cache)
+                image)))))))
+
+(defun disco-media--attachment-real-spoiler-preview-image (attachment)
+  "Return obscured real preview image for ATTACHMENT, or nil."
+  (let* ((image-like (disco-media--attachment-image-p attachment))
+         (video-like (disco-media--attachment-video-p attachment))
+         (preview-image (and (or image-like video-like)
+                             (disco-media--attachment-real-preview-image
+                              attachment image-like video-like)))
+         (cache-key (and (or image-like video-like)
+                         (disco-media-attachment-preview-cache-key attachment)))
          (cache-file (and cache-key
                           (disco-media-attachment-preview-cache-existing-file cache-key))))
     (when (and cache-file (disco-media-image-object-valid-p preview-image))
@@ -508,10 +865,16 @@ VALUE should be nil for uncapped mode or a non-negative integer."
              (cached (gethash spoiler-key disco-media--attachment-spoiler-preview-cache)))
         (or (and (disco-media-image-object-valid-p cached) cached)
             (let ((image (disco-media--make-attachment-spoiler-preview-image
-                          cache-file preview-image)))
+                          cache-file preview-image video-like)))
               (when (disco-media-image-object-valid-p image)
                 (puthash spoiler-key image disco-media--attachment-spoiler-preview-cache)
                 image)))))))
+
+(defun disco-media-attachment-spoiler-preview-image (attachment)
+  "Return obscured preview image for spoiler ATTACHMENT, or nil."
+  (when (disco-media-attachment-preview-rendering-available-p)
+    (or (disco-media--attachment-real-spoiler-preview-image attachment)
+        (disco-media-attachment-spoiler-placeholder-image attachment))))
 
 (defun disco-media--notify-state-updated ()
   "Notify UI after media state/cache updates."
@@ -699,6 +1062,41 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                   cache-key
                   (error-message-string err)))))))
 
+(defun disco-media--attachment-real-preview-image (attachment image-like video-like)
+  "Return real fetched preview image for ATTACHMENT, or nil."
+  (let* ((cache-key (disco-media-attachment-preview-cache-key attachment))
+         (cached (and cache-key
+                      (gethash cache-key disco-media--attachment-preview-image-cache))))
+    (cond
+     ((eq cached :missing)
+      nil)
+     ((and cached (disco-media-image-object-valid-p cached))
+      cached)
+     (cached
+      (remhash cache-key disco-media--attachment-preview-image-cache)
+      nil)
+     (t
+      (let* ((url (disco-media-attachment-preview-url attachment))
+             (cache-base (and cache-key
+                              (disco-media--attachment-preview-cache-file-base cache-key)))
+             (cache-file (and cache-key
+                              (disco-media-attachment-preview-cache-existing-file cache-key)))
+             (file-image (and cache-file
+                              (disco-media--attachment-preview-image-from-file cache-file))))
+        (cond
+         (file-image
+          (puthash cache-key file-image disco-media--attachment-preview-image-cache)
+          file-image)
+         ((and url cache-base)
+          (when (and cache-file (not file-image))
+            (ignore-errors (delete-file cache-file)))
+          (if image-like
+              (disco-media--start-attachment-preview-fetch cache-key url cache-base)
+            (when video-like
+              (disco-media--start-video-preview-fetch cache-key url cache-base)))
+          nil)
+         (t nil)))))))
+
 (defun disco-media-attachment-preview-image (attachment &optional bypass-user-toggle)
   "Return preview image object for ATTACHMENT when available."
   (let* ((rendering-ok (if bypass-user-toggle
@@ -708,34 +1106,8 @@ VALUE should be nil for uncapped mode or a non-negative integer."
          (video-like (disco-media--attachment-video-p attachment)))
     (when (and rendering-ok
                (or image-like video-like))
-      (let* ((cache-key (disco-media-attachment-preview-cache-key attachment))
-             (cached (gethash cache-key disco-media--attachment-preview-image-cache)))
-        (cond
-         ((eq cached :missing)
-          nil)
-         ((and cached (disco-media-image-object-valid-p cached))
-          cached)
-         (cached
-          (remhash cache-key disco-media--attachment-preview-image-cache)
-          nil)
-         (t
-          (let* ((url (disco-media-attachment-preview-url attachment))
-                 (cache-base (disco-media--attachment-preview-cache-file-base cache-key))
-                 (cache-file (disco-media-attachment-preview-cache-existing-file cache-key))
-                 (file-image (and cache-file
-                                  (disco-media--attachment-preview-image-from-file cache-file))))
-            (cond
-             (file-image
-              (puthash cache-key file-image disco-media--attachment-preview-image-cache)
-              file-image)
-             ((and url cache-base)
-              (when (and cache-file (not file-image))
-                (ignore-errors (delete-file cache-file)))
-              (if image-like
-                  (disco-media--start-attachment-preview-fetch cache-key url cache-base)
-                (disco-media--start-video-preview-fetch cache-key url cache-base))
-              nil)
-             (t nil)))))))))
+      (or (disco-media--attachment-real-preview-image attachment image-like video-like)
+          (disco-media-attachment-placeholder-image attachment)))))
 
 (defun disco-media-attachment-ephemeral-p (attachment)
   "Return non-nil when ATTACHMENT is ephemeral."

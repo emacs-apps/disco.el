@@ -26,3 +26,19 @@ continuous refactor pass.
 - [x] Add spoiler placeholder inserter to `disco-ins.el`
 - [x] Gate attachment rendering in `disco-room.el` on spoiler reveal state
 - [x] Add spoiler attachment tests and re-run compile/ERT
+
+## Follow-up: attachment placeholder
+
+- [x] Add attachment placeholder owner support to `disco-media.el`
+- [x] Implement thumbhash-backed placeholder image decoding/rendering
+- [x] Make preview selection prefer real preview and fall back to placeholder
+- [x] Make spoiler preview selection prefer real spoiler preview and fall back
+      to spoiler placeholder
+- [x] Add placeholder fallback tests and re-run compile/ERT
+
+## Follow-up: telega-like spoiler noise effect
+
+- [x] Replace plain spoiler cover with telega-style SVG turbulence/displacement
+      filter in `disco-media.el`
+- [x] Apply the same noise-based spoiler treatment to thumbhash placeholders
+- [x] Add owner-level SVG filter coverage and re-run compile/ERT
