@@ -16,6 +16,7 @@
 (require 'url-util)
 (require 'disco-customize)
 (require 'disco-http)
+(require 'disco-util)
 (require 'disco-api-normalize)
 
 (define-error 'disco-api-error "Disco API error")
@@ -189,7 +190,7 @@ STATUS, HEADERS, BODY come from transport layer."
     ;; Authoritative cooldown on 429 responses.
     (when (and (= status 429) retry-after)
       (let ((deadline (+ now retry-after disco-rate-limit-safety-margin)))
-        (if (or (disco-api--json-true-p global-body)
+        (if (or (disco-util-json-true-p global-body)
                 (equal global-header "true"))
             (setq disco-api--global-rate-limit-until deadline)
           (disco-api--set-route-deadline route-key deadline bucket-id))))))

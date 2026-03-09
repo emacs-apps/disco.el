@@ -18,6 +18,7 @@
 (require 'subr-x)
 (require 'disco-ui)
 (require 'disco-view)
+(require 'disco-util)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-customize)
@@ -2960,7 +2961,7 @@ if structural fallback is required."
                 next-pending)
             (maphash
              (lambda (guild-id pending-channel-ids)
-               (let* ((ordered (disco-root--normalize-id-list pending-channel-ids))
+               (let* ((ordered (disco-util-normalize-id-list pending-channel-ids))
                       (batch (seq-take ordered max-per-guild))
                       (remaining (nthcdr (length batch) ordered)))
                  (cond
@@ -3223,20 +3224,6 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
     (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
     (setq disco-root--gateway-handler nil))
   (disco-gateway-unwatch-global))
-
-(defun disco-root--normalize-id-list (ids &optional max-items)
-  "Normalize IDS as unique string list, optionally capped by MAX-ITEMS."
-  (let (result)
-    (dolist (it (or ids '()))
-      (let ((normalized (and it (format "%s" it))))
-        (when normalized
-          (cl-pushnew normalized result :test #'equal))))
-    (let ((ordered (nreverse result)))
-      (if (and (integerp max-items)
-               (> (length ordered) max-items))
-          (seq-take ordered max-items)
-        ordered))))
-
 
 (defun disco-root-toggle-sort-mode ()
   "Toggle root channel sort mode between activity and name."
@@ -3507,7 +3494,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                        (if (= left-unread right-unread)
                            (string-lessp (or left-id "") (or right-id ""))
                          (> left-unread right-unread)))))))
-        (disco-root--normalize-id-list
+        (disco-util-normalize-id-list
          (mapcar (lambda (guild)
                    (alist-get 'id guild))
                  (seq-take sorted max-guilds)))))))
@@ -3534,7 +3521,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                     (lambda (left right)
                       (> (disco-root--channel-activity-score left)
                          (disco-root--channel-activity-score right)))))
-        (disco-root--normalize-id-list
+        (disco-util-normalize-id-list
          (mapcar (lambda (channel)
                    (alist-get 'id channel))
                  (seq-take eligible limit)))))))

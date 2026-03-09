@@ -15,6 +15,7 @@
 (require 'ewoc)
 (require 'seq)
 (require 'subr-x)
+(require 'disco-util)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-gateway)
@@ -603,12 +604,6 @@ not jump between windows or reflow unpredictably."
           (and (window-live-p fallback-win)
                (disco-root--compute-fill-column buf fallback-win))
           (disco-root--compute-fill-column buf fallback-win)))))
-
-(defun disco-root--json-true-p (value)
-  "Return non-nil when VALUE semantically represents JSON true."
-  (or (eq value t)
-      (eq value 'true)
-      (equal value "true")))
 
 (defun disco-root--parse-decimal-integer (value)
   "Parse decimal integer VALUE and return integer or nil."
@@ -2064,7 +2059,7 @@ Return plist with keys:
   (condition-case err
       (let* ((resp (funcall source-fn parent-channel-id before disco-thread-archive-fetch-limit))
              (threads (or (alist-get 'threads resp) '()))
-             (has-more (disco-root--json-true-p (alist-get 'has_more resp)))
+             (has-more (disco-util-json-true-p (alist-get 'has_more resp)))
              (next-before (disco-root--archived-next-before-cursor source-name threads)))
         (when (and has-more (null threads))
           ;; Prevent endless pagination loops when server returns

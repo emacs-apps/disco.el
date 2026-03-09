@@ -4,10 +4,12 @@
 
 ;;; Commentary:
 
-;; Shared formatting helpers used across room/embed renderers.
+;; Shared low-level helpers used across disco modules.
 
 ;;; Code:
 
+(require 'cl-lib)
+(require 'seq)
 (require 'subr-x)
 (require 'time-date)
 
@@ -16,6 +18,22 @@
   (or (eq value t)
       (eq value 'true)
       (equal value "true")))
+
+(defun disco-util-normalize-id-list (ids &optional max-items)
+  "Normalize IDS into a list of unique string IDs.
+
+Preserve the original order of first appearance.  When MAX-ITEMS is non-nil,
+truncate to at most that many IDs."
+  (let (result)
+    (dolist (it (or ids '()))
+      (let ((normalized (and it (format "%s" it))))
+        (when normalized
+          (cl-pushnew normalized result :test #'equal))))
+    (let ((ordered (nreverse result)))
+      (if (and (integerp max-items)
+               (> (length ordered) max-items))
+          (seq-take ordered max-items)
+        ordered))))
 
 (defun disco-util-format-time (iso8601)
   "Format ISO8601 into a compact local string."

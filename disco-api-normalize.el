@@ -15,18 +15,12 @@
 (require 'disco-read-state)
 (require 'disco-util)
 
-(defun disco-api--json-true-p (value)
-  "Return non-nil if VALUE semantically represents JSON true."
-  (or (eq value t)
-      (equal value "true")
-      (eq value 'true)))
-
 (defun disco-api--query-bool-string (value)
   "Return VALUE as API query boolean string.
 
 JSON-like true values map to the true string and everything else maps to
 the false string."
-  (if (disco-api--json-true-p value) "true" "false"))
+  (if (disco-util-json-true-p value) "true" "false"))
 
 (defconst disco-api--thread-search-tag-setting-alist
   '((match-some . "match_some")
@@ -206,13 +200,13 @@ FIELD-NAME is used to describe the failing payload field."
             payload))
     (when (not (null mention-everyone))
       (push `(mention_everyone
-              . ,(if (disco-api--json-true-p mention-everyone) t :false))
+              . ,(if (disco-util-json-true-p mention-everyone) t :false))
             payload))
     (when has
       (push `(has . ,(disco-api--normalize-string-sequence has "message search has"))
             payload))
     (when (not (null pinned))
-      (push `(pinned . ,(if (disco-api--json-true-p pinned) t :false)) payload))
+      (push `(pinned . ,(if (disco-util-json-true-p pinned) t :false)) payload))
     (let ((sort-by-value (disco-api--message-search-sort-by-value sort-by)))
       (when sort-by-value
         (push `(sort_by . ,sort-by-value) payload)))
@@ -252,11 +246,11 @@ FIELD-NAME is used to describe the failing payload field."
                               "message search channel_ids"))
             payload))
     (when (not (null include-nsfw))
-      (push `(include_nsfw . ,(if (disco-api--json-true-p include-nsfw) t :false))
+      (push `(include_nsfw . ,(if (disco-util-json-true-p include-nsfw) t :false))
             payload))
     (when (not (null track-exact-total-hits))
       (push `(track_exact_total_hits
-              . ,(if (disco-api--json-true-p track-exact-total-hits) t :false))
+              . ,(if (disco-util-json-true-p track-exact-total-hits) t :false))
             payload))
     (nreverse payload)))
 
@@ -323,15 +317,15 @@ FIELD-NAME is used to describe the failing payload field."
     (when (and (stringp name) (not (string-empty-p name)))
       (push `(name . ,name) payload))
     (when (not (null archived))
-      (push `(archived . ,(if (disco-api--json-true-p archived) t :false)) payload))
+      (push `(archived . ,(if (disco-util-json-true-p archived) t :false)) payload))
     (when (not (null locked))
-      (push `(locked . ,(if (disco-api--json-true-p locked) t :false)) payload))
+      (push `(locked . ,(if (disco-util-json-true-p locked) t :false)) payload))
     (when auto-archive-duration
       (push `(auto_archive_duration . ,auto-archive-duration) payload))
     (when (not (null rate-limit-per-user))
       (push `(rate_limit_per_user . ,rate-limit-per-user) payload))
     (when (not (null invitable))
-      (push `(invitable . ,(if (disco-api--json-true-p invitable) t :false)) payload))
+      (push `(invitable . ,(if (disco-util-json-true-p invitable) t :false)) payload))
     (when (listp applied-tags)
       (push `(applied_tags . ,applied-tags) payload))
     (nreverse payload)))
@@ -532,7 +526,7 @@ When POLL is nil, return nil."
           (user-error "disco: poll duration must be 1..768 hours"))
         (push `(duration . ,(truncate duration)) payload))
       (when allow-multiselect-pair
-        (push `(allow_multiselect . ,(if (disco-api--json-true-p (cdr allow-multiselect-pair))
+        (push `(allow_multiselect . ,(if (disco-util-json-true-p (cdr allow-multiselect-pair))
                                          t
                                        :false))
               payload))
@@ -620,7 +614,7 @@ When POLL is nil, return nil."
                           "allowed_mentions.users"))
               payload))
       (when (not (null replied-user))
-        (push `(replied_user . ,(if (disco-api--json-true-p replied-user)
+        (push `(replied_user . ,(if (disco-util-json-true-p replied-user)
                                     t
                                   :false))
               payload))
@@ -735,7 +729,7 @@ REPLY-TO-MESSAGE-ID remains as backwards-compatible shorthand for replies."
                              "message_reference.guild_id"))
               payload))
       (when (not (null fail-if-not-exists))
-        (push `(fail_if_not_exists . ,(if (disco-api--json-true-p fail-if-not-exists)
+        (push `(fail_if_not_exists . ,(if (disco-util-json-true-p fail-if-not-exists)
                                           t
                                         :false))
               payload))
@@ -914,7 +908,7 @@ ALLOWED-MENTIONS is normalized using `disco-api--normalize-allowed-mentions'."
 
 `mention_count' implies `manual=true' following Discord read-state docs.
 When all fields are omitted, return `:empty-object'."
-  (let* ((manual-value (or (disco-api--json-true-p manual)
+  (let* ((manual-value (or (disco-util-json-true-p manual)
                            (not (null mention-count))))
          (normalized-token
           (disco-api--normalize-ack-token token))

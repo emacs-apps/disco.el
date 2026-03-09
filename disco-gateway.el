@@ -30,6 +30,7 @@
 (require 'disco-customize)
 (require 'disco-read-state)
 (require 'disco-state)
+(require 'disco-util)
 (require 'websocket)
 
 (defvar disco-gateway-enable-passive-guild-update-v2)
@@ -244,27 +245,12 @@ When FORCE is non-nil, resend subscriptions even when already tracked."
        (disco-gateway--maybe-subscribe-watched-channel channel-id force))
      disco-gateway--watch-counts)))
 
-(defun disco-gateway--normalize-id-list (ids &optional max-items)
-  "Normalize IDS into a list of unique snowflake-like strings.
-
-When MAX-ITEMS is non-nil, truncate to that many IDs."
-  (let (result)
-    (dolist (it (or ids '()))
-      (let ((normalized (and it (format "%s" it))))
-        (when normalized
-          (cl-pushnew normalized result :test #'equal))))
-    (let ((ordered (nreverse result)))
-      (if (and (integerp max-items)
-               (> (length ordered) max-items))
-          (seq-take ordered max-items)
-        ordered))))
-
 (defun disco-gateway-request-last-messages (guild-id channel-ids)
   "Request last messages for GUILD-ID and CHANNEL-IDS via Gateway op 34.
 
 CHANNEL-IDS is limited to 100 IDs per request by Discord."
   (let* ((normalized-guild-id (and guild-id (format "%s" guild-id)))
-         (normalized-channel-ids (disco-gateway--normalize-id-list channel-ids 100)))
+         (normalized-channel-ids (disco-util-normalize-id-list channel-ids 100)))
     (when (and normalized-guild-id normalized-channel-ids)
       (disco-gateway--send-op
        34
@@ -279,7 +265,7 @@ QUERY performs prefix search on username/nickname. LIMIT defaults to 25 when
 QUERY is non-nil. USER-IDS requests exact members and is limited to 100 IDs."
   (let* ((normalized-guild-id (and guild-id (format "%s" guild-id)))
          (normalized-query (and (stringp query) (string-trim query)))
-         (normalized-user-ids (disco-gateway--normalize-id-list user-ids 100))
+         (normalized-user-ids (disco-util-normalize-id-list user-ids 100))
          (payload `((guild_id . ,normalized-guild-id))))
     (unless normalized-guild-id
       (user-error "disco: guild id is required for member request"))
@@ -1055,7 +1041,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
 
 (defun disco-gateway--channel-unread-channel-ids (updates)
   "Extract channel IDs from channel unread UPDATES list."
-  (disco-gateway--normalize-id-list
+  (disco-util-normalize-id-list
    (mapcar (lambda (it)
              (and (listp it)
                   (alist-get 'id it)))
@@ -1070,7 +1056,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
          (voice-channel-ids
           (disco-state-apply-passive-voice-state-snapshot guild-id voice-states))
          (channel-ids
-          (disco-gateway--normalize-id-list
+          (disco-util-normalize-id-list
            (append (disco-gateway--channel-unread-channel-ids channels)
                    voice-channel-ids))))
     (disco-state-apply-channel-unread-updates channels)
@@ -1095,7 +1081,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
            updated-voice-states
            removed-voice-states))
          (channel-ids
-          (disco-gateway--normalize-id-list
+          (disco-util-normalize-id-list
            (append (disco-gateway--channel-unread-channel-ids updated-channels)
                    voice-channel-ids))))
     (disco-state-apply-channel-unread-updates updated-channels)
