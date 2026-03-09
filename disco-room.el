@@ -3900,7 +3900,7 @@ messages; everything else is a system event shown as a centered divider."
   (let* ((resolved (disco-room--thread-starter-reference-message msg))
          (text (and (listp resolved) (alist-get 'content resolved)))
          (display (and (stringp text)
-                       (disco-util-unescape-markdown-punctuation text))))
+                       (disco-markdown-unescape-punctuation text))))
     (when (and (stringp display) (not (string-empty-p (string-trim display))))
       (string-trim display))))
 
@@ -3938,7 +3938,7 @@ messages; everything else is a system event shown as a centered divider."
   "Return rendered system content for MSG type, or nil if not handled."
   (let* ((type (disco-msg-type msg))
          (author (disco-room--message-author msg))
-         (content (string-trim (disco-util-unescape-markdown-punctuation
+         (content (string-trim (disco-markdown-unescape-punctuation
                                 (or (alist-get 'content msg) ""))))
          (boost-times (and (not (string-empty-p content)) content))
          (guild-name (or (disco-room--message-guild-name msg) "this server")))

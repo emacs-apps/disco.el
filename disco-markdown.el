@@ -13,7 +13,6 @@
 (require 'seq)
 (require 'subr-x)
 (require 'thingatpt)
-(require 'disco-util)
 
 (declare-function markdown-link-url "markdown-mode" ())
 (defvar thing-at-point-url-regexp nil)
@@ -23,7 +22,7 @@
 
 `auto' prefers markdown-mode when available, then falls back to legacy
 punctuation unescaping.
-`legacy' always uses `disco-util-unescape-markdown-punctuation'.
+`legacy' always uses `disco-markdown-unescape-punctuation'.
 `internal' uses disco's built-in Discord-focused renderer.
 `markdown-mode' enforces markdown-mode backend when available; otherwise it
 falls back to `legacy'."
@@ -837,10 +836,74 @@ code spans and fenced code blocks."
         (filter-buffer-substring (point-min) (point-max) nil))))
      'markdown-mode)))
 
+(defun disco-markdown--char-run-length (text start char)
+  "Return contiguous CHAR run length in TEXT from START."
+  (let ((len (length text))
+        (pos start))
+    (while (and (< pos len)
+                (eq (aref text pos) char))
+      (setq pos (1+ pos)))
+    (- pos start)))
+
+(defun disco-markdown--punctuation-char-p (char)
+  "Return non-nil when CHAR is a Markdown-escapable punctuation char."
+  (and (characterp char)
+       (string-match-p "[[:punct:]]" (char-to-string char))))
+
+(defun disco-markdown-unescape-punctuation (text)
+  "Return TEXT with Markdown punctuation escapes removed.
+
+This follows a markdown-aware strategy: escapes are unwrapped only outside
+inline/code-fence spans, so code blocks preserve literal backslashes."
+  (if (not (stringp text))
+      text
+    (let ((len (length text))
+          (idx 0)
+          (parts nil)
+          (in-inline nil)
+          (inline-ticks 0)
+          (in-fence nil)
+          (fence-ticks 0))
+      (while (< idx len)
+        (let ((char (aref text idx)))
+          (if (eq char ?`)
+              (let* ((ticks (disco-markdown--char-run-length text idx ?`))
+                     (line-start (or (= idx 0)
+                                     (memq (aref text (1- idx)) '(?\n ?\r)))))
+                (cond
+                 (in-fence
+                  (when (and line-start (>= ticks fence-ticks))
+                    (setq in-fence nil)
+                    (setq fence-ticks 0)))
+                 (in-inline
+                  (when (= ticks inline-ticks)
+                    (setq in-inline nil)
+                    (setq inline-ticks 0)))
+                 ((and line-start (>= ticks 3))
+                  (setq in-fence t)
+                  (setq fence-ticks ticks))
+                 (t
+                  (setq in-inline t)
+                  (setq inline-ticks ticks)))
+                (push (substring text idx (+ idx ticks)) parts)
+                (setq idx (+ idx ticks)))
+            (if (and (not in-inline)
+                     (not in-fence)
+                     (eq char ?\\)
+                     (< (1+ idx) len)
+                     (disco-markdown--punctuation-char-p
+                      (aref text (1+ idx))))
+                (progn
+                  (push (string (aref text (1+ idx))) parts)
+                  (setq idx (+ idx 2)))
+              (push (string char) parts)
+              (setq idx (1+ idx))))))
+      (apply #'concat (nreverse parts)))))
+
 (defun disco-markdown--render-legacy (text)
   "Render TEXT with legacy markdown punctuation unescape behavior."
   (if (stringp text)
-      (disco-util-unescape-markdown-punctuation text)
+      (disco-markdown-unescape-punctuation text)
     ""))
 
 (defun disco-markdown--sequence-list (value)
