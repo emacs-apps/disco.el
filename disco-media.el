@@ -12,6 +12,7 @@
 (require 'seq)
 (require 'cl-lib)
 (require 'browse-url)
+(require 'url-handlers)
 (require 'plz)
 
 (defvar disco-room-show-attachment-image-previews)
@@ -19,6 +20,7 @@
 (defvar disco-room-attachment-preview-max-height)
 (defvar disco-room-attachment-preview-fetch-concurrency)
 (defvar disco-room-attachment-cache-directory)
+(defvar disco-room-attachment-download-directory)
 (defvar disco-room-video-player-command)
 
 (defconst disco-media--cache-extensions
@@ -43,7 +45,13 @@ Values are image objects or the symbol `:missing'.")
   "Last applied queue limit for `disco-media--attachment-preview-plz-queue'.")
 
 (defvar disco-media-preview-rerender-function nil
-  "Function called after media preview cache updates.")
+  "Compatibility callback used after media preview cache updates.")
+
+(defvar disco-media-rerender-function nil
+  "Function called after media state/cache updates.")
+
+(defvar disco-media--attachment-download-state-table (make-hash-table :test #'equal)
+  "Attachment download state keyed by stable attachment download key.")
 
 (defun disco-media-clear-preview-memory-cache ()
   "Clear in-memory preview image cache without touching disk files."
@@ -404,10 +412,12 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                            360))))
     (disco-media-preview-image-from-file file max-width max-height)))
 
-(defun disco-media--notify-preview-cache-updated ()
-  "Notify UI after preview cache updates."
-  (when (functionp disco-media-preview-rerender-function)
-    (funcall disco-media-preview-rerender-function)))
+(defun disco-media--notify-state-updated ()
+  "Notify UI after media state/cache updates."
+  (let ((callback (or disco-media-rerender-function
+                      disco-media-preview-rerender-function)))
+    (when (functionp callback)
+      (funcall callback))))
 
 (defun disco-media--attachment-preview-complete-fetch (cache-key image &optional target-file)
   "Finalize one attachment preview fetch for CACHE-KEY with IMAGE."
@@ -415,7 +425,7 @@ VALUE should be nil for uncapped mode or a non-negative integer."
     (ignore-errors (delete-file target-file)))
   (puthash cache-key (or image :missing) disco-media--attachment-preview-image-cache)
   (remhash cache-key disco-media--attachment-preview-fetching)
-  (disco-media--notify-preview-cache-updated))
+  (disco-media--notify-state-updated))
 
 (defun disco-media--bytes-prefix-p (bytes offset prefix-bytes)
   "Return non-nil when BYTES at OFFSET starts with PREFIX-BYTES list."
@@ -625,6 +635,359 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                 (disco-media--start-video-preview-fetch cache-key url cache-base))
               nil)
              (t nil)))))))))
+
+(defun disco-media-attachment-ephemeral-p (attachment)
+  "Return non-nil when ATTACHMENT is ephemeral."
+  (let ((value (alist-get 'ephemeral attachment)))
+    (and value (not (eq value :false)))))
+
+(defun disco-media-attachment-kind (attachment)
+  "Return normalized media kind symbol for ATTACHMENT.
+
+Return value is one of `photo', `video', `audio' or `document'."
+  (cond
+   ((disco-media--attachment-image-p attachment) 'photo)
+   ((disco-media--attachment-video-p attachment) 'video)
+   ((or (string-prefix-p "audio/" (downcase (or (alist-get 'content_type attachment) "")))
+        (numberp (alist-get 'duration_secs attachment))
+        (stringp (alist-get 'waveform attachment)))
+    'audio)
+   (t 'document)))
+
+(defun disco-media-attachment-display-name (attachment)
+  "Return best display name for ATTACHMENT."
+  (or (and (stringp (alist-get 'title attachment))
+           (not (string-empty-p (string-trim (alist-get 'title attachment))))
+           (string-trim (alist-get 'title attachment)))
+      (and (stringp (alist-get 'filename attachment))
+           (not (string-empty-p (string-trim (alist-get 'filename attachment))))
+           (string-trim (alist-get 'filename attachment)))
+      (let ((id (alist-get 'id attachment)))
+        (if (and id (not (string-empty-p (format "%s" id))))
+            (format "attachment-%s" id)
+          "attachment.bin"))))
+
+(defun disco-media-attachment-size-label (attachment)
+  "Return human-readable size label for ATTACHMENT, or nil."
+  (let ((size (alist-get 'size attachment)))
+    (when (numberp size)
+      (file-size-human-readable size))))
+
+(defun disco-media-attachment-dimensions-label (attachment)
+  "Return WIDTHxHEIGHT label for ATTACHMENT, or nil."
+  (let ((width (alist-get 'width attachment))
+        (height (alist-get 'height attachment)))
+    (when (and (numberp width) (numberp height))
+      (format "%dx%d" width height))))
+
+(defun disco-media-attachment-duration-label (attachment)
+  "Return human-readable duration label for ATTACHMENT, or nil."
+  (let ((seconds (alist-get 'duration_secs attachment)))
+    (when (numberp seconds)
+      (let* ((total (max 0 (floor seconds)))
+             (hours (/ total 3600))
+             (minutes (% (/ total 60) 60))
+             (secs (% total 60)))
+        (if (> hours 0)
+            (format "%d:%02d:%02d" hours minutes secs)
+          (format "%d:%02d" minutes secs))))))
+
+(defun disco-media-attachment-content-type-label (attachment)
+  "Return media type label for ATTACHMENT, or nil."
+  (let ((content-type (alist-get 'content_type attachment)))
+    (when (and (stringp content-type)
+               (not (string-empty-p (string-trim content-type))))
+      (string-trim content-type))))
+
+(defun disco-media-attachment-summary (attachment)
+  "Return compact one-line summary string for ATTACHMENT."
+  (let* ((kind (pcase (disco-media-attachment-kind attachment)
+                 ('photo "img")
+                 ('video "video")
+                 ('audio "audio")
+                 (_ "file")))
+         (name (disco-media-attachment-display-name attachment))
+         (details (delq nil (list (disco-media-attachment-size-label attachment)
+                                  (disco-media-attachment-dimensions-label attachment)
+                                  (disco-media-attachment-duration-label attachment))))
+         (detail-text (if details
+                          (format " (%s)" (string-join details ", "))
+                        "")))
+    (format "[%s] %s%s" kind name detail-text)))
+
+(defun disco-media-attachment-meta-line (attachment &optional include-content-type)
+  "Return verbose metadata line for ATTACHMENT.
+
+When INCLUDE-CONTENT-TYPE is non-nil, include the attachment media type when
+available."
+  (let ((parts nil))
+    (when include-content-type
+      (when-let* ((content-type
+                   (disco-media-attachment-content-type-label attachment)))
+        (push (format "type=%s" content-type) parts)))
+    (when-let* ((size (disco-media-attachment-size-label attachment)))
+      (push (format "size=%s" size) parts))
+    (when-let* ((dims (disco-media-attachment-dimensions-label attachment)))
+      (push (format "dims=%s" dims) parts))
+    (when-let* ((duration (disco-media-attachment-duration-label attachment)))
+      (push (format "duration=%s" duration) parts))
+    (when (disco-media-attachment-ephemeral-p attachment)
+      (push "ephemeral" parts))
+    (if parts
+        (string-join (nreverse parts) "  ")
+      "size=n/a")))
+
+(defun disco-media--sanitize-filename (filename)
+  "Return filesystem-safe variant of FILENAME."
+  (replace-regexp-in-string
+   "[[:cntrl:]/\\]+"
+   "_"
+   (or filename "attachment.bin")))
+
+(defun disco-media-attachment-default-save-name (attachment)
+  "Return default filename for saving ATTACHMENT locally."
+  (or (and (stringp (alist-get 'filename attachment))
+           (not (string-empty-p (alist-get 'filename attachment)))
+           (alist-get 'filename attachment))
+      (let ((id (alist-get 'id attachment)))
+        (if (and id (not (string-empty-p (format "%s" id))))
+            (format "attachment-%s" id)
+          "attachment.bin"))))
+
+(defun disco-media-attachment-download-key (attachment)
+  "Return stable download-state key for ATTACHMENT."
+  (format "%s"
+          (or (alist-get 'id attachment)
+              (disco-media-attachment-download-url attachment)
+              (alist-get 'filename attachment)
+              (sxhash attachment))))
+
+(defun disco-media-attachment-download-path (attachment)
+  "Return default local download path for ATTACHMENT."
+  (let* ((key (disco-media-attachment-download-key attachment))
+         (safe-name (disco-media--sanitize-filename
+                     (disco-media-attachment-default-save-name attachment))))
+    (expand-file-name
+     (format "%s-%s" (substring (md5 key) 0 10) safe-name)
+     disco-room-attachment-download-directory)))
+
+(defun disco-media-attachment-download-state (attachment)
+  "Return normalized download state plist for ATTACHMENT."
+  (let* ((key (disco-media-attachment-download-key attachment))
+         (entry (copy-tree (or (gethash key disco-media--attachment-download-state-table) '())))
+         (path (or (plist-get entry :path)
+                   (disco-media-attachment-download-path attachment)))
+         (status (plist-get entry :status)))
+    (setq entry (plist-put entry :path path))
+    (when (and (eq status 'downloaded) (not (file-exists-p path)))
+      (setq entry (plist-put entry :status 'not-downloaded))
+      (setq entry (plist-put entry :error nil))
+      (setq status 'not-downloaded))
+    (when (and (not (eq status 'downloading))
+               (file-exists-p path))
+      (setq entry (plist-put entry :status 'downloaded))
+      (setq entry (plist-put entry :error nil)))
+    (unless (plist-get entry :status)
+      (setq entry (plist-put entry :status (if (file-exists-p path)
+                                               'downloaded
+                                             'not-downloaded))))
+    (puthash key entry disco-media--attachment-download-state-table)
+    entry))
+
+(defun disco-media--attachment-error-message (err)
+  "Return user-facing error message extracted from async ERR payload."
+  (or (and (listp err) (plist-get err :message))
+      (and (listp err)
+           (plist-get err :status)
+           (format "HTTP %s" (plist-get err :status)))
+      (condition-case _
+          (error-message-string err)
+        (error
+         (format "%S" err)))))
+
+(defun disco-media-start-attachment-download (attachment &optional open-after)
+  "Start asynchronous default-location download for ATTACHMENT.
+
+When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
+  (let* ((url (disco-media-attachment-download-url attachment))
+         (key (disco-media-attachment-download-key attachment))
+         (entry (disco-media-attachment-download-state attachment))
+         (path (plist-get entry :path))
+         (status (plist-get entry :status))
+         (expected-size (alist-get 'size attachment)))
+    (unless (disco-media-url-present-p url)
+      (user-error "disco: attachment has no downloadable URL"))
+    (when (eq status 'downloading)
+      (user-error "disco: attachment download already in progress"))
+    (make-directory (or (file-name-directory path)
+                        disco-room-attachment-download-directory)
+                    t)
+    (let ((process
+           (plz 'get
+                url
+                :as 'binary
+                :noquery t
+                :then
+                (lambda (data)
+                  (let ((raw-bytes (if (multibyte-string-p data)
+                                       (encode-coding-string data 'binary)
+                                     data))
+                        (current (copy-tree (or (gethash key disco-media--attachment-download-state-table)
+                                                '()))))
+                    (if (and (numberp expected-size)
+                             (> expected-size 0)
+                             (<= (string-bytes raw-bytes) 0))
+                        (condition-case fallback-err
+                            (progn
+                              (url-copy-file url path t)
+                              (let ((actual-size (nth 7 (file-attributes path))))
+                                (when (and (numberp expected-size)
+                                           (> expected-size 0)
+                                           (numberp actual-size)
+                                           (<= actual-size 0))
+                                  (error "empty download body (expected %d bytes)" expected-size)))
+                              (setq current (plist-put current :status 'downloaded))
+                              (setq current (plist-put current :path path))
+                              (setq current (plist-put current :process nil))
+                              (setq current (plist-put current :cancel-requested nil))
+                              (setq current (plist-put current :error nil))
+                              (puthash key current disco-media--attachment-download-state-table)
+                              (disco-media--notify-state-updated)
+                              (message "disco: downloaded attachment -> %s (url fallback)" path)
+                              (when open-after
+                                (find-file path)))
+                          (error
+                           (setq current (plist-put current :status 'error))
+                           (setq current (plist-put current :process nil))
+                           (setq current (plist-put current :cancel-requested nil))
+                           (setq current (plist-put current :error
+                                                    (disco-media--attachment-error-message fallback-err)))
+                           (puthash key current disco-media--attachment-download-state-table)
+                           (disco-media--notify-state-updated)
+                           (message "disco: attachment download failed: %s"
+                                    (plist-get current :error))))
+                      (with-temp-buffer
+                        (set-buffer-multibyte nil)
+                        (insert raw-bytes)
+                        (let ((coding-system-for-write 'binary))
+                          (write-region (point-min) (point-max) path nil 'silent)))
+                      (setq current (plist-put current :status 'downloaded))
+                      (setq current (plist-put current :path path))
+                      (setq current (plist-put current :process nil))
+                      (setq current (plist-put current :cancel-requested nil))
+                      (setq current (plist-put current :error nil))
+                      (puthash key current disco-media--attachment-download-state-table)
+                      (disco-media--notify-state-updated)
+                      (message "disco: downloaded attachment -> %s" path)
+                      (when open-after
+                        (find-file path)))))
+                :else
+                (lambda (err)
+                  (let* ((current (copy-tree (or (gethash key disco-media--attachment-download-state-table)
+                                                '())))
+                         (cancel-requested (plist-get current :cancel-requested)))
+                    (setq current (plist-put current :process nil))
+                    (setq current (plist-put current :cancel-requested nil))
+                    (if cancel-requested
+                        (progn
+                          (setq current (plist-put current :status 'not-downloaded))
+                          (setq current (plist-put current :error nil))
+                          (puthash key current disco-media--attachment-download-state-table)
+                          (disco-media--notify-state-updated)
+                          (message "disco: attachment download canceled"))
+                      (condition-case fallback-err
+                          (progn
+                            (url-copy-file url path t)
+                            (setq current (plist-put current :status 'downloaded))
+                            (setq current (plist-put current :path path))
+                            (setq current (plist-put current :error nil))
+                            (puthash key current disco-media--attachment-download-state-table)
+                            (disco-media--notify-state-updated)
+                            (message "disco: downloaded attachment -> %s (url fallback)" path)
+                            (when open-after
+                              (find-file path)))
+                        (error
+                         (setq current (plist-put current :status 'error))
+                         (setq current (plist-put current :error
+                                                  (or (disco-media--attachment-error-message err)
+                                                      (disco-media--attachment-error-message fallback-err))))
+                         (puthash key current disco-media--attachment-download-state-table)
+                         (disco-media--notify-state-updated)
+                         (message "disco: attachment download failed: %s"
+                                  (plist-get current :error))))))))))
+      (setq entry (plist-put entry :status 'downloading))
+      (setq entry (plist-put entry :process process))
+      (setq entry (plist-put entry :cancel-requested nil))
+      (setq entry (plist-put entry :error nil))
+      (puthash key entry disco-media--attachment-download-state-table)
+      (disco-media--notify-state-updated)
+      (message "disco: downloading attachment %s"
+               (disco-media-attachment-display-name attachment)))))
+
+(defun disco-media-cancel-attachment-download (attachment)
+  "Cancel active asynchronous download for ATTACHMENT."
+  (let* ((key (disco-media-attachment-download-key attachment))
+         (entry (copy-tree (or (gethash key disco-media--attachment-download-state-table) '())))
+         (process (plist-get entry :process))
+         (status (plist-get entry :status)))
+    (unless (eq status 'downloading)
+      (user-error "disco: attachment is not downloading"))
+    (setq entry (plist-put entry :cancel-requested t))
+    (puthash key entry disco-media--attachment-download-state-table)
+    (when (process-live-p process)
+      (ignore-errors (delete-process process)))
+    (message "disco: canceling attachment download")))
+
+(defun disco-media-open-downloaded-attachment (attachment)
+  "Open local downloaded file for ATTACHMENT."
+  (let* ((entry (disco-media-attachment-download-state attachment))
+         (path (plist-get entry :path)))
+    (unless (and (stringp path) (file-exists-p path))
+      (user-error "disco: attachment file is not downloaded yet"))
+    (find-file path)))
+
+(defun disco-media-play-attachment-video (attachment)
+  "Play ATTACHMENT video preferring local file when available."
+  (let* ((entry (disco-media-attachment-download-state attachment))
+         (path (plist-get entry :path))
+         (url (disco-media-attachment-download-url attachment)))
+    (cond
+     ((and (stringp path) (file-exists-p path))
+      (disco-media-play-video-file path))
+     ((disco-media-url-present-p url)
+      (disco-media-play-video-url url))
+     (t
+      (user-error "disco: video attachment has no playable source")))))
+
+(defun disco-media-download-attachment (attachment &optional target-path)
+  "Download ATTACHMENT to TARGET-PATH.
+
+When TARGET-PATH is nil, prompt interactively for destination path."
+  (interactive)
+  (let* ((url (disco-media-attachment-download-url attachment))
+         (download-state (disco-media-attachment-download-state attachment))
+         (cached-path (plist-get download-state :path))
+         (has-cached (and (stringp cached-path) (file-exists-p cached-path)))
+         (has-url (disco-media-url-present-p url))
+         (default-name (disco-media-attachment-default-save-name attachment))
+         (target (or target-path
+                     (read-file-name "Save attachment as: "
+                                     nil
+                                     default-name
+                                     nil
+                                     default-name))))
+    (unless (or has-cached has-url)
+      (user-error "disco: attachment has neither local cache nor downloadable URL"))
+    (condition-case err
+        (progn
+          (make-directory (or (file-name-directory target) default-directory) t)
+          (if has-cached
+              (copy-file cached-path target t)
+            (url-copy-file url target t))
+          (message "disco: downloaded attachment -> %s" target))
+      (error
+       (user-error "disco: attachment download failed: %s"
+                   (disco-media--attachment-error-message err))))))
 
 (provide 'disco-media)
 

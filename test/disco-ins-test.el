@@ -1,6 +1,7 @@
 ;;; disco-ins-test.el --- Tests for disco-ins helpers -*- lexical-binding: t; -*-
 
 (require 'ert)
+(require 'cl-lib)
 
 (add-to-list 'load-path
              (expand-file-name ".."
@@ -119,6 +120,117 @@
       (should (eq 'bold (get-text-property (point) 'face)))
       (search-forward "https://example.invalid/doc.txt")
       (should (eq 'shadow (get-text-property (match-beginning 0) 'face))))))
+
+
+(ert-deftest disco-ins-insert-attachment-document-renders-header-and-transfer-buttons ()
+  (with-temp-buffer
+    (let (downloaded saved)
+      (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+                 (lambda (_attachment)
+                   '(:status not-downloaded :path "/tmp/doc.txt")))
+                ((symbol-function 'disco-media-start-attachment-download)
+                 (lambda (_attachment &optional _open-after)
+                   (setq downloaded t)))
+                ((symbol-function 'disco-media-download-attachment)
+                 (lambda (_attachment &optional _target-path)
+                   (setq saved t))))
+        (disco-ins-insert-attachment-document
+         '((filename . "doc.txt")
+           (size . 128)
+           (url . "https://example.invalid/doc.txt"))
+         :prefix "    "
+         :title-face 'bold
+         :meta-face 'shadow
+         :action-face 'link)
+        (should (string-match-p (regexp-quote "[file] doc.txt") (buffer-string)))
+        (goto-char (point-min))
+        (search-forward "doc.txt")
+        (let ((pos (- (point) (length "doc.txt"))))
+          (should (equal "Open attachment URL"
+                         (get-text-property pos 'help-echo))))
+        (goto-char (point-min))
+        (search-forward "[Download]")
+        (button-activate (button-at (match-beginning 0)))
+        (goto-char (point-min))
+        (search-forward "[Save As]")
+        (button-activate (button-at (match-beginning 0)))
+        (should downloaded)
+        (should saved)))))
+
+(ert-deftest disco-ins-insert-attachment-photo-renders-meta-preview-caption-and-url ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+               (lambda (_attachment)
+                 '(:status not-downloaded :path "/tmp/cat.png")))
+              ((symbol-function 'disco-media-attachment-preview-image)
+               (lambda (_attachment)
+                 :fake-preview))
+              ((symbol-function 'disco-media-insert-image-slices)
+               (lambda (_image &optional _url _prefix _fallback)
+                 (insert "[image-preview]"))))
+      (disco-ins-insert-attachment-photo
+       '((filename . "cat.png")
+         (size . 4096)
+         (width . 640)
+         (height . 480)
+         (description . "nice cat")
+         (url . "https://example.invalid/cat.png")
+         (proxy_url . "https://proxy.example.invalid/cat.png"))
+       :prefix "    "
+       :title-face 'bold
+       :meta-face 'shadow
+       :action-face 'link
+       :show-url t)
+      (should (string-match-p (regexp-quote "[image] cat.png") (buffer-string)))
+      (should (string-match-p (regexp-quote "640x480") (buffer-string)))
+      (should (string-match-p (regexp-quote "[image-preview]") (buffer-string)))
+      (should (string-match-p (regexp-quote "caption: nice cat") (buffer-string)))
+      (should (string-match-p (regexp-quote "https://example.invalid/cat.png")
+                              (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "https://example.invalid/cat.png")
+      (let ((pos (match-beginning 0)))
+        (should (stringp (get-text-property pos 'help-echo)))))))
+
+(ert-deftest disco-ins-insert-attachment-video-renders-play-button-and-playable-preview ()
+  (let ((video-file (make-temp-file "disco-ins-video" nil ".mp4"))
+        played)
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+                     (lambda (_attachment)
+                       `(:status downloaded :path ,video-file)))
+                    ((symbol-function 'disco-media-attachment-preview-image)
+                     (lambda (_attachment)
+                       :fake-preview))
+                    ((symbol-function 'disco-media-insert-image-slices)
+                     (lambda (_image &optional _url _prefix _fallback)
+                       (insert "[video-preview]")))
+                    ((symbol-function 'disco-media-play-attachment-video)
+                     (lambda (_attachment)
+                       (setq played t))))
+            (disco-ins-insert-attachment-video
+             '((filename . "clip.mp4")
+               (size . 8192)
+               (width . 1280)
+               (height . 720)
+               (url . "https://example.invalid/clip.mp4"))
+             :prefix "    "
+             :title-face 'bold
+             :meta-face 'shadow
+             :action-face 'link)
+            (should (string-match-p (regexp-quote "[video] clip.mp4") (buffer-string)))
+            (should (string-match-p (regexp-quote "[video-preview]") (buffer-string)))
+            (goto-char (point-min))
+            (search-forward "[Play]")
+            (button-activate (button-at (match-beginning 0)))
+            (should played)
+            (goto-char (point-min))
+            (search-forward "[video-preview]")
+            (let ((pos (match-beginning 0)))
+              (should (string-match-p "Play video"
+                                      (or (get-text-property pos 'help-echo) ""))))))
+      (ignore-errors (delete-file video-file)))))
 
 (provide 'disco-ins-test)
 

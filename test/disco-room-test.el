@@ -1194,6 +1194,47 @@
       (should (string-match-p (regexp-quote "https://example.invalid/doc.txt")
                               (buffer-string))))))
 
+(ert-deftest disco-room-insert-message-attachments-dispatches-rich-attachments-by-kind ()
+  (with-temp-buffer
+    (let ((disco-room-use-rich-attachment-cards t)
+          (seen nil))
+      (cl-letf (((symbol-function 'disco-ins-insert-attachment-photo)
+                 (lambda (_attachment &rest _args)
+                   (push 'photo seen)
+                   (insert "[photo-block]
+")))
+                ((symbol-function 'disco-ins-insert-attachment-video)
+                 (lambda (_attachment &rest _args)
+                   (push 'video seen)
+                   (insert "[video-block]
+")))
+                ((symbol-function 'disco-ins-insert-attachment-document)
+                 (lambda (_attachment &rest _args)
+                   (push 'document seen)
+                   (insert "[document-block]
+"))))
+        (disco-room--insert-message-attachments
+         '((attachments . (((filename . "cat.png"))
+                           ((filename . "clip.mp4"))
+                           ((filename . "doc.txt"))))))
+        (should (equal '(photo video document) (nreverse seen)))
+        (should (string-match-p (regexp-quote "[photo-block]") (buffer-string)))
+        (should (string-match-p (regexp-quote "[video-block]") (buffer-string)))
+        (should (string-match-p (regexp-quote "[document-block]") (buffer-string)))))))
+
+(ert-deftest disco-room-insert-message-attachments-rich-path-falls-back-on-render-error ()
+  (with-temp-buffer
+    (let ((disco-room-use-rich-attachment-cards t))
+      (cl-letf (((symbol-function 'disco-ins-insert-attachment-photo)
+                 (lambda (&rest _args)
+                   (error "boom"))))
+        (disco-room--insert-message-attachments
+         '((attachments . (((filename . "cat.png")
+                            (url . "https://example.invalid/cat.png"))))) )
+        (should (string-match-p (regexp-quote "[file] cat.png [render fallback]")
+                                (buffer-string)))))))
+
+
 (ert-deftest disco-room-composer-visible-p-hides-archived-thread ()
   (with-temp-buffer
     (disco-room-mode)

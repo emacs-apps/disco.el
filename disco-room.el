@@ -128,12 +128,6 @@ Values are either image objects or the symbol `:missing'.")
 (defvar disco-room--forward-guild-icon-fetching (make-hash-table :test #'equal)
   "Global set of forwarded-source guild icon cache keys currently fetching.")
 
-(defvar disco-room--attachment-download-state-table (make-hash-table :test #'equal)
-  "Global attachment download state keyed by attachment download key.
-
-Each value is a plist carrying :status, :path, :process, :error and
-:cancel-requested flags.")
-
 (defvar disco-room--avatar-fetch-budget nil
   "Dynamic cap for number of avatar fetches started in current render pass.")
 
@@ -3132,6 +3126,7 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
       (when visual-fill-mode-fn
         (funcall visual-fill-mode-fn -1)))))
 
+(setq disco-media-rerender-function #'disco-room--rerender-open-rooms)
 (setq disco-media-preview-rerender-function #'disco-room--rerender-open-rooms)
 
 (defun disco-room--start-avatar-fetch (cache-key url cache-base)
@@ -3566,467 +3561,76 @@ Returns empty string when no avatar is available."
 
 (defun disco-room--attachment-meta-line (attachment)
   "Return compact metadata line for ATTACHMENT object."
-  (let* ((content-type (or (alist-get 'content_type attachment) "unknown"))
-         (size (alist-get 'size attachment))
-         (width (alist-get 'width attachment))
-         (height (alist-get 'height attachment))
-         (size-text (if (numberp size) (file-size-human-readable size) "n/a"))
-         (dims-text (if (and (numberp width) (numberp height))
-                        (format "%dx%d" width height)
-                      "-")))
-    (format "type=%s  size=%s  dims=%s" content-type size-text dims-text)))
+  (disco-media-attachment-meta-line attachment t))
 
 (defun disco-room--attachment-default-save-name (attachment)
   "Return default filename for saving ATTACHMENT locally."
-  (or (alist-get 'filename attachment)
-      (let ((id (alist-get 'id attachment)))
-        (if (and id (not (string-empty-p (format "%s" id))))
-            (format "attachment-%s" id)
-          "attachment.bin"))))
-
-(defun disco-room--sanitize-filename (filename)
-  "Return filesystem-safe variant of FILENAME."
-  (replace-regexp-in-string
-   "[[:cntrl:]/\\\\]+"
-   "_"
-   (or filename "attachment.bin")))
+  (disco-media-attachment-default-save-name attachment))
 
 (defun disco-room--attachment-download-key (attachment)
   "Return stable download state key for ATTACHMENT."
-  (format "%s"
-          (or (alist-get 'id attachment)
-              (disco-media-attachment-download-url attachment)
-              (alist-get 'filename attachment)
-              (sxhash attachment))))
+  (disco-media-attachment-download-key attachment))
 
 (defun disco-room--attachment-download-path (attachment)
   "Return default local download path for ATTACHMENT."
-  (let* ((key (disco-room--attachment-download-key attachment))
-         (safe-name (disco-room--sanitize-filename
-                     (disco-room--attachment-default-save-name attachment))))
-    (expand-file-name
-     (format "%s-%s" (substring (md5 key) 0 10) safe-name)
-     disco-room-attachment-download-directory)))
+  (disco-media-attachment-download-path attachment))
 
 (defun disco-room--attachment-download-state (attachment)
   "Return normalized download state plist for ATTACHMENT."
-  (let* ((key (disco-room--attachment-download-key attachment))
-         (entry (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
-         (path (or (plist-get entry :path)
-                   (disco-room--attachment-download-path attachment)))
-         (status (plist-get entry :status)))
-    (setq entry (plist-put entry :path path))
-    (when (and (eq status 'downloaded) (not (file-exists-p path)))
-      (setq entry (plist-put entry :status 'not-downloaded))
-      (setq entry (plist-put entry :error nil))
-      (setq status 'not-downloaded))
-    (when (and (not (eq status 'downloading))
-               (file-exists-p path))
-      (setq entry (plist-put entry :status 'downloaded))
-      (setq entry (plist-put entry :error nil)))
-    (unless (plist-get entry :status)
-      (setq entry (plist-put entry :status (if (file-exists-p path)
-                                               'downloaded
-                                             'not-downloaded))))
-    (puthash key entry disco-room--attachment-download-state-table)
-    entry))
+  (disco-media-attachment-download-state attachment))
 
 (defun disco-room--start-attachment-download (attachment &optional open-after)
   "Start asynchronous default-location download for ATTACHMENT.
 
 When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
-  (let* ((url (disco-media-attachment-download-url attachment))
-         (key (disco-room--attachment-download-key attachment))
-         (entry (disco-room--attachment-download-state attachment))
-         (path (plist-get entry :path))
-         (status (plist-get entry :status))
-         (expected-size (alist-get 'size attachment)))
-    (unless (and (stringp url) (not (string-empty-p url)))
-      (user-error "disco: attachment has no downloadable URL"))
-    (when (eq status 'downloading)
-      (user-error "disco: attachment download already in progress"))
-    (make-directory (or (file-name-directory path) disco-room-attachment-download-directory) t)
-    (let ((process
-           (plz 'get
-                url
-                :as 'binary
-                :noquery t
-                :then
-                (lambda (data)
-                  (let ((raw-bytes (if (multibyte-string-p data)
-                                       (encode-coding-string data 'binary)
-                                     data))
-                        (current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '()))))
-                    (if (and (numberp expected-size)
-                             (> expected-size 0)
-                             (<= (string-bytes raw-bytes) 0))
-                        (condition-case fallback-err
-                            (progn
-                              (url-copy-file url path t)
-                              (let ((actual-size (nth 7 (file-attributes path))))
-                                (when (and (numberp expected-size)
-                                           (> expected-size 0)
-                                           (numberp actual-size)
-                                           (<= actual-size 0))
-                                  (error "empty download body (expected %d bytes)" expected-size)))
-                              (setq current (plist-put current :status 'downloaded))
-                              (setq current (plist-put current :path path))
-                              (setq current (plist-put current :process nil))
-                              (setq current (plist-put current :cancel-requested nil))
-                              (setq current (plist-put current :error nil))
-                              (puthash key current disco-room--attachment-download-state-table)
-                              (disco-room--rerender-open-rooms)
-                              (message "disco: downloaded attachment -> %s (url fallback)" path)
-                              (when open-after
-                                (find-file path)))
-                          (error
-                           (setq current (plist-put current :status 'error))
-                           (setq current (plist-put current :process nil))
-                           (setq current (plist-put current :cancel-requested nil))
-                           (setq current (plist-put current :error
-                                                    (disco-room--async-error-message fallback-err)))
-                           (puthash key current disco-room--attachment-download-state-table)
-                           (disco-room--rerender-open-rooms)
-                           (message "disco: attachment download failed: %s"
-                                    (or (plist-get current :error) "unknown error"))))
-                      (progn
-                        (with-temp-buffer
-                          (set-buffer-multibyte nil)
-                          (insert raw-bytes)
-                          (let ((coding-system-for-write 'binary))
-                            (write-region (point-min) (point-max) path nil 'silent)))
-                        (setq current (plist-put current :status 'downloaded))
-                        (setq current (plist-put current :path path))
-                        (setq current (plist-put current :process nil))
-                        (setq current (plist-put current :cancel-requested nil))
-                        (setq current (plist-put current :error nil))
-                        (puthash key current disco-room--attachment-download-state-table)
-                        (disco-room--rerender-open-rooms)
-                        (message "disco: downloaded attachment -> %s" path)
-                        (when open-after
-                          (find-file path)))))
-                  :else
-                  (lambda (err)
-                    (let* ((current (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
-                           (cancel-requested (disco-util-json-true-p (plist-get current :cancel-requested)))
-                           (err-msg (unless cancel-requested
-                                      (disco-room--async-error-message err))))
-                      (if cancel-requested
-                          (progn
-                            (setq current (plist-put current :status 'canceled))
-                            (setq current (plist-put current :process nil))
-                            (setq current (plist-put current :cancel-requested nil))
-                            (setq current (plist-put current :error nil))
-                            (puthash key current disco-room--attachment-download-state-table)
-                            (disco-room--rerender-open-rooms)
-                            (message "disco: attachment download canceled"))
-                        (condition-case fallback-err
-                            (progn
-                              (url-copy-file url path t)
-                              (setq current (plist-put current :status 'downloaded))
-                              (setq current (plist-put current :path path))
-                              (setq current (plist-put current :process nil))
-                              (setq current (plist-put current :cancel-requested nil))
-                              (setq current (plist-put current :error nil))
-                              (puthash key current disco-room--attachment-download-state-table)
-                              (disco-room--rerender-open-rooms)
-                              (message "disco: downloaded attachment -> %s (url fallback)" path)
-                              (when open-after
-                                (find-file path)))
-                          (error
-                           (setq current (plist-put current :status 'error))
-                           (setq current (plist-put current :process nil))
-                           (setq current (plist-put current :cancel-requested nil))
-                           (setq current (plist-put current :error
-                                                    (or err-msg
-                                                        (disco-room--async-error-message fallback-err))))
-                           (puthash key current disco-room--attachment-download-state-table)
-                           (disco-room--rerender-open-rooms)
-                           (message "disco: attachment download failed: %s"
-                                    (or (plist-get current :error) "unknown error")))))))))))
-      (setq entry (plist-put entry :status 'downloading))
-      (setq entry (plist-put entry :process process))
-      (setq entry (plist-put entry :cancel-requested nil))
-      (setq entry (plist-put entry :error nil))
-      (puthash key entry disco-room--attachment-download-state-table)
-      (disco-room--rerender-open-rooms)
-      (message "disco: downloading attachment %s"
-               (or (alist-get 'filename attachment)
-                   (alist-get 'id attachment)
-                   key)))))
+  (disco-media-start-attachment-download attachment open-after))
 
 (defun disco-room--cancel-attachment-download (attachment)
   "Cancel active asynchronous download for ATTACHMENT."
-  (let* ((key (disco-room--attachment-download-key attachment))
-         (entry (copy-tree (or (gethash key disco-room--attachment-download-state-table) '())))
-         (status (plist-get entry :status))
-         (process (plist-get entry :process)))
-    (unless (eq status 'downloading)
-      (user-error "disco: attachment is not downloading"))
-    (setq entry (plist-put entry :cancel-requested t))
-    (puthash key entry disco-room--attachment-download-state-table)
-    (when (and (processp process) (process-live-p process))
-      (kill-process process))
-    (disco-room--rerender-open-rooms)
-    (message "disco: canceling attachment download")))
+  (disco-media-cancel-attachment-download attachment))
 
 (defun disco-room--open-downloaded-attachment (attachment)
   "Open local downloaded file for ATTACHMENT."
-  (let* ((entry (disco-room--attachment-download-state attachment))
-         (path (plist-get entry :path)))
-    (unless (and (stringp path) (file-exists-p path))
-      (user-error "disco: attachment file is not downloaded yet"))
-    (find-file path)))
+  (disco-media-open-downloaded-attachment attachment))
 
 (defun disco-room--play-attachment-video (attachment)
   "Play ATTACHMENT video preferring local file when available."
-  (let* ((entry (disco-room--attachment-download-state attachment))
-         (path (plist-get entry :path))
-         (url (disco-media-attachment-download-url attachment)))
-    (cond
-     ((and (stringp path) (file-exists-p path))
-      (disco-media-play-video-file path))
-     ((and (stringp url) (not (string-empty-p url)))
-      (disco-media-play-video-url url))
-     (t
-      (user-error "disco: video attachment has no playable source")))))
+  (disco-media-play-attachment-video attachment))
 
 (defun disco-room-download-attachment (attachment &optional target-path)
   "Download ATTACHMENT to TARGET-PATH.
 
 When TARGET-PATH is nil, prompt interactively for destination path."
   (interactive)
-  (let* ((url (disco-media-attachment-download-url attachment))
-         (download-state (disco-room--attachment-download-state attachment))
-         (cached-path (plist-get download-state :path))
-         (has-cached (and (stringp cached-path) (file-exists-p cached-path)))
-         (has-url (and (stringp url) (not (string-empty-p url))))
-         (default-name (disco-room--attachment-default-save-name attachment))
-         (target (or target-path
-                     (read-file-name "Save attachment as: "
-                                     nil
-                                     default-name
-                                     nil
-                                     default-name))))
-    (unless (or has-cached has-url)
-      (user-error "disco: attachment has neither local cache nor downloadable URL"))
-    (condition-case err
-        (progn
-          (make-directory (or (file-name-directory target) default-directory) t)
-          (if has-cached
-              (copy-file cached-path target t)
-            (url-copy-file url target t))
-          (message "disco: downloaded attachment -> %s" target))
-      (error
-       (user-error "disco: attachment download failed: %s"
-                   (disco-room--async-error-message err))))))
-
-(defun disco-room--insert-attachment-action-button (label callback help-echo)
-  "Insert one attachment action button with LABEL, CALLBACK and HELP-ECHO."
-  (disco-ui-insert-action-button
-   label
-   callback
-   :face 'disco-room-attachment-card-action
-   :help-echo help-echo))
+  (disco-media-download-attachment attachment target-path))
 
 (defun disco-room--insert-attachment-card (attachment)
-  "Insert one rich attachment card for ATTACHMENT object."
-  (let* ((kind (disco-room--attachment-kind attachment))
-         (video-p (equal kind "video"))
-         (summary (disco-room--attachment-summary attachment))
-         (meta (disco-room--attachment-meta-line attachment))
-         (description (alist-get 'description attachment))
-         (url (disco-media-attachment-download-url attachment))
-         (preview-url (disco-media-attachment-preview-url attachment))
-         (preview-rendering-available (disco-media-attachment-preview-rendering-available-p))
-         (preview-cache-key (and (member kind '("img" "video"))
-                                 (disco-media-attachment-preview-cache-key attachment)))
-         (preview-cache-state (disco-media-attachment-preview-cache-state preview-cache-key))
-         (preview-fetching (disco-media-attachment-preview-fetching-p preview-cache-key))
-         (preview (and (member kind '("img" "video"))
-                       (disco-media-attachment-preview-image attachment)))
-         (download-state (disco-room--attachment-download-state attachment))
-         (download-status (plist-get download-state :status))
-         (download-path (plist-get download-state :path))
-         (download-error (plist-get download-state :error))
-         (prefix-state (disco-ui-card-prefix-state :face 'disco-room-attachment-card-border)))
-    (let ((title-start (point)))
-      (insert summary "\n")
-      (when (and (stringp url) (not (string-empty-p url)))
-        (disco-media-add-open-url-properties title-start (1- (point)) url))
-      (disco-ui-apply-line-prefix title-start (point) prefix-state)
-      (disco-ui-append-face
-       title-start (point) 'disco-room-attachment-card-title))
-    (let ((meta-start (point)))
-      (insert meta "\n")
-      (disco-ui-apply-line-prefix meta-start (point) prefix-state)
-      (disco-ui-append-face
-       meta-start (point) 'disco-room-attachment-card-meta))
-    (when (and (stringp description) (not (string-empty-p description)))
-      (let ((desc-start (point)))
-        (insert "caption: " description "\n")
-        (disco-ui-apply-line-prefix desc-start (point) prefix-state)
-        (disco-ui-append-face
-         desc-start (point) 'disco-room-attachment-card-meta)))
-    (let ((action-start (point)))
-      (if (and (stringp url) (not (string-empty-p url)))
-          (progn
-            (when video-p
-              (disco-room--insert-attachment-action-button
-               "[Play]"
-               (lambda ()
-                 (disco-room--play-attachment-video attachment))
-               "Play attachment video")
-              (insert " "))
-            (disco-room--insert-attachment-action-button
-             "[Open]"
-             (lambda () (browse-url url t))
-             "Open attachment URL")
-            (insert " ")
-            (disco-room--insert-attachment-action-button
-             "[Copy]"
-             (lambda ()
-               (kill-new url)
-               (message "disco: copied attachment URL"))
-             "Copy attachment URL"))
-        (insert "[No URL]"))
-      (insert "\n")
-      (disco-ui-apply-line-prefix action-start (point) prefix-state)
-      (disco-ui-append-face
-       action-start (point) 'disco-room-attachment-card-meta))
-    (let ((transfer-start (point)))
-      (insert "transfer: ")
-      (pcase download-status
-        ('downloading
-         (insert "[Downloading...] ")
-         (disco-room--insert-attachment-action-button
-          "[Cancel]"
-          (lambda ()
-            (disco-room--cancel-attachment-download attachment))
-          "Cancel attachment download"))
-        ('downloaded
-         (when video-p
-           (disco-room--insert-attachment-action-button
-            "[Play]"
-            (lambda ()
-              (disco-room--play-attachment-video attachment))
-            "Play downloaded video")
-           (insert " "))
-         (disco-room--insert-attachment-action-button
-          "[Open Local]"
-          (lambda ()
-            (disco-room--open-downloaded-attachment attachment))
-          "Open downloaded attachment file")
-         (insert " ")
-         (disco-room--insert-attachment-action-button
-          "[Save As]"
-          (lambda ()
-            (disco-room-download-attachment attachment))
-          "Copy downloaded file (or download) to chosen path")
-         (when (and (stringp download-path) (file-exists-p download-path))
-           (insert (format "  %s" (file-name-nondirectory download-path)))))
-        ('error
-         (when (and video-p (stringp url) (not (string-empty-p url)))
-           (disco-room--insert-attachment-action-button
-            "[Play]"
-            (lambda ()
-              (disco-room--play-attachment-video attachment))
-            "Play video URL")
-           (insert " "))
-         (when (and (stringp url) (not (string-empty-p url)))
-           (disco-room--insert-attachment-action-button
-            "[Retry]"
-            (lambda ()
-              (disco-room--start-attachment-download attachment nil))
-            "Retry attachment download")
-           (insert " "))
-         (disco-room--insert-attachment-action-button
-          "[Save As]"
-          (lambda ()
-            (disco-room-download-attachment attachment))
-          "Download attachment to chosen path")
-         (when (and (stringp download-error) (not (string-empty-p download-error)))
-           (insert (format "  error=%s"
-                           (truncate-string-to-width download-error 68 nil nil t)))))
-        (_
-         (if (and (stringp url) (not (string-empty-p url)))
-             (progn
-               (when video-p
-                 (disco-room--insert-attachment-action-button
-                  "[Play]"
-                  (lambda ()
-                    (disco-room--play-attachment-video attachment))
-                  "Play video URL")
-                 (insert " "))
-               (disco-room--insert-attachment-action-button
-                "[Download]"
-                (lambda ()
-                  (disco-room--start-attachment-download attachment nil))
-                "Download attachment into local cache directory")
-               (insert " ")
-               (disco-room--insert-attachment-action-button
-                "[Save As]"
-                (lambda ()
-                  (disco-room-download-attachment attachment))
-                "Download attachment to chosen path"))
-           (insert "[No URL]"))))
-      (insert "\n")
-      (disco-ui-apply-line-prefix transfer-start (point) prefix-state)
-      (disco-ui-append-face
-       transfer-start (point) 'disco-room-attachment-card-meta))
-    (when (member kind '("img" "video"))
-      (let ((preview-start (point))
-            (preview-open-url (or preview-url url))
-            (apply-meta-face t)
-            (video-preview-p (equal kind "video")))
-        (if preview
-            (condition-case _
-                (let ((slice-start (point)))
-                  (setq apply-meta-face nil)
-                  (disco-media-insert-image-slices
-                   preview
-                   (unless video-preview-p preview-open-url)
-                   nil
-                   (if video-preview-p "[video]" "[image]"))
-                  (when (and video-preview-p
-                             (stringp preview-open-url)
-                             (not (string-empty-p preview-open-url)))
-                    (disco-media-add-play-video-properties
-                     slice-start
-                     (point)
-                     preview-open-url)))
-              (error
-               (insert (if video-preview-p
-                           "[video preview unavailable]"
-                         "[image unavailable]"))))
-          (cond
-           ((not preview-rendering-available)
-            (insert "[preview disabled]"))
-           ((not (and (stringp preview-url) (not (string-empty-p preview-url))))
-            (insert "[no preview URL]"))
-           ((eq preview-cache-state :missing)
-            (insert (if video-preview-p
-                        "[video preview unavailable]"
-                      "[image unavailable]")))
-           ((or preview-fetching preview-cache-key)
-            (insert "[loading preview]"))
-           (t
-            (insert (if video-preview-p
-                        "[video preview unavailable]"
-                      "[image unavailable]")))))
-        (insert "\n")
-        (disco-ui-apply-line-prefix preview-start (point) prefix-state)
-        (when apply-meta-face
-          (disco-ui-append-face
-           preview-start (point) 'disco-room-attachment-card-meta))))
-    (when (and disco-room-show-attachment-urls
-               (stringp url)
-               (not (string-empty-p url)))
-      (let ((url-start (point)))
-        (insert url "\n")
-        (disco-media-add-open-url-properties url-start (1- (point)) url)
-        (disco-ui-apply-line-prefix url-start (point) prefix-state)
-        (disco-ui-append-face url-start (point) 'shadow)))))
+  "Insert one typed rich attachment block for ATTACHMENT object."
+  (pcase (disco-media-attachment-kind attachment)
+    ('photo
+     (disco-ins-insert-attachment-photo
+      attachment
+      :border-face 'disco-room-attachment-card-border
+      :title-face 'disco-room-attachment-card-title
+      :meta-face 'disco-room-attachment-card-meta
+      :action-face 'disco-room-attachment-card-action
+      :show-url disco-room-show-attachment-urls))
+    ('video
+     (disco-ins-insert-attachment-video
+      attachment
+      :border-face 'disco-room-attachment-card-border
+      :title-face 'disco-room-attachment-card-title
+      :meta-face 'disco-room-attachment-card-meta
+      :action-face 'disco-room-attachment-card-action
+      :show-url disco-room-show-attachment-urls))
+    (_
+     (disco-ins-insert-attachment-document
+      attachment
+      :border-face 'disco-room-attachment-card-border
+      :title-face 'disco-room-attachment-card-title
+      :meta-face 'disco-room-attachment-card-meta
+      :action-face 'disco-room-attachment-card-action
+      :show-url disco-room-show-attachment-urls))))
 
 (defun disco-room--normalize-list-sequence (value)
   "Normalize VALUE into a list, preserving list/vector elements."
@@ -4541,37 +4145,15 @@ messages; everything else is a system event shown as a centered divider."
 
 (defun disco-room--attachment-kind (attachment)
   "Return short attachment kind string for ATTACHMENT object."
-  (let* ((content-type (downcase (or (alist-get 'content_type attachment) "")))
-         (filename (downcase (or (alist-get 'filename attachment) ""))))
-    (cond
-     ((string-prefix-p "image/" content-type) "img")
-     ((string-prefix-p "video/" content-type) "video")
-     ((string-prefix-p "audio/" content-type) "audio")
-     ((string-match-p "\\.\\(?:png\\|jpe?g\\|gif\\|webp\\|bmp\\|svg\\)\\'" filename) "img")
-     ((string-match-p "\\.\\(?:mp4\\|mov\\|mkv\\|webm\\|avi\\)\\'" filename) "video")
-     ((string-match-p "\\.\\(?:mp3\\|wav\\|ogg\\|flac\\|m4a\\)\\'" filename) "audio")
-     (t "file"))))
+  (pcase (disco-media-attachment-kind attachment)
+    ('photo "img")
+    ('video "video")
+    ('audio "audio")
+    (_ "file")))
 
 (defun disco-room--attachment-summary (attachment)
   "Return one-line attachment summary string for ATTACHMENT object."
-  (let* ((kind (disco-room--attachment-kind attachment))
-         (filename (or (alist-get 'filename attachment) "unnamed"))
-         (size (alist-get 'size attachment))
-         (width (alist-get 'width attachment))
-         (height (alist-get 'height attachment))
-         (size-text (when (numberp size)
-                      (file-size-human-readable size)))
-         (dims-text (when (and (numberp width) (numberp height))
-                      (format "%dx%d" width height)))
-         (detail (cond
-                  ((and size-text dims-text)
-                   (format " (%s, %s)" size-text dims-text))
-                  (size-text
-                   (format " (%s)" size-text))
-                  (dims-text
-                   (format " (%s)" dims-text))
-                  (t ""))))
-    (format "[%s] %s%s" kind filename detail)))
+  (disco-media-attachment-summary attachment))
 
 (defun disco-room--insert-message-attachments (msg &optional prefix)
   "Insert attachment detail lines for MSG.

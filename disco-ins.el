@@ -11,6 +11,8 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
+(require 'disco-media)
 (require 'disco-msg)
 (require 'disco-ui)
 
@@ -65,8 +67,8 @@ Return the inserted span as (START . END)."
              rear-nonsticky (read-only)))))
 
 (cl-defun disco-ins-insert-reference-line (body &key prefix face button-label
-                                                     button-action button-face
-                                                     properties)
+                                                button-action button-face
+                                                properties)
   "Insert one prefixed reference line with optional BODY and action button.
 
 PREFIX is applied with `disco-ui-apply-line-prefix'.  FACE and PROPERTIES are
@@ -127,7 +129,7 @@ REACTIONS is empty."
       (cons line-start (point)))))
 
 (cl-defun disco-ins-insert-attachment-lines (summary &key prefix url
-                                                      summary-face url-face)
+                                                     summary-face url-face)
   "Insert plain attachment SUMMARY and optional URL lines.
 
 PREFIX is applied with `disco-ui-apply-line-prefix'.  SUMMARY-FACE styles the
@@ -148,11 +150,365 @@ span as (START . END), or nil when SUMMARY is empty."
             (add-text-properties url-start (point) (list 'face url-face)))))
       (cons start (point)))))
 
+
+(defun disco-ins--attachment-prefix-state (prefix border-face)
+  "Return effective attachment prefix state from PREFIX and BORDER-FACE."
+  (cond
+   ((disco-ui-prefix-state-p prefix) prefix)
+   ((stringp prefix) (disco-ui-make-prefix-state prefix prefix))
+   (t (disco-ui-card-prefix-state :face border-face))))
+
+(cl-defun disco-ins--insert-prefixed-line (text &key prefix face properties
+                                                action help-echo)
+  "Insert TEXT as one prefixed line with optional ACTION and FACE."
+  (let ((start (point)))
+    (insert (or text "") "
+")
+    (when (and (functionp action)
+               (> (point) start))
+      (disco-media-add-action-properties
+       start
+       (max start (1- (point)))
+       (lambda (&optional _event)
+         (interactive)
+         (funcall action))
+       help-echo))
+    (disco-ui-apply-line-prefix start (point) (or prefix "    "))
+    (when properties
+      (add-text-properties start (point) properties))
+    (when face
+      (disco-ui-append-face start (point) face))
+    (cons start (point))))
+
+(defun disco-ins--attachment-open-info (attachment)
+  "Return (ACTION . HELP-ECHO) for ATTACHMENT header, or nil."
+  (let* ((state (disco-media-attachment-download-state attachment))
+         (path (plist-get state :path))
+         (url (disco-media-attachment-download-url attachment)))
+    (cond
+     ((and (stringp path) (file-exists-p path))
+      (cons (lambda ()
+              (disco-media-open-downloaded-attachment attachment))
+            "Open downloaded attachment file"))
+     ((disco-media-url-present-p url)
+      (cons (lambda ()
+              (browse-url url t))
+            "Open attachment URL"))
+     (t nil))))
+
+(defun disco-ins--attachment-kind-tag (kind)
+  "Return human-oriented header tag string for attachment KIND."
+  (pcase kind
+    ('photo "[image]")
+    ('video "[video]")
+    ('audio "[audio]")
+    (_ "[file]")))
+
+(defun disco-ins--attachment-detail-text (details)
+  "Return formatted header detail string for DETAILS list."
+  (if details
+      (format " (%s)" (string-join details ", "))
+    ""))
+
+(cl-defun disco-ins-insert-attachment-caption-line (caption &key prefix face
+                                                            (label "caption: "))
+  "Insert attachment CAPTION line when CAPTION is non-empty."
+  (when (and (stringp caption) (not (string-empty-p caption)))
+    (disco-ins--insert-prefixed-line
+     (concat label caption)
+     :prefix (or prefix "    ")
+     :face face)))
+
+(cl-defun disco-ins-insert-attachment-url-line (url &key prefix face)
+  "Insert clickable attachment URL line when URL is non-empty."
+  (when (disco-media-url-present-p url)
+    (let ((start (point)))
+      (insert url "
+")
+      (disco-media-add-open-url-properties start (max start (1- (point))) url)
+      (disco-ui-apply-line-prefix start (point) (or prefix "    "))
+      (when face
+        (disco-ui-append-face start (point) face))
+      (cons start (point)))))
+
+(cl-defun disco-ins-insert-attachment-transfer-line (attachment &key prefix face
+                                                                action-face kind)
+  "Insert telega-style transfer/progress line for ATTACHMENT."
+  (let* ((line-start (point))
+         (state (disco-media-attachment-download-state attachment))
+         (status (plist-get state :status))
+         (path (plist-get state :path))
+         (error-text (plist-get state :error))
+         (url (disco-media-attachment-download-url attachment))
+         (has-local (and (stringp path) (file-exists-p path)))
+         (has-url (disco-media-url-present-p url))
+         (playable-video-p (eq (or kind (disco-media-attachment-kind attachment)) 'video))
+         (inserted-action nil))
+    (cl-labels ((emit-button (label action help)
+                  (when inserted-action
+                    (insert " "))
+                  (disco-ui-insert-action-button
+                   label action :face action-face :help-echo help)
+                  (setq inserted-action t)))
+      (insert "transfer: ")
+      (pcase status
+        ('downloading
+         (insert "[Downloading...] ")
+         (emit-button "[Cancel]"
+                      (lambda ()
+                        (disco-media-cancel-attachment-download attachment))
+                      "Cancel attachment download"))
+        ('downloaded
+         (when playable-video-p
+           (emit-button "[Play]"
+                        (lambda ()
+                          (disco-media-play-attachment-video attachment))
+                        "Play downloaded video"))
+         (emit-button "[Open Local]"
+                      (lambda ()
+                        (disco-media-open-downloaded-attachment attachment))
+                      "Open downloaded attachment file")
+         (emit-button "[Save As]"
+                      (lambda ()
+                        (disco-media-download-attachment attachment))
+                      "Copy downloaded file (or download) to chosen path")
+         (when has-local
+           (insert "  " (file-name-nondirectory path))))
+        ('error
+         (when (and playable-video-p has-url)
+           (emit-button "[Play]"
+                        (lambda ()
+                          (disco-media-play-attachment-video attachment))
+                        "Play video URL"))
+         (when has-url
+           (emit-button "[Retry]"
+                        (lambda ()
+                          (disco-media-start-attachment-download attachment nil))
+                        "Retry attachment download"))
+         (when (or has-url has-local)
+           (emit-button "[Save As]"
+                        (lambda ()
+                          (disco-media-download-attachment attachment))
+                        "Download attachment to chosen path"))
+         (unless inserted-action
+           (insert "[No URL]"))
+         (when (and (stringp error-text) (not (string-empty-p error-text)))
+           (insert "  error="
+                   (truncate-string-to-width error-text 68 nil nil t))))
+        (_
+         (when (and playable-video-p has-url)
+           (emit-button "[Play]"
+                        (lambda ()
+                          (disco-media-play-attachment-video attachment))
+                        "Play video URL"))
+         (when has-url
+           (emit-button "[Download]"
+                        (lambda ()
+                          (disco-media-start-attachment-download attachment nil))
+                        "Download attachment into local cache directory")
+           (emit-button "[Save As]"
+                        (lambda ()
+                          (disco-media-download-attachment attachment))
+                        "Download attachment to chosen path"))
+         (unless (or has-url has-local inserted-action)
+           (insert "[No URL]"))))
+      (insert "
+")
+      (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
+      (when face
+        (disco-ui-append-face line-start (point) face))
+      (cons line-start (point)))))
+
+(cl-defun disco-ins-insert-attachment-preview-block (attachment &key prefix face
+                                                                kind required)
+  "Insert preview block for ATTACHMENT when available.
+
+When REQUIRED is non-nil, insert a placeholder line when preview output cannot
+be shown yet."
+  (let* ((kind (or kind (disco-media-attachment-kind attachment)))
+         (video-p (eq kind 'video))
+         (preview (disco-media-attachment-preview-image attachment))
+         (preview-url (or (disco-media-attachment-preview-url attachment)
+                          (disco-media-attachment-download-url attachment)))
+         (rendering-ok (disco-media-attachment-preview-rendering-available-p))
+         (cache-key (and (memq kind '(photo video))
+                         (disco-media-attachment-preview-cache-key attachment)))
+         (cache-state (disco-media-attachment-preview-cache-state cache-key))
+         (fetching (disco-media-attachment-preview-fetching-p cache-key))
+         (placeholder (cond
+                       (preview nil)
+                       ((and (not required)
+                             (or (not rendering-ok)
+                                 (not (disco-media-url-present-p preview-url))))
+                        nil)
+                       ((and (not required)
+                             (null cache-key))
+                        nil)
+                       ((not rendering-ok) "[preview disabled]")
+                       ((not (disco-media-url-present-p preview-url)) "[no preview URL]")
+                       ((eq cache-state :missing)
+                        (if video-p
+                            "[video preview unavailable]"
+                          "[image unavailable]"))
+                       ((or fetching cache-key) "[loading preview]")
+                       (video-p "[video preview unavailable]")
+                       (t "[image unavailable]"))))
+    (when (or preview placeholder)
+      (let ((start (point))
+            (apply-face t))
+        (if preview
+            (condition-case _
+                (let ((slice-start (point)))
+                  (setq apply-face nil)
+                  (disco-media-insert-image-slices
+                   preview
+                   (unless video-p preview-url)
+                   nil
+                   (if video-p "[video]" "[image]"))
+                  (when (and video-p
+                             (disco-media-url-present-p preview-url))
+                    (disco-media-add-play-video-properties
+                     slice-start
+                     (point)
+                     preview-url)))
+              (error
+               (setq apply-face t)
+               (insert (or placeholder
+                           (if video-p
+                               "[video preview unavailable]"
+                             "[image unavailable]")))))
+          (insert placeholder))
+        (insert "
+")
+        (disco-ui-apply-line-prefix start (point) (or prefix "    "))
+        (when (and face apply-face)
+          (disco-ui-append-face start (point) face))
+        (cons start (point))))))
+
+(cl-defun disco-ins-insert-attachment-document (attachment &key prefix border-face
+                                                           title-face meta-face
+                                                           action-face show-url)
+  "Insert one document-style attachment block for ATTACHMENT."
+  (let* ((kind (disco-media-attachment-kind attachment))
+         (name (disco-media-attachment-display-name attachment))
+         (details (delq nil (list (disco-media-attachment-size-label attachment)
+                                  (when (eq kind 'audio)
+                                    (disco-media-attachment-duration-label attachment)))))
+         (header (format "%s %s%s"
+                         (disco-ins--attachment-kind-tag kind)
+                         name
+                         (disco-ins--attachment-detail-text details)))
+         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
+         (open-info (disco-ins--attachment-open-info attachment))
+         (card-start (point)))
+    (disco-ins--insert-prefixed-line
+     header
+     :prefix prefix-state
+     :face title-face
+     :action (car-safe open-info)
+     :help-echo (cdr-safe open-info))
+    (let* ((content-type (disco-media-attachment-content-type-label attachment))
+           (dims (disco-media-attachment-dimensions-label attachment))
+           (ephemeral (when (disco-media-attachment-ephemeral-p attachment)
+                        "ephemeral"))
+           (meta-parts (delq nil (list content-type dims ephemeral))))
+      (when meta-parts
+        (disco-ins--insert-prefixed-line
+         (string-join meta-parts "  ")
+         :prefix prefix-state
+         :face meta-face)))
+    (disco-ins-insert-attachment-transfer-line
+     attachment :prefix prefix-state :face meta-face :action-face action-face
+     :kind kind)
+    (disco-ins-insert-attachment-preview-block
+     attachment :prefix prefix-state :face meta-face :kind kind :required nil)
+    (disco-ins-insert-attachment-caption-line
+     (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+    (when show-url
+      (disco-ins-insert-attachment-url-line
+       (disco-media-attachment-download-url attachment)
+       :prefix prefix-state
+       :face 'shadow))
+    (cons card-start (point))))
+
+(cl-defun disco-ins-insert-attachment-photo (attachment &key prefix border-face
+                                                        title-face meta-face
+                                                        action-face show-url)
+  "Insert one photo-style attachment block for ATTACHMENT."
+  (let* ((name (disco-media-attachment-display-name attachment))
+         (meta-parts (delq nil (list (disco-media-attachment-dimensions-label attachment)
+                                     (disco-media-attachment-size-label attachment)
+                                     (when (disco-media-attachment-ephemeral-p attachment)
+                                       "ephemeral"))))
+         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
+         (open-info (disco-ins--attachment-open-info attachment))
+         (card-start (point)))
+    (disco-ins--insert-prefixed-line
+     (format "%s %s" (disco-ins--attachment-kind-tag 'photo) name)
+     :prefix prefix-state
+     :face title-face
+     :action (car-safe open-info)
+     :help-echo (cdr-safe open-info))
+    (when meta-parts
+      (disco-ins--insert-prefixed-line
+       (string-join meta-parts "  ")
+       :prefix prefix-state
+       :face meta-face))
+    (disco-ins-insert-attachment-transfer-line
+     attachment :prefix prefix-state :face meta-face :action-face action-face
+     :kind 'photo)
+    (disco-ins-insert-attachment-preview-block
+     attachment :prefix prefix-state :face meta-face :kind 'photo :required t)
+    (disco-ins-insert-attachment-caption-line
+     (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+    (when show-url
+      (disco-ins-insert-attachment-url-line
+       (disco-media-attachment-download-url attachment)
+       :prefix prefix-state
+       :face 'shadow))
+    (cons card-start (point))))
+
+(cl-defun disco-ins-insert-attachment-video (attachment &key prefix border-face
+                                                        title-face meta-face
+                                                        action-face show-url)
+  "Insert one video-style attachment block for ATTACHMENT."
+  (let* ((name (disco-media-attachment-display-name attachment))
+         (details (delq nil (list (disco-media-attachment-dimensions-label attachment)
+                                  (disco-media-attachment-size-label attachment)
+                                  (disco-media-attachment-duration-label attachment)
+                                  (when (disco-media-attachment-ephemeral-p attachment)
+                                    "ephemeral"))))
+         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
+         (open-info (disco-ins--attachment-open-info attachment))
+         (card-start (point)))
+    (disco-ins--insert-prefixed-line
+     (format "%s %s%s"
+             (disco-ins--attachment-kind-tag 'video)
+             name
+             (disco-ins--attachment-detail-text details))
+     :prefix prefix-state
+     :face title-face
+     :action (car-safe open-info)
+     :help-echo (cdr-safe open-info))
+    (disco-ins-insert-attachment-transfer-line
+     attachment :prefix prefix-state :face meta-face :action-face action-face
+     :kind 'video)
+    (disco-ins-insert-attachment-preview-block
+     attachment :prefix prefix-state :face meta-face :kind 'video :required t)
+    (disco-ins-insert-attachment-caption-line
+     (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+    (when show-url
+      (disco-ins-insert-attachment-url-line
+       (disco-media-attachment-download-url attachment)
+       :prefix prefix-state
+       :face 'shadow))
+    (cons card-start (point))))
+
 (cl-defun disco-ins-insert-forward-card (&key source-text sent-at content
-                                               insert-source-icon title-label
-                                               jump-label jump-action
-                                               jump-face jump-help-echo
-                                               border-face title-face meta-face)
+                                              insert-source-icon title-label
+                                              jump-label jump-action
+                                              jump-face jump-help-echo
+                                              border-face title-face meta-face)
   "Insert one forwarded-message card.
 
 SOURCE-TEXT is the rendered source label line body.  SENT-AT and CONTENT are
