@@ -122,7 +122,10 @@ Structurally:
 
 - shared chat behavior has one owner
 - message behavior has one owner
-- rendering helpers have one owner
+- insert/render leaf helpers should have an `ins`-style owner, analogous to
+  `telega-ins.el`
+- room timeline orchestration does not need its own `disco-room-render` module;
+  it can stay in the room facade while leaf helpers move out
 - root/list UI has one owner
 - event/update plumbing has one owner
 - transient is an implementation detail of those owners, not a top-level split
@@ -216,24 +219,27 @@ The remaining misalignment is concentrated in ownership and chatbuf structure:
 
 The default destination for newly isolated behavior is not a new room module.
 
-The default destinations are existing owners:
+The default destinations are existing owners, plus one telega-like insert owner
+when needed:
 
 - `disco-chatbuf.el` for shared chat-buffer mechanics
 - `disco-msg.el` for shared message/domain helpers
 - `disco-thread.el` for shared thread helpers
+- `disco-ins.el` for shared insert/render leaf helpers
 - `disco-media.el` / `disco-embed.el` for reusable content rendering helpers
 
 ### 2. `disco-room` becomes a facade
 
 After migration, `disco-room` should primarily provide:
 
-- room-specific prompt/footer content
 - room-specific permission and capability rules
 - room-specific public commands and keymap assembly
-- room-specific coordination between send/render/events owners
+- room-specific EWOC/timeline orchestration
+- coordination between send/render/events owners
 - compatibility wrappers where needed
 
-The generic mechanics should live below it.
+Prompt/footer leaf rendering and message section insertion should move below it
+into `disco-ins.el` and other shared content owners.
 
 ### 3. Real tail input region
 
@@ -276,16 +282,18 @@ Likely object kinds over time include:
 - future forward/comment helper objects where useful
 - future poll/send option helper objects where useful
 
-### 6. Room-specific render and events get isolated cleanly
+### 6. Insert/render leaves move out, room orchestration stays thin
 
-After shared owners absorb what belongs to them, the code that remains truly
-room-specific should be isolated into the room-specific layers.
+After shared owners absorb what belongs to them, render ownership should split
+in telega-like fashion.
 
 That mainly means:
 
-- room timeline render ownership
-- room EWOC reconcile ownership
-- room live update and invalidation ownership
+- `disco-ins.el` owns divider/header/footer leaf builders and message section
+  insertion helpers
+- `disco-room.el` keeps room EWOC/timeline orchestration rather than growing a
+  separate `disco-room-render.el`
+- room live update and invalidation ownership is isolated separately
 
 ## Migration phases
 
@@ -359,19 +367,23 @@ Expected win:
 - easier parity with `qq-chat`
 - easier future extension for richer compose modes
 
-### Phase 5 - isolate room-specific render ownership
+### Phase 5 - introduce an `ins`-style render owner
 
 Deliverables:
 
-- room render orchestration is moved out of the room facade into a room-specific
-  render owner
-- EWOC lifecycle and render-context recomputation become reviewable on their own
+- shared divider/header/footer leaf helpers move into `disco-ins.el`
+- message section insertion helpers move into `disco-ins.el` or other shared
+  content owners where appropriate
+- EWOC lifecycle and render-context recomputation stay in `disco-room.el`
+  instead of spawning a `disco-room-render.el`
 - reusable media/embed bits are pushed downward where they are not truly room-
   specific
 
 Expected win:
 
-- render changes stop colliding with composer/message/helper work
+- render leaf changes stop colliding with composer/message/helper work
+- room orchestration stays visible without becoming the default home for every
+  render helper
 
 ### Phase 6 - isolate room-specific event/update ownership
 
@@ -407,7 +419,8 @@ Expected win:
 2. move more pure helpers out of `disco-room.el` into `disco-msg.el` and
    `disco-thread.el`
 3. finish migrating `disco-room` from footer-composed input to true tail input
-4. isolate room-specific render ownership
+4. introduce an `ins`-style render owner while keeping EWOC/reconcile in
+   `disco-room.el`
 5. isolate room-specific event/update ownership
 6. implement real clipboard attach and explicit formatting behind the reserved
    telega-aligned keys

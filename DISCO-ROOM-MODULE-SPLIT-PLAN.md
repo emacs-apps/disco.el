@@ -225,7 +225,7 @@ Examples of the desired direction:
 - `disco-chatbuf-*` for shared input mechanics
 - `disco-msg-*` for shared message/domain helpers
 - `disco-thread-*` for shared thread helpers
-- `disco-room-render-*` for room timeline rendering internals
+- `disco-ins-*` for shared insert/render leaf helpers
 - `disco-room-events-*` for room live-update internals
 
 Compatibility wrappers may keep older names during migration, but they should no
@@ -286,6 +286,25 @@ Room commands can still call into it.
 Move reusable render/normalize logic here instead of making everything a room
 render helper.
 
+#### `disco-ins.el` (new owner to introduce)
+
+If we want telega-style render ownership, this is the one new top-level owner
+that is justified.
+
+It should own shared insert/render leaf helpers, analogous to the role
+`telega-ins.el` plays in telega.
+
+Good candidates:
+
+- divider/header/footer leaf text builders
+- message section insertion helpers
+- reusable button/label insertion helpers
+- reply/forward/media/poll/reaction section insertion helpers when they are not
+  specific to EWOC orchestration itself
+
+This is the right long-term home for render leaf helpers; they should not grow
+into a `disco-room-render.el` bucket.
+
 ### Room-owned files that still make sense
 
 Only a small number of room-owned files are structurally justified.
@@ -294,16 +313,18 @@ Only a small number of room-owned files are structurally justified.
 
 This remains the facade and public surface.
 
-#### `disco-room-render.el`
+It also keeps room timeline orchestration that is truly tied to the room buffer
+itself, for example:
 
-This is justified because EWOC/timeline rendering is room-specific.
-
-It should own:
-
-- message row insertion orchestration
-- room header/footer composition tied to timeline state
+- EWOC lifecycle
 - render-context computation
-- EWOC node reconcile and rerender flow
+- point-preserving room redraw
+- timeline reconcile
+- coordination between room state and `disco-ins.el` leaf rendering
+
+Do not introduce `disco-room-render.el` as a primary owner.  If a helper is a
+leaf render helper, it should move to `disco-ins.el`; if it is room timeline
+orchestration, it can remain in `disco-room.el`.
 
 #### `disco-room-events.el`
 
@@ -357,6 +378,9 @@ That means:
   first expand `disco-thread.el`
 - do not create transient-only ownerless files; transient should stay with the
   subsystem that owns the operation
+- do not create `disco-room-render.el`; telega-style render ownership wants an
+  `ins` owner for leaf helpers and room orchestration to stay in
+  `disco-room.el`
 
 ## Recommended ownership map for current `disco-room.el`
 
@@ -371,8 +395,9 @@ This is the practical answer to "where should the code go?"
 | message identity/reference/preview helpers | shared message domain | `disco-msg.el` |
 | thread status, prompt parsing, update shaping | shared thread domain | `disco-thread.el` |
 | attachment/embed card normalization and reusable render bits | media/embed owners | `disco-media.el`, `disco-embed.el` |
+| divider/header/footer leaf render helpers and message section insertion helpers | shared insert/render owner | `disco-ins.el` |
 | room search/jump/filter orchestration | transitional room adapter plus shared helpers | `disco-room-search.el` for now, then reevaluate |
-| EWOC/timeline render orchestration | room-specific | `disco-room-render.el` |
+| EWOC/timeline render orchestration | room-specific orchestration | keep in `disco-room.el` |
 | live update patching and invalidation | room-specific | `disco-room-events.el` |
 | keymap assembly and public commands | room facade | `disco-room.el` |
 
@@ -454,18 +479,30 @@ Acceptance:
 
 - thread UI commands become orchestration wrappers instead of state owners
 
-### Milestone 5 - isolate room-specific render ownership
+### Milestone 5 - introduce an `ins`-style render owner
 
-Create or expand `disco-room-render.el` for the code that is truly room-local:
+Create or expand `disco-ins.el` for render leaf helpers, and do not create
+`disco-room-render.el`.
+
+Move or factor out:
+
+- divider/header/footer leaf text builders
+- message/section insertion helpers
+- reusable reply/forward/media/poll/reaction insertion helpers
+- other render leaves that do not own EWOC lifecycle or timeline reconcile
+
+Keep in `disco-room.el` for now:
 
 - EWOC lifecycle
 - room render contexts
-- message row orchestration
-- room header/footer rendering that depends on room state
+- point-preserving room redraw
+- timeline reconcile
 
 Acceptance:
 
-- render code is reviewable without wading through composer/search/thread logic
+- render leaf helpers are reviewable without wading through composer/search/
+  thread logic
+- `disco-room.el` keeps only orchestration, not a growing pile of insert leaves
 
 ### Milestone 6 - isolate room-specific live updates
 
@@ -513,6 +550,7 @@ Use these rules for new internals.
 - prefer `disco-chatbuf-*` for shared chatbuf mechanics
 - prefer `disco-msg-*` for shared message/domain helpers
 - prefer `disco-thread-*` for shared thread helpers
+- prefer `disco-ins-*` for shared insert/render leaf helpers
 - prefer `disco-media-*` / `disco-embed-*` when the code is really about those
   content types
 - use a room-prefixed internal namespace only when the implementation is tied to
