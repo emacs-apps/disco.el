@@ -875,25 +875,23 @@ EXTRA-PERMISSIONS augments the base send permission set for this room."
 
 (defun disco-room--composer-edit-active-p ()
   "Return non-nil when room composer is editing an existing message."
-  (and (listp disco-room--pending-edit)
-       (eq (plist-get disco-room--pending-edit :type) 'edit)))
+  (eq (disco-chatbuf-aux-type) 'edit))
 
 (defun disco-room--composer-edit-message-id ()
   "Return target message id for active composer edit, or nil."
   (and (disco-room--composer-edit-active-p)
-       (plist-get disco-room--pending-edit :message-id)))
+       (disco-chatbuf-aux-message-id)))
 
 (defun disco-room--composer-aux-active-p ()
   "Return non-nil when room composer currently has reply/edit context."
-  (or (disco-room--composer-edit-active-p)
-      (not (null disco-room--pending-reply-to))))
+  (disco-chatbuf-aux-active-p))
 
 (defun disco-room--composer-aux-context-name ()
   "Return human-readable name for active composer aux context, or nil."
-  (cond
-   ((disco-room--composer-edit-active-p) "editing a message")
-   (disco-room--pending-reply-to "replying to a message")
-   (t nil)))
+  (pcase (disco-chatbuf-aux-type)
+    ('edit "editing a message")
+    ('reply "replying to a message")
+    (_ nil)))
 
 (defun disco-room--message-owned-by-current-user-p (msg &optional unknown-value)
   "Return non-nil when MSG belongs to current user.
@@ -1935,7 +1933,7 @@ When INDEX is nil, restore pending draft text."
     (nreverse fields)))
 
 (defun disco-room--restore-channel-read-state (channel-id state ack-token)
-  "Restore CHANNEL-ID read STATE and ACK-TOKEN snapshot." 
+  "Restore CHANNEL-ID read STATE and ACK-TOKEN snapshot."
   (if state
       (disco-state--upsert-read-state
        disco-read-state-type-channel
@@ -1967,7 +1965,7 @@ When INDEX is nil, restore pending draft text."
     seq))
 
 (defun disco-room--optimistic-read-ack-clear (seq)
-  "Clear pending optimistic read ACK when it matches SEQ." 
+  "Clear pending optimistic read ACK when it matches SEQ."
   (when (and (listp disco-room--pending-optimistic-read-ack)
              (= (or (plist-get disco-room--pending-optimistic-read-ack :seq) -1)
                 seq))
@@ -1975,7 +1973,7 @@ When INDEX is nil, restore pending draft text."
     t))
 
 (defun disco-room--optimistic-read-ack-confirm (message-id)
-  "Confirm pending optimistic read ACK using MESSAGE-ID from gateway/server." 
+  "Confirm pending optimistic read ACK using MESSAGE-ID from gateway/server."
   (when (and (listp disco-room--pending-optimistic-read-ack)
              (stringp message-id))
     (let ((target-id (plist-get disco-room--pending-optimistic-read-ack :target-id)))
@@ -1986,7 +1984,7 @@ When INDEX is nil, restore pending draft text."
         t))))
 
 (defun disco-room--optimistic-read-ack-rollback (seq)
-  "Rollback pending optimistic read ACK when it still matches SEQ." 
+  "Rollback pending optimistic read ACK when it still matches SEQ."
   (when (and (listp disco-room--pending-optimistic-read-ack)
              (= (or (plist-get disco-room--pending-optimistic-read-ack :seq) -1)
                 seq))
@@ -4916,23 +4914,21 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
-  (concat
-   (cond
-    ((disco-room--composer-edit-active-p)
-     (disco-room--composer-context-text
-      "Editing"
-      (disco-room--composer-edit-message-id)))
-    (disco-room--pending-reply-to
-     (disco-room--composer-context-text
-      "Replying to"
-      disco-room--pending-reply-to))
-    (t ""))
-   (if disco-room--pending-attachments
-       (format "Queued attachments: %s\n"
-               (mapconcat #'identity
-                          (disco-room--pending-attachment-labels)
-                          ", "))
-     "")))
+  (let ((aux-type (disco-chatbuf-aux-type))
+        (message-id (disco-chatbuf-aux-message-id)))
+    (concat
+     (pcase aux-type
+       ('edit
+        (disco-room--composer-context-text "Editing" message-id))
+       ('reply
+        (disco-room--composer-context-text "Replying to" message-id))
+       (_ ""))
+     (if disco-room--pending-attachments
+         (format "Queued attachments: %s\n"
+                 (mapconcat #'identity
+                            (disco-room--pending-attachment-labels)
+                            ", "))
+       ""))))
 
 (defun disco-room--input-footer-text ()
   "Build read-only EWOC footer text shown above the room prompt."
@@ -4966,12 +4962,13 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--sync-shared-aux-state ()
   "Mirror room reply/edit context into shared chatbuf aux state."
   (cond
-   ((disco-room--composer-edit-active-p)
-    (disco-chatbuf-aux-set
-     (list :aux-type 'edit
-           :aux-msg (disco-room--composer-context-message
-                     (disco-room--composer-edit-message-id))
-           :message-id (disco-room--composer-edit-message-id))))
+   ((and (listp disco-room--pending-edit)
+         (eq (plist-get disco-room--pending-edit :type) 'edit))
+    (let ((message-id (plist-get disco-room--pending-edit :message-id)))
+      (disco-chatbuf-aux-set
+       (list :aux-type 'edit
+             :aux-msg (disco-room--composer-context-message message-id)
+             :message-id message-id))))
    (disco-room--pending-reply-to
     (disco-chatbuf-aux-set
      (list :aux-type 'reply
@@ -4997,15 +4994,11 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (disco-chatbuf-init-state disco-room-input-history-size)
   (disco-room--sync-shared-aux-state)
   (disco-room--sync-shared-input-options-state)
-  (if (not (disco-room--composer-visible-p))
-      (disco-chatbuf-clear-prompt-and-input)
-    (save-excursion
-      (goto-char (point-max))
-      (if (disco-chatbuf-prompt-button-live-p)
-          (disco-chatbuf-prompt-update (disco-room--prompt-text))
-        (disco-chatbuf-install-prompt (disco-room--prompt-text))))
-    (disco-chatbuf-input-set-text disco-room--draft-input)
-    (disco-room--apply-input-text-properties)))
+  (disco-chatbuf-bind-input-region
+   :visible-p (disco-room--composer-visible-p)
+   :prompt (disco-room--prompt-text)
+   :input-text disco-room--draft-input
+   :post-bind-function #'disco-room--apply-input-text-properties))
 
 (defun disco-room--header-text (&optional channel)
   "Build EWOC header text for the current room state."
@@ -6508,10 +6501,10 @@ enabled, include `replied_user'."
          (content (string-trim-right (or (plist-get parsed :content) "")))
          (attachments (or (plist-get parsed :attachments) '()))
          (buf (get-buffer-create "*disco-room-preview*"))
-         (mode-label (cond
-                      ((disco-room--composer-edit-active-p) "edit")
-                      (disco-room--pending-reply-to "reply")
-                      (t "message"))))
+         (mode-label (pcase (disco-chatbuf-aux-type)
+                       ('edit "edit")
+                       ('reply "reply")
+                       (_ "message"))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)

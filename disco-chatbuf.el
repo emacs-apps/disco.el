@@ -294,6 +294,25 @@ point is restored relative to the input start when it was inside the input."
       (insert (or text ""))))
   (goto-char (point-max)))
 
+(cl-defun disco-chatbuf-bind-input-region (&key visible-p prompt input-text post-bind-function)
+  "Ensure the tail input region matches VISIBLE-P, PROMPT and INPUT-TEXT.
+
+When VISIBLE-P is nil, remove the current prompt and input region.  Otherwise,
+install or update PROMPT, replace the input contents with INPUT-TEXT, and call
+POST-BIND-FUNCTION when non-nil.  This is a shared chatbuf primitive; callers
+can use POST-BIND-FUNCTION for owner-specific text properties or local repair."
+  (disco-chatbuf-init-state)
+  (if (not visible-p)
+      (disco-chatbuf-clear-prompt-and-input)
+    (save-excursion
+      (goto-char (point-max))
+      (if (disco-chatbuf-prompt-button-live-p)
+          (disco-chatbuf-prompt-update prompt)
+        (disco-chatbuf-install-prompt prompt)))
+    (disco-chatbuf-input-set-text input-text)
+    (when (functionp post-bind-function)
+      (funcall post-bind-function))))
+
 (defun disco-chatbuf-input-apply-text-properties (&optional _input-map)
   "Normalize current input region after redraws and edits."
   (disco-chatbuf-init-state)
@@ -419,6 +438,18 @@ PROPERTIES are appended to the inserted text properties."
   "Clear current aux state and return nil."
   (setq disco-chatbuf--aux-plist nil))
 
+(defun disco-chatbuf-aux-state ()
+  "Return current shared aux state plist, or nil."
+  disco-chatbuf--aux-plist)
+
+(defun disco-chatbuf-aux-type ()
+  "Return current shared aux type, or nil."
+  (plist-get disco-chatbuf--aux-plist :aux-type))
+
+(defun disco-chatbuf-aux-message-id ()
+  "Return current shared aux message id, or nil."
+  (plist-get disco-chatbuf--aux-plist :message-id))
+
 (defun disco-chatbuf-aux-active-p ()
   "Return non-nil when a shared aux state is currently active."
   (not (null disco-chatbuf--aux-plist)))
@@ -430,6 +461,16 @@ PROPERTIES are appended to the inserted text properties."
 (defun disco-chatbuf-input-options-reset ()
   "Clear current input options state and return nil."
   (setq disco-chatbuf--input-options-plist nil))
+
+(defun disco-chatbuf-input-options-state ()
+  "Return current shared input options plist, or nil."
+  disco-chatbuf--input-options-plist)
+
+(defun disco-chatbuf-input-option (key &optional default)
+  "Return input option KEY from shared state, or DEFAULT when missing."
+  (if (plist-member disco-chatbuf--input-options-plist key)
+      (plist-get disco-chatbuf--input-options-plist key)
+    default))
 
 (defun disco-chatbuf-input-history-push (&optional input)
   "Push INPUT into shared input history when it is plain text and non-empty.

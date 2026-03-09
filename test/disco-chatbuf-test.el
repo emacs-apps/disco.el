@@ -66,6 +66,30 @@
     (should (equal "hello" (disco-chatbuf-input-string)))
     (should (= 2 (- (point) (disco-chatbuf-input-start-position))))))
 
+(ert-deftest disco-chatbuf-bind-input-region-hides-and-restores-tail-input ()
+  (with-temp-buffer
+    (insert "timeline\n")
+    (disco-chatbuf-bind-input-region
+     :visible-p t
+     :prompt ">>> "
+     :input-text "hello"
+     :post-bind-function
+     (lambda ()
+       (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
+         (add-text-properties (car bounds) (cdr bounds) '(demo t)))))
+    (should (disco-chatbuf-prompt-button-live-p))
+    (should (equal "hello" (disco-chatbuf-input-string)))
+    (should (eq t (get-text-property (disco-chatbuf-input-start-position) 'demo)))
+    (disco-chatbuf-bind-input-region :visible-p nil)
+    (should-not (disco-chatbuf-prompt-button-live-p))
+    (should-not (disco-chatbuf-input-start-position))
+    (disco-chatbuf-bind-input-region
+     :visible-p t
+     :prompt "qq> "
+     :input-text "world")
+    (should (disco-chatbuf-prompt-button-live-p))
+    (should (equal "world" (disco-chatbuf-input-string)))))
+
 (ert-deftest disco-chatbuf-post-command-clamp-point-skips-prompt-glyphs ()
   (with-temp-buffer
     (insert "timeline\n")
@@ -139,11 +163,27 @@
   (with-temp-buffer
     (disco-chatbuf-init-state)
     (should-not (disco-chatbuf-aux-active-p))
-    (disco-chatbuf-aux-set '(:aux-type reply :aux-msg ((id . "m1"))))
+    (disco-chatbuf-aux-set '(:aux-type reply :aux-msg ((id . "m1")) :message-id "m1"))
     (should (disco-chatbuf-aux-active-p))
-    (should (equal 'reply (plist-get disco-chatbuf--aux-plist :aux-type)))
+    (should (equal 'reply (disco-chatbuf-aux-type)))
+    (should (equal "m1" (disco-chatbuf-aux-message-id)))
+    (should (equal '(:aux-type reply :aux-msg ((id . "m1")) :message-id "m1")
+                   (disco-chatbuf-aux-state)))
     (disco-chatbuf-aux-reset)
     (should-not (disco-chatbuf-aux-active-p))))
+
+(ert-deftest disco-chatbuf-input-options-state-roundtrip ()
+  (with-temp-buffer
+    (disco-chatbuf-init-state)
+    (disco-chatbuf-input-options-set
+     '(:send-on-return t :allowed-mentions none))
+    (should (equal '(:send-on-return t :allowed-mentions none)
+                   (disco-chatbuf-input-options-state)))
+    (should (eq t (disco-chatbuf-input-option :send-on-return)))
+    (should (eq 'none (disco-chatbuf-input-option :allowed-mentions)))
+    (should (eq 'fallback (disco-chatbuf-input-option :missing 'fallback)))
+    (disco-chatbuf-input-options-reset)
+    (should-not (disco-chatbuf-input-options-state))))
 
 (provide 'disco-chatbuf-test)
 
