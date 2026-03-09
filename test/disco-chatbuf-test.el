@@ -134,6 +134,36 @@
     (should-not disco-chatbuf--input-idx)
     (should-not disco-chatbuf--input-pending)))
 
+(ert-deftest disco-chatbuf-input-history-value-navigation-restores-structured-pending-input ()
+  (with-temp-buffer
+    (disco-chatbuf-init-state 8)
+    (disco-chatbuf-input-history-push "first")
+    (disco-chatbuf-input-history-push "second")
+    (let ((pending (copy-sequence "[file] a.txt")))
+      (add-text-properties 0 (length pending)
+                           (list disco-chatbuf-input-object-property
+                                 '(:kind attachment :path "/tmp/a.txt"))
+                           pending)
+      (let ((prev (disco-chatbuf-input-history-prev-value pending)))
+        (should (eq 'ok (plist-get prev :status)))
+        (should (equal "second" (plist-get prev :value))))
+      (let ((next (disco-chatbuf-input-history-next-value)))
+        (should (eq 'ok (plist-get next :status)))
+        (should (disco-chatbuf-string-has-objects-p (plist-get next :value)))
+        (should-not disco-chatbuf--input-idx)
+        (should-not disco-chatbuf--input-pending)))))
+
+(ert-deftest disco-chatbuf-input-history-value-navigation-reports-empty-and-latest ()
+  (with-temp-buffer
+    (disco-chatbuf-init-state 8)
+    (should (eq 'empty
+                (plist-get (disco-chatbuf-input-history-prev-value "pending")
+                           :status)))
+    (disco-chatbuf-input-history-push "first")
+    (should (eq 'latest
+                (plist-get (disco-chatbuf-input-history-next-value)
+                           :status)))))
+
 (ert-deftest disco-chatbuf-input-history-push-explicit-text-ignores-live-object-buffer ()
   (with-temp-buffer
     (disco-chatbuf-init-state 8)

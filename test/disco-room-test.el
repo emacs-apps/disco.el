@@ -65,6 +65,37 @@
                    (disco-chatbuf-string-plain-text
                     (disco-room--current-draft))))))
 
+(ert-deftest disco-room-draft-history-prev-next-restores-structured-pending-draft ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (let ((path (make-temp-file "disco-room-history"))
+          (render-calls 0))
+      (unwind-protect
+          (progn
+            (disco-chatbuf-input-history-push "older draft")
+            (disco-room--set-draft
+             (concat "pending "
+                     (disco-room--attachment-input-object-string
+                      (disco-room--make-attachment-input-object path :filename "a.txt"))))
+            (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
+                       (lambda (&rest _args)
+                         (setq render-calls (1+ render-calls)))))
+              (disco-room-draft-prev)
+              (should (equal "older draft"
+                             (disco-chatbuf-string-plain-text
+                              (disco-room--current-draft))))
+              (should-not (disco-chatbuf-string-has-objects-p
+                           (disco-room--current-draft)))
+              (disco-room-draft-next)
+              (should (disco-chatbuf-string-has-objects-p
+                       (disco-room--current-draft)))
+              (should (= 1 (length disco-room--pending-attachments)))
+              (should (equal "a.txt"
+                             (plist-get (car disco-room--pending-attachments)
+                                        :filename)))
+              (should (= 2 render-calls))))
+        (delete-file path)))))
+
 (ert-deftest disco-room-input-preview-renders-parsed-attachments ()
   (with-temp-buffer
     (disco-room-mode)

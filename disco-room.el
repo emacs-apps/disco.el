@@ -1867,48 +1867,33 @@ When NO-RERENDER is non-nil, update local state without rendering."
   (setq disco-room--pending-attachments nil)
   (disco-chatbuf-input-history-reset))
 
-(defun disco-room--input-history-push (input)
-  "Push INPUT into draft history using shared chatbuf history rules."
-  (let ((normalized (string-trim-right (disco-chatbuf-string-plain-text input))))
-    (disco-chatbuf-input-history-push normalized)))
-
-(defun disco-room--input-history-goto (index)
-  "Switch draft view to history entry INDEX.
-
-When INDEX is nil, restore pending draft text."
-  (setq disco-chatbuf--input-idx index)
-  (if (null index)
-      (setq disco-room--draft-input (disco-chatbuf-copy-string disco-chatbuf--input-pending))
-    (setq disco-room--draft-input (disco-chatbuf-copy-string
-                                   (ring-ref disco-chatbuf--input-ring index))))
-  (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
-  (disco-room--update-frame-preserving-point))
-
 (defun disco-room-draft-prev (&optional n)
   "Replace draft with N previous entries from draft history."
   (interactive "p")
-  (let* ((step (max 1 (or n 1)))
-         (ring-size (and disco-chatbuf--input-ring (ring-length disco-chatbuf--input-ring))))
-    (cond
-     ((or (null ring-size) (= ring-size 0))
-      (message "disco: draft history is empty"))
-     (t
-      (unless (integerp disco-chatbuf--input-idx)
-        (setq disco-chatbuf--input-pending (disco-room--current-draft))
-        (setq disco-chatbuf--input-idx -1))
-      (let ((target (min (1- ring-size) (+ disco-chatbuf--input-idx step))))
-        (disco-room--input-history-goto target))))))
+  (let ((result (disco-chatbuf-input-history-prev-value
+                 (disco-room--current-draft)
+                 n)))
+    (pcase (plist-get result :status)
+      ('ok
+       (setq disco-room--draft-input
+             (disco-chatbuf-copy-string (plist-get result :value)))
+       (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
+       (disco-room--update-frame-preserving-point))
+      (_
+       (message "disco: draft history is empty")))))
 
 (defun disco-room-draft-next (&optional n)
   "Replace draft with N newer entries from draft history."
   (interactive "p")
-  (let ((step (max 1 (or n 1))))
-    (if (not (integerp disco-chatbuf--input-idx))
-        (message "disco: already at latest draft")
-      (let ((target (- disco-chatbuf--input-idx step)))
-        (if (< target 0)
-            (disco-room--input-history-goto nil)
-          (disco-room--input-history-goto target))))))
+  (let ((result (disco-chatbuf-input-history-next-value n)))
+    (pcase (plist-get result :status)
+      ('ok
+       (setq disco-room--draft-input
+             (disco-chatbuf-copy-string (plist-get result :value)))
+       (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
+       (disco-room--update-frame-preserving-point))
+      (_
+       (message "disco: already at latest draft")))))
 
 (defun disco-room-edit-draft ()
   "Edit current room draft in minibuffer and re-render room."
@@ -6904,7 +6889,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                required-permissions
                :action "sending messages")
               (unless (string-empty-p normalized)
-                (disco-room--input-history-push normalized))
+                (disco-chatbuf-input-history-push normalized))
               (setq disco-room--draft-input "")
               (setq disco-room--send-in-flight t)
               (disco-room--update-frame-preserving-point)

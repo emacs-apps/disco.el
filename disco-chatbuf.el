@@ -526,34 +526,74 @@ When INDEX is nil, restore pending input remembered before history navigation."
   (setq disco-chatbuf--input-idx nil)
   (setq disco-chatbuf--input-pending nil))
 
-(defun disco-chatbuf-input-history-prev (&optional n)
-  "Replace input with N previous entries from input history."
-  (interactive "p")
+(defun disco-chatbuf-input-history-prev-value (current-input &optional n)
+  "Return N older history entries for cached CURRENT-INPUT.
+
+CURRENT-INPUT is remembered as the pending latest value the first time history
+navigation moves away from it.  The return value is a plist with `:status' set
+to either `ok' or `empty'.  When the status is `ok', `:value' contains the
+selected history string, preserving text properties of CURRENT-INPUT when it is
+restored later via `disco-chatbuf-input-history-next-value'."
   (let* ((step (max 1 (or n 1)))
          (ring-size (and (ring-p disco-chatbuf--input-ring)
                          (ring-length disco-chatbuf--input-ring))))
+    (if (or (null ring-size) (= ring-size 0))
+        (list :status 'empty)
+      (unless (integerp disco-chatbuf--input-idx)
+        (setq disco-chatbuf--input-pending
+              (disco-chatbuf-copy-string current-input))
+        (setq disco-chatbuf--input-idx -1))
+      (setq disco-chatbuf--input-idx
+            (min (1- ring-size) (+ disco-chatbuf--input-idx step)))
+      (list :status 'ok
+            :value (disco-chatbuf-copy-string
+                    (ring-ref disco-chatbuf--input-ring
+                              disco-chatbuf--input-idx))))))
+
+(defun disco-chatbuf-input-history-next-value (&optional n)
+  "Return N newer history entries for cached chatbuf input state.
+
+The return value is a plist with `:status' set to either `ok' or `latest'.
+When the status is `ok', `:value' contains the selected history string or the
+remembered pending latest input when navigation returns to the newest state."
+  (let ((step (max 1 (or n 1))))
     (cond
-     ((or (null ring-size) (= ring-size 0))
-      (user-error "disco-chatbuf: input history is empty"))
      ((null disco-chatbuf--input-idx)
-      (disco-chatbuf-input-history-goto (1- step)))
+      (list :status 'latest))
+     ((<= disco-chatbuf--input-idx (1- step))
+      (let ((value (disco-chatbuf-copy-string
+                    (or disco-chatbuf--input-pending ""))))
+        (setq disco-chatbuf--input-idx nil)
+        (setq disco-chatbuf--input-pending nil)
+        (list :status 'ok :value value)))
      (t
-      (disco-chatbuf-input-history-goto
-       (min (1- ring-size) (+ disco-chatbuf--input-idx step)))))))
+      (setq disco-chatbuf--input-idx (- disco-chatbuf--input-idx step))
+      (list :status 'ok
+            :value (disco-chatbuf-copy-string
+                    (ring-ref disco-chatbuf--input-ring
+                              disco-chatbuf--input-idx)))))))
+
+(defun disco-chatbuf-input-history-prev (&optional n)
+  "Replace input with N previous entries from input history."
+  (interactive "p")
+  (let ((result (disco-chatbuf-input-history-prev-value
+                 (disco-chatbuf-input-string)
+                 n)))
+    (pcase (plist-get result :status)
+      ('ok
+       (disco-chatbuf-input-set-text (plist-get result :value)))
+      (_
+       (user-error "disco-chatbuf: input history is empty")))))
 
 (defun disco-chatbuf-input-history-next (&optional n)
   "Replace input with N newer entries from input history."
   (interactive "p")
-  (let ((step (max 1 (or n 1))))
-    (cond
-     ((null disco-chatbuf--input-idx)
-      (user-error "disco-chatbuf: already at latest input"))
-     ((<= disco-chatbuf--input-idx (1- step))
-      (setq disco-chatbuf--input-idx nil)
-      (disco-chatbuf-input-set-text (or disco-chatbuf--input-pending ""))
-      (setq disco-chatbuf--input-pending nil))
-     (t
-      (disco-chatbuf-input-history-goto (- disco-chatbuf--input-idx step))))))
+  (let ((result (disco-chatbuf-input-history-next-value n)))
+    (pcase (plist-get result :status)
+      ('ok
+       (disco-chatbuf-input-set-text (plist-get result :value)))
+      (_
+       (user-error "disco-chatbuf: already at latest input")))))
 
 (provide 'disco-chatbuf)
 
