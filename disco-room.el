@@ -1777,9 +1777,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
                 (when-let* ((attachment (disco-room--attachment-by-token-id token-id)))
                   (push (copy-tree attachment) attachments))))
             (setq pos end)))))
-    (list :content (replace-regexp-in-string
-                    "[ \t][ \t]+" " "
-                    (mapconcat #'identity (nreverse content-parts) ""))
+    (list :content (mapconcat #'identity (nreverse content-parts) "")
           :objects (nreverse objects)
           :attachments (nreverse attachments)
           :token-ids (nreverse token-ids))))
