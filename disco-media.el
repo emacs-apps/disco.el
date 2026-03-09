@@ -27,6 +27,9 @@
   '("webp" "png" "jpg" "jpeg" "gif" "img")
   "Preferred media cache file extension candidates.")
 
+(defconst disco-media--attachment-flag-is-spoiler (ash 1 3)
+  "Attachment flag bit marking spoiler attachments.")
+
 (defvar disco-media--attachment-preview-image-cache (make-hash-table :test #'equal)
   "Preview image cache keyed by attachment preview cache key.
 
@@ -641,6 +644,35 @@ VALUE should be nil for uncapped mode or a non-negative integer."
   (let ((value (alist-get 'ephemeral attachment)))
     (and value (not (eq value :false)))))
 
+(defun disco-media--attachment-flags (attachment)
+  "Return normalized integer attachment flags from ATTACHMENT, or nil."
+  (let ((raw (alist-get 'flags attachment)))
+    (cond
+     ((integerp raw) raw)
+     ((and (stringp raw)
+           (string-match-p "\\`[0-9]+\\'" raw))
+      (string-to-number raw))
+     (t nil))))
+
+(defun disco-media-attachment-spoiler-p (attachment)
+  "Return non-nil when ATTACHMENT should be treated as a spoiler."
+  (let ((filename (alist-get 'filename attachment))
+        (flagged (disco-media--attachment-flags attachment))
+        (explicit (alist-get 'is_spoiler attachment)))
+    (or (and explicit (not (eq explicit :false)))
+        (and (integerp flagged)
+             (/= 0 (logand flagged disco-media--attachment-flag-is-spoiler)))
+        (and (stringp filename)
+             (string-prefix-p "SPOILER_" filename t)))))
+
+(defun disco-media-attachment-spoiler-label (attachment)
+  "Return placeholder label shown while spoiler ATTACHMENT stays hidden."
+  (pcase (disco-media-attachment-kind attachment)
+    ('photo "[spoiler image hidden]")
+    ('video "[spoiler video hidden]")
+    ('audio "[spoiler audio hidden]")
+    (_ "[spoiler attachment hidden]")))
+
 (defun disco-media-attachment-kind (attachment)
   "Return normalized media kind symbol for ATTACHMENT.
 
@@ -661,7 +693,11 @@ Return value is one of `photo', `video', `audio' or `document'."
            (string-trim (alist-get 'title attachment)))
       (and (stringp (alist-get 'filename attachment))
            (not (string-empty-p (string-trim (alist-get 'filename attachment))))
-           (string-trim (alist-get 'filename attachment)))
+           (let ((filename (string-trim (alist-get 'filename attachment))))
+             (if (and (disco-media-attachment-spoiler-p attachment)
+                      (string-prefix-p "SPOILER_" filename t))
+                 (substring filename 8)
+               filename)))
       (let ((id (alist-get 'id attachment)))
         (if (and id (not (string-empty-p (format "%s" id))))
             (format "attachment-%s" id)

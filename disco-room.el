@@ -4160,25 +4160,44 @@ messages; everything else is a system event shown as a centered divider."
 
 PREFIX can be a fixed prefix string or mutable prefix-state."
   (when disco-room-show-attachments
-    (dolist (attachment (or (disco-room--message-effective-attachments msg) '()))
-      (condition-case _
-          (if disco-room-use-rich-attachment-cards
-              (disco-room--insert-attachment-card attachment)
-            (disco-ins-insert-attachment-lines
-             (disco-room--attachment-summary attachment)
-             :prefix prefix
-             :url (and disco-room-show-attachment-urls
-                       (or (alist-get 'url attachment)
-                           (alist-get 'proxy_url attachment)))
-             :summary-face 'disco-room-message-meta
-             :url-face 'shadow))
-        (error
-         (disco-ins-insert-attachment-lines
-          (format "[file] %s [render fallback]"
-                  (or (alist-get 'filename attachment)
-                      (format "%s" (or (alist-get 'id attachment) "unknown"))))
-          :prefix prefix
-          :summary-face 'shadow))))))
+    (let* ((message-id (alist-get 'id msg))
+           (reveal-spoilers (disco-room--message-spoilers-revealed-p message-id)))
+      (dolist (attachment (or (disco-room--message-effective-attachments msg) '()))
+        (condition-case _
+            (if (and (stringp message-id)
+                     (disco-media-attachment-spoiler-p attachment)
+                     (not reveal-spoilers))
+                (disco-ins-insert-attachment-spoiler-placeholder
+                 attachment
+                 :prefix (unless disco-room-use-rich-attachment-cards prefix)
+                 :border-face (and disco-room-use-rich-attachment-cards
+                                   'disco-room-attachment-card-border)
+                 :line-face (if disco-room-use-rich-attachment-cards
+                                'disco-room-attachment-card-meta
+                              'disco-room-message-meta)
+                 :button-face (if disco-room-use-rich-attachment-cards
+                                  'disco-room-attachment-card-action
+                                'disco-room-message-meta)
+                 :toggle-action (lambda ()
+                                  (disco-room-toggle-message-spoilers message-id))
+                 :toggle-help-echo "Reveal spoiler attachment")
+              (if disco-room-use-rich-attachment-cards
+                  (disco-room--insert-attachment-card attachment)
+                (disco-ins-insert-attachment-lines
+                 (disco-room--attachment-summary attachment)
+                 :prefix prefix
+                 :url (and disco-room-show-attachment-urls
+                           (or (alist-get 'url attachment)
+                               (alist-get 'proxy_url attachment)))
+                 :summary-face 'disco-room-message-meta
+                 :url-face 'shadow)))
+          (error
+           (disco-ins-insert-attachment-lines
+            (format "[file] %s [render fallback]"
+                    (or (alist-get 'filename attachment)
+                        (format "%s" (or (alist-get 'id attachment) "unknown"))))
+            :prefix prefix
+            :summary-face 'shadow)))))))
 
 (defun disco-room--insert-message-embeds (msg)
   "Insert embed detail lines for MSG."

@@ -122,6 +122,25 @@
       (should (eq 'shadow (get-text-property (match-beginning 0) 'face))))))
 
 
+(ert-deftest disco-ins-insert-attachment-spoiler-placeholder-renders-reveal-button ()
+  (with-temp-buffer
+    (let (revealed)
+      (disco-ins-insert-attachment-spoiler-placeholder
+       '((filename . "SPOILER_cat.png"))
+       :prefix "    "
+       :line-face 'shadow
+       :button-face 'link
+       :toggle-action (lambda ()
+                        (setq revealed t)))
+      (should (string-match-p (regexp-quote "[spoiler image hidden]")
+                              (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "[Reveal spoiler]")
+      (button-activate (button-at (match-beginning 0)))
+      (should revealed)
+      (goto-char (point-min))
+      (should (stringp (get-text-property (point) 'help-echo))))))
+
 (ert-deftest disco-ins-insert-attachment-document-renders-header-and-transfer-buttons ()
   (with-temp-buffer
     (let (downloaded saved)

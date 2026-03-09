@@ -231,6 +231,35 @@ span as (START . END), or nil when SUMMARY is empty."
         (disco-ui-append-face start (point) face))
       (cons start (point)))))
 
+(cl-defun disco-ins-insert-attachment-spoiler-placeholder
+    (attachment &key prefix border-face line-face button-face
+                     toggle-action toggle-help-echo reveal-label)
+  "Insert hidden spoiler placeholder for ATTACHMENT."
+  (let* ((prefix-state (disco-ins--attachment-prefix-state prefix border-face))
+         (label (disco-media-attachment-spoiler-label attachment))
+         (start (point))
+         (help (or toggle-help-echo "Reveal spoiler")))
+    (insert label)
+    (when (functionp toggle-action)
+      (disco-media-add-action-properties
+       start (point)
+       (lambda (&optional _event)
+         (interactive)
+         (funcall toggle-action))
+       help)
+      (insert " ")
+      (disco-ui-insert-action-button
+       (or reveal-label "[Reveal spoiler]")
+       toggle-action
+       :face button-face
+       :help-echo help))
+    (insert "
+")
+    (disco-ui-apply-line-prefix start (point) prefix-state)
+    (when line-face
+      (disco-ui-append-face start (point) line-face))
+    (cons start (point))))
+
 (cl-defun disco-ins-insert-attachment-transfer-line (attachment &key prefix face
                                                                 action-face kind)
   "Insert telega-style transfer/progress line for ATTACHMENT."

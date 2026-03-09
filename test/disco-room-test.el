@@ -1234,6 +1234,63 @@
         (should (string-match-p (regexp-quote "[file] cat.png [render fallback]")
                                 (buffer-string)))))))
 
+(ert-deftest disco-room-insert-message-attachments-hides-spoiler-media-until-revealed ()
+  (with-temp-buffer
+    (let ((disco-room-use-rich-attachment-cards t)
+          (disco-room--revealed-spoiler-message-id nil)
+          typed-called
+          toggled-id)
+      (cl-letf (((symbol-function 'disco-ins-insert-attachment-photo)
+                 (lambda (&rest _args)
+                   (setq typed-called t)
+                   (insert "[photo-block]\n")))
+                ((symbol-function 'disco-room-toggle-message-spoilers)
+                 (lambda (message-id)
+                   (setq toggled-id message-id))))
+        (disco-room--insert-message-attachments
+         '((id . "m1")
+           (attachments . (((filename . "SPOILER_cat.png")
+                            (flags . 8))))))
+        (should-not typed-called)
+        (should (string-match-p (regexp-quote "[spoiler image hidden]")
+                                (buffer-string)))
+        (goto-char (point-min))
+        (search-forward "[Reveal spoiler]")
+        (button-activate (button-at (match-beginning 0)))
+        (should (equal "m1" toggled-id))))))
+
+(ert-deftest disco-room-toggle-message-spoilers-reveals-spoiler-attachment-on-rerender ()
+  (with-temp-buffer
+    (let ((disco-room-use-rich-attachment-cards nil)
+          (disco-room-show-attachment-urls nil))
+      (disco-room-mode)
+      (setq-local disco-room--channel-id "chat")
+      (setq-local disco-room--channel-name "chat")
+      (disco-state-reset)
+      (disco-state-upsert-channel
+       '((id . "chat")
+         (type . 0)
+         (guild_id . "g1")
+         (permissions . "2048")))
+      (disco-state-put-messages
+       "chat"
+       '(((id . "m1")
+          (channel_id . "chat")
+          (content . "")
+          (attachments . (((id . "a1")
+                           (filename . "SPOILER_cat.png")
+                           (flags . 8)
+                           (width . 640)
+                           (height . 480)
+                           (url . "https://example.invalid/cat.png")))))))
+      (disco-room-render)
+      (should (string-match-p (regexp-quote "[spoiler image hidden]")
+                              (buffer-string)))
+      (should-not (string-match-p (regexp-quote "cat.png") (buffer-string)))
+      (disco-room-toggle-message-spoilers "m1")
+      (should (string-match-p (regexp-quote "cat.png") (buffer-string)))
+      (should-not (string-match-p (regexp-quote "[spoiler image hidden]")
+                                  (buffer-string))))))
 
 (ert-deftest disco-room-composer-visible-p-hides-archived-thread ()
   (with-temp-buffer

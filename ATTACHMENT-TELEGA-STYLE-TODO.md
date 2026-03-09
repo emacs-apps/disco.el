@@ -22,7 +22,7 @@ continuous refactor pass.
 
 ## Follow-up: spoiler media
 
-- [ ] Add attachment spoiler detection helpers to `disco-media.el`
-- [ ] Add spoiler placeholder inserter to `disco-ins.el`
-- [ ] Gate attachment rendering in `disco-room.el` on spoiler reveal state
-- [ ] Add spoiler attachment tests and re-run compile/ERT
+- [x] Add attachment spoiler detection helpers to `disco-media.el`
+- [x] Add spoiler placeholder inserter to `disco-ins.el`
+- [x] Gate attachment rendering in `disco-room.el` on spoiler reveal state
+- [x] Add spoiler attachment tests and re-run compile/ERT

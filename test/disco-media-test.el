@@ -47,9 +47,30 @@
                  (disco-media-attachment-display-name
                   '((title . "Quarterly report")
                     (filename . "report.pdf")))))
+  (should (equal "cat.png"
+                 (disco-media-attachment-display-name
+                  '((filename . "SPOILER_cat.png")))))
   (should (equal "attachment-42"
                  (disco-media-attachment-display-name
                   '((id . "42"))))))
+
+(ert-deftest disco-media-attachment-spoiler-p-detects-common-discord-shapes ()
+  (should (disco-media-attachment-spoiler-p
+           '((flags . 8) (filename . "cat.png"))))
+  (should (disco-media-attachment-spoiler-p
+           '((flags . "8") (filename . "cat.png"))))
+  (should (disco-media-attachment-spoiler-p
+           '((is_spoiler . t) (filename . "cat.png"))))
+  (should (disco-media-attachment-spoiler-p
+           '((filename . "SPOILER_cat.png"))))
+  (should-not (disco-media-attachment-spoiler-p
+               '((filename . "cat.png"))))
+  (should (equal "[spoiler image hidden]"
+                 (disco-media-attachment-spoiler-label
+                  '((filename . "SPOILER_cat.png")))))
+  (should (equal "[spoiler attachment hidden]"
+                 (disco-media-attachment-spoiler-label
+                  '((filename . "secret.bin"))))))
 
 (ert-deftest disco-media-attachment-meta-line-includes-duration-and-ephemeral ()
   (let ((meta (disco-media-attachment-meta-line
