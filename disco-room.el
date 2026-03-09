@@ -788,26 +788,6 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   "Return current room channel object from state."
   (disco-state-channel disco-room--channel-id))
 
-(defun disco-room--thread-channel-p (&optional channel)
-  "Return non-nil when CHANNEL (or current room channel) is a thread."
-  (disco-thread-channel-p (or channel (disco-room--channel-object))))
-
-(defun disco-room--thread-metadata (&optional channel)
-  "Return thread metadata alist for CHANNEL or current room channel."
-  (disco-thread-metadata (or channel (disco-room--channel-object))))
-
-(defun disco-room--thread-archived-p (&optional channel)
-  "Return non-nil when CHANNEL thread is archived."
-  (disco-thread-archived-p (or channel (disco-room--channel-object))))
-
-(defun disco-room--thread-locked-p (&optional channel)
-  "Return non-nil when CHANNEL thread is locked."
-  (disco-thread-locked-p (or channel (disco-room--channel-object))))
-
-(defun disco-room--thread-header-suffix ()
-  "Return human-readable status suffix for thread header."
-  (disco-thread-header-suffix (disco-room--channel-object)))
-
 (defun disco-room--channel-header-suffix (&optional channel)
   "Return human-readable suffixes for room header CHANNEL."
   (let ((channel (or channel (disco-room--channel-object))))
@@ -819,19 +799,19 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
 
 (defun disco-room--ensure-thread-channel ()
   "Signal user error unless current room channel is a thread."
-  (unless (disco-room--thread-channel-p)
+  (unless (disco-thread-channel-p (disco-room--channel-object))
     (user-error "disco: current room is not a thread")))
 
 (defun disco-room--ensure-parent-channel ()
   "Signal user error when current room channel is itself a thread."
-  (when (disco-room--thread-channel-p)
+  (when (disco-thread-channel-p (disco-room--channel-object))
     (user-error "disco: open a parent channel room to create a new thread")))
 
 (defun disco-room--required-send-permissions (&optional channel)
   "Return permission list required to send message in CHANNEL.
 
 When CHANNEL is nil, use current room channel."
-  (if (disco-room--thread-channel-p channel)
+  (if (disco-thread-channel-p (or channel (disco-room--channel-object)))
       '(send-messages-in-threads)
     '(send-messages)))
 
@@ -870,9 +850,9 @@ negatives."
 (defun disco-room--thread-send-restriction-reason (&optional channel)
   "Return thread-local send restriction reason for CHANNEL, or nil."
   (let ((channel (or channel (disco-room--channel-object))))
-    (when (disco-room--thread-channel-p channel)
-      (let ((tags (delq nil (list (and (disco-room--thread-archived-p channel) "archived")
-                                  (and (disco-room--thread-locked-p channel) "locked")))))
+    (when (disco-thread-channel-p channel)
+      (let ((tags (delq nil (list (and (disco-thread-archived-p channel) "archived")
+                                  (and (disco-thread-locked-p channel) "locked")))))
         (when tags
           (format "current thread is %s" (mapconcat #'identity tags ", ")))))))
 
@@ -1094,9 +1074,9 @@ This covers operations like rename, lock, slowmode, and auto-archive changes
 that require an active, mutable thread."
   (let ((channel (or channel (disco-room--channel-object))))
     (cond
-     ((not (disco-room--thread-channel-p channel))
+     ((not (disco-thread-channel-p (or channel (disco-room--channel-object))))
       "current room is not a thread")
-     ((disco-room--thread-archived-p channel)
+     ((disco-thread-archived-p channel)
       "current thread is archived")
      (t
       (disco-room--channel-permission-reason '(manage-threads) channel)))))
@@ -1105,11 +1085,11 @@ that require an active, mutable thread."
   "Return reason toggle-thread-archived is unavailable for CHANNEL, or nil."
   (let ((channel (or channel (disco-room--channel-object))))
     (cond
-     ((not (disco-room--thread-channel-p channel))
+     ((not (disco-thread-channel-p (or channel (disco-room--channel-object))))
       "current room is not a thread")
-     ((not (disco-room--thread-archived-p channel))
+     ((not (disco-thread-archived-p channel))
       (disco-room--channel-permission-reason '(manage-threads) channel))
-     ((disco-room--thread-locked-p channel)
+     ((disco-thread-locked-p channel)
       (disco-room--channel-permission-reason '(manage-threads) channel))
      (t
       (disco-room--channel-permission-reason
@@ -1130,9 +1110,9 @@ that require an active, mutable thread."
   "Return reason join-thread is unavailable for CHANNEL, or nil."
   (let ((channel (or channel (disco-room--channel-object))))
     (cond
-     ((not (disco-room--thread-channel-p channel))
+     ((not (disco-thread-channel-p (or channel (disco-room--channel-object))))
       "current room is not a thread")
-     ((disco-room--thread-archived-p channel)
+     ((disco-thread-archived-p channel)
       "current thread is archived")
      ((disco-room--thread-joined-p channel)
       "already joined to this thread")
@@ -1142,9 +1122,9 @@ that require an active, mutable thread."
   "Return reason leave-thread is unavailable for CHANNEL, or nil."
   (let ((channel (or channel (disco-room--channel-object))))
     (cond
-     ((not (disco-room--thread-channel-p channel))
+     ((not (disco-thread-channel-p (or channel (disco-room--channel-object))))
       "current room is not a thread")
-     ((disco-room--thread-archived-p channel)
+     ((disco-thread-archived-p channel)
       "current thread is archived")
      ((not (disco-room--thread-joined-p channel))
       "not joined to this thread")
@@ -1154,9 +1134,9 @@ that require an active, mutable thread."
   "Return reason set-thread-muted is unavailable for CHANNEL, or nil."
   (let ((channel (or channel (disco-room--channel-object))))
     (cond
-     ((not (disco-room--thread-channel-p channel))
+     ((not (disco-thread-channel-p (or channel (disco-room--channel-object))))
       "current room is not a thread")
-     ((disco-room--thread-archived-p channel)
+     ((disco-thread-archived-p channel)
       "current thread is archived")
      ((not (disco-room--thread-joined-p channel))
       "join the thread before changing mute state")
@@ -1183,14 +1163,14 @@ regular parent channels. Forum/media parents still require public-thread
 creation permission."
   (let ((channel (disco-room--channel-object)))
     (cond
-     ((disco-room--thread-channel-p channel)
+     ((disco-thread-channel-p channel)
       "open a parent channel room to create a new thread")
      ((and channel (not (disco-thread-parent-channel-p channel)))
       "current room channel does not support threads")
      ((not (and channel (disco-permission-channel-known-p channel)))
       nil)
      ((and (eq type :any)
-           (not (disco-room--forum-or-media-channel-p channel)))
+           (not (disco-thread-forum-or-media-channel-p channel)))
       (unless (or (disco-permission-channel-has-p channel 'create-public-threads nil)
                   (disco-permission-channel-has-p channel 'create-private-threads nil))
         (format "missing one of %s"
@@ -2579,24 +2559,6 @@ Discord starter threads reuse source message ID as thread channel ID."
     (or msg
         (user-error "disco: message not found in local room cache"))))
 
-(defun disco-room--read-thread-auto-archive-duration ()
-  "Prompt for optional auto archive duration in minutes.
-
-Returns nil when left blank."
-  (disco-thread-read-auto-archive-duration nil nil))
-
-(defun disco-room--read-required-thread-auto-archive-duration (&optional default)
-  "Prompt for required auto archive duration in minutes.
-
-DEFAULT, when non-nil, is preselected in completion candidates."
-  (disco-thread-read-auto-archive-duration t default))
-
-(defun disco-room--read-tristate-bool (prompt current-value)
-  "Read tri-state boolean with PROMPT and CURRENT-VALUE.
-
-Return symbol `keep', t, or :false."
-  (disco-thread-read-tristate-bool prompt current-value))
-
 (defun disco-room--read-optional-nonnegative-int (prompt)
   "Read optional non-negative integer using PROMPT.
 
@@ -2607,23 +2569,6 @@ Returns nil when left blank."
         (when (< n 0)
           (user-error "disco: value must be >= 0"))
         n))))
-
-(defun disco-room--read-detached-thread-type ()
-  "Prompt for detached thread type; return numeric channel type or nil."
-  (disco-thread-read-detached-type))
-
-(defun disco-room--forum-or-media-channel-p (&optional channel)
-  "Return non-nil when CHANNEL (or current room channel) is forum/media."
-  (disco-thread-forum-or-media-channel-p
-   (or channel (disco-room--channel-object))))
-
-(defun disco-room--thread-with-meta-field (channel key value)
-  "Return CHANNEL with thread metadata KEY set to VALUE."
-  (disco-thread-with-meta-field channel key value))
-
-(defun disco-room--thread-with-field (channel key value)
-  "Return CHANNEL with top-level KEY set to VALUE."
-  (disco-thread-with-field channel key value))
 
 (defun disco-room--resolve-thread-update (updated fallback)
   "Resolve UPDATED thread channel response with FALLBACK object.
@@ -7940,7 +7885,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
                             (or default-message-id
                                 (user-error "disco: no message id provided and no loaded messages"))
                           message-raw))
-            (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
+            (auto-archive-duration (disco-thread-read-auto-archive-duration nil nil))
             (rate-limit-per-user
              (disco-room--read-optional-nonnegative-int
               "Slowmode seconds (empty for none): ")))
@@ -7976,9 +7921,9 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
       (disco-room--thread-create-unavailable-reason :any)
       "create detached threads")
      (let* ((name (read-string "Thread name: "))
-            (type (unless (disco-room--forum-or-media-channel-p)
-                    (disco-room--read-detached-thread-type)))
-            (auto-archive-duration (disco-room--read-thread-auto-archive-duration))
+            (type (unless (disco-thread-forum-or-media-channel-p (disco-room--channel-object))
+                    (disco-thread-read-detached-type)))
+            (auto-archive-duration (disco-thread-read-auto-archive-duration nil nil))
             (invitable (when (equal type 12)
                          (y-or-n-p "Invitable by non-moderators? ")))
             (rate-limit-per-user
@@ -8036,7 +7981,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
-         (next-archived (not (disco-room--thread-archived-p channel)))
+         (next-archived (not (disco-thread-archived-p channel)))
          (updated (disco-api-set-thread-archived disco-room--channel-id next-archived nil))
          (fallback (disco-thread-apply-updates
                     channel
@@ -8088,7 +8033,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
-         (next-locked (not (disco-room--thread-locked-p channel)))
+         (next-locked (not (disco-thread-locked-p channel)))
          (updated (disco-api-update-thread disco-room--channel-id :locked next-locked))
          (fallback (disco-thread-apply-updates
                     channel
@@ -8142,10 +8087,10 @@ When called interactively, empty input clears slowmode (sets to 0)."
       "set thread auto archive duration")
      (let* ((channel (or (disco-room--channel-object)
                          (user-error "disco: unknown thread in state")))
-            (meta (disco-room--thread-metadata channel))
+            (meta (disco-thread-metadata channel))
             (current (or (alist-get 'auto_archive_duration meta)
                          (alist-get 'auto_archive_duration channel))))
-       (list (disco-room--read-required-thread-auto-archive-duration current)))))
+       (list (disco-thread-read-auto-archive-duration t current)))))
   (disco-room--ensure-action-available
    (disco-room--thread-update-unavailable-reason)
    "set thread auto archive duration")
@@ -8190,7 +8135,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (disco-room--ensure-thread-channel)
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
-         (meta (disco-room--thread-metadata channel))
+         (meta (disco-thread-metadata channel))
          (current-name (or (alist-get 'name channel) ""))
          (name-input (string-trim
                       (read-string
@@ -8215,13 +8160,13 @@ When called interactively, empty input clears slowmode (sets to 0)."
                 (user-error "disco: value must be >= 0"))
               n)))
          (archived-choice
-          (disco-room--read-tristate-bool
+          (disco-thread-read-tristate-bool
            "Archived"
-           (disco-room--thread-archived-p channel)))
+           (disco-thread-archived-p channel)))
          (locked-choice
-          (disco-room--read-tristate-bool
+          (disco-thread-read-tristate-bool
            "Locked"
-           (disco-room--thread-locked-p channel)))
+           (disco-thread-locked-p channel)))
          (archived (unless (eq archived-choice 'keep) archived-choice))
          (locked (unless (eq locked-choice 'keep) locked-choice))
          (has-change (or name
