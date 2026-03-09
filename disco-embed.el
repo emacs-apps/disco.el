@@ -594,28 +594,109 @@ Keeps original line breaks and applies markdown renderer pipeline."
     ('no-url "[no preview URL]")
     (_ "[loading preview]")))
 
+(defun disco-embed--preview-image-width-chars (image)
+  "Return IMAGE display width in text columns, or 0 when unavailable."
+  (let* ((size (and image
+                    (ignore-errors
+                      (image-size image nil (selected-frame)))))
+         (width (and (consp size) (car size))))
+    (if (numberp width)
+        (max 0 (ceiling width))
+      0)))
+
+(defun disco-embed--insert-preview-image-slice (image slice-index url &optional fallback)
+  "Insert one preview line slice for IMAGE at SLICE-INDEX.
+
+When URL is non-nil, make the inserted slice clickable.  FALLBACK is used as
+image alt text."
+  (let* ((slice-height-px (max 1
+                               (or (ignore-errors (line-pixel-height))
+                                   (frame-char-height))))
+         (slice-start (point))
+         (slice (list 0
+                      (* slice-index slice-height-px)
+                      1.0
+                      slice-height-px)))
+    (insert-image image (or fallback "[image]") nil slice)
+    (disco-media-add-open-url-properties slice-start (point) url)))
+
+(defun disco-embed--grid-item-label (item)
+  "Return fallback text label for preview grid ITEM."
+  (disco-embed--preview-status-label (plist-get item :status)))
+
+(defun disco-embed--grid-item-line-count (item)
+  "Return number of rendered text lines for preview grid ITEM."
+  (let ((image (plist-get item :image)))
+    (cond
+     (image
+      (max 1
+           (or (ignore-errors (disco-media-image-slice-count image))
+               1)))
+     ((disco-embed--grid-item-label item) 1)
+     (t 0))))
+
+(defun disco-embed--grid-item-width-chars (item)
+  "Return display width in text columns for preview grid ITEM."
+  (let ((image (plist-get item :image))
+        (label (disco-embed--grid-item-label item)))
+    (cond
+     (image (disco-embed--preview-image-width-chars image))
+     ((stringp label) (string-width label))
+     (t 0))))
+
+(defun disco-embed--insert-grid-item-line (item line-index)
+  "Insert ITEM content for LINE-INDEX in a multi-image preview grid.
+
+Return non-nil when anything was inserted."
+  (let ((image (plist-get item :image))
+        (url (plist-get item :url))
+        (label (disco-embed--grid-item-label item)))
+    (cond
+     (image
+      (let ((slice-count (disco-embed--grid-item-line-count item)))
+        (and (< line-index slice-count)
+             (condition-case _
+                 (progn
+                   (disco-embed--insert-preview-image-slice image line-index url "[image]")
+                   t)
+               (error
+                (when (zerop line-index)
+                  (insert "[image unavailable]")
+                  t))))))
+     ((and (zerop line-index)
+           (stringp label))
+      (insert label)
+      t)
+     (t nil))))
+
+(defun disco-embed--insert-grid-item-padding (item)
+  "Insert padding that matches ITEM display width."
+  (let ((width (disco-embed--grid-item-width-chars item)))
+    (when (> width 0)
+      (insert (make-string width ?\s)))))
+
 (defun disco-embed--insert-grid-preview-row (items embed prefix-str)
-  "Insert multi-image preview ITEMS as a two-column text grid."
+  "Insert multi-image preview ITEMS as a sliced two-column text grid."
   (let ((content-start (point))
-        (index 0)
-        (count (length items)))
-    (dolist (item items)
-      (let ((image (plist-get item :image))
-            (status (plist-get item :status))
-            (url (plist-get item :url)))
-        (if image
-            (condition-case _
-                (let ((image-start (point)))
-                  (insert-image image "[image]")
-                  (disco-media-add-open-url-properties image-start (point) url))
-              (error
-               (insert "[image unavailable]")))
-          (insert (disco-embed--preview-status-label status))))
-      (setq index (1+ index))
-      (when (< index count)
-        (if (= (% index 2) 0)
-            (insert "\n")
-          (insert " "))))
+        (remaining items)
+        (first-line t))
+    (while remaining
+      (let* ((left (pop remaining))
+             (right (pop remaining))
+             (left-lines (disco-embed--grid-item-line-count left))
+             (right-lines (and right (disco-embed--grid-item-line-count right)))
+             (row-lines (max 1 left-lines (or right-lines 0))))
+        (dotimes (line-index row-lines)
+          (unless first-line
+            (disco-media-insert-slice-newline))
+          (setq first-line nil)
+          (let ((left-inserted (disco-embed--insert-grid-item-line left line-index)))
+            (when (and right
+                       (< line-index (or right-lines 0)))
+              (unless left-inserted
+                (disco-embed--insert-grid-item-padding left))
+              (insert " ")
+              (disco-embed--insert-grid-item-line right line-index))))))
     (insert "\n")
     (disco-ui-apply-line-prefix content-start (point) prefix-str)
     (disco-ui-append-face

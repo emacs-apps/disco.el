@@ -1,6 +1,7 @@
 ;;; disco-embed-test.el --- Tests for disco-embed -*- lexical-binding: t; -*-
 
 (require 'ert)
+(require 'cl-lib)
 
 (add-to-list 'load-path
              (expand-file-name ".."
@@ -38,6 +39,67 @@
                    (get-text-property pos 'disco-markdown-spoiler-message-id rendered)))
     (should (equal "█"
                    (get-text-property pos 'display rendered)))))
+
+(ert-deftest disco-embed-normalize-embeds-merges-trailing-image-only-embeds ()
+  (let* ((embeds (list '((type . "rich")
+                         (url . "https://example.invalid/post")
+                         (title . "Gallery")
+                         (image . ((url . "https://example.invalid/1.png"))))
+                       '((type . "rich")
+                         (url . "https://example.invalid/post")
+                         (image . ((url . "https://example.invalid/2.png"))))
+                       '((type . "rich")
+                         (url . "https://example.invalid/other")
+                         (title . "Other")
+                         (image . ((url . "https://example.invalid/3.png"))))))
+         (normalized (disco-embed--normalize-embeds embeds))
+         (first (car normalized))
+         (images (alist-get 'images first)))
+    (should (= 2 (length normalized)))
+    (should (= 2 (length images)))
+    (should (equal "https://example.invalid/1.png"
+                   (alist-get 'url (nth 0 images))))
+    (should (equal "https://example.invalid/2.png"
+                   (alist-get 'url (nth 1 images))))
+    (should (equal "https://example.invalid/other"
+                   (alist-get 'url (cadr normalized))))))
+
+(ert-deftest disco-embed-grid-preview-row-renders-images-as-slices ()
+  (let (insert-calls)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'image-size)
+                 (lambda (image &optional _pixels _frame)
+                   (pcase image
+                     (:img-a '(4 . 2))
+                     (:img-b '(5 . 3))
+                     (_ '(1 . 1)))))
+                ((symbol-function 'insert-image)
+                 (lambda (image string &optional area slice)
+                   (push (list image string area slice) insert-calls)
+                   (insert (format "[%s:%s]"
+                                   image
+                                   (if slice "slice" "plain")))))
+                ((symbol-function 'disco-media-image-slice-count)
+                 (lambda (image)
+                   (pcase image
+                     (:img-a 2)
+                     (:img-b 3)
+                     (_ 1))))
+                ((symbol-function 'disco-embed--background-face)
+                 (lambda (_embed) nil)))
+        (disco-embed--insert-grid-preview-row
+         (list (list :image :img-a :status 'ready :url "https://example.invalid/a.png")
+               (list :image :img-b :status 'ready :url "https://example.invalid/b.png"))
+         nil
+         "    "))
+      (setq insert-calls (nreverse insert-calls))
+      (should (= 5 (length insert-calls)))
+      (should (equal '(:img-a :img-b :img-a :img-b :img-b)
+                     (mapcar #'car insert-calls)))
+      (dolist (call insert-calls)
+        (should (equal "[image]" (nth 1 call)))
+        (should-not (nth 2 call))
+        (should (consp (nth 3 call)))))))
 
 (provide 'disco-embed-test)
 
