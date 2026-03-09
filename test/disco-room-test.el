@@ -115,6 +115,28 @@
       (should-not disco-room--pending-reply-to)
       (should-not (disco-chatbuf-aux-active-p)))))
 
+(ert-deftest disco-room-composer-aux-state-prefers-synced-shared-state-but-falls-back-on-divergence ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--pending-reply-to "m1")
+    (disco-chatbuf-aux-set
+     '(:aux-type reply :message-id "m1" :aux-msg ((id . "m1") (content . "shared"))))
+    (let ((aux (disco-room--composer-aux-state)))
+      (should (eq 'reply (plist-get aux :aux-type)))
+      (should (equal "m1" (plist-get aux :message-id)))
+      (should (equal "shared"
+                     (alist-get 'content (plist-get aux :aux-msg)))))
+    (setq-local disco-room--pending-reply-to "m2")
+    (let ((aux (disco-room--composer-aux-state)))
+      (should (equal "m2" (plist-get aux :message-id)))
+      (should-not (equal "shared"
+                         (alist-get 'content (plist-get aux :aux-msg)))))
+    (setq-local disco-room--pending-reply-to nil)
+    (let ((aux (disco-room--composer-aux-state)))
+      (should (equal "m1" (plist-get aux :message-id)))
+      (should (equal "shared"
+                     (alist-get 'content (plist-get aux :aux-msg)))))))
+
 (ert-deftest disco-room-input-preview-renders-parsed-attachments ()
   (with-temp-buffer
     (disco-room-mode)

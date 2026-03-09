@@ -873,30 +873,8 @@ EXTRA-PERMISSIONS augments the base send permission set for this room."
   (when-let* ((reason (disco-room--room-send-restriction-reason nil channel)))
     (format "(read-only room; composer hidden: %s)" reason)))
 
-(defun disco-room--composer-edit-active-p ()
-  "Return non-nil when room composer is editing an existing message."
-  (and (listp disco-room--pending-edit)
-       (eq (plist-get disco-room--pending-edit :type) 'edit)))
-
-(defun disco-room--composer-edit-message-id ()
-  "Return target message id for active composer edit, or nil."
-  (and (disco-room--composer-edit-active-p)
-       (plist-get disco-room--pending-edit :message-id)))
-
-(defun disco-room--composer-aux-active-p ()
-  "Return non-nil when room composer currently has reply/edit context."
-  (or (disco-room--composer-edit-active-p)
-      (not (null disco-room--pending-reply-to))))
-
-(defun disco-room--composer-aux-context-name ()
-  "Return human-readable name for active composer aux context, or nil."
-  (cond
-   ((disco-room--composer-edit-active-p) "editing a message")
-   (disco-room--pending-reply-to "replying to a message")
-   (t nil)))
-
 (defun disco-room--current-composer-aux-state ()
-  "Return current room composer aux plist for shared chatbuf state, or nil."
+  "Return current room-local composer aux plist, or nil."
   (cond
    ((and (listp disco-room--pending-edit)
          (eq (plist-get disco-room--pending-edit :type) 'edit))
@@ -909,6 +887,46 @@ EXTRA-PERMISSIONS augments the base send permission set for this room."
           :aux-msg (disco-room--composer-context-message disco-room--pending-reply-to)
           :message-id disco-room--pending-reply-to))
    (t nil)))
+
+(defun disco-room--composer-aux-state ()
+  "Return effective composer aux plist.
+
+Prefer the shared chatbuf aux state when it matches the room-local aux source.
+If the two diverge, fall back to the room-local state to avoid stale reads
+while migration is still in progress."
+  (let ((room-state (disco-room--current-composer-aux-state))
+        (shared-state (and (disco-chatbuf-aux-active-p)
+                           (disco-chatbuf-aux-state))))
+    (cond
+     ((and shared-state room-state
+           (equal (plist-get shared-state :aux-type)
+                  (plist-get room-state :aux-type))
+           (equal (plist-get shared-state :message-id)
+                  (plist-get room-state :message-id)))
+      shared-state)
+     (room-state room-state)
+     (shared-state shared-state)
+     (t nil))))
+
+(defun disco-room--composer-edit-active-p ()
+  "Return non-nil when room composer is editing an existing message."
+  (eq (plist-get (disco-room--composer-aux-state) :aux-type) 'edit))
+
+(defun disco-room--composer-edit-message-id ()
+  "Return target message id for active composer edit, or nil."
+  (and (disco-room--composer-edit-active-p)
+       (plist-get (disco-room--composer-aux-state) :message-id)))
+
+(defun disco-room--composer-aux-active-p ()
+  "Return non-nil when room composer currently has reply/edit context."
+  (not (null (disco-room--composer-aux-state))))
+
+(defun disco-room--composer-aux-context-name ()
+  "Return human-readable name for active composer aux context, or nil."
+  (pcase (plist-get (disco-room--composer-aux-state) :aux-type)
+    ('edit "editing a message")
+    ('reply "replying to a message")
+    (_ nil)))
 
 (defun disco-room--message-owned-by-current-user-p (msg &optional unknown-value)
   "Return non-nil when MSG belongs to current user.
@@ -4910,7 +4928,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
-  (let* ((aux-state (disco-room--current-composer-aux-state))
+  (let* ((aux-state (disco-room--composer-aux-state))
          (aux-type (plist-get aux-state :aux-type))
          (message-id (plist-get aux-state :message-id)))
     (concat
@@ -6494,7 +6512,7 @@ enabled, include `replied_user'."
          (content (string-trim-right (or (plist-get parsed :content) "")))
          (attachments (or (plist-get parsed :attachments) '()))
          (buf (get-buffer-create "*disco-room-preview*"))
-         (mode-label (pcase (plist-get (disco-room--current-composer-aux-state) :aux-type)
+         (mode-label (pcase (plist-get (disco-room--composer-aux-state) :aux-type)
                        ('edit "edit")
                        ('reply "reply")
                        (_ "message"))))
