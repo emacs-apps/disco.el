@@ -1218,8 +1218,8 @@ creation permission."
           (or (plist-get state :attachment-token-seq) 0))
     (disco-room--restore-attachment-token-table
      (plist-get state :attachment-token-entries))
-    (setq disco-room--draft-input draft)
-    (disco-chatbuf-input-history-reset)
+    (disco-chatbuf-input-cache-set
+     'disco-room--draft-input draft :reset-history-p t)
     (disco-room--prune-unused-attachment-tokens draft)
     (disco-room--sync-pending-attachments-from-draft draft)))
 
@@ -1269,8 +1269,8 @@ state that was present before edit mode was entered."
                 :message-id message-id
                 :saved-state saved-state))
     (setq disco-room--pending-reply-to nil)
-    (setq disco-room--draft-input old-content)
-    (disco-chatbuf-input-history-reset)
+    (disco-chatbuf-input-cache-set
+     'disco-room--draft-input old-content :reset-history-p t)
     (setq disco-room--pending-attachments nil)
     (setq disco-room--attachment-token-seq 0)
     (when (hash-table-p disco-room--attachment-token-table)
@@ -1839,10 +1839,9 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync `disco-room--draft-input' from editable input region, when present."
-  (let ((text (disco-chatbuf-copy-string (or (disco-chatbuf-input-string) ""))))
-    (unless (equal-including-properties text disco-room--draft-input)
-      (setq disco-room--draft-input text)
-      (disco-chatbuf-input-history-reset))
+  (let ((text (plist-get
+               (disco-chatbuf-input-cache-sync-from-buffer 'disco-room--draft-input)
+               :value)))
     (disco-room--prune-unused-attachment-tokens text)
     (disco-room--sync-pending-attachments-from-draft text)))
 
@@ -1856,16 +1855,15 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--set-draft (text)
   "Set room draft TEXT and refresh the room composer frame."
-  (setq disco-room--draft-input (disco-chatbuf-copy-string text))
+  (disco-chatbuf-input-cache-set 'disco-room--draft-input text)
   (disco-room--prune-unused-attachment-tokens disco-room--draft-input)
   (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
   (disco-room--update-frame-preserving-point))
 
 (defun disco-room--clear-draft ()
   "Clear room draft and reset draft history navigation state."
-  (setq disco-room--draft-input "")
-  (setq disco-room--pending-attachments nil)
-  (disco-chatbuf-input-history-reset))
+  (disco-chatbuf-input-cache-clear 'disco-room--draft-input :reset-history-p t)
+  (setq disco-room--pending-attachments nil))
 
 (defun disco-room-draft-prev (&optional n)
   "Replace draft with N previous entries from draft history."
@@ -1875,8 +1873,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
                  n)))
     (pcase (plist-get result :status)
       ('ok
-       (setq disco-room--draft-input
-             (disco-chatbuf-copy-string (plist-get result :value)))
+       (disco-chatbuf-input-cache-set
+        'disco-room--draft-input (plist-get result :value))
        (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
        (disco-room--update-frame-preserving-point))
       (_
@@ -1888,8 +1886,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
   (let ((result (disco-chatbuf-input-history-next-value n)))
     (pcase (plist-get result :status)
       ('ok
-       (setq disco-room--draft-input
-             (disco-chatbuf-copy-string (plist-get result :value)))
+       (disco-chatbuf-input-cache-set
+        'disco-room--draft-input (plist-get result :value))
        (disco-room--sync-pending-attachments-from-draft disco-room--draft-input)
        (disco-room--update-frame-preserving-point))
       (_
@@ -6853,7 +6851,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                    "edit messages")
                   (when has-attachments
                     (user-error "disco: editing via composer does not support attachments yet"))
-                  (setq disco-room--draft-input "")
+                  (disco-chatbuf-input-cache-clear 'disco-room--draft-input)
                   (setq disco-room--send-in-flight t)
                   (disco-room--update-frame-preserving-point)
                   (disco-api-edit-message-async
@@ -6874,7 +6872,8 @@ When called with prefix argument, force draft edit in minibuffer first."
                      (when (disco-room--channel-buffer-p room-buffer channel-id)
                        (with-current-buffer room-buffer
                          (setq disco-room--send-in-flight nil)
-                         (setq disco-room--draft-input normalized)
+                         (disco-chatbuf-input-cache-set
+                          'disco-room--draft-input normalized)
                          (disco-room--update-frame-preserving-point)
                          (message "disco: edit failed for %s: %s"
                                   edit-message-id
@@ -6890,7 +6889,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                :action "sending messages")
               (unless (string-empty-p normalized)
                 (disco-chatbuf-input-history-push normalized))
-              (setq disco-room--draft-input "")
+              (disco-chatbuf-input-cache-clear 'disco-room--draft-input)
               (setq disco-room--send-in-flight t)
               (disco-room--update-frame-preserving-point)
               (cl-labels
@@ -6937,8 +6936,9 @@ When called with prefix argument, force draft edit in minibuffer first."
                                 (setq disco-room--send-in-flight nil)
                                 (if (> sent-count 0)
                                     (progn
-                                      (setq disco-room--draft-input
-                                            (mapconcat #'identity remaining "\n\n"))
+                                      (disco-chatbuf-input-cache-set
+                                       'disco-room--draft-input
+                                       (mapconcat #'identity remaining "\n\n"))
                                       (setq disco-room--pending-reply-to nil)
                                       (when has-attachments
                                         (disco-room--clear-pending-attachment-state))
@@ -6946,7 +6946,8 @@ When called with prefix argument, force draft edit in minibuffer first."
                                       (message "disco: sent %d/%d split messages; restored remaining draft: %s"
                                                sent-count total
                                                (disco-room--async-error-message err)))
-                                  (setq disco-room--draft-input content)
+                                  (disco-chatbuf-input-cache-set
+                                   'disco-room--draft-input content)
                                   (disco-room--update-frame-preserving-point)
                                   (message "disco: send failed: %s"
                                            (disco-room--async-error-message err))))))
@@ -6988,7 +6989,8 @@ When called with prefix argument, force draft edit in minibuffer first."
                             (when (room-active-p)
                               (with-current-buffer room-buffer
                                 (setq disco-room--send-in-flight nil)
-                                (setq disco-room--draft-input content)
+                                (disco-chatbuf-input-cache-set
+                                 'disco-room--draft-input content)
                                 (disco-room--update-frame-preserving-point)
                                 (message "disco: send failed: %s"
                                          (disco-room--async-error-message err))))))
@@ -7014,8 +7016,9 @@ When called with prefix argument, force draft edit in minibuffer first."
                       (when (room-active-p)
                         (with-current-buffer room-buffer
                           (setq disco-room--send-in-flight nil)
-                          (setq disco-room--draft-input
-                                (if has-attachments content normalized))
+                          (disco-chatbuf-input-cache-set
+                           'disco-room--draft-input
+                           (if has-attachments content normalized))
                           (disco-room--update-frame-preserving-point)
                           (message "disco: send failed: %s"
                                    (disco-room--async-error-message err)))))))))))))))))
@@ -7879,7 +7882,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local filter-buffer-substring-function
               #'disco-room--buffer-substring-filter)
   (disco-room--typing-cancel-expire-timer)
-  (setq-local disco-room--draft-input "")
+  (disco-chatbuf-input-cache-clear 'disco-room--draft-input)
   (setq-local disco-room--pending-reply-to nil)
   (setq-local disco-room--pending-edit nil)
   (disco-chatbuf-reset-state disco-room-input-history-size)

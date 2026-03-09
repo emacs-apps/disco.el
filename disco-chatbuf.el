@@ -52,6 +52,41 @@
                               disco-chatbuf-input-object-property nil
                               value)))
 
+(cl-defun disco-chatbuf-input-cache-set (cache-symbol value &key reset-history-p)
+  "Store VALUE in CACHE-SYMBOL, preserving text properties.
+
+CACHE-SYMBOL should name a buffer-local cached input variable owned by the
+caller, for example `disco-room--draft-input'.  When RESET-HISTORY-P is
+non-nil, also clear shared history navigation state.  Return the stored value."
+  (set cache-symbol (disco-chatbuf-copy-string value))
+  (when reset-history-p
+    (disco-chatbuf-input-history-reset))
+  (symbol-value cache-symbol))
+
+(cl-defun disco-chatbuf-input-cache-clear (cache-symbol &key reset-history-p)
+  "Clear cached input stored in CACHE-SYMBOL.
+
+When RESET-HISTORY-P is non-nil, also clear shared history navigation state.
+Return the stored empty string."
+  (disco-chatbuf-input-cache-set cache-symbol "" :reset-history-p reset-history-p))
+
+(defun disco-chatbuf-input-cache-sync-from-buffer (cache-symbol)
+  "Sync CACHE-SYMBOL from current input region and return sync metadata.
+
+Return a plist with keys `:value' and `:changed-p'.  When the live input text
+changes including text properties, CACHE-SYMBOL is updated and shared history
+navigation state is reset."
+  (let* ((text (disco-chatbuf-copy-string (or (disco-chatbuf-input-string) "")))
+         (current (or (and (boundp cache-symbol)
+                           (symbol-value cache-symbol))
+                      ""))
+         (changed-p (not (equal-including-properties text current))))
+    (when changed-p
+      (set cache-symbol text)
+      (disco-chatbuf-input-history-reset))
+    (list :value text
+          :changed-p changed-p)))
+
 (defvar-local disco-chatbuf--input-marker nil
   "Marker pointing to the start of the editable input region.")
 

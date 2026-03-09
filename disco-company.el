@@ -103,11 +103,12 @@ completion row height stays stable across CAPF/Corfu and company popups."
       (funcall #'disco-room--sync-draft-from-buffer)
     (let ((bounds (disco-chatbuf-input-region-bounds)))
       (when bounds
-        (setq-local disco-room--draft-input
-                    (replace-regexp-in-string
-                     "[\n\r]+\\'"
-                     ""
-                     (buffer-substring-no-properties (car bounds) (cdr bounds))))))))
+        (disco-chatbuf-input-cache-set
+         'disco-room--draft-input
+         (replace-regexp-in-string
+          "[\n\r]+\\'"
+          ""
+          (buffer-substring-no-properties (car bounds) (cdr bounds))))))))
 
 (defun disco-company--completion-token-boundary-p (char)
   "Return non-nil when CHAR is a valid left boundary for token completion."
