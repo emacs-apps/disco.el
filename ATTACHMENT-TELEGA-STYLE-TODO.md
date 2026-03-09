@@ -19,3 +19,10 @@ continuous refactor pass.
 - [x] Add and update automated tests for the new media owner and typed inserter
       paths
 - [x] Verify the refactor with byte-compilation and ERT
+
+## Follow-up: spoiler media
+
+- [ ] Add attachment spoiler detection helpers to `disco-media.el`
+- [ ] Add spoiler placeholder inserter to `disco-ins.el`
+- [ ] Gate attachment rendering in `disco-room.el` on spoiler reveal state
+- [ ] Add spoiler attachment tests and re-run compile/ERT
