@@ -32,15 +32,6 @@
 (defconst disco-media--attachment-flag-is-spoiler (ash 1 3)
   "Attachment flag bit marking spoiler attachments.")
 
-(defconst disco-media--spoiler-turbulence-attrs
-  '((baseFrequency . "0.1 0.1")
-    (numOctaves . "2"))
-  "Attributes for spoiler `feTurbulence' SVG node.")
-
-(defconst disco-media--spoiler-displacement-attrs
-  '((scale . "80"))
-  "Attributes for spoiler `feDisplacementMap' SVG node.")
-
 (defvar disco-media--attachment-preview-image-cache (make-hash-table :test #'equal)
   "Preview image cache keyed by attachment preview cache key.
 
@@ -76,8 +67,96 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-decorated-preview-cache (make-hash-table :test #'equal)
   "Cache of SVG-decorated preview images keyed by source/spec/mode.")
 
+(defgroup disco-media nil
+  "Media preview, placeholder, and spoiler rendering for disco."
+  :group 'disco)
+
+(defun disco-media--visual-custom-set (symbol value)
+  "Set SYMBOL to VALUE and invalidate media preview caches."
+  (set-default symbol value)
+  (when (fboundp 'disco-media-clear-preview-memory-cache)
+    (disco-media-clear-preview-memory-cache))
+  (let ((callback (or disco-media-rerender-function
+                      disco-media-preview-rerender-function)))
+    (when (functionp callback)
+      (funcall callback))))
+
+(defcustom disco-media-spoiler-turbulence-base-frequency '(0.1 . 0.1)
+  "Base-frequency pair passed to spoiler `feTurbulence'."
+  :type '(cons (number :tag "X frequency")
+          (number :tag "Y frequency"))
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-spoiler-turbulence-num-octaves 2
+  "Number of turbulence octaves used for spoiler distortion."
+  :type 'integer
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-spoiler-displacement-min-scale 10.0
+  "Minimum spoiler displacement-map scale."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-spoiler-displacement-max-scale 28.0
+  "Maximum spoiler displacement-map scale."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-spoiler-displacement-divisor 5.0
+  "Divisor used to derive spoiler displacement scale from preview size."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-spoiler-filter-margin-ratio 0.20
+  "Extra spoiler filter margin ratio around the preview bounds."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-spoiler-real-preview-dim-opacity 0.08
+  "Dark overlay opacity applied over real spoiler previews."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-spoiler-placeholder-dim-opacity 0.10
+  "Dark overlay opacity applied over placeholder spoiler previews."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-video-preview-play-icon-min-radius 6.0
+  "Minimum radius in pixels for video preview play-icon circle."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-video-preview-play-icon-radius-divisor 6.0
+  "Preview-size divisor used to derive video play-icon circle radius."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-video-preview-play-icon-circle-opacity 0.82
+  "Fill opacity used for the video preview play-icon circle."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-video-preview-play-icon-triangle-opacity 0.75
+  "Fill opacity used for the video preview play-icon triangle."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
 (defun disco-media-clear-preview-memory-cache ()
   "Clear in-memory preview image cache without touching disk files."
+  (interactive)
   (clrhash disco-media--attachment-preview-image-cache)
   (clrhash disco-media--attachment-preview-fetching)
   (clrhash disco-media--attachment-spoiler-preview-cache)
@@ -458,33 +537,43 @@ VALUE should be nil for uncapped mode or a non-negative integer."
     (apply #'create-image svg-data 'svg t props)))
 
 (defun disco-media--spoiler-displacement-scale (width height)
-  "Return telega-like spoiler displacement scale for WIDTH and HEIGHT."
-  (let ((base (float (max 24 (min (or width 120) (or height 120))))))
-    (format "%.1f" (max 10.0 (min 28.0 (/ base 5.0))))))
+  "Return spoiler displacement scale string for WIDTH and HEIGHT."
+  (let* ((base (float (max 24 (min (or width 120) (or height 120)))))
+         (divisor (max 0.1 (float disco-media-spoiler-displacement-divisor)))
+         (min-scale (float disco-media-spoiler-displacement-min-scale))
+         (max-scale (float disco-media-spoiler-displacement-max-scale)))
+    (format "%.1f" (max min-scale (min max-scale (/ base divisor))))))
 
 (defun disco-media--svg-append-spoiler-node (svg node-id &optional width height)
   "Append telega-like spoiler turbulence filter with NODE-ID into SVG."
   (when (and (fboundp 'svg--append)
              (fboundp 'dom-node))
-    (svg--append
-     svg
-     (dom-node 'filter
-               `((id . ,node-id)
-                 (x . "-20%")
-                 (y . "-20%")
-                 (width . "140%")
-                 (height . "140%"))
-               (dom-node 'feTurbulence
-                         `((type . "turbulence")
-                           (result . "NOISE")
-                           ,@disco-media--spoiler-turbulence-attrs))
-               (dom-node 'feDisplacementMap
-                         `((in . "SourceGraphic")
-                           (in2 . "NOISE")
-                           (xChannelSelector . "R")
-                           (yChannelSelector . "G")
-                           (scale . ,(disco-media--spoiler-displacement-scale
-                                      width height))))))))
+    (let* ((freq-pair disco-media-spoiler-turbulence-base-frequency)
+           (freq-x (float (or (car-safe freq-pair) 0.1)))
+           (freq-y (float (or (cdr-safe freq-pair) 0.1)))
+           (octaves (max 1 disco-media-spoiler-turbulence-num-octaves))
+           (margin (* 100.0 (max 0.0 (float disco-media-spoiler-filter-margin-ratio))))
+           (extent (+ 100.0 (* 2.0 margin))))
+      (svg--append
+       svg
+       (dom-node 'filter
+                 `((id . ,node-id)
+                   (x . ,(format "%.0f%%" (- margin)))
+                   (y . ,(format "%.0f%%" (- margin)))
+                   (width . ,(format "%.0f%%" extent))
+                   (height . ,(format "%.0f%%" extent)))
+                 (dom-node 'feTurbulence
+                           `((type . "turbulence")
+                             (result . "NOISE")
+                             (baseFrequency . ,(format "%.3f %.3f" freq-x freq-y))
+                             (numOctaves . ,(number-to-string octaves))))
+                 (dom-node 'feDisplacementMap
+                           `((in . "SourceGraphic")
+                             (in2 . "NOISE")
+                             (xChannelSelector . "R")
+                             (yChannelSelector . "G")
+                             (scale . ,(disco-media--spoiler-displacement-scale
+                                        width height)))))))))
 
 (defun disco-media--svg-spoiler-filter-ref (svg &optional width height)
   "Return spoiler filter ref string for SVG, appending node when possible."
@@ -501,7 +590,9 @@ VALUE should be nil for uncapped mode or a non-negative integer."
              (fboundp 'svg-polygon))
     (let* ((cx (/ width 2.0))
            (cy (/ height 2.0))
-           (radius (max 6.0 (min (/ width 6.0) (/ height 6.0))))
+           (radius (max (float disco-media-video-preview-play-icon-min-radius)
+                        (min (/ width (max 0.1 (float disco-media-video-preview-play-icon-radius-divisor)))
+                             (/ height (max 0.1 (float disco-media-video-preview-play-icon-radius-divisor))))))
            (tri-w (* radius 0.95))
            (tri-h (* radius 1.10))
            (x1 (- cx (/ tri-w 3.0)))
@@ -512,23 +603,24 @@ VALUE should be nil for uncapped mode or a non-negative integer."
            (y3 cy))
       (svg-circle svg cx cy radius
                   :fill "#ffffff"
-                  :fill-opacity 0.82)
+                  :fill-opacity disco-media-video-preview-play-icon-circle-opacity)
       (svg-polygon svg
                    (list (cons x1 y1)
                          (cons x2 y2)
                          (cons x3 y3))
                    :fill "#000000"
-                   :fill-opacity 0.75))))
+                   :fill-opacity disco-media-video-preview-play-icon-triangle-opacity))))
 
-(defun disco-media--svg-append-spoiler-overlay (svg width height &optional video-p)
-  "Append telega-like spoiler overlay chrome to SVG of WIDTH by HEIGHT.
+(defun disco-media--svg-append-spoiler-overlay (svg width height &optional video-p dim-opacity)
+  "Append spoiler overlay chrome to SVG of WIDTH by HEIGHT.
 
 The actual spoiler distortion comes from the turbulence/displacement filter.
 This overlay only darkens slightly and optionally adds a video play marker."
   (when (fboundp 'svg-rectangle)
     (svg-rectangle svg 0 0 width height
                    :fill "#000000"
-                   :fill-opacity 0.08))
+                   :fill-opacity (or dim-opacity
+                                     disco-media-spoiler-real-preview-dim-opacity)))
   (when video-p
     (disco-media--svg-append-spoiler-video-icon svg width height)))
 
@@ -920,7 +1012,9 @@ When SPOILER-P is non-nil, return a spoiler-obscured variant."
               (svg--append svg target-group))
             (when spoiler-p
               (disco-media--svg-append-spoiler-overlay
-               svg pixel-width pixel-height (eq kind 'video)))
+               svg pixel-width pixel-height
+               (eq kind 'video)
+               disco-media-spoiler-placeholder-dim-opacity))
             (disco-media--svg-image
              svg
              :scale 1.0
@@ -971,7 +1065,7 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
      placeholder-image
      :spoiler-filter-p nil
      :video-p (eq (disco-media-attachment-kind attachment) 'video)
-     :dim-opacity 0.10)))
+     :dim-opacity disco-media-spoiler-placeholder-dim-opacity)))
 
 (defun disco-media--attachment-real-spoiler-preview-image (attachment)
   "Return obscured real preview image for ATTACHMENT, or nil."
@@ -985,7 +1079,7 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
        preview-image
        :spoiler-filter-p t
        :video-p video-like
-       :dim-opacity 0.08))))
+       :dim-opacity disco-media-spoiler-real-preview-dim-opacity))))
 
 (defun disco-media-attachment-spoiler-preview-image (attachment)
   "Return obscured preview image for spoiler ATTACHMENT, or nil."

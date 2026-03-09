@@ -87,7 +87,13 @@
                     (fboundp 'svg-print)
                     (fboundp 'svg--append)
                     (fboundp 'dom-node)))
-  (let ((svg (svg-create 8 8)))
+  (let ((svg (svg-create 8 8))
+        (disco-media-spoiler-turbulence-base-frequency '(0.125 . 0.125))
+        (disco-media-spoiler-turbulence-num-octaves 3)
+        (disco-media-spoiler-displacement-min-scale 12.0)
+        (disco-media-spoiler-displacement-max-scale 36.0)
+        (disco-media-spoiler-displacement-divisor 4.0)
+        (disco-media-spoiler-filter-margin-ratio 0.25))
     (disco-media--svg-append-spoiler-node svg "noise" 120 180)
     (let ((xml (with-temp-buffer
                  (svg-print svg)
@@ -95,8 +101,10 @@
       (should (string-match-p "feTurbulence" xml))
       (should (string-match-p "feDisplacementMap" xml))
       (should (string-match-p "id=\"noise\"" xml))
-      (should (string-match-p "scale=\"[0-9.]+\"" xml))
-      (should (string-match-p "width=\"140%\"" xml)))))
+      (should (string-match-p "baseFrequency=\"0.125 0.125\"" xml))
+      (should (string-match-p "numOctaves=\"3\"" xml))
+      (should (string-match-p "scale=\"30.0\"" xml))
+      (should (string-match-p "width=\"150%\"" xml)))))
 
 (ert-deftest disco-media-start-video-preview-fetch-uses-thumbnail-filter-without-seek ()
   (let ((disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
@@ -154,14 +162,15 @@
                  '((filename . "SPOILER_cat.png") (placeholder . "abcd")))))))
 
 (ert-deftest disco-media-attachment-spoiler-placeholder-image-avoids-extra-distortion ()
-  (cl-letf (((symbol-function 'disco-media-attachment-placeholder-image)
-             (lambda (_attachment) :placeholder))
-            ((symbol-function 'disco-media--decorate-preview-image)
-             (lambda (image &rest args)
-               (list image args))))
-    (should (equal '(:placeholder (:spoiler-filter-p nil :video-p nil :dim-opacity 0.10))
-                   (disco-media-attachment-spoiler-placeholder-image
-                    '((filename . "SPOILER_cat.png") (placeholder . "abcd")))))))
+  (let ((disco-media-spoiler-placeholder-dim-opacity 0.17))
+    (cl-letf (((symbol-function 'disco-media-attachment-placeholder-image)
+               (lambda (_attachment) :placeholder))
+              ((symbol-function 'disco-media--decorate-preview-image)
+               (lambda (image &rest args)
+                 (list image args))))
+      (should (equal `(:placeholder (:spoiler-filter-p nil :video-p nil :dim-opacity ,disco-media-spoiler-placeholder-dim-opacity))
+                     (disco-media-attachment-spoiler-placeholder-image
+                      '((filename . "SPOILER_cat.png") (placeholder . "abcd"))))))))
 
 (ert-deftest disco-media-attachment-video-display-image-adds-play-icon-decoration ()
   (cl-letf (((symbol-function 'disco-media--decorate-preview-image)
@@ -198,8 +207,8 @@
       (should (eq :decorated
                   (disco-media--decorate-preview-image
                    '(image :type png :file "/tmp/demo.png"
-                           :height (2 . ch)
-                           :disco-nslices 2)
+                     :height (2 . ch)
+                     :disco-nslices 2)
                    :video-p nil)))
       (should (plist-get captured-props :height))
       (should (equal 2 (plist-get captured-props :disco-nslices)))
