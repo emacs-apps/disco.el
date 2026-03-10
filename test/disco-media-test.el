@@ -82,6 +82,27 @@
     (should (string-match-p (regexp-quote "duration=1:01") meta))
     (should (string-match-p (regexp-quote "ephemeral") meta))))
 
+(ert-deftest disco-media-attachment-waveform-string-decodes-and-colors-progress ()
+  (let* ((attachment `((content_type . "audio/ogg")
+                       (duration_secs . 4.0)
+                       (waveform . ,(base64-encode-string
+                                     (unibyte-string 0 64 255 128)
+                                     t))))
+         (text (disco-media-attachment-waveform-string
+                attachment
+                :width 8
+                :progress 2.0
+                :played-face 'success
+                :unplayed-face 'shadow)))
+    (should (stringp text))
+    (should (= 8 (length text)))
+    (let ((played-face (get-text-property 0 'face text))
+          (unplayed-face (get-text-property 7 'face text)))
+      (should (or (eq played-face 'success)
+                  (and (listp played-face) (memq 'success played-face))))
+      (should (or (eq unplayed-face 'shadow)
+                  (and (listp unplayed-face) (memq 'shadow unplayed-face)))))))
+
 (ert-deftest disco-media-svg-append-spoiler-node-adds-noise-filter ()
   (skip-unless (and (fboundp 'svg-create)
                     (fboundp 'svg-print)

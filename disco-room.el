@@ -348,6 +348,23 @@ When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
           (string :tag "Command line"))
   :group 'disco)
 
+(defcustom disco-room-audio-player-command
+  (cond
+   ((executable-find "ffplay") "ffplay -nodisp -autoexit")
+   ((executable-find "mpv") "mpv --no-video")
+   ((executable-find "vlc") "vlc --intf dummy --play-and-exit")
+   (t nil))
+  "Command used to play audio URLs/files from cards.
+
+When this resolves to `ffplay', disco can track play/pause/progress inline in a
+telega-style attachment card.  Other players are launched as best-effort
+external commands without inline playback state.  When nil, fallback uses
+browser/file handlers."
+  :type '(choice
+          (const :tag "Use browser/file handler" nil)
+          (string :tag "Command line"))
+  :group 'disco)
+
 (defcustom disco-room-attachment-preview-max-width 460
   "Maximum pixel width used for inline attachment previews."
   :type 'integer
@@ -3637,6 +3654,16 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         :spoiler-toggle-action toggle-action))
       ('video
        (disco-ins-insert-attachment-video
+        attachment
+        :border-face 'disco-room-attachment-card-border
+        :title-face 'disco-room-attachment-card-title
+        :meta-face 'disco-room-attachment-card-meta
+        :action-face 'disco-room-attachment-card-action
+        :show-url disco-room-show-attachment-urls
+        :spoiler-hidden spoiler-hidden
+        :spoiler-toggle-action toggle-action))
+      ('audio
+       (disco-ins-insert-attachment-audio
         attachment
         :border-face 'disco-room-attachment-card-border
         :title-face 'disco-room-attachment-card-title

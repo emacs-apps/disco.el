@@ -287,7 +287,8 @@ telega; otherwise fall back to a text placeholder line."
         (cons start (point))))))
 
 (cl-defun disco-ins-insert-attachment-transfer-line (attachment &key prefix face
-                                                                action-face kind)
+                                                                action-face kind
+                                                                (allow-play t))
   "Insert telega-style transfer/progress line for ATTACHMENT."
   (let* ((line-start (point))
          (state (disco-media-attachment-download-state attachment))
@@ -295,16 +296,34 @@ telega; otherwise fall back to a text placeholder line."
          (path (plist-get state :path))
          (error-text (plist-get state :error))
          (url (disco-media-attachment-download-url attachment))
+         (effective-kind (or kind (disco-media-attachment-kind attachment)))
          (has-local (and (stringp path) (file-exists-p path)))
          (has-url (disco-media-url-present-p url))
-         (playable-video-p (eq (or kind (disco-media-attachment-kind attachment)) 'video))
+         (playable-video-p (and allow-play (eq effective-kind 'video)))
+         (playable-audio-p (and allow-play (eq effective-kind 'audio)))
          (inserted-action nil))
     (cl-labels ((emit-button (label action help)
                   (when inserted-action
                     (insert " "))
                   (disco-ui-insert-action-button
                    label action :face action-face :help-echo help)
-                  (setq inserted-action t)))
+                  (setq inserted-action t))
+                (emit-play-button (downloaded-p)
+                  (cond
+                   (playable-video-p
+                    (emit-button "[Play]"
+                                 (lambda ()
+                                   (disco-media-play-attachment-video attachment))
+                                 (if downloaded-p
+                                     "Play downloaded video"
+                                   "Play video URL")))
+                   (playable-audio-p
+                    (emit-button "[Play]"
+                                 (lambda ()
+                                   (disco-media-play-attachment-audio attachment))
+                                 (if downloaded-p
+                                     "Play downloaded audio"
+                                   "Play audio URL"))))))
       (insert "transfer: ")
       (pcase status
         ('downloading
@@ -314,11 +333,7 @@ telega; otherwise fall back to a text placeholder line."
                         (disco-media-cancel-attachment-download attachment))
                       "Cancel attachment download"))
         ('downloaded
-         (when playable-video-p
-           (emit-button "[Play]"
-                        (lambda ()
-                          (disco-media-play-attachment-video attachment))
-                        "Play downloaded video"))
+         (emit-play-button t)
          (emit-button "[Open Local]"
                       (lambda ()
                         (disco-media-open-downloaded-attachment attachment))
@@ -330,12 +345,8 @@ telega; otherwise fall back to a text placeholder line."
          (when has-local
            (insert "  " (file-name-nondirectory path))))
         ('error
-         (when (and playable-video-p has-url)
-           (emit-button "[Play]"
-                        (lambda ()
-                          (disco-media-play-attachment-video attachment))
-                        "Play video URL"))
          (when has-url
+           (emit-play-button nil)
            (emit-button "[Retry]"
                         (lambda ()
                           (disco-media-start-attachment-download attachment nil))
@@ -351,12 +362,8 @@ telega; otherwise fall back to a text placeholder line."
            (insert "  error="
                    (truncate-string-to-width error-text 68 nil nil t))))
         (_
-         (when (and playable-video-p has-url)
-           (emit-button "[Play]"
-                        (lambda ()
-                          (disco-media-play-attachment-video attachment))
-                        "Play video URL"))
          (when has-url
+           (emit-play-button nil)
            (emit-button "[Download]"
                         (lambda ()
                           (disco-media-start-attachment-download attachment nil))
@@ -586,6 +593,128 @@ be shown yet."
       (progn
         (disco-ins-insert-attachment-preview-block
          attachment :prefix prefix-state :face meta-face :kind 'video :required t)
+        (disco-ins-insert-attachment-caption-line
+         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+        (when show-url
+          (disco-ins-insert-attachment-url-line
+           (disco-media-attachment-download-url attachment)
+           :prefix prefix-state
+           :face 'shadow))))
+    (cons card-start (point))))
+
+(defun disco-ins--attachment-audio-tag (attachment)
+  "Return header tag string for ATTACHMENT audio payload."
+  (if (disco-media-attachment-voice-message-p attachment)
+      "[voice]"
+    (disco-ins--attachment-kind-tag 'audio)))
+
+(defun disco-ins--attachment-audio-progress-label (attachment progress)
+  "Return human-readable playback label for ATTACHMENT at PROGRESS seconds."
+  (let ((duration (disco-media-attachment-duration-label attachment)))
+    (cond
+     ((and (numberp progress) duration)
+      (format "%s / %s"
+              (disco-media-attachment-duration-label
+               `((duration_secs . ,(max 0.0 progress))))
+              duration))
+     (duration duration)
+     ((numberp progress)
+      (disco-media-attachment-duration-label
+       `((duration_secs . ,(max 0.0 progress)))))
+     (t nil))))
+
+(cl-defun disco-ins-insert-attachment-audio (attachment &key prefix border-face
+                                                        title-face meta-face
+                                                        action-face show-url
+                                                        spoiler-hidden
+                                                        spoiler-toggle-action)
+  "Insert one audio-style attachment block for ATTACHMENT."
+  (let* ((name (disco-media-attachment-display-name attachment))
+         (details (delq nil (list (disco-media-attachment-size-label attachment)
+                                  (disco-media-attachment-duration-label attachment)
+                                  (when (disco-media-attachment-ephemeral-p attachment)
+                                    "ephemeral"))))
+         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
+         (open-info (unless spoiler-hidden
+                      (disco-ins--attachment-open-info attachment)))
+         (inline-playback-p (disco-media-audio-inline-playback-available-p))
+         (playing-p (and inline-playback-p
+                         (disco-media-attachment-audio-playing-p attachment)))
+         (paused-at (and inline-playback-p
+                         (disco-media-attachment-audio-paused-p attachment)))
+         (progress (and inline-playback-p
+                        (or (disco-media-attachment-audio-progress attachment)
+                            paused-at)))
+         (progress-label (disco-ins--attachment-audio-progress-label attachment progress))
+         (waveform-width (max 12 (min 36 (- (window-width) 28))))
+         (waveform (disco-media-attachment-waveform-string
+                    attachment
+                    :width waveform-width
+                    :progress progress
+                    :played-face title-face
+                    :unplayed-face meta-face))
+         (card-start (point)))
+    (disco-ins--insert-prefixed-line
+     (format "%s %s%s"
+             (disco-ins--attachment-audio-tag attachment)
+             name
+             (disco-ins--attachment-detail-text details))
+     :prefix prefix-state
+     :face title-face
+     :action (car-safe open-info)
+     :help-echo (cdr-safe open-info))
+    (let* ((content-type (disco-media-attachment-content-type-label attachment))
+           (meta-parts (delq nil (list content-type))))
+      (when meta-parts
+        (disco-ins--insert-prefixed-line
+         (string-join meta-parts "  ")
+         :prefix prefix-state
+         :face meta-face)))
+    (if spoiler-hidden
+        (disco-ins-insert-attachment-spoiler-placeholder
+         attachment
+         :prefix prefix-state
+         :line-face meta-face
+         :button-face action-face
+         :toggle-action spoiler-toggle-action)
+      (progn
+        (when inline-playback-p
+          (let ((playback-start (point)))
+            (insert "playback: ")
+            (disco-ui-insert-action-button
+             (cond
+              (playing-p "[Pause]")
+              (paused-at "[Resume]")
+              (t "[Play]"))
+             (lambda ()
+               (disco-media-play-attachment-audio attachment))
+             :face action-face
+             :help-echo (if playing-p
+                            "Pause audio playback"
+                          "Play audio attachment"))
+            (when (or playing-p paused-at progress)
+              (insert " ")
+              (disco-ui-insert-action-button
+               "[Stop]"
+               (lambda ()
+                 (disco-media-stop-attachment-audio attachment))
+               :face action-face
+               :help-echo "Stop audio playback"))
+            (when progress-label
+              (insert "  " progress-label))
+            (insert "\n")
+            (disco-ui-apply-line-prefix playback-start (point) prefix-state)
+            (when meta-face
+              (disco-ui-append-face playback-start (point) meta-face))))
+        (when waveform
+          (let ((wave-start (point)))
+            (insert waveform "\n")
+            (disco-ui-apply-line-prefix wave-start (point) prefix-state)
+            (when meta-face
+              (disco-ui-append-face wave-start (point) meta-face))))
+        (disco-ins-insert-attachment-transfer-line
+         attachment :prefix prefix-state :face meta-face :action-face action-face
+         :kind 'audio :allow-play (not inline-playback-p))
         (disco-ins-insert-attachment-caption-line
          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
         (when show-url

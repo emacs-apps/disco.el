@@ -288,6 +288,76 @@
                                       (or (get-text-property pos 'help-echo) ""))))))
       (ignore-errors (delete-file video-file)))))
 
+(ert-deftest disco-ins-insert-attachment-transfer-line-renders-audio-play-button ()
+  (with-temp-buffer
+    (let (played)
+      (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+                 (lambda (_attachment)
+                   '(:status not-downloaded :path "/tmp/track.mp3")))
+                ((symbol-function 'disco-media-play-attachment-audio)
+                 (lambda (_attachment)
+                   (setq played t))))
+        (disco-ins-insert-attachment-transfer-line
+         '((content_type . "audio/mpeg")
+           (filename . "track.mp3")
+           (url . "https://example.invalid/track.mp3"))
+         :prefix "    "
+         :action-face 'link
+         :kind 'audio)
+        (should (string-match-p (regexp-quote "[Play]") (buffer-string)))
+        (goto-char (point-min))
+        (search-forward "[Play]")
+        (button-activate (button-at (match-beginning 0)))
+        (should played)))))
+
+(ert-deftest disco-ins-insert-attachment-audio-renders-inline-controls-and-waveform ()
+  (with-temp-buffer
+    (let (played stopped)
+      (cl-letf (((symbol-function 'disco-media-audio-inline-playback-available-p)
+                 (lambda () t))
+                ((symbol-function 'disco-media-attachment-audio-playing-p)
+                 (lambda (_attachment) nil))
+                ((symbol-function 'disco-media-attachment-audio-paused-p)
+                 (lambda (_attachment) 12.0))
+                ((symbol-function 'disco-media-attachment-audio-progress)
+                 (lambda (_attachment) 12.0))
+                ((symbol-function 'disco-media-attachment-download-state)
+                 (lambda (_attachment)
+                   '(:status not-downloaded :path "/tmp/voice.ogg")))
+                ((symbol-function 'disco-media-attachment-waveform-string)
+                 (lambda (&rest _args)
+                   "[waveform]"))
+                ((symbol-function 'disco-media-play-attachment-audio)
+                 (lambda (_attachment)
+                   (setq played t)))
+                ((symbol-function 'disco-media-stop-attachment-audio)
+                 (lambda (_attachment)
+                   (setq stopped t))))
+        (disco-ins-insert-attachment-audio
+         '((content_type . "audio/ogg")
+           (filename . "voice.ogg")
+           (duration_secs . 61.0)
+           (waveform . "AAAA"))
+         :prefix "    "
+         :title-face 'bold
+         :meta-face 'shadow
+         :action-face 'link)
+        (should (string-match-p (regexp-quote "[voice] voice.ogg")
+                                (buffer-string)))
+        (should (string-match-p (regexp-quote "playback: [Resume] [Stop]  0:12 / 1:01")
+                                (buffer-string)))
+        (should (string-match-p (regexp-quote "[waveform]") (buffer-string)))
+        (should-not (string-match-p (regexp-quote "transfer: [Play]")
+                                    (buffer-string)))
+        (goto-char (point-min))
+        (search-forward "[Resume]")
+        (button-activate (button-at (match-beginning 0)))
+        (goto-char (point-min))
+        (search-forward "[Stop]")
+        (button-activate (button-at (match-beginning 0)))
+        (should played)
+        (should stopped)))))
+
 (provide 'disco-ins-test)
 
 ;;; disco-ins-test.el ends here

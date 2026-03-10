@@ -17,13 +17,16 @@
 (require 'svg nil t)
 (require 'plz)
 
-(defvar disco-room-show-attachment-image-previews)
-(defvar disco-room-attachment-preview-max-width)
-(defvar disco-room-attachment-preview-max-height)
-(defvar disco-room-attachment-preview-fetch-concurrency)
-(defvar disco-room-attachment-cache-directory)
-(defvar disco-room-attachment-download-directory)
-(defvar disco-room-video-player-command)
+(defvar disco-room-show-attachment-image-previews t)
+(defvar disco-room-attachment-preview-max-width 460)
+(defvar disco-room-attachment-preview-max-height 360)
+(defvar disco-room-attachment-preview-fetch-concurrency 6)
+(defvar disco-room-attachment-cache-directory
+  (locate-user-emacs-file "disco-attachment-cache/"))
+(defvar disco-room-attachment-download-directory
+  (locate-user-emacs-file "disco-attachment-downloads/"))
+(defvar disco-room-video-player-command nil)
+(defvar disco-room-audio-player-command nil)
 
 (defconst disco-media--cache-extensions
   '("webp" "png" "jpg" "jpeg" "gif" "img")
@@ -57,6 +60,12 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-media--attachment-download-state-table (make-hash-table :test #'equal)
   "Attachment download state keyed by stable attachment download key.")
+
+(defvar disco-media--attachment-audio-state-table (make-hash-table :test #'equal)
+  "Inline audio playback state keyed by stable attachment download key.")
+
+(defvar disco-media--attachment-audio-current-process nil
+  "Current inline audio playback process, if any.")
 
 (defvar disco-media--attachment-spoiler-preview-cache (make-hash-table :test #'equal)
   "Cache of spoiler-preview image objects keyed by preview cache identity.")
@@ -192,13 +201,36 @@ Values are image objects or the symbol `:missing'.")
     (split-string-and-unquote command))
    (t nil)))
 
+(defun disco-media--command-runnable-p (command)
+  "Return non-nil when COMMAND resolves to an executable program."
+  (when-let* ((argv (disco-media--split-command-args command))
+              (program (car argv)))
+    (or (and (file-name-absolute-p program)
+             (file-executable-p program))
+        (executable-find program))))
+
+(defun disco-media--command-program-name (command)
+  "Return program basename for COMMAND, or nil when unavailable."
+  (when-let* ((argv (disco-media--split-command-args command))
+              (program (car argv)))
+    (file-name-nondirectory program)))
+
+(defun disco-media--audio-player-program-name ()
+  "Return basename for configured audio player, or nil."
+  (disco-media--command-program-name disco-room-audio-player-command))
+
+(defun disco-media-audio-inline-playback-available-p ()
+  "Return non-nil when configured audio player supports inline state tracking."
+  (and (disco-media--command-runnable-p disco-room-audio-player-command)
+       (equal (disco-media--audio-player-program-name) "ffplay")))
+
 (defun disco-media--start-video-player (source)
   "Start configured video player for SOURCE and return non-nil on success."
   (let* ((argv (disco-media--split-command-args disco-room-video-player-command))
          (program (car argv))
          (args (append (cdr argv) (list source))))
     (when (and program
-               (executable-find program))
+               (disco-media--command-runnable-p disco-room-video-player-command))
       (condition-case nil
           (progn
             (make-process
@@ -1408,6 +1440,67 @@ Return value is one of `photo', `video', `audio' or `document'."
                (not (string-empty-p (string-trim content-type))))
       (string-trim content-type))))
 
+(defconst disco-media--attachment-waveform-chars ".:-=+*#%@"
+  "ASCII ramp used to render text audio waveforms.")
+
+(defun disco-media-attachment-waveform-samples (attachment)
+  "Return decoded waveform samples for ATTACHMENT as a vector, or nil."
+  (when-let* ((waveform (alist-get 'waveform attachment)))
+    (condition-case nil
+        (let ((bytes (base64-decode-string waveform)))
+          (when (> (length bytes) 0)
+            (vconcat bytes)))
+      (error nil))))
+
+(defun disco-media--waveform-resample (samples width)
+  "Return resampled waveform peak vector from SAMPLES for target WIDTH."
+  (let* ((source-len (length samples))
+         (target-len (max 1 width))
+         (result (make-vector target-len 0))
+         (idx 0))
+    (while (< idx target-len)
+      (let* ((start (floor (/ (* idx source-len) (float target-len))))
+             (end (max (1+ start)
+                       (floor (/ (* (1+ idx) source-len) (float target-len)))))
+             (peak 0))
+        (dotimes (offset (max 1 (- end start)))
+          (let ((sample-index (min (1- source-len) (+ start offset))))
+            (setq peak (max peak (aref samples sample-index)))))
+        (aset result idx peak)
+        (setq idx (1+ idx))))
+    result))
+
+(cl-defun disco-media-attachment-waveform-string (attachment &key width progress
+                                                                 played-face unplayed-face)
+  "Return propertized text waveform preview string for ATTACHMENT, or nil."
+  (when-let* ((samples (disco-media-attachment-waveform-samples attachment)))
+    (let* ((chars disco-media--attachment-waveform-chars)
+           (bar-width (max 8 (or width 28)))
+           (levels (disco-media--waveform-resample samples bar-width))
+           (duration (alist-get 'duration_secs attachment))
+           (played-ratio (if (and (numberp progress)
+                                  (numberp duration)
+                                  (> duration 0))
+                             (min 1.0 (max 0.0 (/ (float progress) duration)))
+                           0.0))
+           (played-width (floor (* bar-width played-ratio)))
+           (text (make-string bar-width ?.)))
+      (dotimes (idx bar-width)
+        (let* ((sample (aref levels idx))
+               (char-index (min (1- (length chars))
+                                (floor (* (/ (float sample) 255.0)
+                                          (1- (length chars))))))
+               (face (if (< idx played-width) played-face unplayed-face)))
+          (aset text idx (aref chars char-index))
+          (when face
+            (put-text-property idx (1+ idx) 'face face text))))
+      text)))
+
+(defun disco-media-attachment-voice-message-p (attachment)
+  "Return non-nil when ATTACHMENT looks like a Discord voice message."
+  (and (eq (disco-media-attachment-kind attachment) 'audio)
+       (stringp (alist-get 'waveform attachment))))
+
 (defun disco-media-attachment-summary (attachment)
   "Return compact one-line summary string for ATTACHMENT."
   (let* ((kind (pcase (disco-media-attachment-kind attachment)
@@ -1667,6 +1760,227 @@ When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
       (disco-media-play-video-url url))
      (t
       (user-error "disco: video attachment has no playable source")))))
+
+(defun disco-media--audio-state-entry (key)
+  "Return normalized inline audio playback state for KEY."
+  (let ((entry (copy-tree (or (gethash key disco-media--attachment-audio-state-table) '()))))
+    (unless (plist-get entry :status)
+      (setq entry (plist-put entry :status 'stopped)))
+    (when (and (eq (plist-get entry :status) 'playing)
+               (not (process-live-p (plist-get entry :process))))
+      (setq entry (plist-put entry :status 'stopped))
+      (setq entry (plist-put entry :process nil)))
+    entry))
+
+(defun disco-media--audio-store-state (key entry)
+  "Persist inline audio playback ENTRY for KEY and return ENTRY."
+  (puthash key entry disco-media--attachment-audio-state-table)
+  entry)
+
+(defun disco-media-attachment-audio-state (attachment)
+  "Return normalized inline audio playback state for ATTACHMENT."
+  (let* ((key (disco-media-attachment-download-key attachment))
+         (entry (disco-media--audio-state-entry key)))
+    (disco-media--audio-store-state key entry)))
+
+(defun disco-media-attachment-audio-playing-p (attachment)
+  "Return non-nil when ATTACHMENT audio is currently playing inline."
+  (eq (plist-get (disco-media-attachment-audio-state attachment) :status) 'playing))
+
+(defun disco-media-attachment-audio-paused-p (attachment)
+  "Return pause position for ATTACHMENT audio, or nil when not paused."
+  (let ((entry (disco-media-attachment-audio-state attachment)))
+    (when (eq (plist-get entry :status) 'paused)
+      (plist-get entry :progress))))
+
+(defun disco-media-attachment-audio-progress (attachment)
+  "Return current known playback progress for ATTACHMENT audio, or nil."
+  (plist-get (disco-media-attachment-audio-state attachment) :progress))
+
+(defun disco-media-attachment-audio-source (attachment)
+  "Return preferred playable source for ATTACHMENT audio, or nil."
+  (let* ((entry (disco-media-attachment-download-state attachment))
+         (path (plist-get entry :path))
+         (url (disco-media-attachment-download-url attachment)))
+    (cond
+     ((and (stringp path) (file-exists-p path)) path)
+     ((disco-media-url-present-p url) url)
+     (t nil))))
+
+(defun disco-media--start-external-audio-player (source)
+  "Start configured non-inline audio player for SOURCE.
+
+Return non-nil on success."
+  (let* ((argv (disco-media--split-command-args disco-room-audio-player-command))
+         (program (car argv))
+         (args (append (cdr argv) (list source))))
+    (when (and program
+               (disco-media--command-runnable-p disco-room-audio-player-command))
+      (condition-case nil
+          (progn
+            (make-process
+             :name "disco-audio-player"
+             :buffer nil
+             :command (cons program args)
+             :noquery t)
+            t)
+        (error nil)))))
+
+(defun disco-media--stop-inline-audio-process (&optional process stop-reason)
+  "Stop inline audio PROCESS and record STOP-REASON for the sentinel."
+  (when-let* ((proc (or process disco-media--attachment-audio-current-process)))
+    (when (process-live-p proc)
+      (let ((proc-plist (process-plist proc)))
+        (setq proc-plist (plist-put proc-plist :stop-reason stop-reason))
+        (set-process-plist proc proc-plist)
+        (ignore-errors (delete-process proc))))))
+
+(defun disco-media--inline-audio-process-filter (proc output)
+  "Track ffplay progress for inline audio PROC from OUTPUT."
+  (let ((buffer (process-buffer proc))
+        new-progress)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (goto-char (point-max))
+        (insert output)
+        (when (> (buffer-size) 20000)
+          (delete-region (point-min) (max (point-min) (- (point-max) 10000))))
+        (cond
+         ((save-excursion
+            (re-search-backward "\r\\s-*\\([0-9.]+\\)" nil t))
+          (setq new-progress (string-to-number (match-string 1))))
+         ((save-excursion
+            (re-search-backward
+             " time=\\([0-9][0-9]\\):\\([0-9][0-9]\\):\\([0-9.]+\\) "
+             nil t))
+          (setq new-progress
+                (+ (* 3600 (string-to-number (match-string 1)))
+                   (* 60 (string-to-number (match-string 2)))
+                   (string-to-number (match-string 3))))))))
+    (when (numberp new-progress)
+      (let* ((proc-plist (process-plist proc))
+             (key (plist-get proc-plist :attachment-key))
+             (entry (and key (disco-media--audio-state-entry key))))
+        (setq proc-plist (plist-put proc-plist :progress new-progress))
+        (when key
+          (setq entry (plist-put entry :progress new-progress))
+          (when (eq (plist-get entry :process) proc)
+            (disco-media--audio-store-state key entry)))
+        (let ((last-second (plist-get proc-plist :last-second))
+              (next-second (floor new-progress)))
+          (unless (equal last-second next-second)
+            (setq proc-plist (plist-put proc-plist :last-second next-second))
+            (disco-media--notify-state-updated)))
+        (set-process-plist proc proc-plist)))))
+
+(defun disco-media--inline-audio-process-sentinel (proc _event)
+  "Finalize inline audio state after PROC exits."
+  (unless (process-live-p proc)
+    (let* ((proc-plist (process-plist proc))
+           (key (plist-get proc-plist :attachment-key))
+           (stop-reason (plist-get proc-plist :stop-reason))
+           (final-progress (or (and (consp stop-reason)
+                                    (eq (car stop-reason) 'paused)
+                                    (cdr stop-reason))
+                               (plist-get proc-plist :progress))))
+      (when key
+        (let ((entry (disco-media--audio-state-entry key)))
+          (when (eq (plist-get entry :process) proc)
+            (cond
+             ((and (consp stop-reason) (eq (car stop-reason) 'paused))
+              (setq entry (plist-put entry :status 'paused))
+              (setq entry (plist-put entry :progress (max 0.0 (or final-progress 0.0)))))
+             (t
+              (setq entry (plist-put entry :status 'stopped))
+              (setq entry (plist-put entry :progress nil))))
+            (setq entry (plist-put entry :process nil))
+            (disco-media--audio-store-state key entry))))
+      (when (eq proc disco-media--attachment-audio-current-process)
+        (setq disco-media--attachment-audio-current-process nil))
+      (when (buffer-live-p (process-buffer proc))
+        (kill-buffer (process-buffer proc)))
+      (disco-media--notify-state-updated))))
+
+(defun disco-media--start-inline-audio-player (attachment source &optional start-at)
+  "Start ffplay-backed inline audio playback for ATTACHMENT using SOURCE."
+  (let* ((argv (disco-media--split-command-args disco-room-audio-player-command))
+         (program (car argv))
+         (args (append (cdr argv)
+                       (when (and (numberp start-at)
+                                  (> start-at 0))
+                         (list "-ss" (format "%.2f" start-at)))
+                       (list source)))
+         (key (disco-media-attachment-download-key attachment))
+         (buffer (get-buffer-create " *disco-audio-player*")))
+    (unless (and program
+                 (disco-media-audio-inline-playback-available-p))
+      (user-error "disco: inline audio playback requires ffplay"))
+    (when (process-live-p disco-media--attachment-audio-current-process)
+      (disco-media--stop-inline-audio-process disco-media--attachment-audio-current-process 'stopped))
+    (with-current-buffer buffer
+      (erase-buffer))
+    (let ((proc (apply #'start-process "disco-audio-player" buffer program args)))
+      (set-process-query-on-exit-flag proc nil)
+      (set-process-filter proc #'disco-media--inline-audio-process-filter)
+      (set-process-sentinel proc #'disco-media--inline-audio-process-sentinel)
+      (set-process-plist
+       proc
+       (list :attachment-key key
+             :progress (and (numberp start-at)
+                            (max 0.0 start-at))
+             :last-second (and (numberp start-at)
+                               (floor start-at))))
+      (setq disco-media--attachment-audio-current-process proc)
+      (let ((entry (disco-media--audio-state-entry key)))
+        (setq entry (plist-put entry :status 'playing))
+        (setq entry (plist-put entry :progress (and (numberp start-at)
+                                                    (max 0.0 start-at))))
+        (setq entry (plist-put entry :process proc))
+        (disco-media--audio-store-state key entry))
+      (disco-media--notify-state-updated)
+      proc)))
+
+(defun disco-media-stop-attachment-audio (attachment)
+  "Stop inline playback for ATTACHMENT and clear any paused position."
+  (let* ((key (disco-media-attachment-download-key attachment))
+         (entry (disco-media--audio-state-entry key))
+         (process (plist-get entry :process)))
+    (if (process-live-p process)
+        (disco-media--stop-inline-audio-process process 'stopped)
+      (setq entry (plist-put entry :status 'stopped))
+      (setq entry (plist-put entry :progress nil))
+      (setq entry (plist-put entry :process nil))
+      (disco-media--audio-store-state key entry)
+      (disco-media--notify-state-updated))))
+
+(defun disco-media-play-attachment-audio (attachment)
+  "Play or pause ATTACHMENT audio.
+
+When `disco-room-audio-player-command' resolves to ffplay, playback state is
+tracked inline for telega-style controls.  Otherwise a best-effort external
+player is started without inline state tracking."
+  (let* ((source (disco-media-attachment-audio-source attachment))
+         (key (disco-media-attachment-download-key attachment))
+         (entry (disco-media--audio-state-entry key))
+         (process (plist-get entry :process))
+         (paused-at (and (eq (plist-get entry :status) 'paused)
+                         (plist-get entry :progress))))
+    (unless source
+      (user-error "disco: audio attachment has no playable source"))
+    (if (disco-media-audio-inline-playback-available-p)
+        (if (process-live-p process)
+            (disco-media--stop-inline-audio-process
+             process
+             (cons 'paused
+                   (max 0.0
+                        (or (plist-get (process-plist process) :progress)
+                            (plist-get entry :progress)
+                            0.0))))
+          (disco-media--start-inline-audio-player attachment source paused-at))
+      (unless (disco-media--start-external-audio-player source)
+        (if (and (stringp source) (file-exists-p source))
+            (browse-url-of-file source)
+          (browse-url source t))))))
 
 (defun disco-media-download-attachment (attachment &optional target-path)
   "Download ATTACHMENT to TARGET-PATH.
