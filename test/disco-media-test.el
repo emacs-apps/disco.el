@@ -279,6 +279,33 @@
             (should (equal path (plist-get state :path)))))
       (delete-directory tmpdir t))))
 
+(ert-deftest disco-media-play-attachment-audio-downloads-before-inline-playback ()
+  (let ((disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+        (disco-media--attachment-audio-state-table (make-hash-table :test #'equal))
+        (downloaded nil)
+        started-source)
+    (cl-letf (((symbol-function 'disco-media-audio-inline-playback-available-p)
+               (lambda () t))
+              ((symbol-function 'disco-media-attachment-download-state)
+               (lambda (_attachment)
+                 (list :status (if downloaded 'downloaded 'not-downloaded)
+                       :path "/tmp/voice.ogg")))
+              ((symbol-function 'file-exists-p)
+               (lambda (path)
+                 (and downloaded (equal path "/tmp/voice.ogg"))))
+              ((symbol-function 'disco-media-start-attachment-download)
+               (lambda (_attachment _open-after on-success)
+                 (setq downloaded t)
+                 (funcall on-success "/tmp/voice.ogg")))
+              ((symbol-function 'disco-media--start-inline-audio-player)
+               (lambda (_attachment source &optional _start-at)
+                 (setq started-source source))))
+      (disco-media-play-attachment-audio
+       '((id . "a1")
+         (filename . "voice.ogg")
+         (url . "https://example.invalid/voice.ogg")))
+      (should (equal "/tmp/voice.ogg" started-source)))))
+
 (provide 'disco-media-test)
 
 ;;; disco-media-test.el ends here
