@@ -324,6 +324,8 @@
                 ((symbol-function 'disco-media-attachment-download-state)
                  (lambda (_attachment)
                    '(:status not-downloaded :path "/tmp/voice.ogg")))
+                ((symbol-function 'disco-media-attachment-waveform-image)
+                 (lambda (&rest _args) nil))
                 ((symbol-function 'disco-media-attachment-waveform-string)
                  (lambda (&rest _args)
                    "[waveform]"))
@@ -344,9 +346,8 @@
          :action-face 'link)
         (should (string-match-p (regexp-quote "[voice] voice.ogg")
                                 (buffer-string)))
-        (should (string-match-p (regexp-quote "playback: [Resume] [Stop]  0:12 / 1:01")
+        (should (string-match-p (regexp-quote "[Resume] [waveform]  0:12 / 1:01 [Stop]")
                                 (buffer-string)))
-        (should (string-match-p (regexp-quote "[waveform]") (buffer-string)))
         (should-not (string-match-p (regexp-quote "transfer: [Play]")
                                     (buffer-string)))
         (goto-char (point-min))
@@ -357,6 +358,33 @@
         (button-activate (button-at (match-beginning 0)))
         (should played)
         (should stopped)))))
+
+(ert-deftest disco-ins-insert-attachment-audio-prefers-waveform-image-when-available ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'disco-media-audio-inline-playback-available-p)
+               (lambda () nil))
+              ((symbol-function 'disco-media-attachment-waveform-image)
+               (lambda (&rest _args) :waveform-image))
+              ((symbol-function 'disco-media-image-object-valid-p)
+               (lambda (image)
+                 (eq image :waveform-image)))
+              ((symbol-function 'insert-image)
+               (lambda (_image &optional _string _slice)
+                 (insert "[waveform-image]")))
+              ((symbol-function 'disco-media-play-attachment-audio)
+               (lambda (&rest _args) nil)))
+      (disco-ins-insert-attachment-audio
+       '((content_type . "audio/ogg")
+         (filename . "voice.ogg")
+         (duration_secs . 61.0)
+         (waveform . "AAAA")
+         (url . "https://example.invalid/voice.ogg"))
+       :prefix "    "
+       :title-face 'bold
+       :meta-face 'shadow
+       :action-face 'link)
+      (should (string-match-p (regexp-quote "[Play] [waveform-image]  1:01")
+                              (buffer-string))))))
 
 (provide 'disco-ins-test)
 

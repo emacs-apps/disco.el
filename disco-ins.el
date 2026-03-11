@@ -646,13 +646,21 @@ be shown yet."
                         (or (disco-media-attachment-audio-progress attachment)
                             paused-at)))
          (progress-label (disco-ins--attachment-audio-progress-label attachment progress))
-         (waveform-width (max 12 (min 36 (- (window-width) 28))))
-         (waveform (disco-media-attachment-waveform-string
-                    attachment
-                    :width waveform-width
-                    :progress progress
-                    :played-face title-face
-                    :unplayed-face meta-face))
+         (waveform-width (max 12 (min 44 (- (window-width) 28))))
+         (waveform-image (disco-media-attachment-waveform-image
+                          attachment
+                          :width waveform-width
+                          :progress progress))
+         (waveform-text (unless (disco-media-image-object-valid-p waveform-image)
+                          (disco-media-attachment-waveform-string
+                           attachment
+                           :width waveform-width
+                           :progress progress
+                           :played-face title-face
+                           :unplayed-face meta-face)))
+         (play-help (if playing-p
+                        "Pause audio playback"
+                      "Play audio attachment"))
          (card-start (point)))
     (disco-ins--insert-prefixed-line
      (format "%s %s%s"
@@ -678,43 +686,54 @@ be shown yet."
          :button-face action-face
          :toggle-action spoiler-toggle-action)
       (progn
-        (when inline-playback-p
-          (let ((playback-start (point)))
-            (insert "playback: ")
-            (disco-ui-insert-action-button
-             (cond
-              (playing-p "[Pause]")
-              (paused-at "[Resume]")
-              (t "[Play]"))
-             (lambda ()
-               (disco-media-play-attachment-audio attachment))
-             :face action-face
-             :help-echo (if playing-p
-                            "Pause audio playback"
-                          "Play audio attachment"))
-            (when (or playing-p paused-at progress)
-              (insert " ")
-              (disco-ui-insert-action-button
-               "[Stop]"
-               (lambda ()
-                 (disco-media-stop-attachment-audio attachment))
-               :face action-face
-               :help-echo "Stop audio playback"))
-            (when progress-label
-              (insert "  " progress-label))
-            (insert "\n")
-            (disco-ui-apply-line-prefix playback-start (point) prefix-state)
-            (when meta-face
-              (disco-ui-append-face playback-start (point) meta-face))))
-        (when waveform
+        (let ((playback-start (point)))
+          (disco-ui-insert-action-button
+           (cond
+            (playing-p "[Pause]")
+            (paused-at "[Resume]")
+            (t "[Play]"))
+           (lambda ()
+             (disco-media-play-attachment-audio attachment))
+           :face action-face
+           :help-echo play-help)
+          (when (or waveform-image waveform-text progress-label
+                    (and inline-playback-p (or playing-p paused-at progress)))
+            (insert " "))
           (let ((wave-start (point)))
-            (insert waveform "\n")
-            (disco-ui-apply-line-prefix wave-start (point) prefix-state)
-            (when meta-face
-              (disco-ui-append-face wave-start (point) meta-face))))
+            (cond
+             ((disco-media-image-object-valid-p waveform-image)
+              (insert-image waveform-image "[waveform]")
+              (disco-media-add-action-properties
+               wave-start (point)
+               (lambda (&optional _event)
+                 (interactive)
+                 (disco-media-play-attachment-audio attachment))
+               play-help))
+             ((and (stringp waveform-text) (not (string-empty-p waveform-text)))
+              (insert waveform-text)
+              (disco-media-add-action-properties
+               wave-start (point)
+               (lambda (&optional _event)
+                 (interactive)
+                 (disco-media-play-attachment-audio attachment))
+               play-help))))
+          (when progress-label
+            (insert "  " progress-label))
+          (when (and inline-playback-p (or playing-p paused-at progress))
+            (insert " ")
+            (disco-ui-insert-action-button
+             "[Stop]"
+             (lambda ()
+               (disco-media-stop-attachment-audio attachment))
+             :face action-face
+             :help-echo "Stop audio playback"))
+          (insert "\n")
+          (disco-ui-apply-line-prefix playback-start (point) prefix-state)
+          (when meta-face
+            (disco-ui-append-face playback-start (point) meta-face)))
         (disco-ins-insert-attachment-transfer-line
          attachment :prefix prefix-state :face meta-face :action-face action-face
-         :kind 'audio :allow-play (not inline-playback-p))
+         :kind 'audio :allow-play nil)
         (disco-ins-insert-attachment-caption-line
          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
         (when show-url

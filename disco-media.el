@@ -67,6 +67,9 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-audio-current-process nil
   "Current inline audio playback process, if any.")
 
+(defvar disco-media--attachment-waveform-image-cache (make-hash-table :test #'equal)
+  "Cache of rendered audio waveform image objects.")
+
 (defvar disco-media--attachment-spoiler-preview-cache (make-hash-table :test #'equal)
   "Cache of spoiler-preview image objects keyed by preview cache identity.")
 
@@ -157,11 +160,37 @@ Values are image objects or the symbol `:missing'.")
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
+(defcustom disco-media-audio-waveform-colors '("#17c23a" . "#72d86f")
+  "Colors used for audio waveform bars as (PLAYED . UNPLAYED)."
+  :type '(cons (string :tag "Played color")
+          (string :tag "Unplayed color"))
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-audio-waveform-height-factor 1.15
+  "Line-height multiplier used for rendered audio waveform images."
+  :type 'number
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-audio-waveform-bar-width 3
+  "Stroke width in pixels used for each audio waveform bar."
+  :type 'integer
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
+(defcustom disco-media-audio-waveform-gap-width 2
+  "Horizontal gap in pixels between adjacent audio waveform bars."
+  :type 'integer
+  :set #'disco-media--visual-custom-set
+  :group 'disco-media)
+
 (defun disco-media-clear-preview-memory-cache ()
   "Clear in-memory preview image cache without touching disk files."
   (interactive)
   (clrhash disco-media--attachment-preview-image-cache)
   (clrhash disco-media--attachment-preview-fetching)
+  (clrhash disco-media--attachment-waveform-image-cache)
   (clrhash disco-media--attachment-spoiler-preview-cache)
   (clrhash disco-media--attachment-placeholder-image-cache)
   (clrhash disco-media--attachment-decorated-preview-cache))
@@ -1470,6 +1499,15 @@ Return value is one of `photo', `video', `audio' or `document'."
         (setq idx (1+ idx))))
     result))
 
+(defun disco-media--attachment-waveform-played-width (bar-width duration progress)
+  "Return played bar count for BAR-WIDTH, DURATION, and PROGRESS."
+  (if (and (numberp progress)
+           (numberp duration)
+           (> duration 0))
+      (floor (* bar-width
+                (min 1.0 (max 0.0 (/ (float progress) duration)))))
+    0))
+
 (cl-defun disco-media-attachment-waveform-string (attachment &key width progress
                                                                  played-face unplayed-face)
   "Return propertized text waveform preview string for ATTACHMENT, or nil."
@@ -1478,12 +1516,8 @@ Return value is one of `photo', `video', `audio' or `document'."
            (bar-width (max 8 (or width 28)))
            (levels (disco-media--waveform-resample samples bar-width))
            (duration (alist-get 'duration_secs attachment))
-           (played-ratio (if (and (numberp progress)
-                                  (numberp duration)
-                                  (> duration 0))
-                             (min 1.0 (max 0.0 (/ (float progress) duration)))
-                           0.0))
-           (played-width (floor (* bar-width played-ratio)))
+           (played-width (disco-media--attachment-waveform-played-width
+                          bar-width duration progress))
            (text (make-string bar-width ?.)))
       (dotimes (idx bar-width)
         (let* ((sample (aref levels idx))
@@ -1495,6 +1529,68 @@ Return value is one of `photo', `video', `audio' or `document'."
           (when face
             (put-text-property idx (1+ idx) 'face face text))))
       text)))
+
+(cl-defun disco-media-attachment-waveform-image (attachment &key width progress)
+  "Return SVG waveform image for ATTACHMENT, or nil when unavailable."
+  (when (and (display-graphic-p)
+             (image-type-available-p 'svg)
+             (fboundp 'svg-create)
+             (fboundp 'svg-line))
+    (when-let* ((samples (disco-media-attachment-waveform-samples attachment))
+                (waveform (alist-get 'waveform attachment)))
+      (let* ((bar-count (max 8 (or width 28)))
+             (levels (disco-media--waveform-resample samples bar-count))
+             (duration (alist-get 'duration_secs attachment))
+             (played-width (disco-media--attachment-waveform-played-width
+                            bar-count duration progress))
+             (bar-width (max 1 disco-media-audio-waveform-bar-width))
+             (gap-width (max 0 disco-media-audio-waveform-gap-width))
+             (pad-x (max 2 bar-width))
+             (pad-y 3)
+             (height (max 14 (round (* (frame-char-height)
+                                       (max 0.5
+                                            (float disco-media-audio-waveform-height-factor))))))
+             (width-px (+ (* bar-count bar-width)
+                          (* (max 0 (1- bar-count)) gap-width)
+                          (* 2 pad-x)))
+             (colors disco-media-audio-waveform-colors)
+             (played-color (or (car-safe colors) "#17c23a"))
+             (unplayed-color (or (cdr-safe colors) "#72d86f"))
+             (key (list (md5 waveform)
+                        bar-count
+                        played-width
+                        height
+                        bar-width
+                        gap-width
+                        played-color
+                        unplayed-color)))
+        (or (gethash key disco-media--attachment-waveform-image-cache)
+            (let ((svg (svg-create width-px height))
+                  (available-height (max 4 (- height (* 2 pad-y)))))
+              (dotimes (idx bar-count)
+                (let* ((sample (aref levels idx))
+                       (ratio (/ (float sample) 255.0))
+                       (x (+ pad-x (* idx (+ bar-width gap-width))
+                             (/ (float bar-width) 2.0)))
+                       (y2 (- height pad-y))
+                       (bar-height (max 2 (round (* ratio available-height))))
+                       (y1 (- y2 bar-height))
+                       (played-p (< idx played-width)))
+                  (svg-line svg x y2 x y1
+                            :stroke-color (if played-p played-color unplayed-color)
+                            :stroke-width (if played-p
+                                              (1+ bar-width)
+                                            bar-width)
+                            :stroke-linecap "round")))
+              (when-let* ((image (disco-media--svg-image
+                                  svg
+                                  :scale 1.0
+                                  :width width-px
+                                  :height height
+                                  :ascent 'center
+                                  :mask 'heuristic)))
+                (puthash key image disco-media--attachment-waveform-image-cache)
+                image)))))))
 
 (defun disco-media-attachment-voice-message-p (attachment)
   "Return non-nil when ATTACHMENT looks like a Discord voice message."
