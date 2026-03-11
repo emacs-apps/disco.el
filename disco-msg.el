@@ -34,6 +34,61 @@ should return the latest cached message object for that buffer context.")
 When non-nil it is called with one argument, the message object, and should
 return a string or nil.")
 
+(defvar-local disco-msg-reply-function nil
+  "Buffer-local function beginning a reply for a message.")
+
+(defvar-local disco-msg-forward-function nil
+  "Buffer-local function beginning a forward flow for a message.")
+
+(defvar-local disco-msg-edit-function nil
+  "Buffer-local function beginning an edit flow for a message.")
+
+(defvar-local disco-msg-delete-function nil
+  "Buffer-local function deleting a message.")
+
+(defvar-local disco-msg-open-thread-function nil
+  "Buffer-local function opening a starter thread for a message.")
+
+(defvar-local disco-msg-toggle-reaction-function nil
+  "Buffer-local function toggling a reaction on a message.")
+
+(defvar-local disco-msg-add-reaction-function nil
+  "Buffer-local function adding a reaction to a message.")
+
+(defvar-local disco-msg-remove-reaction-function nil
+  "Buffer-local function removing a reaction from a message.")
+
+(defvar disco-msg-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "c") #'disco-msg-copy-dwim)
+    (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "r") #'disco-msg-reply)
+    (define-key map (kbd "f") #'disco-msg-forward)
+    (define-key map (kbd "e") #'disco-msg-edit)
+    (define-key map (kbd "d") #'disco-msg-delete)
+    (define-key map (kbd "!") #'disco-msg-toggle-reaction)
+    (define-key map (kbd "+") #'disco-msg-add-reaction)
+    (define-key map (kbd "-") #'disco-msg-remove-reaction)
+    (define-key map (kbd "T") #'disco-msg-open-thread)
+    map)
+  "Default command map applied to rendered message spans.")
+
+(defun disco-msg-apply-command-map (start end)
+  "Apply `disco-msg-command-map' between START and END where no keymap exists."
+  (let ((pos start))
+    (while (< pos end)
+      (let ((next (or (next-single-char-property-change pos 'keymap nil end)
+                      end)))
+        (unless (get-text-property pos 'keymap)
+          (add-text-properties pos next (list 'keymap disco-msg-command-map)))
+        (setq pos next)))))
+
+(defun disco-msg--call-adapter (adapter message action)
+  "Call ADAPTER with MESSAGE or signal an ACTION-specific user error."
+  (unless (functionp adapter)
+    (user-error "disco: %s is unavailable in this buffer" action))
+  (funcall adapter message))
+
 (defun disco-msg--event-point (event)
   "Return buffer position encoded by mouse EVENT, or nil."
   (when event
@@ -371,6 +426,52 @@ before copying."
           (kill-new copied)
           (message "disco: copied text (%d chars)" (length copied)))
       (disco-msg-copy-text message no-properties))))
+
+(defun disco-msg-reply (message)
+  "Begin replying to MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-reply-function message "replying to messages"))
+
+(defun disco-msg-forward (message)
+  "Begin forwarding MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-forward-function message "forwarding messages"))
+
+(defun disco-msg-edit (message)
+  "Begin editing MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-edit-function message "editing messages"))
+
+(defun disco-msg-delete (message)
+  "Delete MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-delete-function message "deleting messages"))
+
+(defun disco-msg-open-thread (message)
+  "Open starter thread associated with MESSAGE."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-open-thread-function message "opening threads"))
+
+(defun disco-msg-toggle-reaction (message)
+  "Toggle a reaction on MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-toggle-reaction-function
+                           message
+                           "toggling reactions"))
+
+(defun disco-msg-add-reaction (message)
+  "Add a reaction to MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-add-reaction-function
+                           message
+                           "adding reactions"))
+
+(defun disco-msg-remove-reaction (message)
+  "Remove a reaction from MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-remove-reaction-function
+                           message
+                           "removing reactions"))
 
 (defun disco-msg-time (message)
   "Return decoded timestamp for MESSAGE, or nil when unavailable."

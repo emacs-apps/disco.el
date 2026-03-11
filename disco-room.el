@@ -763,14 +763,14 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
     (define-key map (kbd "q") #'quit-window)
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
-    (define-key map (kbd "r") #'disco-room-reply-to-message)
-    (define-key map (kbd "f") #'disco-room-forward-message)
-    (define-key map (kbd "e") #'disco-room-edit-message)
-    (define-key map (kbd "d") #'disco-room-delete-message)
-    (define-key map (kbd "!") #'disco-room-toggle-reaction)
-    (define-key map (kbd "+") #'disco-room-add-reaction)
-    (define-key map (kbd "-") #'disco-room-remove-reaction)
-    (define-key map (kbd "T") #'disco-room-open-thread-from-message-at-point)
+    (define-key map (kbd "r") #'disco-msg-reply)
+    (define-key map (kbd "f") #'disco-msg-forward)
+    (define-key map (kbd "e") #'disco-msg-edit)
+    (define-key map (kbd "d") #'disco-msg-delete)
+    (define-key map (kbd "!") #'disco-msg-toggle-reaction)
+    (define-key map (kbd "+") #'disco-msg-add-reaction)
+    (define-key map (kbd "-") #'disco-msg-remove-reaction)
+    (define-key map (kbd "T") #'disco-msg-open-thread)
     map)
   "Timeline-only keymap active when point is outside the room draft.")
 
@@ -779,13 +779,14 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
     (define-key map (kbd "t") #'disco-msg-copy-text)
-    (define-key map (kbd "r") #'disco-room-reply-to-message)
-    (define-key map (kbd "f") #'disco-room-forward-message)
-    (define-key map (kbd "e") #'disco-room-edit-message)
-    (define-key map (kbd "d") #'disco-room-delete-message)
-    (define-key map (kbd "!") #'disco-room-toggle-reaction)
-    (define-key map (kbd "+") #'disco-room-add-reaction)
-    (define-key map (kbd "-") #'disco-room-remove-reaction)
+    (define-key map (kbd "r") #'disco-msg-reply)
+    (define-key map (kbd "f") #'disco-msg-forward)
+    (define-key map (kbd "e") #'disco-msg-edit)
+    (define-key map (kbd "d") #'disco-msg-delete)
+    (define-key map (kbd "!") #'disco-msg-toggle-reaction)
+    (define-key map (kbd "+") #'disco-msg-add-reaction)
+    (define-key map (kbd "-") #'disco-msg-remove-reaction)
+    (define-key map (kbd "T") #'disco-msg-open-thread)
     map)
   "Prefix map for message actions at point in `disco-room-mode'.")
 
@@ -2514,13 +2515,9 @@ message id and render that context before jumping."
                    (disco-state-channel-thread-p channel))
           channel)))))
 
-(defun disco-room-open-thread-from-message-at-point ()
-  "Open starter thread associated with message at point.
-
-Discord starter threads reuse source message ID as thread channel ID."
-  (interactive)
-  (let* ((msg (disco-room--message-at-point))
-         (message-id (alist-get 'id msg))
+(defun disco-room--open-thread-from-message (msg)
+  "Open starter thread associated with MSG."
+  (let* ((message-id (alist-get 'id msg))
          (thread (disco-room--thread-from-message msg))
          (target-thread-id (or (and (listp thread) (alist-get 'id thread))
                                (and (disco-room--message-has-thread-p msg)
@@ -2535,6 +2532,13 @@ Discord starter threads reuse source message ID as thread channel ID."
       (user-error "disco: cannot resolve starter thread id from message %s" message-id))
     (disco-room-open target-thread-id
                      (or target-thread-name target-thread-id))))
+
+(defun disco-room-open-thread-from-message-at-point ()
+  "Open starter thread associated with message at point.
+
+Discord starter threads reuse source message ID as thread channel ID."
+  (interactive)
+  (disco-room--open-thread-from-message (disco-room--message-at-point)))
 
 (defun disco-room--message-at-point ()
   "Return message object at point, or signal user error."
@@ -4960,6 +4964,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
          :selected-face 'disco-room-reaction-selected
          :unselected-face 'disco-room-reaction
          :line-face 'disco-room-message-meta))
+      (disco-msg-apply-command-map line-start (point))
       (add-text-properties
        line-start
        (point)
@@ -6120,6 +6125,15 @@ REASON is shown in the minibuffer."
         (or default (user-error "disco: emoji cannot be empty"))
       emoji)))
 
+(defun disco-room--add-reaction-to-msg (msg)
+  "Prompt for and add a reaction to MSG."
+  (disco-room--ensure-action-available
+   (disco-room--reaction-unavailable-reason msg)
+   "add reactions")
+  (let* ((default (disco-room--default-reaction-emoji msg))
+         (picked (disco-room--read-reaction-emoji "Add reaction" default)))
+    (disco-room-add-reaction picked (alist-get 'id msg))))
+
 (defun disco-room-add-reaction (&optional emoji message-id)
   "Add EMOJI reaction to MESSAGE-ID at point."
   (interactive
@@ -6156,6 +6170,15 @@ REASON is shown in the minibuffer."
        (message "disco: add reaction failed: %s"
                 (disco-room--async-error-message err))))))
 
+(defun disco-room--remove-reaction-from-msg (msg)
+  "Prompt for and remove a reaction from MSG."
+  (disco-room--ensure-action-available
+   (disco-room--reaction-unavailable-reason msg)
+   "remove reactions")
+  (let* ((default (disco-room--default-reaction-emoji msg))
+         (picked (disco-room--read-reaction-emoji "Remove reaction" default)))
+    (disco-room-remove-reaction picked (alist-get 'id msg))))
+
 (defun disco-room-remove-reaction (&optional emoji message-id)
   "Remove current user's EMOJI reaction from MESSAGE-ID at point."
   (interactive
@@ -6191,6 +6214,15 @@ REASON is shown in the minibuffer."
      (lambda (err)
        (message "disco: remove reaction failed: %s"
                 (disco-room--async-error-message err))))))
+
+(defun disco-room--toggle-reaction-on-msg (msg)
+  "Prompt for and toggle a reaction on MSG."
+  (disco-room--ensure-action-available
+   (disco-room--reaction-unavailable-reason msg)
+   "toggle reactions")
+  (let* ((default (disco-room--default-reaction-emoji msg))
+         (picked (disco-room--read-reaction-emoji "Toggle reaction" default)))
+    (disco-room-toggle-reaction picked (alist-get 'id msg))))
 
 (defun disco-room-toggle-reaction (&optional emoji message-id)
   "Toggle current user's EMOJI reaction on MESSAGE-ID at point."
@@ -7237,6 +7269,13 @@ When called with prefix argument, force draft edit in minibuffer first."
                (message "disco: older history load failed: %s"
                         (disco-room--async-error-message err)))))))))))
 
+(defun disco-room--reply-to-msg (msg)
+  "Set pending reply target to MSG for the next send."
+  (let ((message-id (alist-get 'id msg)))
+    (unless (and (stringp message-id) (not (string-empty-p message-id)))
+      (user-error "disco: message has no id to reply to"))
+    (disco-room-reply-to-message message-id)))
+
 (defun disco-room-reply-to-message (&optional message-id)
   "Set pending reply target MESSAGE-ID for next send.
 
@@ -7271,6 +7310,23 @@ When called interactively, defaults to message under point."
        (= status 400)
        (stringp message)
        (string-match-p "Forward messages cannot have additional content" message)))
+
+(defun disco-room--forward-msg (msg)
+  "Forward MSG into the current room, prompting only for optional extras."
+  (let* ((message-id (alist-get 'id msg))
+         (source-channel-id (or (alist-get 'channel_id msg) disco-room--channel-id))
+         (content-raw (string-trim (read-string "Optional forward comment: ")))
+         (forward-only (disco-room--read-forward-only source-channel-id message-id)))
+    (unless (and (stringp message-id) (not (string-empty-p message-id)))
+      (user-error "disco: message has no id to forward"))
+    (unless (and (stringp source-channel-id) (not (string-empty-p source-channel-id)))
+      (user-error "disco: message has no source channel id to forward"))
+    (disco-room-forward-message
+     message-id
+     source-channel-id
+     (unless (string-empty-p content-raw)
+       content-raw)
+     forward-only)))
 
 (defun disco-room-forward-message (&optional message-id source-channel-id content forward-only)
   "Forward MESSAGE-ID from SOURCE-CHANNEL-ID into current room.
@@ -7427,23 +7483,24 @@ editor."
   (message "disco: breakline wrapping %s"
            (if disco-room-wrap-long-lines "enabled" "disabled")))
 
-(defun disco-room-edit-message ()
-  "Enter composer edit mode for message at point in current room."
-  (interactive)
+(defun disco-room--edit-msg (msg)
+  "Enter composer edit mode for MSG in current room."
   (disco-room--ensure-action-available
    (disco-room--edit-start-unavailable-reason nil)
    "edit messages")
-  (let ((msg (disco-room--message-at-point)))
-    (disco-room--ensure-action-available
-     (disco-room--edit-start-unavailable-reason msg)
-     "edit messages")
-    (disco-room--composer-enter-edit msg)))
+  (disco-room--ensure-action-available
+   (disco-room--edit-start-unavailable-reason msg)
+   "edit messages")
+  (disco-room--composer-enter-edit msg))
 
-(defun disco-room-delete-message ()
-  "Delete message at point in current room."
+(defun disco-room-edit-message ()
+  "Enter composer edit mode for message at point in current room."
   (interactive)
-  (let* ((msg (disco-room--message-at-point))
-         (message-id (alist-get 'id msg)))
+  (disco-room--edit-msg (disco-room--message-at-point)))
+
+(defun disco-room--delete-msg (msg)
+  "Delete MSG in current room."
+  (let ((message-id (alist-get 'id msg)))
     (disco-room--ensure-action-available
      (disco-room--delete-message-unavailable-reason msg)
      "delete messages")
@@ -7464,6 +7521,11 @@ editor."
            (message "disco: delete failed for %s: %s"
                     message-id
                     (disco-room--async-error-message err))))))))
+
+(defun disco-room-delete-message ()
+  "Delete message at point in current room."
+  (interactive)
+  (disco-room--delete-msg (disco-room--message-at-point)))
 
 (defun disco-room-create-thread-from-message (name message-id
                                                    &optional auto-archive-duration
@@ -8055,6 +8117,14 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--msg-filter nil)
   (setq-local disco-msg-resolve-function #'disco-room--resolve-message)
   (setq-local disco-msg-content-text-function #'disco-room--message-copy-text)
+  (setq-local disco-msg-reply-function #'disco-room--reply-to-msg)
+  (setq-local disco-msg-forward-function #'disco-room--forward-msg)
+  (setq-local disco-msg-edit-function #'disco-room--edit-msg)
+  (setq-local disco-msg-delete-function #'disco-room--delete-msg)
+  (setq-local disco-msg-open-thread-function #'disco-room--open-thread-from-message)
+  (setq-local disco-msg-toggle-reaction-function #'disco-room--toggle-reaction-on-msg)
+  (setq-local disco-msg-add-reaction-function #'disco-room--add-reaction-to-msg)
+  (setq-local disco-msg-remove-reaction-function #'disco-room--remove-reaction-from-msg)
   (setq-local disco-room--filter-generation 0)
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)
