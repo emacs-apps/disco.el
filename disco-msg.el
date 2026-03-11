@@ -8,6 +8,7 @@
 
 ;;; Code:
 
+(require 'pp)
 (require 'seq)
 (require 'subr-x)
 (require 'time-date)
@@ -61,15 +62,32 @@ return a string or nil.")
 (defvar-local disco-msg-remove-reaction-function nil
   "Buffer-local function removing a reaction from a message.")
 
+(defvar-local disco-msg-redisplay-function nil
+  "Buffer-local function forcing a message redisplay in the current view.")
+
+(defvar-local disco-msg--inspect-message-id nil
+  "Message id shown by the current msg inspect buffer.")
+
+(defvar-local disco-msg--inspect-channel-id nil
+  "Channel id shown by the current msg inspect buffer.")
+
+(defvar-local disco-msg--inspect-guild-id nil
+  "Guild id shown by the current msg inspect buffer.")
+
 (defvar disco-msg-command-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "n") #'disco-msg-next)
+    (define-key map (kbd "p") #'disco-msg-previous)
     (define-key map (kbd "o") #'disco-msg-operate)
     (define-key map (kbd "r") #'disco-msg-reply)
     (define-key map (kbd "f") #'disco-msg-forward)
     (define-key map (kbd "e") #'disco-msg-edit)
     (define-key map (kbd "d") #'disco-msg-delete)
+    (define-key map (kbd "i") #'disco-msg-describe-message)
+    (define-key map (kbd "t") #'disco-msg-copy-text)
+    (define-key map (kbd "L") #'disco-msg-redisplay)
     (define-key map (kbd "!") #'disco-msg-add-reaction)
     (define-key map (kbd "+") #'disco-msg-toggle-reaction)
     (define-key map (kbd "-") #'disco-msg-remove-reaction)
@@ -86,6 +104,32 @@ return a string or nil.")
         (unless (get-text-property pos 'keymap)
           (add-text-properties pos next (list 'keymap disco-msg-command-map)))
         (setq pos next)))))
+
+(defun disco-msg--message-start-positions ()
+  "Return visible message start positions in the current buffer."
+  (let ((pos (point-min))
+        starts)
+    (while (< pos (point-max))
+      (when (get-text-property pos 'disco-message-id)
+        (push pos starts))
+      (setq pos (or (next-single-char-property-change
+                     pos 'disco-message-id nil (point-max))
+                    (point-max))))
+    (nreverse starts)))
+
+(defun disco-msg--message-start-at-point (&optional pos)
+  "Return message start position containing POS, or nil."
+  (let ((position (or pos (point)))
+        found)
+    (dolist (start (disco-msg--message-start-positions) found)
+      (when (<= start position)
+        (setq found start)))))
+
+(defun disco-msg--goto-message-start (position)
+  "Move point to POSITION and ensure it is visible."
+  (goto-char position)
+  (when-let* ((win (get-buffer-window (current-buffer) t)))
+    (set-window-point win position)))
 
 (defun disco-msg--call-adapter (adapter message action)
   "Call ADAPTER with MESSAGE or signal an ACTION-specific user error."
@@ -157,6 +201,39 @@ predicate."
   (or (disco-msg-at (disco-msg--event-point last-input-event))
       (disco-msg-at (point))
       (user-error "disco: point is not on a message")))
+
+(defun disco-msg-next (&optional n)
+  "Move point to the Nth next visible message."
+  (interactive "p")
+  (let* ((count (max 1 (or n 1)))
+         (starts (disco-msg--message-start-positions))
+         (current (disco-msg--message-start-at-point))
+         (target (if current
+                     (nth count (member current starts))
+                   (seq-find (lambda (start)
+                               (> start (point)))
+                             starts))))
+    (unless target
+      (user-error "disco: no next message"))
+    (disco-msg--goto-message-start target)))
+
+(defun disco-msg-previous (&optional n)
+  "Move point to the Nth previous visible message."
+  (interactive "p")
+  (let* ((count (max 1 (or n 1)))
+         (starts (disco-msg--message-start-positions))
+         (current (disco-msg--message-start-at-point))
+         (candidates (if current
+                         (seq-take-while (lambda (start)
+                                           (< start current))
+                                         starts)
+                       (seq-take-while (lambda (start)
+                                         (< start (point)))
+                                       starts)))
+         (target (nth (1- count) (reverse candidates))))
+    (unless target
+      (user-error "disco: no previous message"))
+    (disco-msg--goto-message-start target)))
 
 (defun disco-msg-normalize-id (value)
   "Return normalized snowflake-like ID string from VALUE, or nil.
@@ -446,6 +523,87 @@ before copying."
   (interactive (list (disco-msg-for-interactive)))
   (disco-msg--call-adapter disco-msg-operate-function message "message actions"))
 
+(defun disco-msg--inspect-buffer-name (message)
+  "Return inspect buffer name for MESSAGE."
+  (format "*disco-message:%s*"
+          (or (disco-msg-id message) "unknown")))
+
+(defun disco-msg--inspect-buffer-message ()
+  "Return current inspect-buffer message object, or nil."
+  (and disco-msg--inspect-message-id
+       disco-msg--inspect-channel-id
+       (disco-msg-find-in-channel disco-msg--inspect-channel-id
+                                  disco-msg--inspect-message-id)))
+
+(defun disco-msg--render-inspect-buffer ()
+  "Render current message inspect buffer."
+  (let* ((message (or (disco-msg--inspect-buffer-message)
+                      (user-error "disco: inspect buffer has no message context")))
+         (message-id (disco-msg-id message))
+         (channel-id (or (disco-msg-channel-id message) disco-msg--inspect-channel-id))
+         (guild-id (or (disco-msg-guild-id message) disco-msg--inspect-guild-id))
+         (title (or (disco-msg-preview-line message)
+                    message-id
+                    "(unknown message)"))
+         (copy-text (ignore-errors (disco-msg-content-text message)))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert title "\n")
+    (insert (make-string (length title) ?=) "\n\n")
+    (when message-id
+      (insert (format "Message ID: %s\n" message-id)))
+    (when channel-id
+      (insert (format "Channel ID: %s\n" channel-id)))
+    (when guild-id
+      (insert (format "Guild ID: %s\n" guild-id)))
+    (insert (format "Type: %s\n" (disco-msg-type message)))
+    (when-let* ((timestamp (alist-get 'timestamp message)))
+      (insert (format "Timestamp: %s\n" timestamp)))
+    (when-let* ((link (disco-msg-link message channel-id guild-id)))
+      (insert (format "Link: %s\n" link)))
+    (when (and (stringp copy-text)
+               (not (string-empty-p (substring-no-properties copy-text))))
+      (insert "\nCopy Text:\n\n")
+      (insert (substring-no-properties copy-text) "\n"))
+    (insert "\nRaw message object:\n\n")
+    (insert (pp-to-string message))
+    (goto-char (point-min))))
+
+(defun disco-msg-inspect-refresh ()
+  "Refresh the current message inspect buffer from local state."
+  (interactive)
+  (unless disco-msg--inspect-message-id
+    (user-error "disco: inspect buffer has no message context"))
+  (disco-msg--render-inspect-buffer)
+  (message "disco: refreshed message inspect"))
+
+(defvar disco-msg-inspect-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'disco-msg-inspect-refresh)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `disco-msg-inspect-mode'.")
+
+(define-derived-mode disco-msg-inspect-mode special-mode "Disco-Message"
+  "Major mode for message inspect buffers."
+  (setq buffer-read-only t)
+  (setq truncate-lines nil))
+
+(defun disco-msg-describe-message (message)
+  "Open an inspect buffer describing MESSAGE.
+
+Return the inspect buffer."
+  (interactive (list (disco-msg-for-interactive)))
+  (let ((buf (get-buffer-create (disco-msg--inspect-buffer-name message))))
+    (with-current-buffer buf
+      (disco-msg-inspect-mode)
+      (setq disco-msg--inspect-message-id (disco-msg-id message))
+      (setq disco-msg--inspect-channel-id (disco-msg-channel-id message))
+      (setq disco-msg--inspect-guild-id (disco-msg-guild-id message))
+      (disco-msg--render-inspect-buffer))
+    (pop-to-buffer buf)
+    buf))
+
 (defun disco-msg-edit (message)
   "Begin editing MESSAGE in the current buffer context."
   (interactive (list (disco-msg-for-interactive)))
@@ -481,6 +639,11 @@ before copying."
   (disco-msg--call-adapter disco-msg-remove-reaction-function
                            message
                            "removing reactions"))
+
+(defun disco-msg-redisplay (message)
+  "Force MESSAGE to be redisplayed in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-redisplay-function message "redisplaying messages"))
 
 (defun disco-msg-time (message)
   "Return decoded timestamp for MESSAGE, or nil when unavailable."

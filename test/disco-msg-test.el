@@ -196,7 +196,43 @@
       (should (equal (list 'add msg) seen))
       (setq-local disco-msg-remove-reaction-function (lambda (it) (setq seen (list 'remove it))))
       (disco-msg-remove-reaction msg)
-      (should (equal (list 'remove msg) seen)))))
+      (should (equal (list 'remove msg) seen))
+      (setq-local disco-msg-redisplay-function (lambda (it) (setq seen (list 'redisplay it))))
+      (disco-msg-redisplay msg)
+      (should (equal (list 'redisplay msg) seen)))))
+
+(ert-deftest disco-msg-next-and-previous-follow-message-spans ()
+  (with-temp-buffer
+    (insert "one\n\ntwo\n")
+    (add-text-properties 1 4 '(disco-message-id "m1"))
+    (add-text-properties 6 9 '(disco-message-id "m2"))
+    (goto-char 2)
+    (disco-msg-next)
+    (should (= 6 (point)))
+    (disco-msg-previous)
+    (should (= 1 (point)))))
+
+(ert-deftest disco-msg-describe-message-renders-inspect-buffer ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "c1") (guild_id . "g1") (type . 0)))
+  (disco-state-put-messages
+   "c1"
+   '(((id . "m1")
+      (channel_id . "c1")
+      (content . "hello world"))))
+  (let ((buf nil))
+    (unwind-protect
+        (progn
+          (setq buf (disco-msg-describe-message
+                     '((id . "m1")
+                       (channel_id . "c1")
+                       (content . "hello world"))))
+          (with-current-buffer buf
+            (should (eq major-mode 'disco-msg-inspect-mode))
+            (should (string-match-p "Message ID: m1" (buffer-string)))
+            (should (string-match-p "hello world" (buffer-string)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 (ert-deftest disco-msg-apply-command-map-preserves-existing-local-keymaps ()
   (with-temp-buffer

@@ -763,11 +763,15 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
     (define-key map (kbd "q") #'quit-window)
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "n") #'disco-msg-next)
+    (define-key map (kbd "p") #'disco-msg-previous)
     (define-key map (kbd "o") #'disco-msg-operate)
     (define-key map (kbd "r") #'disco-msg-reply)
     (define-key map (kbd "f") #'disco-msg-forward)
     (define-key map (kbd "e") #'disco-msg-edit)
     (define-key map (kbd "d") #'disco-msg-delete)
+    (define-key map (kbd "i") #'disco-msg-describe-message)
+    (define-key map (kbd "L") #'disco-msg-redisplay)
     (define-key map (kbd "!") #'disco-msg-add-reaction)
     (define-key map (kbd "+") #'disco-msg-toggle-reaction)
     (define-key map (kbd "-") #'disco-msg-remove-reaction)
@@ -779,12 +783,16 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "n") #'disco-msg-next)
+    (define-key map (kbd "p") #'disco-msg-previous)
     (define-key map (kbd "o") #'disco-msg-operate)
     (define-key map (kbd "t") #'disco-msg-copy-text)
     (define-key map (kbd "r") #'disco-msg-reply)
     (define-key map (kbd "f") #'disco-msg-forward)
     (define-key map (kbd "e") #'disco-msg-edit)
     (define-key map (kbd "d") #'disco-msg-delete)
+    (define-key map (kbd "i") #'disco-msg-describe-message)
+    (define-key map (kbd "L") #'disco-msg-redisplay)
     (define-key map (kbd "!") #'disco-msg-add-reaction)
     (define-key map (kbd "+") #'disco-msg-toggle-reaction)
     (define-key map (kbd "-") #'disco-msg-remove-reaction)
@@ -2165,6 +2173,14 @@ Message lines carry the `disco-message-id' text property."
           (when snapshot
             (disco-view-restore-position snapshot))
           t)))))
+
+(defun disco-room--redisplay-msg (msg)
+  "Force MSG to be rerendered in the current room."
+  (let ((message-id (and (listp msg) (alist-get 'id msg))))
+    (unless (and (stringp message-id) (not (string-empty-p message-id)))
+      (user-error "disco: message has no id to redisplay"))
+    (unless (disco-room--invalidate-message-node message-id)
+      (disco-room--render-preserving-point))))
 
 (defun disco-room-toggle-message-spoilers (message-id)
   "Toggle all rendered spoilers for MESSAGE-ID, telega-style."
@@ -5034,7 +5050,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (concat
    "M-<: older/more   C-c g/s/n/p: refresh/search/next/prev   M-g s/n/p: inplace search"
    "   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
-   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline c/l/o/r/f/e/d/!/+/-/T: message actions"
+   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline c/l/n/p/o/r/f/e/d/i/L/!/+/-/T: message actions"
    "   C-c C-w: toggle breakline   C-c C-p s/+/-/t/v/c/e: poll actions"
    "   C-c C-P: ack pins   C-c C-a: attach menu   C-c C-f: attach file   C-c C-v: clipboard attach"
    "   C-c C-e/o: formatting/options   C-c C-x: clear attachments   C-c M-l/M-e/M-r: attachment ops"
@@ -7938,6 +7954,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("c" "Copy dwim" disco-msg-copy-dwim)
     ("l" "Copy link" disco-msg-copy-link)
     ("t" "Copy text" disco-msg-copy-text)
+    ("i" "Describe" disco-msg-describe-message)
+    ("L" "Redisplay" disco-msg-redisplay)
     ("r" "Reply" disco-msg-reply
      :inapt-if disco-room--reply-unavailable-reason)
     ("f" "Forward" disco-msg-forward
@@ -8199,6 +8217,7 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local disco-msg-toggle-reaction-function #'disco-room--toggle-reaction-on-msg)
   (setq-local disco-msg-add-reaction-function #'disco-room--add-reaction-to-msg)
   (setq-local disco-msg-remove-reaction-function #'disco-room--remove-reaction-from-msg)
+  (setq-local disco-msg-redisplay-function #'disco-room--redisplay-msg)
   (setq-local disco-room--filter-generation 0)
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)
