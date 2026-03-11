@@ -763,12 +763,13 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
     (define-key map (kbd "q") #'quit-window)
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "o") #'disco-msg-operate)
     (define-key map (kbd "r") #'disco-msg-reply)
     (define-key map (kbd "f") #'disco-msg-forward)
     (define-key map (kbd "e") #'disco-msg-edit)
     (define-key map (kbd "d") #'disco-msg-delete)
-    (define-key map (kbd "!") #'disco-msg-toggle-reaction)
-    (define-key map (kbd "+") #'disco-msg-add-reaction)
+    (define-key map (kbd "!") #'disco-msg-add-reaction)
+    (define-key map (kbd "+") #'disco-msg-toggle-reaction)
     (define-key map (kbd "-") #'disco-msg-remove-reaction)
     (define-key map (kbd "T") #'disco-msg-open-thread)
     map)
@@ -778,13 +779,14 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "o") #'disco-msg-operate)
     (define-key map (kbd "t") #'disco-msg-copy-text)
     (define-key map (kbd "r") #'disco-msg-reply)
     (define-key map (kbd "f") #'disco-msg-forward)
     (define-key map (kbd "e") #'disco-msg-edit)
     (define-key map (kbd "d") #'disco-msg-delete)
-    (define-key map (kbd "!") #'disco-msg-toggle-reaction)
-    (define-key map (kbd "+") #'disco-msg-add-reaction)
+    (define-key map (kbd "!") #'disco-msg-add-reaction)
+    (define-key map (kbd "+") #'disco-msg-toggle-reaction)
     (define-key map (kbd "-") #'disco-msg-remove-reaction)
     (define-key map (kbd "T") #'disco-msg-open-thread)
     map)
@@ -4989,7 +4991,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (concat
    "M-<: older/more   C-c g/s/n/p: refresh/search/next/prev   M-g s/n/p: inplace search"
    "   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
-   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline c/l/r/f/e/d/!/+/-/T: message actions"
+   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline c/l/o/r/f/e/d/!/+/-/T: message actions"
    "   C-c C-w: toggle breakline   C-c C-p s/+/-/t/v/c/e: poll actions"
    "   C-c C-P: ack pins   C-c C-a: attach menu   C-c C-f: attach file   C-c C-v: clipboard attach"
    "   C-c C-e/o: formatting/options   C-c C-x: clear attachments   C-c M-l/M-e/M-r: attachment ops"
@@ -7887,6 +7889,34 @@ When called interactively, empty input clears slowmode (sets to 0)."
       (user-error "disco: current room has no parent channel"))
     (disco-root-list-archived-threads parent-id)))
 
+(transient-define-prefix disco-room-message-transient ()
+  "Transient for msg-centric room actions at point."
+  [["Message"
+    ("c" "Copy dwim" disco-msg-copy-dwim)
+    ("l" "Copy link" disco-msg-copy-link)
+    ("t" "Copy text" disco-msg-copy-text)
+    ("r" "Reply" disco-msg-reply
+     :inapt-if disco-room--reply-unavailable-reason)
+    ("f" "Forward" disco-msg-forward
+     :inapt-if disco-room--forward-unavailable-reason)
+    ("e" "Edit" disco-msg-edit
+     :inapt-if #'disco-room-menu--edit-inapt-reason)
+    ("d" "Delete" disco-msg-delete
+     :inapt-if #'disco-room-menu--delete-inapt-reason)
+    ("!" "Add reaction" disco-msg-add-reaction
+     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+    ("+" "Toggle reaction" disco-msg-toggle-reaction
+     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+    ("-" "Remove reaction" disco-msg-remove-reaction
+     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+    ("T" "Open thread" disco-msg-open-thread)]])
+
+(defun disco-room--operate-msg (_msg)
+  "Open the message transient for the current room.
+
+_MSG is ignored because the transient resolves availability from point."
+  (disco-room-message-transient))
+
 (defun disco-room-menu--attachment-action-inapt-reason (min-count)
   "Return inapt text for attachment actions requiring MIN-COUNT items."
   (disco-room--attachment-token-action-unavailable-reason min-count))
@@ -7973,9 +8003,9 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if #'disco-room-menu--edit-inapt-reason)
     ("d" "Delete at point" disco-room-delete-message
      :inapt-if #'disco-room-menu--delete-inapt-reason)
-    ("!" "Toggle reaction" disco-room-toggle-reaction
+    ("!" "Add reaction" disco-room-add-reaction
      :inapt-if #'disco-room-menu--reaction-inapt-reason)
-    ("+" "Add reaction" disco-room-add-reaction
+    ("+" "Toggle reaction" disco-room-toggle-reaction
      :inapt-if #'disco-room-menu--reaction-inapt-reason)
     ("-" "Remove reaction" disco-room-remove-reaction
      :inapt-if #'disco-room-menu--reaction-inapt-reason)
@@ -8119,6 +8149,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-msg-content-text-function #'disco-room--message-copy-text)
   (setq-local disco-msg-reply-function #'disco-room--reply-to-msg)
   (setq-local disco-msg-forward-function #'disco-room--forward-msg)
+  (setq-local disco-msg-operate-function #'disco-room--operate-msg)
   (setq-local disco-msg-edit-function #'disco-room--edit-msg)
   (setq-local disco-msg-delete-function #'disco-room--delete-msg)
   (setq-local disco-msg-open-thread-function #'disco-room--open-thread-from-message)

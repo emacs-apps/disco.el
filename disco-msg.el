@@ -40,6 +40,9 @@ return a string or nil.")
 (defvar-local disco-msg-forward-function nil
   "Buffer-local function beginning a forward flow for a message.")
 
+(defvar-local disco-msg-operate-function nil
+  "Buffer-local function opening a message actions menu for a message.")
+
 (defvar-local disco-msg-edit-function nil
   "Buffer-local function beginning an edit flow for a message.")
 
@@ -62,12 +65,13 @@ return a string or nil.")
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "c") #'disco-msg-copy-dwim)
     (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "o") #'disco-msg-operate)
     (define-key map (kbd "r") #'disco-msg-reply)
     (define-key map (kbd "f") #'disco-msg-forward)
     (define-key map (kbd "e") #'disco-msg-edit)
     (define-key map (kbd "d") #'disco-msg-delete)
-    (define-key map (kbd "!") #'disco-msg-toggle-reaction)
-    (define-key map (kbd "+") #'disco-msg-add-reaction)
+    (define-key map (kbd "!") #'disco-msg-add-reaction)
+    (define-key map (kbd "+") #'disco-msg-toggle-reaction)
     (define-key map (kbd "-") #'disco-msg-remove-reaction)
     (define-key map (kbd "T") #'disco-msg-open-thread)
     map)
@@ -436,6 +440,11 @@ before copying."
   "Begin forwarding MESSAGE in the current buffer context."
   (interactive (list (disco-msg-for-interactive)))
   (disco-msg--call-adapter disco-msg-forward-function message "forwarding messages"))
+
+(defun disco-msg-operate (message)
+  "Open message actions menu for MESSAGE in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-operate-function message "message actions"))
 
 (defun disco-msg-edit (message)
   "Begin editing MESSAGE in the current buffer context."
