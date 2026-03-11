@@ -58,6 +58,12 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media-rerender-function nil
   "Function called after media state/cache updates.")
 
+(defvar disco-media--last-notify-kind nil
+  "Kind of the latest media-state notification.")
+
+(defvar disco-media--last-notify-key nil
+  "Attachment/download key for the latest media-state notification.")
+
 (defvar disco-media--attachment-download-state-table (make-hash-table :test #'equal)
   "Attachment download state keyed by stable attachment download key.")
 
@@ -1155,8 +1161,13 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
     (or (disco-media--attachment-real-spoiler-preview-image attachment)
         (disco-media-attachment-spoiler-placeholder-image attachment))))
 
-(defun disco-media--notify-state-updated ()
-  "Notify UI after media state/cache updates."
+(defun disco-media--notify-state-updated (&optional kind key)
+  "Notify UI after media state/cache updates.
+
+KIND is a symbol such as `audio', `download', or `preview'.  KEY is the stable
+attachment/download key associated with the update when available."
+  (setq disco-media--last-notify-kind kind)
+  (setq disco-media--last-notify-key key)
   (let ((callback (or disco-media-rerender-function
                       disco-media-preview-rerender-function)))
     (when (functionp callback)
@@ -1168,7 +1179,7 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
     (ignore-errors (delete-file target-file)))
   (puthash cache-key (or image :missing) disco-media--attachment-preview-image-cache)
   (remhash cache-key disco-media--attachment-preview-fetching)
-  (disco-media--notify-state-updated))
+  (disco-media--notify-state-updated 'preview cache-key))
 
 (defun disco-media--bytes-prefix-p (bytes offset prefix-bytes)
   "Return non-nil when BYTES at OFFSET starts with PREFIX-BYTES list."
@@ -1744,7 +1755,7 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
            (setq current (plist-put current :cancel-requested nil))
            (setq current (plist-put current :error nil))
            (puthash key current disco-media--attachment-download-state-table)
-           (disco-media--notify-state-updated)
+           (disco-media--notify-state-updated 'download key)
            (message "disco: downloaded attachment -> %s%s"
                     path
                     (if fallback-p " (url fallback)" ""))
@@ -1759,7 +1770,7 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
            (setq current (plist-put current :error
                                     (disco-media--attachment-error-message err)))
            (puthash key current disco-media--attachment-download-state-table)
-           (disco-media--notify-state-updated)
+           (disco-media--notify-state-updated 'download key)
            (message "disco: attachment download failed: %s"
                     (plist-get current :error)))
          (finish-canceled (current)
@@ -1768,7 +1779,7 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
            (setq current (plist-put current :cancel-requested nil))
            (setq current (plist-put current :error nil))
            (puthash key current disco-media--attachment-download-state-table)
-           (disco-media--notify-state-updated)
+           (disco-media--notify-state-updated 'download key)
            (message "disco: attachment download canceled"))
          (fallback-copy (current err)
            (condition-case fallback-err
@@ -1817,7 +1828,7 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
         (setq entry (plist-put entry :cancel-requested nil))
         (setq entry (plist-put entry :error nil))
         (puthash key entry disco-media--attachment-download-state-table)
-        (disco-media--notify-state-updated)
+        (disco-media--notify-state-updated 'download key)
         (message "disco: downloading attachment %s"
                  (disco-media-attachment-display-name attachment))))))
 
@@ -1978,7 +1989,7 @@ Return non-nil on success."
               (next-second (floor new-progress)))
           (unless (equal last-second next-second)
             (setq proc-plist (plist-put proc-plist :last-second next-second))
-            (disco-media--notify-state-updated)))
+            (disco-media--notify-state-updated 'audio key)))
         (set-process-plist proc proc-plist)))))
 
 (defun disco-media--inline-audio-process-sentinel (proc _event)
@@ -2008,7 +2019,7 @@ Return non-nil on success."
         (setq disco-media--attachment-audio-current-process nil))
       (when (buffer-live-p (process-buffer proc))
         (kill-buffer (process-buffer proc)))
-      (disco-media--notify-state-updated))))
+      (disco-media--notify-state-updated 'audio key))))
 
 (defun disco-media--start-inline-audio-player (attachment source &optional start-at)
   "Start ffplay-backed inline audio playback for ATTACHMENT using SOURCE."
@@ -2048,7 +2059,7 @@ Return non-nil on success."
         (setq entry (plist-put entry :pending-play nil))
         (setq entry (plist-put entry :process proc))
         (disco-media--audio-store-state key entry))
-      (disco-media--notify-state-updated)
+      (disco-media--notify-state-updated 'audio key)
       proc)))
 
 (defun disco-media-stop-attachment-audio (attachment)
@@ -2063,7 +2074,7 @@ Return non-nil on success."
       (setq entry (plist-put entry :pending-play nil))
       (setq entry (plist-put entry :process nil))
       (disco-media--audio-store-state key entry)
-      (disco-media--notify-state-updated))))
+      (disco-media--notify-state-updated 'audio key))))
 
 (defun disco-media-play-attachment-audio (attachment)
   "Play or pause ATTACHMENT audio.

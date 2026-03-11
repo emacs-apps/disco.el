@@ -3115,6 +3115,9 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
   (disco-room--rerender-open-rooms)
   (message "disco: avatar cache reset; refetching"))
 
+(defvar disco-media--last-notify-kind)
+(defvar disco-media--last-notify-key)
+
 (defun disco-room--rerender-open-rooms ()
   "Rerender all open room buffers while preserving reading position."
   (dolist (buf (buffer-list))
@@ -3125,6 +3128,46 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
            #'disco-room-render
            :anchor-property 'disco-message-id
            :preserve-window-start t))))))
+
+(defun disco-room--message-has-attachment-download-key-p (msg attachment-key)
+  "Return non-nil when MSG renders an attachment with ATTACHMENT-KEY."
+  (and (stringp attachment-key)
+       (seq-some (lambda (attachment)
+                   (equal (disco-media-attachment-download-key attachment)
+                          attachment-key))
+                 (or (disco-room--message-effective-attachments msg) '()))))
+
+(defun disco-room--displayed-message-ids-for-attachment-key (attachment-key)
+  "Return displayed message ids whose rendered attachments match ATTACHMENT-KEY."
+  (let (matches)
+    (dolist (message-id (or disco-room--displayed-message-ids '()) (nreverse matches))
+      (when-let* ((msg (disco-room--message-by-id message-id)))
+        (when (disco-room--message-has-attachment-download-key-p msg attachment-key)
+          (push message-id matches))))))
+
+(defun disco-room--invalidate-attachment-key-in-open-rooms (attachment-key)
+  "Invalidate rendered rows referencing ATTACHMENT-KEY in open room buffers."
+  (let ((updated nil))
+    (dolist (buf (buffer-list) updated)
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (eq major-mode 'disco-room-mode)
+                     (stringp attachment-key))
+            (let ((message-ids
+                   (disco-room--displayed-message-ids-for-attachment-key attachment-key)))
+              (when message-ids
+                (setq updated t)
+                (disco-room--invalidate-message-ids-preserving-point message-ids)))))))))
+
+(defun disco-room--handle-media-rerender ()
+  "Handle media refreshes with targeted invalidation when possible."
+  (pcase disco-media--last-notify-kind
+    ((or 'audio 'download)
+     (unless (disco-room--invalidate-attachment-key-in-open-rooms
+              disco-media--last-notify-key)
+       (disco-room--rerender-open-rooms)))
+    (_
+     (disco-room--rerender-open-rooms))))
 
 (defun disco-room--on-text-scale-change ()
   "Rerender room buffers after `text-scale-mode' changes."
@@ -3175,8 +3218,8 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
       (when visual-fill-mode-fn
         (funcall visual-fill-mode-fn -1)))))
 
-(setq disco-media-rerender-function #'disco-room--rerender-open-rooms)
-(setq disco-media-preview-rerender-function #'disco-room--rerender-open-rooms)
+(setq disco-media-rerender-function #'disco-room--handle-media-rerender)
+(setq disco-media-preview-rerender-function #'disco-room--handle-media-rerender)
 
 (defun disco-room--start-avatar-fetch (cache-key url cache-base)
   "Start asynchronous avatar fetch for CACHE-KEY from URL using CACHE-BASE."

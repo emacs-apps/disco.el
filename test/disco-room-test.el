@@ -1492,6 +1492,31 @@
                                 (buffer-string)))
         (should (string-match-p (regexp-quote "attachment render failed") logged))))))
 
+(ert-deftest disco-room-handle-media-rerender-invalidates-only-affected-audio-message ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (let ((disco-room--displayed-message-ids '("m1" "m2"))
+          (disco-media--last-notify-kind 'audio)
+          (disco-media--last-notify-key "a2")
+          invalidated
+          rerendered)
+      (cl-letf (((symbol-function 'disco-room--message-by-id)
+                 (lambda (message-id)
+                   (pcase message-id
+                     ("m1" '((id . "m1")
+                              (attachments . (((id . "a1") (filename . "one.ogg"))))) )
+                     ("m2" '((id . "m2")
+                              (attachments . (((id . "a2") (filename . "two.ogg"))))) ))))
+                ((symbol-function 'disco-room--invalidate-message-ids-preserving-point)
+                 (lambda (message-ids)
+                   (setq invalidated message-ids)))
+                ((symbol-function 'disco-room--rerender-open-rooms)
+                 (lambda ()
+                   (setq rerendered t))))
+        (disco-room--handle-media-rerender)
+        (should (equal '("m2") invalidated))
+        (should-not rerendered)))))
+
 (ert-deftest disco-room-insert-message-attachments-hides-spoiler-media-until-revealed ()
   (with-temp-buffer
     (let ((disco-room-use-rich-attachment-cards t)
