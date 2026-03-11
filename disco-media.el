@@ -25,8 +25,8 @@
   (locate-user-emacs-file "disco-attachment-cache/"))
 (defvar disco-room-attachment-download-directory
   (locate-user-emacs-file "disco-attachment-downloads/"))
-(defvar disco-room-video-player-command nil)
-(defvar disco-room-audio-player-command nil)
+(defvar disco-room-video-player-command)
+(defvar disco-room-audio-player-command)
 
 (defconst disco-media--cache-extensions
   '("webp" "png" "jpg" "jpeg" "gif" "img")
@@ -244,22 +244,35 @@ Values are image objects or the symbol `:missing'.")
               (program (car argv)))
     (file-name-nondirectory program)))
 
+(defun disco-media--configured-video-player-command ()
+  "Return current configured video player command, or nil when unset."
+  (and (boundp 'disco-room-video-player-command)
+       disco-room-video-player-command))
+
+(defun disco-media--configured-audio-player-command ()
+  "Return current configured audio player command, or nil when unset."
+  (and (boundp 'disco-room-audio-player-command)
+       disco-room-audio-player-command))
+
 (defun disco-media--audio-player-program-name ()
   "Return basename for configured audio player, or nil."
-  (disco-media--command-program-name disco-room-audio-player-command))
+  (disco-media--command-program-name
+   (disco-media--configured-audio-player-command)))
 
 (defun disco-media-audio-inline-playback-available-p ()
   "Return non-nil when configured audio player supports inline state tracking."
-  (and (disco-media--command-runnable-p disco-room-audio-player-command)
-       (equal (disco-media--audio-player-program-name) "ffplay")))
+  (let ((command (disco-media--configured-audio-player-command)))
+    (and (disco-media--command-runnable-p command)
+         (equal (disco-media--audio-player-program-name) "ffplay"))))
 
 (defun disco-media--start-video-player (source)
   "Start configured video player for SOURCE and return non-nil on success."
-  (let* ((argv (disco-media--split-command-args disco-room-video-player-command))
+  (let* ((command (disco-media--configured-video-player-command))
+         (argv (disco-media--split-command-args command))
          (program (car argv))
          (args (append (cdr argv) (list source))))
     (when (and program
-               (disco-media--command-runnable-p disco-room-video-player-command))
+               (disco-media--command-runnable-p command))
       (condition-case nil
           (progn
             (make-process
@@ -1907,11 +1920,12 @@ When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
   "Start configured non-inline audio player for SOURCE.
 
 Return non-nil on success."
-  (let* ((argv (disco-media--split-command-args disco-room-audio-player-command))
+  (let* ((command (disco-media--configured-audio-player-command))
+         (argv (disco-media--split-command-args command))
          (program (car argv))
          (args (append (cdr argv) (list source))))
     (when (and program
-               (disco-media--command-runnable-p disco-room-audio-player-command))
+               (disco-media--command-runnable-p command))
       (condition-case nil
           (progn
             (make-process
@@ -1999,7 +2013,8 @@ Return non-nil on success."
 
 (defun disco-media--start-inline-audio-player (attachment source &optional start-at)
   "Start ffplay-backed inline audio playback for ATTACHMENT using SOURCE."
-  (let* ((argv (disco-media--split-command-args disco-room-audio-player-command))
+  (let* ((command (disco-media--configured-audio-player-command))
+         (argv (disco-media--split-command-args command))
          (program (car argv))
          (args (append (cdr argv)
                        (when (and (numberp start-at)
