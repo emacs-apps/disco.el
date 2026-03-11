@@ -108,6 +108,30 @@
     (should (equal "█" (get-text-property pos 'display rendered)))
     (should (equal "█" (get-text-property (1- (match-end 0)) 'display rendered)))))
 
+(ert-deftest disco-markdown-render-internal-inline-code-has-stable-copy-property ()
+  (let* ((disco-markdown-backend 'internal)
+         (rendered (disco-markdown-render
+                    "Use `code` now"
+                    :context 'test-internal-inline-code-property))
+         (plain (substring-no-properties rendered))
+         (pos (string-match "code" plain)))
+    (should pos)
+    (should (get-text-property pos 'disco-markdown-code rendered))
+    (should (eq 'inline
+                (get-text-property pos 'disco-markdown-code-kind rendered)))))
+
+(ert-deftest disco-markdown-copy-export-materializes-blockquotes-and-reveals-spoilers ()
+  (let* ((disco-markdown-backend 'internal)
+         (exported (disco-markdown-copy-export
+                    "> quote\nLook ||secret||"
+                    :context 'test-copy-export
+                    :spoiler-message-id "m1"
+                    :reveal-spoilers t))
+         (plain (substring-no-properties exported)))
+    (should (equal "| quote\nLook secret" plain))
+    (should-not (get-text-property 0 'line-prefix exported))
+    (should-not (get-text-property 0 'keymap exported))))
+
 (ert-deftest disco-markdown-render-internal-subtitle-lines-strip-marker ()
   (let* ((disco-markdown-backend 'internal)
          (rendered (disco-markdown-render "-# Small print"

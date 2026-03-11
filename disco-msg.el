@@ -11,6 +11,8 @@
 (require 'seq)
 (require 'subr-x)
 (require 'time-date)
+(require 'thingatpt)
+(require 'disco-markdown)
 (require 'disco-state)
 (require 'disco-util)
 
@@ -19,6 +21,83 @@
     (channel-id . channel_id)
     (guild-id . guild_id))
   "Declarative mapping from reference field role to payload key.")
+
+(defvar-local disco-msg-resolve-function nil
+  "Buffer-local function resolving a message by id at point.
+
+When non-nil it is called as (FUNCTION MESSAGE-ID CHANNEL-ID POSITION) and
+should return the latest cached message object for that buffer context.")
+
+(defvar-local disco-msg-content-text-function nil
+  "Buffer-local function returning copy-ready text for a message.
+
+When non-nil it is called with one argument, the message object, and should
+return a string or nil.")
+
+(defun disco-msg--event-point (event)
+  "Return buffer position encoded by mouse EVENT, or nil."
+  (when event
+    (condition-case nil
+        (and (mouse-event-p event)
+             (posn-point (event-start event)))
+      (error nil))))
+
+(defun disco-msg--property-probe-positions (&optional pos)
+  "Return candidate positions to probe message properties around POS."
+  (let* ((position (or pos (point)))
+         (line-beg (save-excursion
+                     (goto-char position)
+                     (line-beginning-position))))
+    (delete-dups
+     (delq nil
+           (list position
+                 (and (> position (point-min)) (1- position))
+                 line-beg)))))
+
+(defun disco-msg--text-property-any (property &optional pos)
+  "Return PROPERTY found around POS, or nil."
+  (seq-some (lambda (probe)
+              (get-text-property probe property))
+            (disco-msg--property-probe-positions pos)))
+
+(defun disco-msg-ref-at (&optional pos)
+  "Return message reference plist at POS, or nil.
+
+The returned plist contains `:message-id', `:channel-id' and `:guild-id'
+when available from buffer text properties."
+  (when-let* ((message-id
+               (disco-msg-normalize-id
+                (disco-msg--text-property-any 'disco-message-id pos))))
+    (list :message-id message-id
+          :channel-id
+          (disco-msg-normalize-id
+           (disco-msg--text-property-any 'disco-message-channel-id pos))
+          :guild-id
+          (disco-msg-normalize-id
+           (disco-msg--text-property-any 'disco-message-guild-id pos)))))
+
+(defun disco-msg-at (&optional pos msg-predicate)
+  "Return current message at POS, or nil.
+
+If MSG-PREDICATE is non-nil, return the message only when it satisfies the
+predicate."
+  (when-let* ((ref (disco-msg-ref-at pos))
+              (message-id (plist-get ref :message-id)))
+    (let* ((channel-id (plist-get ref :channel-id))
+           (msg (or (and (functionp disco-msg-resolve-function)
+                         (funcall disco-msg-resolve-function
+                                  message-id channel-id pos))
+                    (and channel-id
+                         (disco-msg-find-in-channel channel-id message-id)))))
+      (when (or (null msg-predicate)
+                (and msg (funcall msg-predicate msg)))
+        msg))))
+
+(defun disco-msg-for-interactive ()
+  "Return message at mouse event or current point, or signal a user error."
+  (or (disco-msg-at (disco-msg--event-point last-input-event))
+      (disco-msg-at (point))
+      (user-error "disco: point is not on a message")))
 
 (defun disco-msg-normalize-id (value)
   "Return normalized snowflake-like ID string from VALUE, or nil.
@@ -37,6 +116,33 @@ rejected."
 (defun disco-msg-id (message)
   "Return normalized message ID for MESSAGE, or nil."
   (disco-msg-normalize-id (and (listp message) (alist-get 'id message))))
+
+(defun disco-msg-channel-id (message)
+  "Return normalized channel ID for MESSAGE, or nil."
+  (disco-msg-normalize-id (and (listp message) (alist-get 'channel_id message))))
+
+(defun disco-msg-guild-id (message)
+  "Return normalized guild ID for MESSAGE, or nil.
+
+When MESSAGE itself has no `guild_id', infer it from the cached channel when
+possible."
+  (or (disco-msg-normalize-id (and (listp message) (alist-get 'guild_id message)))
+      (when-let* ((channel-id (disco-msg-channel-id message))
+                  (channel (disco-state-channel channel-id)))
+        (disco-msg-normalize-id (alist-get 'guild_id channel)))))
+
+(defun disco-msg-link (message &optional channel-id guild-id)
+  "Return Discord permalink for MESSAGE, or nil when unavailable."
+  (when-let* ((message-id (disco-msg-id message))
+              (resolved-channel-id
+               (disco-msg-normalize-id (or channel-id
+                                           (disco-msg-channel-id message)))))
+    (format "https://discord.com/channels/%s/%s/%s"
+            (or (disco-msg-normalize-id
+                 (or guild-id (disco-msg-guild-id message)))
+                "@me")
+            resolved-channel-id
+            message-id)))
 
 (defun disco-msg-reference (message)
   "Return message_reference object from MESSAGE, or nil."
@@ -160,6 +266,111 @@ ID comparison is normalized for snowflake strings."
   "Return best-effort cached preview line for CHANNEL, or nil."
   (when-let* ((message (disco-msg-channel-last-cached-message channel)))
     (disco-msg-preview-line message)))
+
+(defun disco-msg-content-text (message)
+  "Return copy-ready text content for MESSAGE, or nil."
+  (or (and (functionp disco-msg-content-text-function)
+           (funcall disco-msg-content-text-function message))
+      (let* ((raw-content (and (listp message) (alist-get 'content message)))
+             (exported (and (stringp raw-content)
+                            (disco-markdown-copy-export
+                             raw-content
+                             :context 'message-copy
+                             :message message
+                             :spoiler-message-id (disco-msg-id message)
+                             :reveal-spoilers t))))
+        (when (and (stringp exported)
+                   (not (string-empty-p
+                         (string-trim (substring-no-properties exported)))))
+          exported))))
+
+(defun disco-msg--property-value-at-point (property &optional pos)
+  "Return PROPERTY value around POS, or nil."
+  (let ((positions (disco-msg--property-probe-positions pos))
+        value)
+    (while (and positions (null value))
+      (setq value (get-text-property (car positions) property))
+      (setq positions (cdr positions)))
+    value))
+
+(defun disco-msg--bounds-of-property-at-point (property &optional pos)
+  "Return contiguous bounds for PROPERTY around POS, or nil."
+  (let* ((position (or pos (point)))
+         (probe (seq-find (lambda (candidate)
+                            (get-text-property candidate property))
+                          (disco-msg--property-probe-positions position))))
+    (when probe
+      (cons (or (previous-single-char-property-change
+                 (1+ probe) property nil (point-min))
+                (point-min))
+            (or (next-single-char-property-change probe property nil (point-max))
+                (point-max))))))
+
+(defun disco-msg--url-at-point (&optional pos)
+  "Return URL under POS, preferring rendered Markdown link properties."
+  (or (disco-msg--property-value-at-point 'disco-markdown-url pos)
+      (save-excursion
+        (goto-char (or pos (point)))
+        (thing-at-point-url-at-point))))
+
+(defun disco-msg--code-bounds-at-point (&optional pos)
+  "Return code span bounds around POS, or nil."
+  (disco-msg--bounds-of-property-at-point 'disco-markdown-code pos))
+
+(defun disco-msg-copy-link (message)
+  "Copy Discord permalink for MESSAGE into the kill ring."
+  (interactive (list (disco-msg-for-interactive)))
+  (let ((link (disco-msg-link message)))
+    (unless (and (stringp link) (not (string-empty-p link)))
+      (user-error "disco: message link is unavailable"))
+    (kill-new link)
+    (message "disco: copied message link %s" link)))
+
+(defun disco-msg-copy-text (message &optional no-properties)
+  "Copy copy-ready text for MESSAGE into the kill ring.
+
+With NO-PROPERTIES non-nil, strip text properties before copying."
+  (interactive (list (disco-msg-for-interactive)
+                     current-prefix-arg))
+  (let ((text (disco-msg-content-text message)))
+    (unless text
+      (user-error "disco: nothing to copy"))
+    (kill-new (if no-properties
+                  (substring-no-properties text)
+                text))
+    (message "disco: copied message text (%d chars)" (length text))))
+
+(defun disco-msg-copy-dwim (message &optional no-properties)
+  "Copy text at point in a telega-style DWIM manner.
+
+If the region is active, copy it.  If point is on a URL, copy the URL.  If
+point is inside a code span or code block, copy that code.  Otherwise copy the
+message text for MESSAGE.  With NO-PROPERTIES non-nil, strip text properties
+before copying."
+  (interactive (list (disco-msg-for-interactive)
+                     current-prefix-arg))
+  (let* ((code-bounds (and (not (region-active-p))
+                           (disco-msg--code-bounds-at-point)))
+         (url (and (not (region-active-p))
+                   (not code-bounds)
+                   (disco-msg--url-at-point)))
+         (text (cond
+                ((region-active-p)
+                 (prog1
+                     (buffer-substring (region-beginning) (region-end))
+                   (deactivate-mark)))
+                ((and (stringp url) (not (string-empty-p url)))
+                 url)
+                (code-bounds
+                 (buffer-substring (car code-bounds) (cdr code-bounds)))
+                (t nil))))
+    (if text
+        (let ((copied (if no-properties
+                          (substring-no-properties text)
+                        text)))
+          (kill-new copied)
+          (message "disco: copied text (%d chars)" (length copied)))
+      (disco-msg-copy-text message no-properties))))
 
 (defun disco-msg-time (message)
   "Return decoded timestamp for MESSAGE, or nil when unavailable."

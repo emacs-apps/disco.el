@@ -761,6 +761,8 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
 (defvar disco-room-timeline-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "c") #'disco-msg-copy-dwim)
+    (define-key map (kbd "l") #'disco-msg-copy-link)
     (define-key map (kbd "r") #'disco-room-reply-to-message)
     (define-key map (kbd "f") #'disco-room-forward-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
@@ -774,6 +776,9 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
 
 (defvar disco-room-message-prefix-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "c") #'disco-msg-copy-dwim)
+    (define-key map (kbd "l") #'disco-msg-copy-link)
+    (define-key map (kbd "t") #'disco-msg-copy-text)
     (define-key map (kbd "r") #'disco-room-reply-to-message)
     (define-key map (kbd "f") #'disco-room-forward-message)
     (define-key map (kbd "e") #'disco-room-edit-message)
@@ -2249,6 +2254,15 @@ updates, and keep draft cursor stable when point is in the composer."
   "Return cached MESSAGE-ID from CHANNEL-ID, or nil."
   (disco-msg-find-in-channel channel-id message-id))
 
+(defun disco-room--resolve-message (message-id &optional channel-id _position)
+  "Resolve MESSAGE-ID in current room context, optionally using CHANNEL-ID."
+  (let ((target-channel-id (disco-msg-normalize-id (or channel-id disco-room--channel-id))))
+    (if (and target-channel-id
+             (equal target-channel-id
+                    (disco-msg-normalize-id disco-room--channel-id)))
+        (disco-room--message-by-id message-id)
+      (disco-room--channel-message-by-id target-channel-id message-id))))
+
 (defun disco-room--msg-filter-active-p ()
   "Return non-nil when a room message filter is currently active."
   (and (listp disco-room--msg-filter)
@@ -2524,10 +2538,8 @@ Discord starter threads reuse source message ID as thread channel ID."
 
 (defun disco-room--message-at-point ()
   "Return message object at point, or signal user error."
-  (let* ((message-id (disco-room--message-id-at-point))
-         (msg (disco-room--message-by-id message-id)))
-    (or msg
-        (user-error "disco: message not found in local room cache"))))
+  (or (disco-msg-at)
+      (user-error "disco: message not found in local room cache")))
 
 (defun disco-room--read-optional-nonnegative-int (prompt)
   "Read optional non-negative integer using PROMPT.
@@ -4190,6 +4202,30 @@ messages; everything else is a system event shown as a centered divider."
            (t "[empty]"))
         content))))
 
+(defun disco-room--message-copy-text (msg)
+  "Return copy-ready visible text for MSG, or nil.
+
+This keeps message-copy semantics close to room rendering while avoiding room
+UI affordances such as timestamps, reaction rows and attachment cards." 
+  (let* ((message-id (alist-get 'id msg))
+         (system-content (disco-room--message-system-content msg))
+         (raw-content (and (listp msg) (alist-get 'content msg)))
+         (exported (and (stringp raw-content)
+                        (disco-markdown-copy-export
+                         raw-content
+                         :context 'room-message-copy
+                         :message msg
+                         :spoiler-message-id message-id
+                         :reveal-spoilers t))))
+    (cond
+     ((and (stringp system-content)
+           (not (string-empty-p (string-trim system-content))))
+      system-content)
+     ((and (stringp exported)
+           (not (string-empty-p (string-trim (substring-no-properties exported)))))
+      exported)
+     (t nil))))
+
 (defun disco-room--attachment-kind (attachment)
   "Return short attachment kind string for ATTACHMENT object."
   (pcase (disco-media-attachment-kind attachment)
@@ -4213,7 +4249,7 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
         (let ((spoiler-hidden (and (stringp message-id)
                                    (disco-media-attachment-spoiler-p attachment)
                                    (not reveal-spoilers))))
-          (condition-case _
+          (condition-case err
               (if disco-room-use-rich-attachment-cards
                   (disco-room--insert-attachment-card
                    attachment
@@ -4237,10 +4273,12 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
                    :summary-face 'disco-room-message-meta
                    :url-face 'shadow)))
             (error
+             (message "disco: attachment render failed for %s: %s"
+                      (disco-media-attachment-display-name attachment)
+                      (error-message-string err))
              (disco-ins-insert-attachment-lines
-              (format "[file] %s [render fallback]"
-                      (or (alist-get 'filename attachment)
-                          (format "%s" (or (alist-get 'id attachment) "unknown"))))
+              (format "%s [render fallback]"
+                      (disco-room--attachment-summary attachment))
               :prefix prefix
               :summary-face 'shadow))))))))
 
@@ -4927,7 +4965,15 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
        (point)
        (list 'read-only t
              'front-sticky '(read-only)
-             'disco-message-id message-id)))))
+             'disco-message-id message-id
+             'disco-message-channel-id
+             (disco-msg-normalize-id
+              (or (alist-get 'channel_id msg)
+                  disco-room--channel-id))
+             'disco-message-guild-id
+             (disco-msg-normalize-id
+              (or (alist-get 'guild_id msg)
+                  disco-room--guild-id)))))))
 
 (defun disco-room--ewoc-printer (msg)
   "EWOC pretty-printer for one room message MSG."
@@ -4938,7 +4984,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   (concat
    "M-<: older/more   C-c g/s/n/p: refresh/search/next/prev   M-g s/n/p: inplace search"
    "   C-c /: filter search   C-c C-r/C-s: inplace query back/forward"
-   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline r/f/e/d/!/+/-/T: message actions"
+   "   C-c C-/: cancel filter   C-c C-g: jump msg-id   timeline c/l/r/f/e/d/!/+/-/T: message actions"
    "   C-c C-w: toggle breakline   C-c C-p s/+/-/t/v/c/e: poll actions"
    "   C-c C-P: ack pins   C-c C-a: attach menu   C-c C-f: attach file   C-c C-v: clipboard attach"
    "   C-c C-e/o: formatting/options   C-c C-x: clear attachments   C-c M-l/M-e/M-r: attachment ops"
@@ -8007,6 +8053,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
   (setq-local disco-room--jump-in-flight nil)
   (setq-local disco-room--last-search-query nil)
   (setq-local disco-room--msg-filter nil)
+  (setq-local disco-msg-resolve-function #'disco-room--resolve-message)
+  (setq-local disco-msg-content-text-function #'disco-room--message-copy-text)
   (setq-local disco-room--filter-generation 0)
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)

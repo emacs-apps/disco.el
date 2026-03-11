@@ -550,6 +550,89 @@ return visible spoiler contents; otherwise return masked text."
         (setq pos next)))
     copy))
 
+(defun disco-markdown--code-kind-from-face (face)
+  "Return code region kind encoded by FACE, or nil."
+  (cond
+   ((null face) nil)
+   ((listp face)
+    (seq-some #'disco-markdown--code-kind-from-face face))
+   ((eq face 'markdown-inline-code-face) 'inline)
+   ((or (eq face 'markdown-code-face)
+        (eq face 'markdown-pre-face)
+        (and (symbolp face)
+             (string-match-p "\\`markdown-.*\\(code\\|pre\\)" (symbol-name face))))
+    'block)
+   (t nil)))
+
+(defun disco-markdown--apply-markdown-mode-code-properties (text)
+  "Attach stable code properties to markdown-mode rendered TEXT."
+  (let ((copy (copy-sequence text))
+        (len (length text))
+        (pos 0))
+    (while (< pos len)
+      (let* ((face (get-text-property pos 'face copy))
+             (kind (disco-markdown--code-kind-from-face face))
+             (next (or (next-single-char-property-change pos 'face copy) len)))
+        (when kind
+          (add-text-properties
+           pos next
+           (list 'disco-markdown-code t
+                 'disco-markdown-code-kind kind)
+           copy))
+        (setq pos next)))
+    copy))
+
+(defun disco-markdown--copy-materialize-line-prefixes (text)
+  "Return TEXT with `line-prefix' regions turned into literal text."
+  (let* ((source (or text ""))
+         (len (length source))
+         (pos 0)
+         parts)
+    (while (< pos len)
+      (let* ((newline (or (string-match "\n" source pos) len))
+             (line-end (if (< newline len) (1+ newline) newline))
+             (prefix (or (get-text-property pos 'line-prefix source)
+                         (and (> line-end pos)
+                              (get-text-property (1- line-end)
+                                                 'line-prefix source))))
+             (line (substring source pos line-end)))
+        (when (stringp prefix)
+          (push (copy-sequence prefix) parts))
+        (push line parts)
+        (setq pos line-end)))
+    (apply #'concat (nreverse parts))))
+
+(defun disco-markdown--sanitize-copy-properties (text)
+  "Return TEXT with interactive/display-only properties removed."
+  (let ((copy (copy-sequence (or text ""))))
+    (remove-list-of-text-properties
+     0 (length copy)
+     '(keymap mouse-face follow-link help-echo
+       line-prefix wrap-prefix rear-nonsticky display
+       read-only front-sticky
+       disco-markdown-url
+       disco-markdown-spoiler-message-id
+       disco-markdown-spoiler-hidden
+       disco-markdown-code
+       disco-markdown-code-kind
+       disco-markdown-protected)
+     copy)
+    copy))
+
+(cl-defun disco-markdown-copy-export (text &key context message spoiler-message-id
+                                           reveal-spoilers)
+  "Return TEXT exported for copy/yank operations.
+
+This materializes line prefixes such as blockquote markers and drops
+interactive display properties that should not leak into the kill ring."
+  (disco-markdown--sanitize-copy-properties
+   (disco-markdown--copy-materialize-line-prefixes
+    (disco-markdown-render text
+                           :context (or context 'copy-export)
+                           :message message
+                           :spoiler-message-id spoiler-message-id
+                           :reveal-spoilers reveal-spoilers))))
+
 (defun disco-markdown--url-inside-literal-markdown-link-p (text start end)
   "Return non-nil when URL span START END in TEXT is part of literal link syntax."
   (or (and (< 1 start)
@@ -831,9 +914,10 @@ code spans and fenced code blocks."
       (font-lock-ensure (point-min) (point-max)))
     (disco-markdown--apply-visible-url-properties
      (disco-markdown--normalize-heading-lines
-      (disco-markdown--apply-markdown-mode-link-properties
-       (disco-markdown--sanitize-face-properties
-        (filter-buffer-substring (point-min) (point-max) nil))))
+      (disco-markdown--apply-markdown-mode-code-properties
+       (disco-markdown--apply-markdown-mode-link-properties
+        (disco-markdown--sanitize-face-properties
+         (filter-buffer-substring (point-min) (point-max) nil)))))
      'markdown-mode)))
 
 (defun disco-markdown--char-run-length (text start char)
@@ -1145,8 +1229,11 @@ OBJECT defaults to the current buffer when nil and may also be a string."
              (string-match "\\`[ \\t]*```[ \\t]*\\([^ \\t`\\r\\n]+\\)" line))
     (match-string 1 line)))
 
-(defun disco-markdown--make-code-string (text &optional lang)
-  "Return TEXT propertized as code, optionally fontified for LANG."
+(defun disco-markdown--make-code-string (text &optional lang kind)
+  "Return TEXT propertized as code, optionally fontified for LANG.
+
+KIND is an optional symbol describing the code span, typically `inline' or
+`block'."
   (let* ((source (or text ""))
          (payload (copy-sequence source))
          (lang-mode (and disco-markdown-fontify-code-blocks-natively
@@ -1174,7 +1261,10 @@ OBJECT defaults to the current buffer when nil and may also be a string."
       (add-face-text-property 0 (length payload)
                               'disco-markdown-code-face 'append payload)
       (add-text-properties 0 (length payload)
-                           '(disco-markdown-protected t)
+                           (append '(disco-markdown-protected t
+                                     disco-markdown-code t)
+                                   (when kind
+                                     (list 'disco-markdown-code-kind kind)))
                            payload))
     payload))
 
@@ -1266,7 +1356,7 @@ and CLOSE-END and must return non-nil for the span to be transformed."
                      (close-end (match-end 0))
                      (payload (disco-markdown--make-code-string
                                (buffer-substring content-start close-start)
-                               lang)))
+                               lang 'block)))
                 (delete-region open-start close-end)
                 (goto-char open-start)
                 (insert payload)
@@ -1282,7 +1372,8 @@ and CLOSE-END and must return non-nil for the span to be transformed."
     (cons disco-markdown--regexp-inline-code
           (lambda ()
             (disco-markdown--make-code-string
-             (buffer-substring (match-beginning 1) (match-end 1))))))))
+             (buffer-substring (match-beginning 1) (match-end 1))
+             nil 'inline))))))
 
 (defun disco-markdown--apply-inline-emphasis (text)
   "Apply internal emphasis styling to TEXT."

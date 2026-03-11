@@ -146,7 +146,8 @@ built-in tree/activity layouts, return an `items` view spec instead:
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room buffer draft: attachment objects can be removed at point with `C-c C-d`; `M-r` searches draft history; `M-RET` opens a parsed composer preview buffer.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
-- Room timeline keys outside the composer follow telega-style message actions where available: `r` reply, `f` forward, `e` edit, `d` delete, `!` toggle reaction, `+` add reaction, `-` remove reaction, `T` open thread.
+- Room buffer: `c` copies at point in DWIM fashion (region/url/code/message text), `l` copies the current message permalink, and `C-c m c/l/t` expose the msg-centric copy family.
+- Room timeline keys outside the composer follow telega-style message actions where available: `c` copy-dwim, `l` copy-link, `r` reply, `f` forward, `e` edit, `d` delete, `!` toggle reaction, `+` add reaction, `-` remove reaction, `T` open thread.
 - Room poll actions: `C-c C-p s` send poll, `C-c C-p +` select answer, `C-c C-p -` unselect answer, `C-c C-p t` toggle staged answer, `C-c C-p v` submit staged vote, `C-c C-p c` remove own vote, `C-c C-p e` end poll.
 - Room transient (`?`): includes attachment/forward and reaction/poll actions (`f`, `F`, `D`, `x`, `v`, `V`, `O`, `!`, `+`, `-`, `p`, `w`, `u`, `t`, `W`, `C`, `X`).
 - Room transient (`?`): thread section includes create/open/manage actions (`m`, `o`, `n`, `R`, `L`, `S`, `U`, `E`, `M`, `j`, `l`, `a`, `A`).

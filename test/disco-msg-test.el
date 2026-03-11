@@ -1,6 +1,7 @@
 ;;; disco-msg-test.el --- Tests for disco-msg helpers -*- lexical-binding: t; -*-
 
 (require 'ert)
+(require 'cl-lib)
 
 (add-to-list 'load-path
              (expand-file-name ".."
@@ -81,6 +82,89 @@
     (should (disco-msg-reaction-selected-p reaction))
     (should (equal (list reaction)
                    (disco-msg-reactions message)))))
+
+(ert-deftest disco-msg-at-uses-buffer-properties-and-resolver ()
+  (with-temp-buffer
+    (let ((expected '((id . "m1")
+                      (channel_id . "c1")
+                      (content . "hello"))))
+      (insert "hello")
+      (add-text-properties (point-min) (point-max)
+                           '(disco-message-id "m1"
+                             disco-message-channel-id "c1"
+                             disco-message-guild-id "g1"))
+      (setq-local disco-msg-resolve-function
+                  (lambda (message-id channel-id _pos)
+                    (when (and (equal message-id "m1")
+                               (equal channel-id "c1"))
+                      expected)))
+      (goto-char (point-min))
+      (should (eq expected (disco-msg-at)))
+      (should (equal '(:message-id "m1" :channel-id "c1" :guild-id "g1")
+                     (disco-msg-ref-at))))))
+
+(ert-deftest disco-msg-link-infers-guild-from-channel-and-supports-dms ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "c1")
+                                (guild_id . "g1")
+                                (type . 0)))
+  (disco-state-upsert-channel '((id . "dm1")
+                                (type . 1)))
+  (should (equal "https://discord.com/channels/g1/c1/m1"
+                 (disco-msg-link '((id . "m1")
+                                   (channel_id . "c1")))))
+  (should (equal "https://discord.com/channels/@me/dm1/m2"
+                 (disco-msg-link '((id . "m2")
+                                   (channel_id . "dm1"))))))
+
+(ert-deftest disco-msg-copy-text-respects-no-properties ()
+  (let (copied)
+    (with-temp-buffer
+      (setq-local disco-msg-content-text-function
+                  (lambda (_msg)
+                    (propertize "hello" 'face 'bold)))
+      (cl-letf (((symbol-function 'kill-new)
+                 (lambda (text &rest _args)
+                   (setq copied text)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (disco-msg-copy-text '((id . "m1")))
+        (should (equal "hello" (substring-no-properties copied)))
+        (should (get-text-property 0 'face copied))
+        (disco-msg-copy-text '((id . "m1")) t)
+        (should (equal "hello" copied))))))
+
+(ert-deftest disco-msg-copy-dwim-prefers-url-code-then-message-text ()
+  (let ((disco-markdown-backend 'internal)
+        copied)
+    (with-temp-buffer
+      (let ((rendered (disco-markdown-render
+                       "visit [site](https://example.com) and `(+ 1 2)`"
+                       :context 'test-msg-copy-dwim)))
+        (insert rendered))
+      (cl-letf (((symbol-function 'kill-new)
+                 (lambda (text &rest _args)
+                   (setq copied text)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (goto-char (point-min))
+        (search-forward "site")
+        (backward-char 2)
+        (disco-msg-copy-dwim '((id . "m1")
+                               (content . "fallback text")))
+        (should (equal "https://example.com" copied))
+        (search-forward "+ 1 2")
+        (backward-char 3)
+        (disco-msg-copy-dwim '((id . "m1")
+                               (content . "fallback text")))
+        (should (equal "(+ 1 2)" copied))
+        (goto-char (point-min))
+        (setq-local disco-msg-content-text-function
+                    (lambda (_msg)
+                      "fallback text"))
+        (disco-msg-copy-dwim '((id . "m1")
+                               (content . "fallback text")) t)
+        (should (equal "fallback text" copied))))))
 
 (provide 'disco-msg-test)
 
