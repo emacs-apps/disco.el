@@ -3017,9 +3017,6 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
   (disco-room--rerender-open-rooms)
   (message "disco: avatar cache reset; refetching"))
 
-(defvar disco-media--last-notify-kind)
-(defvar disco-media--last-notify-key)
-
 (defun disco-room--rerender-open-rooms ()
   "Rerender all open room buffers while preserving reading position."
   (dolist (buf (buffer-list))
@@ -3063,13 +3060,13 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
 
 (defun disco-room--handle-media-rerender ()
   "Handle media refreshes with targeted invalidation when possible."
-  (pcase disco-media--last-notify-kind
-    ((or 'audio 'download)
-     (unless (disco-room--invalidate-attachment-key-in-open-rooms
-              disco-media--last-notify-key)
-       (disco-room--rerender-open-rooms)))
-    (_
-     (disco-room--rerender-open-rooms))))
+  (pcase-let ((`(,kind . ,key) (disco-media-last-notification)))
+    (pcase kind
+      ((or 'audio 'download)
+       (unless (disco-room--invalidate-attachment-key-in-open-rooms key)
+         (disco-room--rerender-open-rooms)))
+      (_
+       (disco-room--rerender-open-rooms)))))
 
 (defun disco-room--on-text-scale-change ()
   "Rerender room buffers after `text-scale-mode' changes."

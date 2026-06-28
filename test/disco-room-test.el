@@ -1532,10 +1532,9 @@
   (with-temp-buffer
     (disco-room-mode)
     (let ((disco-room--displayed-message-ids '("m1" "m2"))
-          (disco-media--last-notify-kind 'audio)
-          (disco-media--last-notify-key "a2")
           invalidated
           rerendered)
+      (disco-media-record-notification 'audio "a2")
       (cl-letf (((symbol-function 'disco-room--message-by-id)
                  (lambda (message-id)
                    (pcase message-id

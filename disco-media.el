@@ -1222,13 +1222,21 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
     (or (disco-media--attachment-real-spoiler-preview-image attachment)
         (disco-media-attachment-spoiler-placeholder-image attachment))))
 
+(defun disco-media-last-notification ()
+  "Return the latest media notification as (KIND . KEY)."
+  (cons disco-media--last-notify-kind disco-media--last-notify-key))
+
+(defun disco-media-record-notification (&optional kind key)
+  "Record media state notification KIND for KEY without running callbacks."
+  (setq disco-media--last-notify-kind kind)
+  (setq disco-media--last-notify-key key))
+
 (defun disco-media--notify-state-updated (&optional kind key)
   "Notify UI after media state/cache updates.
 
 KIND is a symbol such as `audio', `download', or `preview'.  KEY is the stable
 attachment/download key associated with the update when available."
-  (setq disco-media--last-notify-kind kind)
-  (setq disco-media--last-notify-key key)
+  (disco-media-record-notification kind key)
   (let ((callback (or disco-media-rerender-function
                       disco-media-preview-rerender-function)))
     (when (functionp callback)
