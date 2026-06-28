@@ -406,7 +406,7 @@ can use POST-BIND-FUNCTION for owner-specific text properties or local repair."
     (when (functionp post-bind-function)
       (funcall post-bind-function))))
 
-(defun disco-chatbuf-input-apply-text-properties (&optional _input-map)
+(defun disco-chatbuf-input-apply-text-properties ()
   "Normalize current input region after redraws and edits."
   (disco-chatbuf-init-state)
   (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
@@ -415,16 +415,13 @@ can use POST-BIND-FUNCTION for owner-specific text properties or local repair."
                            '(read-only nil)))))
 
 (cl-defun disco-chatbuf-after-change
-    (beg end &key rendering-p input-map sync-function prune-broken-objects)
+    (beg end &key rendering-p sync-function prune-broken-objects)
   "Maintain shared input-region invariants after a buffer change.
 
 BEG and END describe the changed region.  When RENDERING-P is non-nil, do
 nothing.  Otherwise, if the change overlaps the current input region, normalize
 input text properties, optionally prune broken structured objects, and then call
-SYNC-FUNCTION when non-nil.
-
-INPUT-MAP is accepted for compatibility with older callers and is ignored."
-  (ignore input-map)
+SYNC-FUNCTION when non-nil."
   (unless rendering-p
     (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
       (when (and (< beg (cdr bounds))

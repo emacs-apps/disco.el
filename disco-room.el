@@ -140,16 +140,8 @@ Values are either image objects or the symbol `:missing'.")
   '("webp" "png" "jpg" "jpeg" "gif" "img")
   "Preferred avatar cache file extension candidates.")
 
-(defvar disco-room-inplace-search-history nil
-  "Minibuffer history for room inplace searches.")
-
 (defvar disco-room-draft-history-search-history nil
   "Minibuffer history for room draft-history searches.")
-
-(defcustom disco-room-filter-search-limit 25
-  "Number of search hits to request per room filter-search page."
-  :type 'integer
-  :group 'disco)
 
 (defcustom disco-room-input-history-size 30
   "Maximum number of draft entries kept in room input history."

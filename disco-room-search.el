@@ -30,8 +30,13 @@
 (defvar disco-room--filter-in-flight)
 (defvar disco-room--inplace-search-filter)
 (defvar disco-room--inplace-search-generation)
-(defvar disco-room-filter-search-limit)
-(defvar disco-room-inplace-search-history)
+(defvar disco-room-inplace-search-history nil
+  "Minibuffer history for room inplace searches.")
+
+(defcustom disco-room-filter-search-limit 25
+  "Number of search hits to request per room filter-search page."
+  :type 'integer
+  :group 'disco)
 
 (declare-function disco-room--active-highlight-query "disco-room")
 (declare-function disco-room--async-error-message "disco-room" (err))
