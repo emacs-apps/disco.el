@@ -17,16 +17,81 @@
 (require 'svg nil t)
 (require 'plz)
 
-(defvar disco-room-show-attachment-image-previews t)
-(defvar disco-room-attachment-preview-max-width 460)
-(defvar disco-room-attachment-preview-max-height 360)
-(defvar disco-room-attachment-preview-fetch-concurrency 6)
-(defvar disco-room-attachment-cache-directory
-  (locate-user-emacs-file "disco-attachment-cache/"))
-(defvar disco-room-attachment-download-directory
-  (locate-user-emacs-file "disco-attachment-downloads/"))
-(defvar disco-room-video-player-command)
-(defvar disco-room-audio-player-command)
+(defgroup disco-media nil
+  "Media preview, placeholder, and spoiler rendering for disco."
+  :group 'disco)
+
+(defcustom disco-media-preview-cache-directory
+  (locate-user-emacs-file "disco-attachment-cache/")
+  "Directory used to cache downloaded attachment preview images."
+  :type 'directory
+  :group 'disco-media)
+
+(defcustom disco-media-download-directory
+  (locate-user-emacs-file "disco-attachment-downloads/")
+  "Directory used for telega-style default attachment downloads."
+  :type 'directory
+  :group 'disco-media)
+
+(defcustom disco-media-preview-max-fetches-per-render 4
+  "Maximum attachment preview fetches started during one room render pass.
+
+Set to nil to disable per-render capping."
+  :type '(choice
+          (const :tag "No per-render cap" nil)
+          integer)
+  :group 'disco-media)
+
+(defcustom disco-media-preview-fetch-concurrency 6
+  "Maximum concurrent attachment preview downloads in plz queue."
+  :type 'integer
+  :group 'disco-media)
+
+(defcustom disco-media-show-previews t
+  "When non-nil, render inline previews for image/video attachments."
+  :type 'boolean
+  :group 'disco-media)
+
+(defcustom disco-media-video-player-command
+  (cond
+   ((executable-find "mpv") "mpv")
+   ((executable-find "vlc") "vlc")
+   ((executable-find "ffplay") "ffplay -autoexit")
+   (t nil))
+  "Command used to play video URLs/files from cards.
+
+When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
+  :type '(choice
+          (const :tag "Use browser" nil)
+          (string :tag "Command line"))
+  :group 'disco-media)
+
+(defcustom disco-media-audio-player-command
+  (cond
+   ((executable-find "ffplay") "ffplay -nodisp -autoexit")
+   ((executable-find "mpv") "mpv --no-video")
+   ((executable-find "vlc") "vlc --intf dummy --play-and-exit")
+   (t nil))
+  "Command used to play audio URLs/files from cards.
+
+When this resolves to `ffplay', disco can track play/pause/progress inline in a
+telega-style attachment card.  Other players are launched as best-effort
+external commands without inline playback state.  When nil, fallback uses
+browser/file handlers."
+  :type '(choice
+          (const :tag "Use browser/file handler" nil)
+          (string :tag "Command line"))
+  :group 'disco-media)
+
+(defcustom disco-media-preview-max-width 460
+  "Maximum pixel width used for inline attachment previews."
+  :type 'integer
+  :group 'disco-media)
+
+(defcustom disco-media-preview-max-height 360
+  "Maximum pixel height used for inline attachment previews."
+  :type 'integer
+  :group 'disco-media)
 
 (defconst disco-media--cache-extensions
   '("webp" "png" "jpg" "jpeg" "gif" "img")
@@ -84,10 +149,6 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-media--attachment-decorated-preview-cache (make-hash-table :test #'equal)
   "Cache of SVG-decorated preview images keyed by source/spec/mode.")
-
-(defgroup disco-media nil
-  "Media preview, placeholder, and spoiler rendering for disco."
-  :group 'disco)
 
 (defun disco-media--visual-custom-set (symbol value)
   "Set SYMBOL to VALUE and invalidate media preview caches."
@@ -252,13 +313,13 @@ Values are image objects or the symbol `:missing'.")
 
 (defun disco-media--configured-video-player-command ()
   "Return current configured video player command, or nil when unset."
-  (and (boundp 'disco-room-video-player-command)
-       disco-room-video-player-command))
+  (and (boundp 'disco-media-video-player-command)
+       disco-media-video-player-command))
 
 (defun disco-media--configured-audio-player-command ()
   "Return current configured audio player command, or nil when unset."
-  (and (boundp 'disco-room-audio-player-command)
-       disco-room-audio-player-command))
+  (and (boundp 'disco-media-audio-player-command)
+       disco-media-audio-player-command))
 
 (defun disco-media--audio-player-program-name ()
   "Return basename for configured audio player, or nil."
@@ -453,7 +514,7 @@ Values are image objects or the symbol `:missing'.")
 
 (defun disco-media-attachment-preview-rendering-available-p ()
   "Return non-nil when inline attachment image previews are available."
-  (and disco-room-show-attachment-image-previews
+  (and disco-media-show-previews
        (disco-media-inline-image-rendering-available-p)))
 
 (defun disco-media-attachment-preview-url (attachment)
@@ -486,12 +547,12 @@ Values are image objects or the symbol `:missing'.")
             seed
             name
             (max 64
-                 (if (numberp disco-room-attachment-preview-max-width)
-                     disco-room-attachment-preview-max-width
+                 (if (numberp disco-media-preview-max-width)
+                     disco-media-preview-max-width
                    460))
             (max 64
-                 (if (numberp disco-room-attachment-preview-max-height)
-                     disco-room-attachment-preview-max-height
+                 (if (numberp disco-media-preview-max-height)
+                     disco-media-preview-max-height
                    360)))))
 
 (defun disco-media-attachment-preview-cache-state (cache-key)
@@ -516,7 +577,7 @@ VALUE should be nil for uncapped mode or a non-negative integer."
 
 (defun disco-media--attachment-preview-cache-file-base (cache-key)
   "Return attachment preview cache file base path for CACHE-KEY."
-  (expand-file-name (md5 cache-key) disco-room-attachment-cache-directory))
+  (expand-file-name (md5 cache-key) disco-media-preview-cache-directory))
 
 (defun disco-media--attachment-preview-cache-file (cache-key extension)
   "Return attachment preview cache file path for CACHE-KEY and EXTENSION."
@@ -533,7 +594,7 @@ VALUE should be nil for uncapped mode or a non-negative integer."
 
 (defun disco-media--attachment-preview-ensure-queue ()
   "Return active queue for attachment preview fetches."
-  (let ((limit (max 1 disco-room-attachment-preview-fetch-concurrency)))
+  (let ((limit (max 1 disco-media-preview-fetch-concurrency)))
     (when (or (null disco-media--attachment-preview-plz-queue)
               (not (equal disco-media--attachment-preview-plz-queue-limit limit)))
       (setq disco-media--attachment-preview-plz-queue (make-plz-queue :limit limit))
@@ -582,12 +643,12 @@ VALUE should be nil for uncapped mode or a non-negative integer."
 (defun disco-media--attachment-preview-image-from-file (file)
   "Create inline attachment preview image from FILE, or nil when unavailable."
   (let ((max-width (max 64
-                        (if (numberp disco-room-attachment-preview-max-width)
-                            disco-room-attachment-preview-max-width
+                        (if (numberp disco-media-preview-max-width)
+                            disco-media-preview-max-width
                           460)))
         (max-height (max 64
-                         (if (numberp disco-room-attachment-preview-max-height)
-                             disco-room-attachment-preview-max-height
+                         (if (numberp disco-media-preview-max-height)
+                             disco-media-preview-max-height
                            360))))
     (disco-media-preview-image-from-file file max-width max-height)))
 
@@ -931,12 +992,12 @@ This overlay only darkens slightly and optionally adds a video play marker."
 (defun disco-media--attachment-placeholder-height-chars (attachment ratio)
   "Return display height in text lines for ATTACHMENT placeholder."
   (let* ((safe-max-width (max 64
-                              (if (numberp disco-room-attachment-preview-max-width)
-                                  disco-room-attachment-preview-max-width
+                              (if (numberp disco-media-preview-max-width)
+                                  disco-media-preview-max-width
                                 460)))
          (safe-max-height (max 64
-                               (if (numberp disco-room-attachment-preview-max-height)
-                                   disco-room-attachment-preview-max-height
+                               (if (numberp disco-media-preview-max-height)
+                                   disco-media-preview-max-height
                                  360))))
     (disco-media--preview-height-chars
      (disco-media--attachment-placeholder-source-size attachment ratio)
@@ -1109,11 +1170,11 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
             spoiler-p
             (alist-get 'width attachment)
             (alist-get 'height attachment)
-            (max 64 (if (numberp disco-room-attachment-preview-max-width)
-                        disco-room-attachment-preview-max-width
+            (max 64 (if (numberp disco-media-preview-max-width)
+                        disco-media-preview-max-width
                       460))
-            (max 64 (if (numberp disco-room-attachment-preview-max-height)
-                        disco-room-attachment-preview-max-height
+            (max 64 (if (numberp disco-media-preview-max-height)
+                        disco-media-preview-max-height
                       360))))))
 
 (defun disco-media-attachment-placeholder-image (attachment)
@@ -1691,7 +1752,7 @@ available."
                      (disco-media-attachment-default-save-name attachment))))
     (expand-file-name
      (format "%s-%s" (substring (md5 key) 0 10) safe-name)
-     disco-room-attachment-download-directory)))
+     disco-media-download-directory)))
 
 (defun disco-media-attachment-download-state (attachment)
   "Return normalized download state plist for ATTACHMENT."
@@ -1743,7 +1804,7 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
     (when (eq status 'downloading)
       (user-error "disco: attachment download already in progress"))
     (make-directory (or (file-name-directory path)
-                        disco-room-attachment-download-directory)
+                        disco-media-download-directory)
                     t)
     (cl-labels
         ((current-entry ()

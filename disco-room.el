@@ -270,17 +270,6 @@ This mirrors telega's gap workaround and keeps slice seams stable."
   :type 'directory
   :group 'disco)
 
-(defcustom disco-room-attachment-cache-directory
-  (locate-user-emacs-file "disco-attachment-cache/")
-  "Directory used to cache downloaded attachment preview images."
-  :type 'directory
-  :group 'disco)
-
-(defcustom disco-room-attachment-download-directory
-  (locate-user-emacs-file "disco-attachment-downloads/")
-  "Directory used for telega-style default attachment downloads."
-  :type 'directory
-  :group 'disco)
 
 (defcustom disco-room-avatar-max-fetches-per-render nil
   "Maximum avatar fetches started during one room render pass.
@@ -292,24 +281,12 @@ When nil, avatar fetches are uncapped per render pass
           integer)
   :group 'disco)
 
-(defcustom disco-room-attachment-preview-max-fetches-per-render 4
-  "Maximum attachment preview fetches started during one room render pass.
-
-Set to nil to disable per-render capping."
-  :type '(choice
-          (const :tag "No per-render cap" nil)
-          integer)
-  :group 'disco)
 
 (defcustom disco-room-avatar-fetch-concurrency 20
   "Maximum concurrent avatar downloads in plz queue."
   :type 'integer
   :group 'disco)
 
-(defcustom disco-room-attachment-preview-fetch-concurrency 6
-  "Maximum concurrent attachment preview downloads in plz queue."
-  :type 'integer
-  :group 'disco)
 
 (defcustom disco-room-show-attachments t
   "When non-nil, render attachment details under each message."
@@ -321,76 +298,6 @@ Set to nil to disable per-render capping."
   :type 'boolean
   :group 'disco)
 
-(defcustom disco-room-show-attachment-image-previews t
-  "When non-nil, render inline previews for image/video attachments."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-video-player-command
-  (cond
-   ((executable-find "mpv") "mpv")
-   ((executable-find "vlc") "vlc")
-   ((executable-find "ffplay") "ffplay -autoexit")
-   (t nil))
-  "Command used to play video URLs/files from cards.
-
-When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
-  :type '(choice
-          (const :tag "Use browser" nil)
-          (string :tag "Command line"))
-  :group 'disco)
-
-(defcustom disco-room-audio-player-command
-  (cond
-   ((executable-find "ffplay") "ffplay -nodisp -autoexit")
-   ((executable-find "mpv") "mpv --no-video")
-   ((executable-find "vlc") "vlc --intf dummy --play-and-exit")
-   (t nil))
-  "Command used to play audio URLs/files from cards.
-
-When this resolves to `ffplay', disco can track play/pause/progress inline in a
-telega-style attachment card.  Other players are launched as best-effort
-external commands without inline playback state.  When nil, fallback uses
-browser/file handlers."
-  :type '(choice
-          (const :tag "Use browser/file handler" nil)
-          (string :tag "Command line"))
-  :group 'disco)
-
-(defcustom disco-room-attachment-preview-max-width 460
-  "Maximum pixel width used for inline attachment previews."
-  :type 'integer
-  :group 'disco)
-
-(defcustom disco-room-attachment-preview-max-height 360
-  "Maximum pixel height used for inline attachment previews."
-  :type 'integer
-  :group 'disco)
-
-(defcustom disco-room-show-embeds t
-  "When non-nil, render embed details under each message."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-use-rich-embed-cards t
-  "When non-nil, render telega-inspired rich cards for embeds."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-show-embed-image-previews t
-  "When non-nil, render inline image/video previews for embed media."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-show-embed-author-icons t
-  "When non-nil, render inline author icons in embed metadata rows."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-embed-author-icon-size 18
-  "Pixel size used for inline embed author icons."
-  :type 'integer
-  :group 'disco)
 
 (defcustom disco-room-use-rich-forward-cards t
   "When non-nil, render forwarded-message metadata as rich cards."
@@ -407,15 +314,6 @@ browser/file handlers."
   :type 'integer
   :group 'disco)
 
-(defcustom disco-room-embed-description-limit nil
-  "Maximum description length rendered in embed cards.
-
-Set to 0 to disable embed description rendering, or nil for no limit."
-  :type '(choice
-          (const :tag "No limit" nil)
-          (const :tag "Disable description" 0)
-          integer)
-  :group 'disco)
 
 (defcustom disco-room-show-reactions t
   "When non-nil, render reaction chips under each message."
@@ -569,10 +467,6 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   :type 'boolean
   :group 'disco)
 
-(defcustom disco-room-show-embed-urls nil
-  "When non-nil, include raw embed URLs in message rendering."
-  :type 'boolean
-  :group 'disco)
 
 (defface disco-room-timestamp
   '((t :inherit shadow))
@@ -4222,7 +4116,7 @@ messages; everything else is a system event shown as a centered divider."
          (embed-count (length embeds))
          (poll-count (if poll 1 0))
          (showing-attachments (and disco-room-show-attachments (> attachment-count 0)))
-         (showing-embeds (and disco-room-show-embeds (> embed-count 0)))
+         (showing-embeds (and disco-embed-show-embeds (> embed-count 0)))
          (showing-poll (and disco-room-show-polls (> poll-count 0)))
          (msg-type (disco-msg-type msg))
          (system-content (disco-room--message-system-content msg))
@@ -5782,8 +5676,8 @@ Return non-nil when handled without full room rerender."
           (when (numberp disco-room-avatar-max-fetches-per-render)
             (max 0 disco-room-avatar-max-fetches-per-render)))
          (preview-fetch-budget
-          (when (numberp disco-room-attachment-preview-max-fetches-per-render)
-            (max 0 disco-room-attachment-preview-max-fetches-per-render))))
+          (when (numberp disco-media-preview-max-fetches-per-render)
+            (max 0 disco-media-preview-max-fetches-per-render))))
     (setq disco-room--rendering t)
     (disco-media-set-preview-fetch-budget preview-fetch-budget)
     (unwind-protect

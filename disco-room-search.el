@@ -30,10 +30,10 @@
 (defvar disco-room--filter-in-flight)
 (defvar disco-room--inplace-search-filter)
 (defvar disco-room--inplace-search-generation)
-(defvar disco-room-inplace-search-history nil
+(defvar disco-room-search-inplace-history nil
   "Minibuffer history for room inplace searches.")
 
-(defcustom disco-room-filter-search-limit 25
+(defcustom disco-room-search-filter-limit 25
   "Number of search hits to request per room filter-search page."
   :type 'integer
   :group 'disco)
@@ -395,7 +395,7 @@ When APPEND is non-nil, load the next page of matching messages."
     (disco-room--search-current-channel-async
      :query (plist-get filter :query)
      :author-id (plist-get filter :author-id)
-     :limit disco-room-filter-search-limit
+     :limit disco-room-search-filter-limit
      :offset offset
      :sort-order 'desc
      :on-success
@@ -419,7 +419,7 @@ When APPEND is non-nil, load the next page of matching messages."
                                :has-more (if (numberp total)
                                              (< (length items) total)
                                            (= (length page)
-                                              disco-room-filter-search-limit))))
+                                              disco-room-search-filter-limit))))
              (if (disco-room--at-message-bottom-p)
                  (disco-room-render)
                (disco-room--render-preserving-point))
@@ -609,7 +609,7 @@ search toward newer messages."
   (interactive
    (list (read-string (format "Search messages%s: "
                               (if current-prefix-arg " by sender" ""))
-                      nil 'disco-room-inplace-search-history)
+                      nil 'disco-room-search-inplace-history)
          current-prefix-arg
          nil))
   (let* ((trimmed (string-trim (or query "")))
@@ -627,7 +627,7 @@ search toward newer messages."
   (interactive
    (list (read-string (format "Search forward%s: "
                               (if current-prefix-arg " by sender" ""))
-                      nil 'disco-room-inplace-search-history)
+                      nil 'disco-room-search-inplace-history)
          current-prefix-arg))
   (disco-room-inplace-search-query query by-sender-p t))
 

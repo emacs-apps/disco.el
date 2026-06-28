@@ -8,7 +8,7 @@
 
 (require 'disco-media)
 
-(defvar disco-room-attachment-download-directory)
+(defvar disco-media-download-directory)
 
 (ert-deftest disco-media-attachment-kind-and-summary-classify-common-types ()
   (let* ((photo '((filename . "cat.png")
@@ -267,7 +267,7 @@
   (let ((tmpdir (make-temp-file "disco-media-downloads" t))
         (disco-media--attachment-download-state-table (make-hash-table :test #'equal)))
     (unwind-protect
-        (let* ((disco-room-attachment-download-directory tmpdir)
+        (let* ((disco-media-download-directory tmpdir)
                (attachment '((id . "42")
                              (filename . "doc.txt")
                              (url . "https://example.invalid/doc.txt")))

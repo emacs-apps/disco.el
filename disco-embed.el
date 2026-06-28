@@ -17,15 +17,52 @@
 (require 'disco-markdown)
 (require 'disco-media)
 
-(defvar disco-room-show-embeds)
-(defvar disco-room-use-rich-embed-cards)
-(defvar disco-room-show-embed-urls)
-(defvar disco-room-show-embed-image-previews)
-(defvar disco-room-show-embed-author-icons)
-(defvar disco-room-embed-author-icon-size)
-(defvar disco-room-embed-description-limit)
-(defvar disco-room-attachment-preview-max-width)
-(defvar disco-room-attachment-preview-max-height)
+(defgroup disco-embed nil
+  "Embed card rendering for disco."
+  :group 'disco)
+
+(defcustom disco-embed-show-embeds t
+  "When non-nil, render embed details under each message."
+  :type 'boolean
+  :group 'disco-embed)
+
+(defcustom disco-embed-use-rich-cards t
+  "When non-nil, render telega-inspired rich cards for embeds."
+  :type 'boolean
+  :group 'disco-embed)
+
+(defcustom disco-embed-show-image-previews t
+  "When non-nil, render inline image/video previews for embed media."
+  :type 'boolean
+  :group 'disco-embed)
+
+(defcustom disco-embed-show-author-icons t
+  "When non-nil, render inline author icons in embed metadata rows."
+  :type 'boolean
+  :group 'disco-embed)
+
+(defcustom disco-embed-author-icon-size 18
+  "Pixel size used for inline embed author icons."
+  :type 'integer
+  :group 'disco-embed)
+
+(defcustom disco-embed-description-limit nil
+  "Maximum description length rendered in embed cards.
+
+Set to 0 to disable embed description rendering, or nil for no limit."
+  :type '(choice
+          (const :tag "No limit" nil)
+          (const :tag "Disable description" 0)
+          integer)
+  :group 'disco-embed)
+
+(defcustom disco-embed-show-urls nil
+  "When non-nil, include raw embed URLs in message rendering."
+  :type 'boolean
+  :group 'disco-embed)
+
+(defvar disco-media-preview-max-width)
+(defvar disco-media-preview-max-height)
 (defvar disco-ui-card-indent-prefix)
 (defvar disco-ui-card-indent-prefix-state)
 (defvar disco-embed--current-message nil)
@@ -230,8 +267,8 @@ Keeps original line breaks and applies markdown renderer pipeline."
   (let* ((icon-url (disco-embed--author-icon-url msg embed))
          (message-id (format "%s" (or (alist-get 'id msg) "unknown")))
          (size (max 8
-                    (if (numberp disco-room-embed-author-icon-size)
-                        disco-room-embed-author-icon-size
+                    (if (numberp disco-embed-author-icon-size)
+                        disco-embed-author-icon-size
                       18))))
     (when (disco-embed--url-present-p icon-url)
       `((id . ,(format "embed-author-icon:%s:%s:%s:%s"
@@ -248,11 +285,11 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--author-icon-image (msg embed embed-index)
   "Return inline author icon image for EMBED in MSG, or nil while loading."
-  (when (and disco-room-show-embed-author-icons
+  (when (and disco-embed-show-author-icons
              (disco-media-inline-image-rendering-available-p))
     (let* ((size (max 8
-                      (if (numberp disco-room-embed-author-icon-size)
-                          disco-room-embed-author-icon-size
+                      (if (numberp disco-embed-author-icon-size)
+                          disco-embed-author-icon-size
                         18)))
            (attachment (disco-embed--author-icon-attachment msg embed embed-index))
            image)
@@ -518,7 +555,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
   "Return embed description for EMBED, preserving original formatting."
   (let ((text (disco-embed--stringify
                (alist-get 'description embed))))
-    (disco-embed--truncate-text text disco-room-embed-description-limit)))
+    (disco-embed--truncate-text text disco-embed-description-limit)))
 
 (defun disco-embed--insert-action-button (label callback help-echo)
   "Insert one compact action button."
@@ -555,15 +592,15 @@ Keeps original line breaks and applies markdown renderer pipeline."
 (defun disco-embed--preview-max-width ()
   "Return max inline preview width in pixels."
   (max 64
-       (if (numberp disco-room-attachment-preview-max-width)
-           disco-room-attachment-preview-max-width
+       (if (numberp disco-media-preview-max-width)
+           disco-media-preview-max-width
          460)))
 
 (defun disco-embed--preview-max-height ()
   "Return max inline preview height in pixels."
   (max 64
-       (if (numberp disco-room-attachment-preview-max-height)
-           disco-room-attachment-preview-max-height
+       (if (numberp disco-media-preview-max-height)
+           disco-media-preview-max-height
          360)))
 
 (defun disco-embed--preview-grid-max-width ()
@@ -709,7 +746,7 @@ Return non-nil when anything was inserted."
 (defun disco-embed--insert-preview-row (msg embed embed-index media-kind media-url video-url prefix-str)
   "Insert media preview row for EMBED in MSG."
   (let* ((preview-rendering-available
-          (and disco-room-show-embed-image-previews
+          (and disco-embed-show-image-previews
                (disco-media-inline-image-rendering-available-p)))
          (embed-images (disco-embed--embed-image-objects embed)))
     (if (> (length embed-images) 1)
@@ -966,7 +1003,7 @@ Return non-nil when anything was inserted."
         (disco-ui-append-face footer-start (point) meta-face)))
     (disco-embed--insert-action-row
      main-url media-url video-url author-url provider-url author-icon-url embed prefix-str)
-    (when disco-room-show-embed-urls
+    (when disco-embed-show-urls
       (dolist (raw-url (delete-dups (delq nil (list main-url media-url author-url
                                                     provider-url author-icon-url))))
         (when (disco-embed--url-present-p raw-url)
@@ -978,7 +1015,7 @@ Return non-nil when anything was inserted."
 
 (defun disco-embed-insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
-  (when disco-room-show-embeds
+  (when disco-embed-show-embeds
     (let ((embed-index 0)
           (embeds (disco-embed--normalize-embeds (alist-get 'embeds msg))))
       (dolist (embed embeds)
@@ -990,7 +1027,7 @@ Return non-nil when anything was inserted."
                     (funcall 'disco-room--message-spoilers-revealed-p
                              (alist-get 'id msg)))))
           (condition-case _
-              (if disco-room-use-rich-embed-cards
+              (if disco-embed-use-rich-cards
                   (disco-embed-insert-card msg embed embed-index)
                 (let* ((prefix-source (or disco-ui-card-indent-prefix-state
                                           (or disco-ui-card-indent-prefix "    ")))
@@ -999,7 +1036,7 @@ Return non-nil when anything was inserted."
                   (insert (disco-embed--summary embed) "\n")
                   (disco-ui-apply-line-prefix line-start (point) prefix-source)
                   (add-text-properties line-start (point) '(face disco-room-message-meta))
-                  (when (and disco-room-show-embed-urls
+                  (when (and disco-embed-show-urls
                              (disco-embed--url-present-p url))
                     (let ((url-start (point)))
                       (insert "  " url "\n")
