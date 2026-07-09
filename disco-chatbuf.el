@@ -432,12 +432,40 @@ SYNC-FUNCTION when non-nil."
         (when (functionp sync-function)
           (funcall sync-function))))))
 
+(defun disco-chatbuf--split-by-text-prop (string prop)
+  "Split STRING by changes of text property PROP.
+
+Mirrors `telega--split-by-text-prop' (used by telega-chatbuf input→IMC)."
+  (let ((finish (length string))
+        (start 0)
+        (pos 0)
+        result)
+    (while (and (> finish pos)
+                (setq pos (next-single-char-property-change pos prop string)))
+      (push (substring string start pos) result)
+      (setq start pos))
+    (nreverse result)))
+
 (cl-defun disco-chatbuf-input-insert (content &key object properties)
   "Insert CONTENT into the current input region.
 
 CONTENT must be a string.  When OBJECT is non-nil, tag the inserted text as a
 structured input object using `disco-chatbuf-input-object-property'.  Extra
-PROPERTIES are appended to the inserted text properties."
+PROPERTIES are appended to the inserted text properties.
+
+Attachment layout follows telega's `telega-chatbuf-input-insert':
+
+1. If point is already on an attachment, insert a separating space first.
+2. Object body carries the object property (+ optional face).
+3. First char gets `disco-chatbuf-input-object-start-property' (telega
+   `attach-open-bracket').
+4. A trailing space after the body carries
+   `disco-chatbuf-input-object-end-property' and `rear-nonsticky t'
+   (telega `attach-close-bracket' + `rear-nonsticky t' on the spacer).
+
+The trailing spacer is what keeps following typed text (e.g. Chinese after an
+image) from inheriting the object property — default Emacs rear-stickiness
+would otherwise glue it into the attachment."
   (unless (stringp content)
     (user-error "disco-chatbuf: input content must be a string"))
   (when (and object (string-empty-p content))
@@ -447,42 +475,46 @@ PROPERTIES are appended to the inserted text properties."
   (when-let* ((input-start (disco-chatbuf-input-start-position)))
     (when (< (point) input-start)
       (goto-char (point-max))))
-  (let ((start (point)))
-    (insert content)
-    (when (< start (point))
-      (let ((end (point))
-            (text-properties properties))
-        (when object
-          ;; Object props must not stick to following typed text.  Default
-          ;; Emacs stickiness is rear-sticky for all properties, so Chinese
-          ;; (or any text) typed after an image/face object would inherit
-          ;; `disco-chatbuf-input-object' and either be parsed as part of the
-          ;; object (text lost on send) or fail prune boundary checks.
-          (setq text-properties
-                (append
-                 (list disco-chatbuf-input-object-property object
-                       'face 'disco-chatbuf-input-object
-                       'rear-nonsticky
-                       (list disco-chatbuf-input-object-property
-                             disco-chatbuf-input-object-start-property
-                             disco-chatbuf-input-object-end-property
-                             'face
-                             'rear-nonsticky))
-                 text-properties))
-          (add-text-properties start (1+ start)
+  ;; telega: when point sits on an existing attach, separate with a space.
+  (when (and object
+             (disco-chatbuf-input-start-position)
+             (>= (point) (disco-chatbuf-input-start-position))
+             (disco-chatbuf-input-object-at-point (point)))
+    (insert " "))
+  (if (not object)
+      (let ((start (point)))
+        (insert content)
+        (when (and properties (< start (point)))
+          (add-text-properties start (point) properties)))
+    ;; Structured object (telega `telega-chatbuf-input-insert' pattern).
+    ;;
+    ;; Inhibit modification hooks while the object is half-built: after-change
+    ;; prune would otherwise see start-without-end and delete the body (image
+    ;; labels with `display' properties hit this immediately).  telega applies
+    ;; open/close brackets before post-command validation runs.
+    (let ((inhibit-modification-hooks t)
+          (body-start (point)))
+      (insert content)
+      (insert " ")
+      (let ((body-end (1- (point)))
+            (gap-end (point)))
+        (when (< body-start body-end)
+          (add-text-properties
+           body-start gap-end
+           (append
+            (list disco-chatbuf-input-object-property object
+                  'face 'disco-chatbuf-input-object
+                  'cursor-intangible t)
+            properties))
+          (add-text-properties body-start (1+ body-start)
                                (list disco-chatbuf-input-object-start-property t))
-          (add-text-properties (1- end) end
+          ;; Trailing spacer: telega attach-close-bracket + rear-nonsticky t.
+          (add-text-properties body-end gap-end
                                (list disco-chatbuf-input-object-end-property t
-                                     ;; Last char: nothing from the object
-                                     ;; should stick onto subsequent inserts.
-                                     'rear-nonsticky
-                                     (list disco-chatbuf-input-object-property
-                                           disco-chatbuf-input-object-start-property
-                                           disco-chatbuf-input-object-end-property
-                                           'face
-                                           'rear-nonsticky))))
-        (when text-properties
-          (add-text-properties start end text-properties))))))
+                                     'rear-nonsticky t
+                                     ;; Spacer itself should not be intangible so
+                                     ;; the user can place point after the attach.
+                                     'cursor-intangible nil)))))))
 
 (defun disco-chatbuf-input-object-at-point (&optional position)
   "Return structured input object at POSITION or point, or nil."
