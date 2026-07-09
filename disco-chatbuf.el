@@ -453,15 +453,34 @@ PROPERTIES are appended to the inserted text properties."
       (let ((end (point))
             (text-properties properties))
         (when object
+          ;; Object props must not stick to following typed text.  Default
+          ;; Emacs stickiness is rear-sticky for all properties, so Chinese
+          ;; (or any text) typed after an image/face object would inherit
+          ;; `disco-chatbuf-input-object' and either be parsed as part of the
+          ;; object (text lost on send) or fail prune boundary checks.
           (setq text-properties
                 (append
                  (list disco-chatbuf-input-object-property object
-                       'face 'disco-chatbuf-input-object)
+                       'face 'disco-chatbuf-input-object
+                       'rear-nonsticky
+                       (list disco-chatbuf-input-object-property
+                             disco-chatbuf-input-object-start-property
+                             disco-chatbuf-input-object-end-property
+                             'face
+                             'rear-nonsticky))
                  text-properties))
           (add-text-properties start (1+ start)
                                (list disco-chatbuf-input-object-start-property t))
           (add-text-properties (1- end) end
-                               (list disco-chatbuf-input-object-end-property t)))
+                               (list disco-chatbuf-input-object-end-property t
+                                     ;; Last char: nothing from the object
+                                     ;; should stick onto subsequent inserts.
+                                     'rear-nonsticky
+                                     (list disco-chatbuf-input-object-property
+                                           disco-chatbuf-input-object-start-property
+                                           disco-chatbuf-input-object-end-property
+                                           'face
+                                           'rear-nonsticky))))
         (when text-properties
           (add-text-properties start end text-properties))))))
 
