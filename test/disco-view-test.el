@@ -69,6 +69,48 @@
     (should (= 7 (plist-get widths :preview-width)))
     (should (= 1 (plist-get widths :separator-width)))))
 
+(ert-deftest disco-view-one-line-row-collapses-preview-newlines ()
+  (with-temp-buffer
+    (disco-view-insert-one-line-row
+     (disco-view-one-line-row-create
+      :context "Group\nName"
+      :preview "first line\nsecond line\r\nthird"
+      :time "12:34")
+     :width 80
+     :icon-slot-width 4
+     :context-width-spec '(0.32 16 30))
+    (should (= (count-lines (point-min) (point-max)) 1))
+    (should (string-match-p "Group Name" (buffer-string)))
+    (should (string-match-p "first line second line third"
+                            (buffer-string)))))
+
+(ert-deftest disco-view-chars-xwidth-does-not-select-display-window ()
+  (let ((original-window (selected-window))
+        other-window
+        (buffer (generate-new-buffer " *disco-view-width*")))
+    (unwind-protect
+        (progn
+          (setq other-window (split-window original-window))
+          (set-window-buffer other-window buffer)
+          (with-current-buffer buffer
+            (insert "window point\nbuffer insertion point")
+            (set-window-point other-window (point-min))
+            (goto-char (point-max))
+            (let ((expected-point (point)))
+              (cl-letf (((symbol-function 'display-graphic-p)
+                         (lambda (&optional _display) t))
+                        ((symbol-function 'string-pixel-width)
+                         (lambda (_string &optional measured-buffer)
+                           (should (eq measured-buffer buffer))
+                           9)))
+                (should (= 9 (disco-view--chars-xwidth 1 other-window))))
+              (should (= expected-point (point)))
+              (should (eq original-window (selected-window))))))
+      (when (window-live-p other-window)
+        (delete-window other-window))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest disco-view-move-to-column-inserts-align-spacer-when-needed ()
   (with-temp-buffer
     (insert "abc")

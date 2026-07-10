@@ -344,11 +344,13 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
           (or (and (frame-live-p frame)
                    (display-graphic-p frame)
                    (fboundp 'string-pixel-width)
-                   (with-selected-window win
-                     (ignore-errors
-                       (string-pixel-width
-                        (propertize "0" 'face 'default)
-                        buffer))))
+                   ;; STRING-PIXEL-WIDTH already accepts the buffer whose face
+                   ;; remapping should be used.  Selecting WIN here would sync
+                   ;; buffer point with its window-point during row insertion.
+                   (ignore-errors
+                     (string-pixel-width
+                      (propertize "0" 'face 'default)
+                      buffer)))
               (and (frame-live-p frame)
                    (let* ((font (ignore-errors (face-font 'default frame)))
                           (info (and font (ignore-errors (font-info font frame)))))
@@ -446,6 +448,11 @@ edge.  Return nil when WINDOW is not live."
           :preview-width preview-width
           :separator-width (if (> preview-width 0) 1 0))))
 
+(defun disco-view--one-line-text (text)
+  "Return TEXT with physical line-breaking whitespace collapsed."
+  (string-trim
+   (replace-regexp-in-string "[\t\n\r ]+" " " (or text "") nil t)))
+
 (cl-defun disco-view-insert-one-line-row (row &key indent width
                                                icon-slot-width context-width-spec)
   "Insert ROW using one-line activity-style layout.
@@ -455,9 +462,12 @@ WIDTH sets the total row width. ICON-SLOT-WIDTH reserves columns for the
 icon slot. CONTEXT-WIDTH-SPEC controls context width using
 `disco-view-canonicalize-number' semantics."
   (let* ((padding (make-string (max 0 (or indent 0)) ?\s))
-         (context-text (or (disco-view-one-line-row-context row) ""))
-         (preview-text (or (disco-view-one-line-row-preview row) ""))
-         (time-text (or (disco-view-one-line-row-time row) ""))
+         (context-text
+          (disco-view--one-line-text (disco-view-one-line-row-context row)))
+         (preview-text
+          (disco-view--one-line-text (disco-view-one-line-row-preview row)))
+         (time-text
+          (disco-view--one-line-text (disco-view-one-line-row-time row)))
          (time-width (if (string-empty-p time-text)
                          0
                        (max 6 (string-width time-text))))
