@@ -2475,9 +2475,6 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
 
-(defvar disco-room--column-offset 0
-  "Temporary column offset used by room alignment helpers.")
-
 (defun disco-room--align-char-width ()
   "Return pixel width for one default-face character."
   (if (not (display-graphic-p))
@@ -2497,42 +2494,6 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
                 ((and (numberp fallback-width) (> fallback-width 0)) fallback-width)
                 (t nil)))
              (frame-char-width)))))
-
-(defun disco-room--align-columns-to-pixels (columns)
-  "Convert COLUMNS to pixels using default-face geometry."
-  (* (max 0 columns) (disco-room--align-char-width)))
-
-(defun disco-room--current-column ()
-  "Return current column including line prefixes and align-to displays."
-  (let* ((bol-point (line-beginning-position))
-         (spoint (point))
-         (dpoint spoint)
-         (ccolumn nil)
-         (char-width (max 1 (disco-room--align-char-width))))
-    (while (and (not ccolumn)
-                (> dpoint bol-point)
-                (setq dpoint (previous-single-char-property-change
-                              dpoint 'display nil bol-point)))
-      (let ((disp (get-text-property dpoint 'display)))
-        (when (and (listp disp)
-                   (> (length disp) 2)
-                   (eq (nth 0 disp) 'space)
-                   (eq (nth 1 disp) :align-to))
-          (let ((align-val (nth 2 disp)))
-            (cond
-             ((numberp align-val)
-              (setq ccolumn (+ align-val
-                               (string-width (buffer-substring dpoint spoint)))))
-             ((and (listp align-val) (numberp (car align-val)))
-              (setq ccolumn (+ (/ (float (car align-val)) char-width)
-                               (string-width (buffer-substring dpoint spoint))))))))))
-    (+ (or ccolumn (current-column))
-       disco-room--column-offset
-       (let ((lwprefix (or (get-text-property bol-point 'line-prefix)
-                           (get-text-property bol-point 'wrap-prefix))))
-         (if (stringp lwprefix)
-             (string-width lwprefix)
-           0)))))
 
 (defun disco-room--render-window ()
   "Return best live window currently displaying this room buffer."
@@ -2605,39 +2566,17 @@ When WIN is nil, use best room window from `disco-room--render-window'."
       (disco-room--update-chat-fill-column)
       80))
 
-(defun disco-room--move-to-column (column)
-  "Insert alignment space moving point to COLUMN."
-  (let* ((target (max 0 column))
-         (align-to (if (display-graphic-p)
-                       (list (disco-room--align-columns-to-pixels target))
-                     target)))
-    (insert (propertize " " 'display `(space :align-to ,align-to)))))
-
 (defun disco-room--insert-right-aligned-text (text &optional face left-prefix-width)
   "Insert TEXT aligned to right edge on current line.
 
 When FACE is non-nil, apply FACE to TEXT.  LEFT-PREFIX-WIDTH reserves
 additional columns at line start (for future `line-prefix' application)."
-  (let* ((raw (or text ""))
-         (rendered (if face
-                       (propertize raw 'face face)
-                     raw))
-         (prefix-width (max 0 (or left-prefix-width 0)))
-         (start (point)))
-    (if disco-room-right-align-timestamps
-        (let* ((tail-width (max 0 (string-width raw)))
-               (target-column (max 0 (- (disco-room--line-fill-column)
-                                        tail-width)))
-               (dsoffset 2)
-               (disco-room--column-offset prefix-width))
-          (when (> (disco-room--current-column)
-                   (max 0 (- target-column dsoffset)))
-            (insert "\n")
-            (setq start (point)))
-          (disco-room--move-to-column target-column))
-      (insert " "))
-    (insert rendered)
-    (cons start (point))))
+  (disco-ins-insert-right-aligned-text
+   text
+   (disco-room--line-fill-column)
+   :face face
+   :right-align-p disco-room-right-align-timestamps
+   :left-prefix-width left-prefix-width))
 
 (defun disco-room--same-sender-p (left right)
   "Return non-nil when LEFT and RIGHT messages share sender identity."

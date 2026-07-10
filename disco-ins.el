@@ -11,10 +11,12 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'button)
 (require 'subr-x)
 (require 'disco-media)
 (require 'disco-msg)
 (require 'disco-ui)
+(require 'disco-view)
 
 (defun disco-ins-prefix-string (prefix &optional consume default)
   "Return normalized prefix string from PREFIX.
@@ -28,6 +30,44 @@ first-prefix.  DEFAULT falls back to the empty string when omitted."
 
 When FACE is non-nil, apply FACE to each inserted line."
   (disco-ui-insert-prefixed-lines prefix text :face face))
+
+(defun disco-ins--current-line-prefix-width ()
+  "Return the display prefix width already attached to the current line."
+  (let ((prefix (or (get-text-property (line-beginning-position) 'line-prefix)
+                    (get-text-property (line-beginning-position) 'wrap-prefix))))
+    (if (stringp prefix) (string-width prefix) 0)))
+
+(cl-defun disco-ins-insert-right-aligned-text
+    (text target-width &key face (right-align-p t) left-prefix-width
+          (minimum-gap 2) (overflow-newline-p t))
+  "Insert TEXT at the right edge of TARGET-WIDTH and return its span.
+
+FACE styles TEXT.  When RIGHT-ALIGN-P is nil, insert one ordinary separating
+space instead.  LEFT-PREFIX-WIDTH reserves a display-only prefix which the
+caller will apply after insertion.  MINIMUM-GAP is the required gap between
+existing line content and TEXT.  If the line cannot fit and
+OVERFLOW-NEWLINE-P is non-nil, place TEXT on a new right-aligned line."
+  (let* ((raw (or text ""))
+         (rendered (if face (propertize raw 'face face) raw))
+         (target-width (max 0 (or target-width 0)))
+         (prefix-width (+ (max 0 (or left-prefix-width 0))
+                          (disco-ins--current-line-prefix-width)))
+         (start (point)))
+    (if right-align-p
+        (let* ((tail-width (string-width raw))
+               (target-column (max 0 (- target-width tail-width)))
+               (current-column (+ prefix-width
+                                  (disco-view-current-column))))
+          (when (and overflow-newline-p
+                     (> current-column
+                        (max 0 (- target-column
+                                  (max 0 (or minimum-gap 0))))))
+            (insert "\n")
+            (setq start (point)))
+          (disco-view-move-to-column target-column))
+      (insert " "))
+    (insert rendered)
+    (cons start (point))))
 
 (defun disco-ins-insert-full-width-divider (label face target-width
                                                   &optional properties)
@@ -100,14 +140,21 @@ inserted using `disco-ui-insert-action-button'.  Return the inserted span as
                (when face (list 'face face)))))
     (cons line-start (point))))
 
-(cl-defun disco-ins-insert-reaction-line (reactions &key prefix selected-face
-                                                    unselected-face line-face)
+(cl-defun disco-ins-insert-reaction-line
+    (reactions &key prefix selected-face unselected-face line-face
+               label-function selected-p-function action-function
+               help-echo-function)
   "Insert one reaction chip line for REACTIONS.
 
 PREFIX is applied with `disco-ui-apply-line-prefix'.  SELECTED-FACE and
-UNSELECTED-FACE style each reaction chip.  LINE-FACE is applied to the whole
-inserted span.  Return the inserted span as (START . END), or nil when
-REACTIONS is empty."
+UNSELECTED-FACE style each reaction chip.  LINE-FACE applies to the whole
+inserted span.
+
+LABEL-FUNCTION formats one reaction, SELECTED-P-FUNCTION identifies the
+current account's reactions, ACTION-FUNCTION makes chips clickable and is
+called with the selected reaction, and HELP-ECHO-FUNCTION supplies hover
+text.  Defaults preserve the Discord reaction representation.  Return the
+inserted span as (START . END), or nil when REACTIONS is empty."
   (when reactions
     (let ((line-start (point))
           (first t))
@@ -115,13 +162,29 @@ REACTIONS is empty."
         (unless first
           (insert " "))
         (setq first nil)
-        (let ((chip (format "[%s %s]"
-                            (disco-msg-reaction-emoji reaction)
-                            (disco-msg-reaction-count reaction))))
-          (insert (propertize chip
-                              'face (if (disco-msg-reaction-selected-p reaction)
-                                        selected-face
-                                      unselected-face)))))
+        (let* ((item reaction)
+               (chip (if label-function
+                         (funcall label-function item)
+                       (format "[%s %s]"
+                               (disco-msg-reaction-emoji item)
+                               (disco-msg-reaction-count item))))
+               (selected-p
+                (if selected-p-function
+                    (funcall selected-p-function item)
+                  (disco-msg-reaction-selected-p item)))
+               (face (if selected-p selected-face unselected-face))
+               (help-echo (and help-echo-function
+                               (funcall help-echo-function item))))
+          (if action-function
+              (insert-text-button
+               chip
+               'follow-link t
+               'face face
+               'help-echo help-echo
+               'action
+               (lambda (_button)
+                 (funcall action-function item)))
+            (insert (propertize chip 'face face)))))
       (insert "\n")
       (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
       (when line-face

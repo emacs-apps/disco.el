@@ -79,6 +79,51 @@
         (should (or (eq face 'shadow)
                     (and (listp face) (memq 'shadow face))))))))
 
+(ert-deftest disco-ins-insert-reaction-line-supports-adapter-label-and-action ()
+  (with-temp-buffer
+    (let ((reaction '((code . "178") (count . 3) (chosen-p . t)))
+          clicked)
+      (disco-ins-insert-reaction-line
+       (list reaction)
+       :selected-face 'success
+       :unselected-face 'shadow
+       :label-function
+       (lambda (item)
+         (format " face-%s %d "
+                 (alist-get 'code item) (alist-get 'count item)))
+       :selected-p-function (lambda (item) (alist-get 'chosen-p item))
+       :action-function (lambda (item) (setq clicked item))
+       :help-echo-function (lambda (_item) "Toggle reaction"))
+      (goto-char (point-min))
+      (search-forward "face-178 3")
+      (let ((button (button-at (match-beginning 0))))
+        (should button)
+        (should (equal (button-get button 'help-echo) "Toggle reaction"))
+        (button-activate button)
+        (should (equal clicked reaction))))))
+
+(ert-deftest disco-ins-insert-right-aligned-text-uses-target-width ()
+  (with-temp-buffer
+    (insert "Alice")
+    (let ((span (disco-ins-insert-right-aligned-text
+                 "12:34" 30 :face 'shadow)))
+      (should (equal (buffer-substring-no-properties
+                      (car span) (cdr span))
+                     " 12:34"))
+      (should (equal (get-text-property (car span) 'display)
+                     '(space :align-to 25)))
+      (should (eq (get-text-property (1- (point)) 'face) 'shadow)))))
+
+(ert-deftest disco-ins-insert-right-aligned-text-reserves-future-prefix ()
+  (with-temp-buffer
+    (insert (make-string 20 ?x))
+    (let ((span (disco-ins-insert-right-aligned-text
+                 "12:34" 30 :left-prefix-width 4)))
+      (should (= (car span) (line-beginning-position)))
+      (should (= (line-number-at-pos) 2))
+      (should (equal (get-text-property (car span) 'display)
+                     '(space :align-to 25))))))
+
 (ert-deftest disco-ins-insert-forward-card-renders-metadata-and-action ()
   (with-temp-buffer
     (let (clicked)
