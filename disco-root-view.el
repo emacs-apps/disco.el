@@ -1331,6 +1331,7 @@ Guild rows use real guild icons when available, with fixed text fallback."
            'disco-channel-id channel-id
            'disco-unread-count mention-count
            'disco-has-unread (and has-unread t))
+     :mouse-face 'highlight
      :help-echo (and (disco-root--openable-channel-p channel)
                      (disco-root--channel-open-help-echo channel)))))
 
@@ -1401,6 +1402,7 @@ Guild rows use real guild icons when available, with fixed text fallback."
            'disco-channel-id channel-id
            'disco-unread-count 0
            'disco-has-unread nil)
+     :mouse-face 'highlight
      :help-echo (and channel-id message-id
                      (format "Open channel %s and jump to message %s"
                              channel-id message-id)))))

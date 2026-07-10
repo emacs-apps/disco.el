@@ -266,7 +266,8 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
   time-face
   time-tail-face
   line-properties
-  help-echo)
+  help-echo
+  mouse-face)
 
 (defun disco-view-canonicalize-number (spec base)
   "Resolve SPEC against BASE columns.
@@ -531,8 +532,9 @@ icon slot. CONTEXT-WIDTH-SPEC controls context width using
      (point)
      (append (or (disco-view-one-line-row-line-properties row) '())
              (when-let* ((help-echo (disco-view-one-line-row-help-echo row)))
-               (list 'mouse-face 'highlight
-                     'help-echo help-echo)))))))
+               (list 'help-echo help-echo))
+             (when-let* ((mouse-face (disco-view-one-line-row-mouse-face row)))
+               (list 'mouse-face mouse-face)))))))
 
 (provide 'disco-view)
 

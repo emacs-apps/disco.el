@@ -84,6 +84,30 @@
     (should (string-match-p "first line second line third"
                             (buffer-string)))))
 
+(ert-deftest disco-view-one-line-row-does-not-infer-hover-from-help ()
+  (with-temp-buffer
+    (disco-view-insert-one-line-row
+     (disco-view-one-line-row-create
+      :context "Group"
+      :preview "preview"
+      :time "12:34"
+      :help-echo "Open Group")
+     :width 80)
+    (should (equal "Open Group" (get-text-property (point-min) 'help-echo)))
+    (should-not (text-property-not-all
+                 (point-min) (point-max) 'mouse-face nil))))
+
+(ert-deftest disco-view-one-line-row-supports-explicit-hover-face ()
+  (with-temp-buffer
+    (disco-view-insert-one-line-row
+     (disco-view-one-line-row-create
+      :context "Group"
+      :preview "preview"
+      :time "12:34"
+      :mouse-face 'highlight)
+     :width 80)
+    (should (eq 'highlight (get-text-property (point-min) 'mouse-face)))))
+
 (ert-deftest disco-view-chars-xwidth-does-not-select-display-window ()
   (let ((original-window (selected-window))
         other-window
