@@ -2475,26 +2475,6 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
 
-(defun disco-room--align-char-width ()
-  "Return pixel width for one default-face character."
-  (if (not (display-graphic-p))
-      1
-    (max 1
-         (or (and (fboundp 'string-pixel-width)
-                  (ignore-errors
-                    (string-pixel-width (propertize "0" 'face 'default)
-                                        (current-buffer))))
-             (let* ((frame (selected-frame))
-                    (font (and frame (face-font 'default frame)))
-                    (info (and font (font-info font frame)))
-                    (avg-width (and info (aref info 11)))
-                    (fallback-width (and info (aref info 10))))
-               (cond
-                ((and (numberp avg-width) (> avg-width 0)) avg-width)
-                ((and (numberp fallback-width) (> fallback-width 0)) fallback-width)
-                (t nil)))
-             (frame-char-width)))))
-
 (defun disco-room--render-window ()
   "Return best live window currently displaying this room buffer."
   (let ((best nil)
@@ -2511,25 +2491,9 @@ When UPDATED does not contain a full channel object, FALLBACK is used."
   "Compute telega-like chat fill column for WIN.
 
 When WIN is nil, use best room window from `disco-room--render-window'."
-  (let* ((target-win (or win (disco-room--render-window)))
-         (margin (max 0 (or disco-room-auto-fill-margin-columns 0))))
-    (when (window-live-p target-win)
-      (let* ((win-margins (window-margins target-win))
-             (new-fill-column (+ (window-width target-win 'remap)
-                                 (or (car win-margins) 0)
-                                 (or (cdr win-margins) 0)))
-             (char-px (max 1 (disco-room--align-char-width)))
-             (line-numbers-p
-              (with-current-buffer (window-buffer target-win)
-                (bound-and-true-p display-line-numbers-mode)))
-             (ln-px (if line-numbers-p
-                        (with-selected-window target-win
-                          (line-number-display-width 'pixels))
-                      0))
-             (ln-cols (if (and (numberp ln-px) (> ln-px 0))
-                          (ceiling (/ ln-px (float char-px)))
-                        0)))
-        (max 1 (- new-fill-column margin ln-cols))))))
+  (disco-view-window-fill-column
+   (or win (disco-room--render-window))
+   disco-room-auto-fill-margin-columns))
 
 (defun disco-room--update-chat-fill-column (&optional win)
   "Refresh cached chat fill column from WIN or current room window."

@@ -339,8 +339,17 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
   (let* ((win (or window (get-buffer-window (current-buffer) t)))
          (frame (and (window-live-p win)
                      (window-frame win)))
+         (buffer (and (window-live-p win) (window-buffer win)))
          (char-width
           (or (and (frame-live-p frame)
+                   (display-graphic-p frame)
+                   (fboundp 'string-pixel-width)
+                   (with-selected-window win
+                     (ignore-errors
+                       (string-pixel-width
+                        (propertize "0" 'face 'default)
+                        buffer))))
+              (and (frame-live-p frame)
                    (let* ((font (ignore-errors (face-font 'default frame)))
                           (info (and font (ignore-errors (font-info font frame)))))
                      (when info
@@ -352,7 +361,10 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
                    (frame-char-width frame))
               (frame-char-width)
               1)))
-    (* (max 0 columns) (max 1 char-width))))
+    (* (max 0 columns)
+       (if (and (frame-live-p frame) (display-graphic-p frame))
+           (max 1 char-width)
+         1))))
 
 (defun disco-view-current-column ()
   "Like `current-column', but account for prior `:align-to' spacers."
@@ -381,12 +393,45 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
 (defun disco-view-move-to-column (column)
   "Insert one forward-only align-to spacer for COLUMN."
   (let* ((target (max 0 (or column 0)))
-         (current (disco-view-current-column)))
+         (current (disco-view-current-column))
+         (win (get-buffer-window (current-buffer) t))
+         (frame (and (window-live-p win) (window-frame win))))
     (when (>= target current)
-      (let ((align-to (if (display-graphic-p)
-                          (list (disco-view--chars-xwidth target))
+      (let ((align-to (if (and (frame-live-p frame)
+                               (display-graphic-p frame))
+                          (list (disco-view--chars-xwidth target win))
                         target)))
         (insert (propertize " " 'display `(space :align-to ,align-to)))))))
+
+(defun disco-view-window-fill-column (&optional window margin-columns)
+  "Return telega-style usable columns for WINDOW.
+
+The result follows face remapping/text scaling, includes window margins,
+subtracts display line-number width, and reserves MARGIN-COLUMNS at the right
+edge.  Return nil when WINDOW is not live."
+  (let ((win (or window (get-buffer-window (current-buffer) t))))
+    (when (window-live-p win)
+      (let* ((margins (window-margins win))
+             (width (+ (window-width win 'remap)
+                       (or (car margins) 0)
+                       (or (cdr margins) 0)))
+             (line-numbers-p
+              (with-current-buffer (window-buffer win)
+                (bound-and-true-p display-line-numbers-mode)))
+             (line-number-pixels
+              (if line-numbers-p
+                  (with-selected-window win
+                    (line-number-display-width 'pixels))
+                0))
+             (char-pixels (max 1 (disco-view--chars-xwidth 1 win)))
+             (line-number-columns
+              (if (and (numberp line-number-pixels)
+                       (> line-number-pixels 0))
+                  (ceiling (/ line-number-pixels (float char-pixels)))
+                0)))
+        (max 1 (- width
+                  (max 0 (or margin-columns 0))
+                  line-number-columns))))))
 
 (defun disco-view-one-line-column-widths (content-width context-width-spec)
   "Return one-line context/preview width split for CONTENT-WIDTH."

@@ -90,6 +90,18 @@
       (should-not (get-text-property (max (point-min) (1- insert-pos))
                                      'display)))))
 
+(ert-deftest disco-view-window-fill-column-uses-remapped-width-and-margins ()
+  (let* ((win (selected-window))
+         (buffer (window-buffer win))
+         (margins (window-margins win))
+         (expected (- (+ (window-width win 'remap)
+                         (or (car margins) 0)
+                         (or (cdr margins) 0))
+                      1)))
+    (with-current-buffer buffer
+      (let ((display-line-numbers-mode nil))
+        (should (= (disco-view-window-fill-column win 1) expected))))))
+
 (ert-deftest disco-view-elide-string-adds-display-ellipsis ()
   (let* ((text "abcdefghijklmnopqrstuvwxyz")
          (elided (disco-view-elide-string text 8 'shadow)))
