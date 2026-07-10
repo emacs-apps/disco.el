@@ -24,7 +24,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Send file attachments from room buffer (multipart upload) with structured composer objects: telega-like attach menu on `C-c C-a`, direct file attach on `C-c C-f`, reserved clipboard attach slot `C-c C-v`, remove attachment at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
 - Reply/edit/delete/forward message from room buffer with telega-like timeline keys `r`/`f`/`e`/`d` when point is outside the composer, or via `C-c m r/f/e/d`; legacy `C-c C-F` still works for forward. Load older history with `M-<`.
 - Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
-- Message rows render telega-inspired rich attachment cards (kind/name/meta, caption, URL actions, and transfer state actions: Download/Cancel/Open Local/Save As/Play; audio attachments now get telega-style play/pause/stop controls with graphical waveform bars and progress, using inline state tracking when `ffplay` is available, plus inline image preview loading for image/video).
+- Message rows render compact telega-inspired attachment cards: title/preview is the primary open/play action, only meaningful transfer status stays inline, and Download/Cancel/Save As/Copy URL live in the message transient.  Cards carry a backend-neutral action context shared with emacs-qq; audio keeps its stateful play/pause/stop waveform controls inline.
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
 - Message rows render reaction chips, with reaction operations at point (`!` toggle, `+` add, `-` remove).
 - Message rows render poll blocks with staged answer selection, explicit submit/remove/end controls, and live vote-count updates from gateway poll vote events.
@@ -65,6 +65,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco.el`: package entrypoint.
 - `disco-customize.el`: user options and token command.
 - `disco-ui.el`: shared UI rendering primitives (buttons, styled lines, list sections).
+- `disco-ins.el`: shared compact media-card and chat insertion primitives.
+- `disco-media.el`: media preview/transfer owners plus the backend-neutral card action-context protocol consumed by disco and emacs-qq.
 - `disco-api.el`: REST requests (sync + async callback paths).
 - `disco-http.el`: HTTP wrapper on `plz` (sync + async queue-backed paths).
 - `disco-permission.el`: shared Discord permission bitfield constants/parsing/check helpers.

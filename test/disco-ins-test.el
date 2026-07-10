@@ -169,7 +169,7 @@
         (button-activate (button-at (match-beginning 0)))
         (should revealed)))))
 
-(ert-deftest disco-ins-insert-attachment-document-renders-header-and-transfer-buttons ()
+(ert-deftest disco-ins-insert-attachment-document-uses-compact-card-context ()
   (with-temp-buffer
     (let (downloaded saved)
       (cl-letf (((symbol-function 'disco-media-attachment-download-state)
@@ -193,14 +193,16 @@
         (goto-char (point-min))
         (search-forward "doc.txt")
         (let ((pos (- (point) (length "doc.txt"))))
-          (should (equal "Open attachment URL"
-                         (get-text-property pos 'help-echo))))
-        (goto-char (point-min))
-        (search-forward "[Download]")
-        (button-activate (button-at (match-beginning 0)))
-        (goto-char (point-min))
-        (search-forward "[Save As]")
-        (button-activate (button-at (match-beginning 0)))
+          (should (equal "Open attachment"
+                         (get-text-property pos 'help-echo)))
+          (goto-char pos)
+          (should (disco-media-card-context-at-point)))
+        (should-not (string-match-p (regexp-quote "[Download]")
+                                    (buffer-string)))
+        (should-not (string-match-p (regexp-quote "[Save As]")
+                                    (buffer-string)))
+        (disco-media-card-call-action 'download)
+        (disco-media-card-call-action 'save-as)
         (should downloaded)
         (should saved)))))
 
@@ -239,7 +241,7 @@
       (let ((pos (match-beginning 0)))
         (should (stringp (get-text-property pos 'help-echo)))))))
 
-(ert-deftest disco-ins-insert-attachment-video-renders-play-button-and-playable-preview ()
+(ert-deftest disco-ins-insert-attachment-video-uses-card-as-play-action ()
   (let ((video-file (make-temp-file "disco-ins-video" nil ".mp4"))
         played
         decorated)
@@ -277,9 +279,9 @@
             (should (eq :fake-preview decorated))
             (should (string-match-p (regexp-quote "[video] clip.mp4") (buffer-string)))
             (should (string-match-p (regexp-quote "[video-preview]") (buffer-string)))
+            (should-not (string-match-p (regexp-quote "[Play]") (buffer-string)))
             (goto-char (point-min))
-            (search-forward "[Play]")
-            (button-activate (button-at (match-beginning 0)))
+            (disco-media-card-call-action 'open)
             (should played)
             (goto-char (point-min))
             (search-forward "[video-preview]")
@@ -288,15 +290,11 @@
                                       (or (get-text-property pos 'help-echo) ""))))))
       (ignore-errors (delete-file video-file)))))
 
-(ert-deftest disco-ins-insert-attachment-transfer-line-renders-audio-play-button ()
+(ert-deftest disco-ins-insert-attachment-transfer-line-renders-status-only ()
   (with-temp-buffer
-    (let (played)
-      (cl-letf (((symbol-function 'disco-media-attachment-download-state)
-                 (lambda (_attachment)
-                   '(:status not-downloaded :path "/tmp/track.mp3")))
-                ((symbol-function 'disco-media-play-attachment-audio)
-                 (lambda (_attachment)
-                   (setq played t))))
+    (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+               (lambda (_attachment)
+                 '(:status downloading :path "/tmp/track.mp3"))))
         (disco-ins-insert-attachment-transfer-line
          '((content_type . "audio/mpeg")
            (filename . "track.mp3")
@@ -304,11 +302,9 @@
          :prefix "    "
          :action-face 'link
          :kind 'audio)
-        (should (string-match-p (regexp-quote "[Play]") (buffer-string)))
-        (goto-char (point-min))
-        (search-forward "[Play]")
-        (button-activate (button-at (match-beginning 0)))
-        (should played)))))
+      (should (string-match-p "downloading" (buffer-string)))
+      (should-not (string-match-p (regexp-quote "[Play]") (buffer-string)))
+      (should-not (string-match-p (regexp-quote "[Cancel]") (buffer-string))))))
 
 (ert-deftest disco-ins-insert-attachment-audio-renders-inline-controls-and-waveform ()
   (with-temp-buffer

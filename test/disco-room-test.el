@@ -157,12 +157,19 @@
         (channel_id . "chat")
         (content . "first"))))
     (disco-room-render)
-    (goto-char (point-min))
-    (should (equal "m2" (get-text-property (point) 'disco-message-id)))
-    (disco-msg-next)
-    (should (equal "m1" (get-text-property (point) 'disco-message-id)))
-    (disco-msg-previous)
-    (should (equal "m2" (get-text-property (point) 'disco-message-id)))))
+    ;; Room headers may precede the first message; navigation starts from the
+    ;; first actual message property span, not blindly from `point-min'.
+    (let* ((starts (disco-msg--message-start-positions))
+           (first-id (get-text-property (nth 0 starts) 'disco-message-id))
+           (second-id (get-text-property (nth 1 starts) 'disco-message-id)))
+      (should (= (length starts) 2))
+      (should-not (equal first-id second-id))
+      (goto-char (car starts))
+      (should (equal first-id (get-text-property (point) 'disco-message-id)))
+      (disco-msg-next)
+      (should (equal second-id (get-text-property (point) 'disco-message-id)))
+      (disco-msg-previous)
+      (should (equal first-id (get-text-property (point) 'disco-message-id))))))
 
 (ert-deftest disco-room-draft-history-search-loads-match ()
   (with-temp-buffer

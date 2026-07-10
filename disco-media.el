@@ -150,6 +150,16 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-decorated-preview-cache (make-hash-table :test #'equal)
   "Cache of SVG-decorated preview images keyed by source/spec/mode.")
 
+(defconst disco-media-card-context-property 'disco-media-card-context
+  "Text property carrying a backend-neutral media card context.")
+
+(defvar-local disco-media-card-fallback-context-function nil
+  "Function returning a media card context when point is outside a card.
+
+Chat clients should use this only to choose their primary media object for the
+current message.  A `disco-media-card-context-property' at point always wins,
+which keeps multi-attachment messages segment-aware.")
+
 (defun disco-media--visual-custom-set (symbol value)
   "Set SYMBOL to VALUE and invalidate media preview caches."
   (set-default symbol value)
@@ -376,6 +386,94 @@ Values are image objects or the symbol `:missing'.")
        (list 'keymap action-map
              'mouse-face 'highlight
              'help-echo (or help-echo "Activate"))))))
+
+(cl-defun disco-media-card-context-create
+    (&key payload kind title open-action download-action cancel-action
+          save-as-action copy-url-action)
+  "Create a backend-neutral media card action context.
+
+PAYLOAD remains owned by the client adapter.  KIND and TITLE are presentation
+hints.  The remaining keyword arguments are zero-argument action functions.
+Keeping callbacks in the context lets chat renderers and transients share the
+same card protocol without teaching the shared layer about Discord attachments
+or OneBot segments."
+  (list :payload payload
+        :kind kind
+        :title title
+        :open-action open-action
+        :download-action download-action
+        :cancel-action cancel-action
+        :save-as-action save-as-action
+        :copy-url-action copy-url-action))
+
+(defun disco-media-card-context-at-point (&optional position)
+  "Return media card context at POSITION or via the buffer fallback."
+  (let* ((pos (or position (point)))
+         (line-pos (and (<= (point-min) pos)
+                        (<= pos (point-max))
+                        (save-excursion
+                          (goto-char pos)
+                          (line-beginning-position))))
+         (context
+          (or (and (< pos (point-max))
+                   (get-text-property pos disco-media-card-context-property))
+              (and line-pos (< line-pos (point-max))
+                   (get-text-property line-pos disco-media-card-context-property)))))
+    (or context
+        (when (functionp disco-media-card-fallback-context-function)
+          (funcall disco-media-card-fallback-context-function)))))
+
+(defun disco-media-card-action-function (action &optional context)
+  "Return ACTION callback from media card CONTEXT at point."
+  (let ((context (or context (disco-media-card-context-at-point))))
+    (and context
+         (plist-get context
+                    (intern (format ":%s-action" action))))))
+
+(defun disco-media-card-action-inapt-reason (action)
+  "Return an inapt reason when media card ACTION is unavailable."
+  (let ((context (disco-media-card-context-at-point)))
+    (cond
+     ((null context) "No media at point")
+     ((not (functionp (disco-media-card-action-function action context)))
+      (format "%s unavailable" (capitalize (symbol-name action))))
+     (t nil))))
+
+(defun disco-media-card-call-action (action &optional context)
+  "Invoke media card ACTION from CONTEXT or the context at point."
+  (let* ((context (or context (disco-media-card-context-at-point)))
+         (callback (and context
+                        (disco-media-card-action-function action context))))
+    (unless context
+      (user-error "No media at point"))
+    (unless (functionp callback)
+      (user-error "Media action `%s' is unavailable" action))
+    (funcall callback)))
+
+(defun disco-media-card-open ()
+  "Open or play the media card at point."
+  (interactive)
+  (disco-media-card-call-action 'open))
+
+(defun disco-media-card-download ()
+  "Download or retry the media card at point."
+  (interactive)
+  (disco-media-card-call-action 'download))
+
+(defun disco-media-card-cancel-download ()
+  "Cancel the media card download at point."
+  (interactive)
+  (disco-media-card-call-action 'cancel))
+
+(defun disco-media-card-save-as ()
+  "Save the media card at point to a chosen file."
+  (interactive)
+  (disco-media-card-call-action 'save-as))
+
+(defun disco-media-card-copy-url ()
+  "Copy the media card URL at point."
+  (interactive)
+  (disco-media-card-call-action 'copy-url))
 
 (defun disco-media-add-open-url-properties (start end url)
   "Attach mouse/key handlers to open URL for text between START and END."
@@ -2223,6 +2321,54 @@ When TARGET-PATH is nil, prompt interactively for destination path."
       (error
        (user-error "disco: attachment download failed: %s"
                    (disco-media--attachment-error-message err))))))
+
+(defun disco-media-open-attachment (attachment)
+  "Open or play ATTACHMENT according to its media kind."
+  (let* ((kind (disco-media-attachment-kind attachment))
+         (state (disco-media-attachment-download-state attachment))
+         (path (plist-get state :path))
+         (url (disco-media-attachment-download-url attachment)))
+    (pcase kind
+      ('video (disco-media-play-attachment-video attachment))
+      ('audio (disco-media-play-attachment-audio attachment))
+      (_
+       (cond
+        ((and (stringp path) (file-exists-p path))
+         (disco-media-open-downloaded-attachment attachment))
+        ((disco-media-url-present-p url)
+         (browse-url url t))
+        (t
+         (user-error "disco: attachment has no openable source")))))))
+
+(defun disco-media-attachment-card-context (attachment)
+  "Return shared media card context adapted from Discord ATTACHMENT."
+  (let* ((state (disco-media-attachment-download-state attachment))
+         (status (plist-get state :status))
+         (path (plist-get state :path))
+         (url (disco-media-attachment-download-url attachment))
+         (has-local (and (stringp path) (file-exists-p path)))
+         (has-url (disco-media-url-present-p url)))
+    (disco-media-card-context-create
+     :payload attachment
+     :kind (disco-media-attachment-kind attachment)
+     :title (disco-media-attachment-display-name attachment)
+     :open-action (when (or has-local has-url)
+                    (lambda ()
+                      (disco-media-open-attachment attachment)))
+     :download-action (when (and has-url
+                                 (not (memq status '(downloading downloaded))))
+                        (lambda ()
+                          (disco-media-start-attachment-download attachment nil)))
+     :cancel-action (when (eq status 'downloading)
+                      (lambda ()
+                        (disco-media-cancel-attachment-download attachment)))
+     :save-as-action (when (or has-local has-url)
+                       (lambda ()
+                         (disco-media-download-attachment attachment)))
+     :copy-url-action (when has-url
+                        (lambda ()
+                          (kill-new url)
+                          (message "disco: copied attachment URL"))))))
 
 (provide 'disco-media)
 

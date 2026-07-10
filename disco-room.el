@@ -3643,6 +3643,15 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         :spoiler-hidden spoiler-hidden
         :spoiler-toggle-action toggle-action)))))
 
+(defun disco-room--media-card-fallback-context ()
+  "Return primary attachment context for the message at point.
+
+An exact card context property wins before this function is called; this is
+only the message-level fallback used by the shared media transient protocol."
+  (when-let* ((message (ignore-errors (disco-room--message-at-point)))
+              (attachment (car (disco-room--message-effective-attachments message))))
+    (disco-media-attachment-card-context attachment)))
+
 (defun disco-room--normalize-list-sequence (value)
   "Normalize VALUE into a list, preserving list/vector elements."
   (cond
@@ -7853,7 +7862,18 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if #'disco-room-menu--reaction-inapt-reason)
     ("-" "Remove reaction" disco-msg-remove-reaction
      :inapt-if #'disco-room-menu--reaction-inapt-reason)
-    ("T" "Open thread" disco-msg-open-thread)]])
+    ("T" "Open thread" disco-msg-open-thread)]
+   ["Media"
+    ("o" "Open / play" disco-media-card-open
+     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'open)))
+    ("D" "Download / retry" disco-media-card-download
+     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'download)))
+    ("C" "Cancel download" disco-media-card-cancel-download
+     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'cancel)))
+    ("s" "Save as" disco-media-card-save-as
+     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'save-as)))
+    ("y" "Copy media URL" disco-media-card-copy-url
+     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'copy-url)))]])
 
 (defun disco-room--operate-msg (_msg)
   "Open the message transient for the current room.
@@ -8101,6 +8121,8 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local disco-msg-add-reaction-function #'disco-room--add-reaction-to-msg)
   (setq-local disco-msg-remove-reaction-function #'disco-room--remove-reaction-from-msg)
   (setq-local disco-msg-redisplay-function #'disco-room--redisplay-msg)
+  (setq-local disco-media-card-fallback-context-function
+              #'disco-room--media-card-fallback-context)
   (setq-local disco-room--filter-generation 0)
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)

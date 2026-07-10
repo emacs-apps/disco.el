@@ -54,6 +54,37 @@
                  (disco-media-attachment-display-name
                   '((id . "42"))))))
 
+(ert-deftest disco-media-card-context-prefers-exact-card-before-fallback ()
+  "Shared actions stay attachment-specific inside multi-media messages."
+  (with-temp-buffer
+    (let* ((opened nil)
+           (exact (disco-media-card-context-create
+                   :payload 'exact
+                   :kind 'image
+                   :open-action (lambda () (setq opened 'exact))))
+           (fallback (disco-media-card-context-create
+                      :payload 'fallback
+                      :kind 'video
+                      :open-action (lambda () (setq opened 'fallback))))
+           (card-start (point)))
+      (insert "exact card\n")
+      (add-text-properties
+       card-start (point)
+       (list disco-media-card-context-property exact))
+      (insert "message text\n")
+      (setq-local disco-media-card-fallback-context-function
+                  (lambda () fallback))
+      (goto-char card-start)
+      (should (eq (plist-get (disco-media-card-context-at-point) :payload)
+                  'exact))
+      (disco-media-card-open)
+      (should (eq opened 'exact))
+      (forward-line 1)
+      (should (eq (plist-get (disco-media-card-context-at-point) :payload)
+                  'fallback))
+      (disco-media-card-open)
+      (should (eq opened 'fallback)))))
+
 (ert-deftest disco-media-attachment-spoiler-p-detects-common-discord-shapes ()
   (should (disco-media-attachment-spoiler-p
            '((flags . 8) (filename . "cat.png"))))

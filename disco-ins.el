@@ -179,28 +179,13 @@ span as (START . END), or nil when SUMMARY is empty."
       (disco-ui-append-face start (point) face))
     (cons start (point))))
 
-(defun disco-ins--attachment-open-info (attachment)
-  "Return (ACTION . HELP-ECHO) for ATTACHMENT header, or nil."
-  (let* ((state (disco-media-attachment-download-state attachment))
-         (path (plist-get state :path))
-         (url (disco-media-attachment-download-url attachment)))
-    (cond
-     ((and (stringp path) (file-exists-p path))
-      (cons (lambda ()
-              (disco-media-open-downloaded-attachment attachment))
-            "Open downloaded attachment file"))
-     ((disco-media-url-present-p url)
-      (cons (lambda ()
-              (browse-url url t))
-            "Open attachment URL"))
-     (t nil))))
-
 (defun disco-ins--attachment-kind-tag (kind)
   "Return human-oriented header tag string for attachment KIND."
   (pcase kind
-    ('photo "[image]")
+    ((or 'photo 'image) "[image]")
     ('video "[video]")
     ('audio "[audio]")
+    ('sticker "[sticker]")
     (_ "[file]")))
 
 (defun disco-ins--attachment-detail-text (details)
@@ -208,6 +193,79 @@ span as (START . END), or nil when SUMMARY is empty."
   (if details
       (format " (%s)" (string-join details ", "))
     ""))
+
+(defun disco-ins-media-transfer-status-text (state)
+  "Return compact transfer status text for normalized media STATE.
+
+STATE uses the shared `:status', `:path', and `:error' plist shape already
+returned by both disco and emacs-qq media adapters.  Ordinary remote media has
+no status line; only active, local, or failed transfer state occupies timeline
+space."
+  (let ((status (plist-get state :status))
+        (path (plist-get state :path))
+        (error-text (plist-get state :error)))
+    (pcase status
+      ('downloading "downloading…")
+      ('downloaded
+       (if (and (stringp path) (not (string-empty-p path)))
+           (format "local: %s" (file-name-nondirectory path))
+         "downloaded"))
+      ('error
+       (if (and (stringp error-text) (not (string-empty-p error-text)))
+           (format "download failed: %s"
+                   (truncate-string-to-width error-text 68 nil nil t))
+         "download failed"))
+      (_ nil))))
+
+(cl-defun disco-ins-insert-media-status-line (status &key prefix face)
+  "Insert compact media STATUS using PREFIX and FACE."
+  (when (and (stringp status) (not (string-empty-p status)))
+    (disco-ins--insert-prefixed-line
+     status :prefix (or prefix "    ") :face face)))
+
+(cl-defun disco-ins-insert-media-card
+    (&key kind title details meta status prefix border-face title-face meta-face
+          properties context open-action open-help-echo body-inserter)
+  "Insert one backend-neutral compact media card.
+
+KIND, TITLE, DETAILS, META, and STATUS describe presentation only.  CONTEXT is
+a `disco-media-card-context-create' value stored as a text property across the
+card, so message transients can target the exact attachment/segment at point.
+OPEN-ACTION defaults to the context's open callback.  BODY-INSERTER, when
+non-nil, receives the mutable prefix-state and inserts previews, captions, or
+stateful controls owned by the client adapter.  PROPERTIES are applied across
+the final card span."
+  (let* ((card-start (point))
+         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
+         (details (delq nil (copy-sequence (or details '()))))
+         (meta-text (cond
+                     ((stringp meta) meta)
+                     ((listp meta) (string-join (delq nil (copy-sequence meta)) "  "))
+                     (t nil)))
+         (action (or open-action (plist-get context :open-action))))
+    (disco-ins--insert-prefixed-line
+     (format "%s %s%s"
+             (disco-ins--attachment-kind-tag kind)
+             (or title "media")
+             (disco-ins--attachment-detail-text details))
+     :prefix prefix-state
+     :face title-face
+     :action action
+     :help-echo (or open-help-echo "Open media"))
+    (when (and (stringp meta-text) (not (string-empty-p meta-text)))
+      (disco-ins--insert-prefixed-line
+       meta-text :prefix prefix-state :face meta-face))
+    (disco-ins-insert-media-status-line
+     status :prefix prefix-state :face meta-face)
+    (when (functionp body-inserter)
+      (funcall body-inserter prefix-state))
+    (when properties
+      (add-text-properties card-start (point) properties))
+    (when context
+      (add-text-properties
+       card-start (point)
+       (list disco-media-card-context-property context)))
+    (cons card-start (point))))
 
 (cl-defun disco-ins-insert-attachment-caption-line (caption &key prefix face
                                                             (label "caption: "))
@@ -289,96 +347,17 @@ telega; otherwise fall back to a text placeholder line."
 (cl-defun disco-ins-insert-attachment-transfer-line (attachment &key prefix face
                                                                 action-face kind
                                                                 (allow-play t))
-  "Insert telega-style transfer/progress line for ATTACHMENT."
-  (let* ((line-start (point))
-         (state (disco-media-attachment-download-state attachment))
-         (status (plist-get state :status))
-         (path (plist-get state :path))
-         (error-text (plist-get state :error))
-         (url (disco-media-attachment-download-url attachment))
-         (effective-kind (or kind (disco-media-attachment-kind attachment)))
-         (has-local (and (stringp path) (file-exists-p path)))
-         (has-url (disco-media-url-present-p url))
-         (playable-video-p (and allow-play (eq effective-kind 'video)))
-         (playable-audio-p (and allow-play (eq effective-kind 'audio)))
-         (inserted-action nil))
-    (cl-labels ((emit-button (label action help)
-                  (when inserted-action
-                    (insert " "))
-                  (disco-ui-insert-action-button
-                   label action :face action-face :help-echo help)
-                  (setq inserted-action t))
-                (emit-play-button (downloaded-p)
-                  (cond
-                   (playable-video-p
-                    (emit-button "[Play]"
-                                 (lambda ()
-                                   (disco-media-play-attachment-video attachment))
-                                 (if downloaded-p
-                                     "Play downloaded video"
-                                   "Play video URL")))
-                   (playable-audio-p
-                    (emit-button "[Play]"
-                                 (lambda ()
-                                   (disco-media-play-attachment-audio attachment))
-                                 (if downloaded-p
-                                     "Play downloaded audio"
-                                   "Play audio URL"))))))
-      (insert "transfer: ")
-      (pcase status
-        ('downloading
-         (insert "[Downloading...] ")
-         (emit-button "[Cancel]"
-                      (lambda ()
-                        (disco-media-cancel-attachment-download attachment))
-                      "Cancel attachment download"))
-        ('downloaded
-         (emit-play-button t)
-         (emit-button "[Open Local]"
-                      (lambda ()
-                        (disco-media-open-downloaded-attachment attachment))
-                      "Open downloaded attachment file")
-         (emit-button "[Save As]"
-                      (lambda ()
-                        (disco-media-download-attachment attachment))
-                      "Copy downloaded file (or download) to chosen path")
-         (when has-local
-           (insert "  " (file-name-nondirectory path))))
-        ('error
-         (when has-url
-           (emit-play-button nil)
-           (emit-button "[Retry]"
-                        (lambda ()
-                          (disco-media-start-attachment-download attachment nil))
-                        "Retry attachment download"))
-         (when (or has-url has-local)
-           (emit-button "[Save As]"
-                        (lambda ()
-                          (disco-media-download-attachment attachment))
-                        "Download attachment to chosen path"))
-         (unless inserted-action
-           (insert "[No URL]"))
-         (when (and (stringp error-text) (not (string-empty-p error-text)))
-           (insert "  error="
-                   (truncate-string-to-width error-text 68 nil nil t))))
-        (_
-         (when has-url
-           (emit-play-button nil)
-           (emit-button "[Download]"
-                        (lambda ()
-                          (disco-media-start-attachment-download attachment nil))
-                        "Download attachment into local cache directory")
-           (emit-button "[Save As]"
-                        (lambda ()
-                          (disco-media-download-attachment attachment))
-                        "Download attachment to chosen path"))
-         (unless (or has-url has-local inserted-action)
-           (insert "[No URL]"))))
-      (insert "\n")
-      (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
-      (when face
-        (disco-ui-append-face line-start (point) face))
-      (cons line-start (point)))))
+  "Insert compact transfer status for ATTACHMENT.
+
+ACTION-FACE, KIND, and ALLOW-PLAY remain accepted for source compatibility.
+Open/play/download/save actions now live on the card context and its transient;
+only meaningful transfer state remains inline."
+  (ignore action-face kind allow-play)
+  (disco-ins-insert-media-status-line
+   (disco-ins-media-transfer-status-text
+    (disco-media-attachment-download-state attachment))
+   :prefix (or prefix "    ")
+   :face face))
 
 (cl-defun disco-ins-insert-attachment-preview-block (attachment &key prefix face
                                                                 kind required)
@@ -461,51 +440,46 @@ be shown yet."
          (details (delq nil (list (disco-media-attachment-size-label attachment)
                                   (when (eq kind 'audio)
                                     (disco-media-attachment-duration-label attachment)))))
-         (header (format "%s %s%s"
-                         (disco-ins--attachment-kind-tag kind)
-                         name
-                         (disco-ins--attachment-detail-text details)))
-         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
-         (open-info (unless spoiler-hidden
-                      (disco-ins--attachment-open-info attachment)))
-         (card-start (point)))
-    (disco-ins--insert-prefixed-line
-     header
-     :prefix prefix-state
-     :face title-face
-     :action (car-safe open-info)
-     :help-echo (cdr-safe open-info))
-    (let* ((content-type (disco-media-attachment-content-type-label attachment))
-           (dims (disco-media-attachment-dimensions-label attachment))
-           (ephemeral (when (disco-media-attachment-ephemeral-p attachment)
-                        "ephemeral"))
-           (meta-parts (delq nil (list content-type dims ephemeral))))
-      (when meta-parts
-        (disco-ins--insert-prefixed-line
-         (string-join meta-parts "  ")
-         :prefix prefix-state
-         :face meta-face)))
-    (disco-ins-insert-attachment-transfer-line
-     attachment :prefix prefix-state :face meta-face :action-face action-face
-     :kind kind)
-    (if spoiler-hidden
-        (disco-ins-insert-attachment-spoiler-placeholder
-         attachment
-         :prefix prefix-state
-         :line-face meta-face
-         :button-face action-face
-         :toggle-action spoiler-toggle-action)
-      (progn
-        (disco-ins-insert-attachment-preview-block
-         attachment :prefix prefix-state :face meta-face :kind kind :required nil)
-        (disco-ins-insert-attachment-caption-line
-         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
-        (when show-url
-          (disco-ins-insert-attachment-url-line
-           (disco-media-attachment-download-url attachment)
-           :prefix prefix-state
-           :face 'shadow))))
-    (cons card-start (point))))
+         (meta-parts
+          (delq nil
+                (list (disco-media-attachment-content-type-label attachment)
+                      (disco-media-attachment-dimensions-label attachment)
+                      (when (disco-media-attachment-ephemeral-p attachment)
+                        "ephemeral"))))
+         (context (disco-media-attachment-card-context attachment)))
+    (when spoiler-hidden
+      (setq context (plist-put context :open-action nil)))
+    (disco-ins-insert-media-card
+     :kind kind
+     :title name
+     :details details
+     :meta meta-parts
+     :status (disco-ins-media-transfer-status-text
+              (disco-media-attachment-download-state attachment))
+     :prefix prefix
+     :border-face border-face
+     :title-face title-face
+     :meta-face meta-face
+     :context context
+     :open-help-echo "Open attachment"
+     :body-inserter
+     (lambda (prefix-state)
+       (if spoiler-hidden
+           (disco-ins-insert-attachment-spoiler-placeholder
+            attachment
+            :prefix prefix-state
+            :line-face meta-face
+            :button-face action-face
+            :toggle-action spoiler-toggle-action)
+         (disco-ins-insert-attachment-preview-block
+          attachment :prefix prefix-state :face meta-face :kind kind :required nil)
+         (disco-ins-insert-attachment-caption-line
+          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+         (when show-url
+           (disco-ins-insert-attachment-url-line
+            (disco-media-attachment-download-url attachment)
+            :prefix prefix-state
+            :face 'shadow)))))))
 
 (cl-defun disco-ins-insert-attachment-photo (attachment &key prefix border-face
                                                         title-face meta-face
@@ -518,42 +492,39 @@ be shown yet."
                                      (disco-media-attachment-size-label attachment)
                                      (when (disco-media-attachment-ephemeral-p attachment)
                                        "ephemeral"))))
-         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
-         (open-info (unless spoiler-hidden
-                      (disco-ins--attachment-open-info attachment)))
-         (card-start (point)))
-    (disco-ins--insert-prefixed-line
-     (format "%s %s" (disco-ins--attachment-kind-tag 'photo) name)
-     :prefix prefix-state
-     :face title-face
-     :action (car-safe open-info)
-     :help-echo (cdr-safe open-info))
-    (when meta-parts
-      (disco-ins--insert-prefixed-line
-       (string-join meta-parts "  ")
-       :prefix prefix-state
-       :face meta-face))
-    (disco-ins-insert-attachment-transfer-line
-     attachment :prefix prefix-state :face meta-face :action-face action-face
-     :kind 'photo)
-    (if spoiler-hidden
-        (disco-ins-insert-attachment-spoiler-placeholder
-         attachment
-         :prefix prefix-state
-         :line-face meta-face
-         :button-face action-face
-         :toggle-action spoiler-toggle-action)
-      (progn
-        (disco-ins-insert-attachment-preview-block
-         attachment :prefix prefix-state :face meta-face :kind 'photo :required t)
-        (disco-ins-insert-attachment-caption-line
-         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
-        (when show-url
-          (disco-ins-insert-attachment-url-line
-           (disco-media-attachment-download-url attachment)
-           :prefix prefix-state
-           :face 'shadow))))
-    (cons card-start (point))))
+         (context (disco-media-attachment-card-context attachment)))
+    (when spoiler-hidden
+      (setq context (plist-put context :open-action nil)))
+    (disco-ins-insert-media-card
+     :kind 'photo
+     :title name
+     :meta meta-parts
+     :status (disco-ins-media-transfer-status-text
+              (disco-media-attachment-download-state attachment))
+     :prefix prefix
+     :border-face border-face
+     :title-face title-face
+     :meta-face meta-face
+     :context context
+     :open-help-echo "Open image"
+     :body-inserter
+     (lambda (prefix-state)
+       (if spoiler-hidden
+           (disco-ins-insert-attachment-spoiler-placeholder
+            attachment
+            :prefix prefix-state
+            :line-face meta-face
+            :button-face action-face
+            :toggle-action spoiler-toggle-action)
+         (disco-ins-insert-attachment-preview-block
+          attachment :prefix prefix-state :face meta-face :kind 'photo :required t)
+         (disco-ins-insert-attachment-caption-line
+          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+         (when show-url
+           (disco-ins-insert-attachment-url-line
+            (disco-media-attachment-download-url attachment)
+            :prefix prefix-state
+            :face 'shadow)))))))
 
 (cl-defun disco-ins-insert-attachment-video (attachment &key prefix border-face
                                                         title-face meta-face
@@ -567,40 +538,39 @@ be shown yet."
                                   (disco-media-attachment-duration-label attachment)
                                   (when (disco-media-attachment-ephemeral-p attachment)
                                     "ephemeral"))))
-         (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
-         (open-info (unless spoiler-hidden
-                      (disco-ins--attachment-open-info attachment)))
-         (card-start (point)))
-    (disco-ins--insert-prefixed-line
-     (format "%s %s%s"
-             (disco-ins--attachment-kind-tag 'video)
-             name
-             (disco-ins--attachment-detail-text details))
-     :prefix prefix-state
-     :face title-face
-     :action (car-safe open-info)
-     :help-echo (cdr-safe open-info))
-    (disco-ins-insert-attachment-transfer-line
-     attachment :prefix prefix-state :face meta-face :action-face action-face
-     :kind 'video)
-    (if spoiler-hidden
-        (disco-ins-insert-attachment-spoiler-placeholder
-         attachment
-         :prefix prefix-state
-         :line-face meta-face
-         :button-face action-face
-         :toggle-action spoiler-toggle-action)
-      (progn
-        (disco-ins-insert-attachment-preview-block
-         attachment :prefix prefix-state :face meta-face :kind 'video :required t)
-        (disco-ins-insert-attachment-caption-line
-         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
-        (when show-url
-          (disco-ins-insert-attachment-url-line
-           (disco-media-attachment-download-url attachment)
-           :prefix prefix-state
-           :face 'shadow))))
-    (cons card-start (point))))
+         (context (disco-media-attachment-card-context attachment)))
+    (when spoiler-hidden
+      (setq context (plist-put context :open-action nil)))
+    (disco-ins-insert-media-card
+     :kind 'video
+     :title name
+     :details details
+     :status (disco-ins-media-transfer-status-text
+              (disco-media-attachment-download-state attachment))
+     :prefix prefix
+     :border-face border-face
+     :title-face title-face
+     :meta-face meta-face
+     :context context
+     :open-help-echo "Play video"
+     :body-inserter
+     (lambda (prefix-state)
+       (if spoiler-hidden
+           (disco-ins-insert-attachment-spoiler-placeholder
+            attachment
+            :prefix prefix-state
+            :line-face meta-face
+            :button-face action-face
+            :toggle-action spoiler-toggle-action)
+         (disco-ins-insert-attachment-preview-block
+          attachment :prefix prefix-state :face meta-face :kind 'video :required t)
+         (disco-ins-insert-attachment-caption-line
+          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+         (when show-url
+           (disco-ins-insert-attachment-url-line
+            (disco-media-attachment-download-url attachment)
+            :prefix prefix-state
+            :face 'shadow)))))))
 
 (defun disco-ins--attachment-audio-tag (attachment)
   "Return header tag string for ATTACHMENT audio payload."
@@ -635,8 +605,7 @@ be shown yet."
                                   (when (disco-media-attachment-ephemeral-p attachment)
                                     "ephemeral"))))
          (prefix-state (disco-ins--attachment-prefix-state prefix border-face))
-         (open-info (unless spoiler-hidden
-                      (disco-ins--attachment-open-info attachment)))
+         (context (disco-media-attachment-card-context attachment))
          (inline-playback-p (disco-media-audio-inline-playback-available-p))
          (playing-p (and inline-playback-p
                          (disco-media-attachment-audio-playing-p attachment)))
@@ -662,6 +631,8 @@ be shown yet."
                         "Pause audio playback"
                       "Play audio attachment"))
          (card-start (point)))
+    (when spoiler-hidden
+      (setq context (plist-put context :open-action nil)))
     (disco-ins--insert-prefixed-line
      (format "%s %s%s"
              (disco-ins--attachment-audio-tag attachment)
@@ -669,8 +640,8 @@ be shown yet."
              (disco-ins--attachment-detail-text details))
      :prefix prefix-state
      :face title-face
-     :action (car-safe open-info)
-     :help-echo (cdr-safe open-info))
+     :action (plist-get context :open-action)
+     :help-echo play-help)
     (let* ((content-type (disco-media-attachment-content-type-label attachment))
            (meta-parts (delq nil (list content-type))))
       (when meta-parts
@@ -741,6 +712,9 @@ be shown yet."
            (disco-media-attachment-download-url attachment)
            :prefix prefix-state
            :face 'shadow))))
+    (add-text-properties
+     card-start (point)
+     (list disco-media-card-context-property context))
     (cons card-start (point))))
 
 (cl-defun disco-ins-insert-forward-card (&key source-text sent-at content
