@@ -144,11 +144,9 @@ Signal a user-facing error when the root controller callback is missing."
    'transient))
 
 (defun disco-root--ensure-layout ()
-  "Ensure active root layout is available and return it."
+  "Return the active root layout, signaling when it is not registered."
   (unless (memq disco-root--layout (disco-root-layout-names))
-    (setq disco-root--layout disco-root-default-layout)
-    (unless (memq disco-root--layout (disco-root-layout-names))
-      (setq disco-root--layout 'tree)))
+    (error "disco: root layout is not registered: %S" disco-root--layout))
   disco-root--layout)
 
 (defun disco-root--search-domain-kind (domain)
@@ -1331,7 +1329,6 @@ Guild rows use real guild icons when available, with fixed text fallback."
            'disco-channel-id channel-id
            'disco-unread-count mention-count
            'disco-has-unread (and has-unread t))
-     :mouse-face 'highlight
      :help-echo (and (disco-root--openable-channel-p channel)
                      (disco-root--channel-open-help-echo channel)))))
 
@@ -1402,7 +1399,6 @@ Guild rows use real guild icons when available, with fixed text fallback."
            'disco-channel-id channel-id
            'disco-unread-count 0
            'disco-has-unread nil)
-     :mouse-face 'highlight
      :help-echo (and channel-id message-id
                      (format "Open channel %s and jump to message %s"
                              channel-id message-id)))))
@@ -2514,8 +2510,7 @@ SCOPE is forwarded to extra-info providers."
           (add-text-properties
            line-start
            (point)
-           (list 'mouse-face 'highlight
-                 'help-echo (disco-root--channel-open-help-echo channel))))))))
+           (list 'help-echo (disco-root--channel-open-help-echo channel))))))))
 
 (defun disco-root-button-forward (&optional n)
   "Move point to next channel row by N steps."

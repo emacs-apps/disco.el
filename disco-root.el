@@ -113,6 +113,12 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--live-update-timer nil
   "Debounce timer used to flush aggregated gateway updates.")
 
+(defvar-local disco-root--rendering nil
+  "Non-nil while a root render transaction is rebuilding the buffer.")
+
+(defvar-local disco-root--render-pending nil
+  "Non-nil when an update arrives during a root render transaction.")
+
 (defvar-local disco-root--missing-preview-fetch-timer nil
   "Debounce timer used to flush missing last-message fetch requests.")
 
@@ -2468,41 +2474,6 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
       (erase-buffer)))
   (message "disco: root debug log cleared"))
 
-(defun disco-root--buffer-corrupted-p ()
-  "Return non-nil when root buffer appears to have duplicated header artifacts."
-  (and (eq major-mode 'disco-root-mode)
-       disco-root--ewoc
-       (save-excursion
-         (let* ((start (disco-root--header-start))
-                (end (or (disco-root--ewoc-start) start))
-                (line1 (progn
-                         (goto-char start)
-                         (buffer-substring-no-properties
-                          (line-beginning-position)
-                          (line-end-position))))
-                (line3 (progn
-                         (goto-char start)
-                         (forward-line 2)
-                         (buffer-substring-no-properties
-                          (line-beginning-position)
-                          (line-end-position))))
-                (node-location (when-let* ((node (ewoc-nth disco-root--ewoc 0)))
-                                 (ewoc-location node)))
-                (scan-start (max start end))
-                (line1-ok (string-prefix-p "Status: " line1))
-                (line3-ok (string-prefix-p "_/" line3))
-                (duplicate (save-excursion
-                             (goto-char scan-start)
-                             (re-search-forward "^Status: " nil t)))
-                (corrupted (or (not line1-ok)
-                               (not line3-ok)
-                               duplicate)))
-           (when (and corrupted (disco-root--debug-log-verbose-p))
-             (disco-root--debug-log
-              "buffer-corrupted start=%s ewoc=%s node=%s line1=%S line3=%S dup=%s"
-              start end node-location line1 line3 (and duplicate t)))
-           corrupted))))
-
 (defun disco-root--refresh-mode-divider-line ()
   "Refresh only the mode-divider header line used for width framing."
   (let ((inhibit-read-only t)
@@ -3158,16 +3129,11 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                              (eq layout 'activity))
                         (disco-root--maybe-refresh-activity-header-line)))
                       (when (and (not needs-structural)
-                                 (disco-root--buffer-corrupted-p))
-                        (setq needs-structural t)
-                        (disco-root--debug-log
-                         "flush-live-updates -> structural(corrupted)"))
-                      (when (and (not needs-structural)
                                  position-snapshot)
                         (disco-view-restore-position position-snapshot)
                         (disco-root--update-window-points))))
                   (when needs-structural
-                    (disco-root--debug-log "flush-live-updates -> structural(fallback)")
+                    (disco-root--debug-log "flush-live-updates -> structural-reconcile")
                     (disco-root--render-preserving-position)))))))))))))
 
 (defun disco-root--handle-gateway-event (event)
@@ -3454,30 +3420,36 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
-  (let* ((inhibit-read-only t)
-         (buffer-undo-list t)
-         (layout (disco-root--ensure-layout)))
-    (setq-local disco-root--fill-column (disco-root--render-fill-column))
-    (disco-root--debug-log
-     "render layout=%s view=%s fill=%s"
-     layout
-     disco-root--view-mode
-     disco-root--fill-column)
-    (erase-buffer)
-    (disco-root--ensure-markers)
-    (set-marker disco-root--header-marker (point-min))
-    (set-marker-insertion-type disco-root--header-marker nil)
-    (goto-char (point-min))
-    (dolist (line (disco-root--header-lines))
-      (insert line "\n"))
-    (setq-local disco-root--last-header-refresh-at (float-time))
-    (insert "\n")
-    (set-marker disco-root--ewoc-marker (point))
-    (set-marker-insertion-type disco-root--ewoc-marker nil)
-    (disco-root--clear-ewoc-state)
-    (unless (disco-root-layout-render layout)
-      (disco-root-layout-render 'tree))
-    (goto-char (point-min))))
+  (if disco-root--rendering
+      (setq disco-root--render-pending t)
+    (let ((disco-root--rendering t))
+      (unwind-protect
+          (let* ((inhibit-read-only t)
+                 (buffer-undo-list t)
+                 (layout (disco-root--ensure-layout)))
+            (setq-local disco-root--fill-column (disco-root--render-fill-column))
+            (disco-root--debug-log
+             "render layout=%s view=%s fill=%s"
+             layout
+             disco-root--view-mode
+             disco-root--fill-column)
+            (erase-buffer)
+            (disco-root--ensure-markers)
+            (set-marker disco-root--header-marker (point-min))
+            (set-marker-insertion-type disco-root--header-marker nil)
+            (goto-char (point-min))
+            (dolist (line (disco-root--header-lines))
+              (insert line "\n"))
+            (setq-local disco-root--last-header-refresh-at (float-time))
+            (insert "\n")
+            (set-marker disco-root--ewoc-marker (point))
+            (set-marker-insertion-type disco-root--ewoc-marker nil)
+            (disco-root--clear-ewoc-state)
+            (disco-root-layout-render layout)
+            (goto-char (point-min)))
+        (when disco-root--render-pending
+          (setq disco-root--render-pending nil)
+          (disco-root--queue-live-update nil t nil))))))
 
 (defun disco-root--gateway-sync-guild-ids ()
   "Return guild IDs prioritized for gateway context requests."
@@ -3750,6 +3722,8 @@ When QUIET is non-nil, suppress minibuffer status messages."
   (setq-local disco-root--guild-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--category-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--live-update-timer nil)
+  (setq-local disco-root--rendering nil)
+  (setq-local disco-root--render-pending nil)
   (setq-local disco-root--missing-preview-fetch-timer nil)
   (setq-local disco-root--missing-preview-pending-by-guild
               (make-hash-table :test #'equal))

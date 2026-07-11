@@ -123,12 +123,13 @@ Custom entries can override built-in layouts when NAME matches."
       disco-root-default-layout))
 
 (defun disco-root-layout-spec (&optional layout)
-  "Return merged layout plist for LAYOUT (or active layout)."
+  "Return merged layout plist for LAYOUT (or active layout).
+
+Signal an error when the selected layout is not registered."
   (let* ((name (disco-root-layout--active-layout layout))
          (spec (alist-get name (disco-root-layout-specs) nil nil #'eq)))
     (or spec
-        (alist-get 'tree (disco-root-layout-specs) nil nil #'eq)
-        '(:label "Tree" :update-mode incremental))))
+        (error "disco: root layout is not registered: %S" name))))
 
 (defun disco-root-layout-label (&optional layout)
   "Return display label for LAYOUT (or active layout)."
@@ -190,10 +191,14 @@ builder."
 
 (defun disco-root-layout-render (&optional layout)
   "Render LAYOUT (or active layout) in the current root buffer."
-  (when-let* ((builder (disco-root-layout-builder layout))
-              (view-spec (and (functionp builder)
-                              (funcall builder))))
-    (disco-root-layout-render-view-spec view-spec)))
+  (let* ((name (disco-root-layout--active-layout layout))
+         (builder (disco-root-layout-builder name)))
+    (unless (functionp builder)
+      (error "disco: root layout %S has no callable builder" name))
+    (let ((view-spec (funcall builder)))
+      (unless (disco-root-layout-view-spec-p view-spec)
+        (error "disco: root layout %S returned an invalid view spec" name))
+      (disco-root-layout-render-view-spec view-spec))))
 
 (defun disco-root-layout-update-mode (&optional layout)
   "Return update mode for LAYOUT (or active layout)."
