@@ -507,6 +507,56 @@
         (disco-root-toggle-unread-lens)
         (should (eq disco-root--view-mode 'all))))))
 
+(ert-deftest disco-root-guilds-default-collapsed-and-hydrate-on-expand ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (requested rendered)
+      (cl-letf (((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (guild-id &rest _args)
+                   (setq requested guild-id)))
+                ((symbol-function 'disco-root--render-preserving-position)
+                 (lambda () (setq rendered t))))
+        (should-not (disco-root--guild-expanded-p "g1"))
+        (disco-root--toggle-guild "g1")
+        (should (disco-root--guild-expanded-p "g1"))
+        (should (equal "g1" requested))
+        (should rendered)))))
+
+(ert-deftest disco-root-unloaded-guild-remains-visible-with-explicit-status ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((guild '((id . "g1") (name . "Guild"))))
+      (disco-state-reset)
+      (disco-state-set-guilds (list guild))
+      (let ((collapsed (disco-root--guild-entries guild)))
+        (should (eq 'guild (disco-root-layout-entry-type (car collapsed)))))
+      (disco-root--set-guild-expanded "g1" t)
+      (puthash "g1" 'loading disco-root--guild-load-status)
+      (let ((expanded (disco-root--guild-entries guild)))
+        (should (seq-some
+                 (lambda (entry)
+                   (and (eq 'text (disco-root-layout-entry-type entry))
+                        (equal "    Loading channels…"
+                               (disco-root-layout-entry-text entry))))
+                 expanded))))))
+
+(ert-deftest disco-root-refresh-index-is-lazy-unless-prefix-is-given ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (index-refresh full-refresh)
+      (cl-letf (((symbol-function 'disco-directory-refresh-index-async)
+                 (lambda (&rest _args) (setq index-refresh t)))
+                ((symbol-function 'disco-directory-refresh-all-async)
+                 (lambda () (setq full-refresh t)))
+                ((symbol-function 'message) #'ignore))
+        (disco-root-refresh)
+        (should index-refresh)
+        (should-not full-refresh)
+        (setq index-refresh nil)
+        (disco-root-refresh t)
+        (should full-refresh)
+        (should-not index-refresh)))))
+
 (ert-deftest disco-root-layout-specs-merge-custom-layout-overrides ()
   (let ((disco-root-custom-layouts
          '((activity :label "Recent" :update-mode full)

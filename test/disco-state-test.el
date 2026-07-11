@@ -618,6 +618,22 @@
     (should (equal "1000" (alist-get 'id (car messages))))
     (should-not (alist-get 'pending (car messages)))))
 
+(ert-deftest disco-state-guild-channel-snapshot-preserves-threads-and-removes-stale-channels ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-put-channels
+         "g1" '(((id . "old") (guild_id . "g1") (type . 0))))
+        (disco-state-upsert-channel
+         '((id . "thread") (guild_id . "g1") (parent_id . "new") (type . 11)))
+        (disco-state-put-channels
+         "g1" '(((id . "new") (guild_id . "g1") (type . 0))))
+        (should-not (disco-state-channel "old"))
+        (should (disco-state-channel "new"))
+        (should (disco-state-channel "thread"))
+        (should (member "thread" (disco-state-guild-thread-ids "g1"))))
+    (disco-state-reset)))
+
 (ert-deftest disco-state-merge-message-page-preserves-concurrent-mutations ()
   (disco-state-reset)
   (unwind-protect

@@ -21,6 +21,7 @@
 (require 'subr-x)
 (require 'disco-customize)
 (require 'disco-state)
+(require 'disco-directory)
 (require 'disco-api)
 (require 'disco-http)
 (require 'disco-gateway)
@@ -47,6 +48,7 @@ If neither session token nor `DISCO_TOKEN' is available, prompt once."
   "Clear all in-memory caches used by disco.el."
   (interactive)
   (disco-gateway-stop)
+  (disco-directory-reset)
   (disco-state-reset)
   (disco-api-reset-rate-limit-state)
   (disco-http-reset-queue-state)

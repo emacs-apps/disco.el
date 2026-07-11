@@ -20,6 +20,9 @@
 (defvar disco-state--channels-by-guild (make-hash-table :test #'equal)
   "Hash table guild-id -> list of channel objects.")
 
+(defvar disco-state--guild-channels-loaded (make-hash-table :test #'equal)
+  "Hash table of guild IDs with complete channel snapshots.")
+
 (defvar disco-state--channels-by-id (make-hash-table :test #'equal)
   "Hash table channel-id -> channel object.")
 
@@ -165,6 +168,7 @@
   (setq disco-state--private-channels nil)
   (setq disco-state--sessions nil)
   (clrhash disco-state--channels-by-guild)
+  (clrhash disco-state--guild-channels-loaded)
   (clrhash disco-state--channels-by-id)
   (clrhash disco-state--threads-by-parent)
   (clrhash disco-state--thread-ids-by-guild)
@@ -382,7 +386,15 @@ MEMBER-COUNT is optional approximate thread member count."
       (append updated (list guild)))))
 
 (defun disco-state-set-guilds (guilds)
-  "Set GUILDS list in memory."
+  "Set GUILDS list in memory and remove state for departed guilds."
+  (let ((new-ids (delq nil (mapcar (lambda (guild)
+                                     (disco-state--normalize-id
+                                      (alist-get 'id guild)))
+                                   guilds))))
+    (dolist (old-guild (copy-sequence disco-state--guilds))
+      (let ((old-id (disco-state--normalize-id (alist-get 'id old-guild))))
+        (when (and old-id (not (member old-id new-ids)))
+          (disco-state-delete-guild old-id)))))
   (setq disco-state--guilds guilds))
 
 (defun disco-state-guilds ()
@@ -425,20 +437,42 @@ MEMBER-COUNT is optional approximate thread member count."
         (disco-state-delete-channel channel-id))))
   (disco-state-remove-voice-states-for-guild guild-id)
   (remhash guild-id disco-state--channels-by-guild)
+  (remhash guild-id disco-state--guild-channels-loaded)
   (remhash guild-id disco-state--thread-ids-by-guild))
 
+(defun disco-state-guild-channels-loaded-p (guild-id)
+  "Return non-nil when GUILD-ID has a complete channel snapshot."
+  (and (gethash (disco-state--normalize-id guild-id)
+                disco-state--guild-channels-loaded)
+       t))
+
 (defun disco-state-put-channels (guild-id channels)
-  "Store CHANNELS list for GUILD-ID and index channels by ID."
-  ;; Remove previously indexed threads for this guild before replacing list.
-  (let ((old-thread-ids (or (gethash guild-id disco-state--thread-ids-by-guild) '())))
-    (dolist (thread-id old-thread-ids)
-      (let ((old-thread (gethash thread-id disco-state--channels-by-id)))
-        (when old-thread
-          (disco-state--remove-thread-indexes old-thread)
-          (remhash thread-id disco-state--thread-member-ids-by-thread)
-          (remhash thread-id disco-state--thread-member-count-by-thread)
-          (remhash thread-id disco-state--channels-by-id)))))
-  (puthash guild-id channels disco-state--channels-by-guild)
+  "Store complete non-thread CHANNELS snapshot for GUILD-ID.
+
+Active thread entities are an independent Gateway/API collection and remain
+indexed when the guild channel directory is refreshed."
+  (setq guild-id (disco-state--normalize-id guild-id))
+  (let* ((old-channels (copy-sequence
+                        (or (gethash guild-id disco-state--channels-by-guild) '())))
+         (new-ids (delq nil (mapcar (lambda (channel)
+                                     (disco-state--normalize-id
+                                      (alist-get 'id channel)))
+                                   channels)))
+         (preserved-threads
+          (seq-filter
+           (lambda (channel)
+             (and (disco-state-channel-thread-p channel)
+                  (not (member (disco-state--normalize-id (alist-get 'id channel))
+                               new-ids))))
+           old-channels)))
+    (dolist (old-channel old-channels)
+      (let ((old-id (disco-state--normalize-id (alist-get 'id old-channel))))
+        (when (and old-id
+                   (not (disco-state-channel-thread-p old-channel))
+                   (not (member old-id new-ids)))
+          (disco-state-delete-channel old-id))))
+    (puthash guild-id (append channels preserved-threads)
+             disco-state--channels-by-guild))
   (dolist (channel channels)
     (let ((channel-id (alist-get 'id channel)))
       (when channel-id
@@ -452,15 +486,18 @@ MEMBER-COUNT is optional approximate thread member count."
                 (when user-id
                   (disco-state-upsert-thread-member channel-id user-id))))
             (when (numberp thread-member-count)
-              (disco-state-set-thread-member-count channel-id thread-member-count))))))))
+              (disco-state-set-thread-member-count channel-id thread-member-count)))))))
+  (puthash guild-id t disco-state--guild-channels-loaded))
 
 (defun disco-state-guild-channels (guild-id)
   "Return channels for GUILD-ID."
-  (gethash guild-id disco-state--channels-by-guild))
+  (gethash (disco-state--normalize-id guild-id)
+           disco-state--channels-by-guild))
 
 (defun disco-state-channel (channel-id)
   "Return channel object for CHANNEL-ID."
-  (gethash channel-id disco-state--channels-by-id))
+  (gethash (disco-state--normalize-id channel-id)
+           disco-state--channels-by-id))
 
 (defun disco-state--settings-guild-key (guild-id)
   "Return stable settings key for possibly nil GUILD-ID."

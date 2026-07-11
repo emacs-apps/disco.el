@@ -50,6 +50,10 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus layout cycle (`l`), explicit layout selection (`L`), sort toggle (`\`), view cycle (`v`: all/unread/dms), and unread-lens toggle (`U`).
 - Root now supports multiple layouts: telega-style activity list (non-collapsible, one-line rows as `<icon> [channel | category | guild] <preview> <time>`) and collapsible tree browse, with user-defined custom layouts via layout specs.
 - Activity layout excludes thread rows by default to keep large guilds responsive; enable them with `disco-root-activity-include-threads` when needed.
+- Root startup is summary-first: guild and DM indexes load without a per-guild
+  REST fan-out. Guilds/categories start collapsed, READY channel snapshots are
+  reused, and expanding a guild hydrates only that guild. `g` refreshes the
+  index; `C-u g` explicitly refreshes every guild directory.
 - Root rendering uses EWOC plus debounced live-update aggregation; tree and activity layouts now patch rows incrementally, with activity row reordering to track sort changes without full buffer rebuilds.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
@@ -74,6 +78,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-http.el`: HTTP wrapper on `plz` (sync + async queue-backed paths).
 - `disco-permission.el`: shared Discord permission bitfield constants/parsing/check helpers.
 - `disco-state.el`: in-memory guild/channel/message cache.
+- `disco-directory.el`: request owner for guild/DM indexes and lazy per-guild channel snapshots.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root-layout.el`: root layout registry, entry/view-spec structs, and layout composition helpers.
 - `disco-view.el`: shared cursor preservation helpers plus reusable one-line/list-view rendering helpers.

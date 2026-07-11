@@ -49,6 +49,7 @@
 (defvar disco-root--section-order)
 (defvar disco-root--section-expanded)
 (defvar disco-root--guild-expanded)
+(defvar disco-root--guild-load-status)
 (defvar disco-root--category-expanded)
 (defvar disco-root--ewoc)
 (defvar disco-root--channel-node-table)
@@ -73,6 +74,12 @@
 (defvar disco-root-tree-unread-section-limit)
 (defvar disco-root-week-start-day)
 (defvar disco-thread-archive-fetch-limit)
+
+(declare-function disco-root--ensure-section-state "disco-root" (&optional sections))
+(declare-function disco-root--section-expanded-p "disco-root" (section))
+(declare-function disco-root--guild-expanded-p "disco-root" (guild-id))
+(declare-function disco-root--category-expanded-p "disco-root" (category-id))
+(declare-function disco-root--toggle-node-at-point "disco-root" ())
 
 (defvar disco-root-view-attach-live-updates-function nil
   "Function used by root view buffers to attach live updates.")
@@ -283,120 +290,6 @@ Signal a user-facing error when the root controller callback is missing."
            (hash-table-p disco-root--search-channel-table)
            (gethash channel-id disco-root--search-channel-table))))
 
-
-(defun disco-root--ensure-section-state (&optional sections)
-  "Ensure `disco-root--section-expanded' has defaults for SECTIONS.
-
-When SECTIONS is nil, use `disco-root--section-order'."
-  (dolist (section (or sections disco-root--section-order))
-    (unless (assq section disco-root--section-expanded)
-      (push (cons section t) disco-root--section-expanded)))
-  (setq disco-root--section-expanded
-        (nreverse (seq-uniq (nreverse disco-root--section-expanded)
-                            (lambda (a b) (eq (car a) (car b)))))))
-
-(defun disco-root--section-expanded-p (section)
-  "Return non-nil when SECTION is currently expanded."
-  (if-let* ((it (assq section disco-root--section-expanded)))
-      (and (cdr it) t)
-    t))
-
-(defun disco-root--set-section-expanded (section expanded)
-  "Set SECTION expansion state to EXPANDED and return EXPANDED."
-  (if-let* ((it (assq section disco-root--section-expanded)))
-      (setcdr it (and expanded t))
-    (push (cons section (and expanded t)) disco-root--section-expanded))
-  (and expanded t))
-
-(defun disco-root--ensure-collapse-state-tables ()
-  "Ensure guild/category expansion tables are initialized in current buffer."
-  (unless (hash-table-p disco-root--guild-expanded)
-    (setq disco-root--guild-expanded (make-hash-table :test #'equal)))
-  (unless (hash-table-p disco-root--category-expanded)
-    (setq disco-root--category-expanded (make-hash-table :test #'equal))))
-
-(defun disco-root--node-expanded-p (table key)
-  "Return expansion state from TABLE for KEY, defaulting to expanded."
-  (disco-root--ensure-collapse-state-tables)
-  (if (null key)
-      t
-    (let ((value (gethash key table '__disco-missing)))
-      (if (eq value '__disco-missing)
-          t
-        (and value t)))))
-
-(defun disco-root--set-node-expanded (table key expanded)
-  "Store EXPANDED for KEY in TABLE and return resulting state."
-  (disco-root--ensure-collapse-state-tables)
-  (when key
-    (puthash key (and expanded t) table))
-  (and expanded t))
-
-(defun disco-root--guild-expanded-p (guild-id)
-  "Return non-nil when GUILD-ID row is expanded."
-  (disco-root--node-expanded-p disco-root--guild-expanded guild-id))
-
-(defun disco-root--set-guild-expanded (guild-id expanded)
-  "Set GUILD-ID expansion to EXPANDED and return resulting state."
-  (disco-root--set-node-expanded disco-root--guild-expanded guild-id expanded))
-
-(defun disco-root--category-expanded-p (category-id)
-  "Return non-nil when CATEGORY-ID row is expanded."
-  (disco-root--node-expanded-p disco-root--category-expanded category-id))
-
-(defun disco-root--set-category-expanded (category-id expanded)
-  "Set CATEGORY-ID expansion to EXPANDED and return resulting state."
-  (disco-root--set-node-expanded disco-root--category-expanded category-id expanded))
-
-(defun disco-root--toggle-section (section)
-  "Toggle expansion state of SECTION and rerender root buffer."
-  (interactive)
-  (disco-root--set-section-expanded section
-                                    (not (disco-root--section-expanded-p section)))
-  (disco-root-view--render-preserving-position)
-  (message "disco: section %s -> %s"
-           section
-           (if (disco-root--section-expanded-p section) "expanded" "collapsed")))
-
-(defun disco-root--toggle-guild (guild-id)
-  "Toggle expansion state of GUILD-ID and rerender root buffer."
-  (interactive)
-  (unless guild-id
-    (user-error "disco: missing guild id at point"))
-  (disco-root--set-guild-expanded
-   guild-id
-   (not (disco-root--guild-expanded-p guild-id)))
-  (disco-root-view--render-preserving-position)
-  (message "disco: guild %s -> %s"
-           guild-id
-           (if (disco-root--guild-expanded-p guild-id) "expanded" "collapsed")))
-
-(defun disco-root--toggle-category (category-id)
-  "Toggle expansion state of CATEGORY-ID and rerender root buffer."
-  (interactive)
-  (unless category-id
-    (user-error "disco: missing category id at point"))
-  (disco-root--set-category-expanded
-   category-id
-   (not (disco-root--category-expanded-p category-id)))
-  (disco-root-view--render-preserving-position)
-  (message "disco: category %s -> %s"
-           category-id
-           (if (disco-root--category-expanded-p category-id) "expanded" "collapsed")))
-
-(defun disco-root--toggle-node-at-point ()
-  "Toggle collapsible node at point: section, guild, or category."
-  (let ((section (disco-root--line-section))
-        (guild-id (disco-root--line-guild-id))
-        (category-id (disco-root--line-category-id)))
-    (cond
-     (section
-      (disco-root--toggle-section section))
-     (guild-id
-      (disco-root--toggle-guild guild-id))
-     (category-id
-      (disco-root--toggle-category category-id))
-     (t nil))))
 
 (defun disco-root--line-property (property &optional pos)
   "Return text PROPERTY on current rendered row at POS (or point)."
@@ -675,7 +568,9 @@ This prevents noisy permission errors for sources that require elevated access."
       "unknown-user"))
 
 (defun disco-root--private-channel-recipient-display-names (channel)
-  "Return display names for CHANNEL recipients, excluding the current user when known."
+  "Return display names for CHANNEL recipients.
+
+Exclude the current user when its ID is known."
   (let* ((current-user-id (and (fboundp 'disco-gateway-current-user-id)
                                (disco-gateway-current-user-id)))
          (recipients (or (alist-get 'recipients channel) '()))
@@ -2643,6 +2538,9 @@ row indentation and defaults to 8 spaces."
 (defun disco-root--guild-entries (guild)
   "Return EWOC entry list for GUILD and its visible children."
   (let* ((guild-id (alist-get 'id guild))
+         (loaded-p (disco-state-guild-channels-loaded-p guild-id))
+         (load-status (and (hash-table-p disco-root--guild-load-status)
+                           (gethash guild-id disco-root--guild-load-status)))
          (guild-unread (disco-root--guild-unread-total guild-id t))
          (parents (disco-root--guild-visible-parent-channels guild-id))
          (categories (disco-root--guild-visible-categories guild-id))
@@ -2675,52 +2573,57 @@ row indentation and defaults to 8 spaces."
                          (and category-id
                               (gethash category-id category-children))))
                      categories)))
-      (when (or uncategorized-parents has-categorized-parents has-visible-thread)
+      (when (or (not loaded-p)
+                uncategorized-parents has-categorized-parents has-visible-thread)
         (push (disco-root--entry-guild guild guild-unread)
               entries)
         (when (disco-root--guild-expanded-p guild-id)
-          (dolist (channel uncategorized-parents)
-            (push (disco-root--entry-channel channel 4 'root)
-                  entries)
-            (when (disco-root--thread-parent-channel-p channel)
-              (dolist (entry (disco-root--parent-thread-entries
-                              channel
-                              rendered-thread-ids
-                              8))
-                (push entry entries))))
-          (dolist (category categories)
-            (let* ((category-id (alist-get 'id category))
-                   (children (and category-id
-                                  (gethash category-id category-children)))
-                   (category-unread (and children
-                                         (disco-root--category-children-unread-total children))))
-              (when children
-                (push (disco-root--entry-category category (or category-unread 0))
-                      entries)
-                (when (disco-root--category-expanded-p category-id)
-                  (dolist (channel children)
-                    (push (disco-root--entry-channel channel 6 'root)
-                          entries)
-                    (when (disco-root--thread-parent-channel-p channel)
-                      (dolist (entry (disco-root--parent-thread-entries
-                                      channel
-                                      rendered-thread-ids
-                                      10))
-                        (push entry entries))))))))
-          (let (orphan-threads)
-            (dolist (thread (or (disco-state-guild-threads guild-id) '()))
-              (let ((thread-id (alist-get 'id thread)))
-                (when (and thread-id
-                           (disco-root--displayable-channel-p thread)
-                           (disco-root--channel-visible-in-view-p thread)
-                           (not (gethash thread-id rendered-thread-ids)))
-                  (push thread orphan-threads))))
-            (setq orphan-threads (nreverse orphan-threads))
-            (when orphan-threads
-              (push (disco-root--entry-text "    [threads]") entries)
-              (dolist (thread orphan-threads)
-                (push (disco-root--entry-channel thread 8 'root)
-                      entries)))))
+          (if (not loaded-p)
+              (push (disco-root--entry-text
+                     (pcase load-status
+                       ('loading "    Loading channels…")
+                       ('error "    Channel load failed; collapse and expand to retry")
+                       (_ "    Channels not loaded")))
+                    entries)
+            (dolist (channel uncategorized-parents)
+              (push (disco-root--entry-channel channel 4 'root)
+                    entries)
+              (when (disco-root--thread-parent-channel-p channel)
+                (dolist (entry (disco-root--parent-thread-entries
+                                channel rendered-thread-ids 8))
+                  (push entry entries))))
+            (dolist (category categories)
+              (let* ((category-id (alist-get 'id category))
+                     (children (and category-id
+                                    (gethash category-id category-children)))
+                     (category-unread
+                      (and children
+                           (disco-root--category-children-unread-total children))))
+                (when children
+                  (push (disco-root--entry-category category (or category-unread 0))
+                        entries)
+                  (when (disco-root--category-expanded-p category-id)
+                    (dolist (channel children)
+                      (push (disco-root--entry-channel channel 6 'root)
+                            entries)
+                      (when (disco-root--thread-parent-channel-p channel)
+                        (dolist (entry (disco-root--parent-thread-entries
+                                        channel rendered-thread-ids 10))
+                          (push entry entries))))))))
+            (let (orphan-threads)
+              (dolist (thread (or (disco-state-guild-threads guild-id) '()))
+                (let ((thread-id (alist-get 'id thread)))
+                  (when (and thread-id
+                             (disco-root--displayable-channel-p thread)
+                             (disco-root--channel-visible-in-view-p thread)
+                             (not (gethash thread-id rendered-thread-ids)))
+                    (push thread orphan-threads))))
+              (setq orphan-threads (nreverse orphan-threads))
+              (when orphan-threads
+                (push (disco-root--entry-text "    [threads]") entries)
+                (dolist (thread orphan-threads)
+                  (push (disco-root--entry-channel thread 8 'root)
+                        entries))))))
         (push (disco-root--entry-blank) entries)
         (nreverse entries)))))
 
