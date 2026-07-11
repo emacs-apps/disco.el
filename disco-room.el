@@ -20,6 +20,7 @@
 (require 'url-handlers)
 (require 'plz)
 (require 'svg nil t)
+(require 'disco-chat-avatar)
 (require 'disco-chatbuf)
 (require 'disco-chat-timeline)
 (require 'disco-ins)
@@ -255,11 +256,6 @@ telega's avatar sizing approach."
 
 This mirrors telega's gap workaround and keeps slice seams stable."
   :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-avatar-rounding-default-char-width 2
-  "Fallback avatar width in columns when geometry cannot be derived."
-  :type 'integer
   :group 'disco)
 
 (defcustom disco-room-avatar-cache-directory
@@ -2964,46 +2960,15 @@ If needed, schedule async fetch and fall back to text placeholder."
             nil)
            (t nil))))))))
 
-(defun disco-room--avatar-line-pixel-height ()
-  "Return line height in pixels for current room text scale."
-  (let* ((line-height (ignore-errors (line-pixel-height)))
-         (base-height (or (ignore-errors (default-line-height))
-                          (frame-char-height)
-                          16))
-         (scale-step (if (and (boundp 'text-scale-mode-step)
-                              (numberp text-scale-mode-step)
-                              (> text-scale-mode-step 0))
-                         text-scale-mode-step
-                       1.2))
-         (scale-amount (if (and (boundp 'text-scale-mode-amount)
-                                (numberp text-scale-mode-amount))
-                           text-scale-mode-amount
-                         0))
-         (scale (if (zerop scale-amount)
-                    1.0
-                  (expt scale-step scale-amount)))
-         (scaled-base (round (* (float base-height) scale)))
-         (use-line-height (and (numberp line-height)
-                               (> line-height 2)
-                               (>= line-height (floor (* 0.5 base-height))))))
-    (max 1 (if use-line-height line-height scaled-base))))
-
 (defun disco-room--avatar-display-size ()
   "Return full avatar size in pixels for two-line avatar rendering.
 
 `disco-room-avatar-image-size' is interpreted as baseline size ratio where
 `28' maps to exactly two text lines at current scale."
-  (let* ((line-height (disco-room--avatar-line-pixel-height))
+  (let* ((line-height (disco-chat-avatar-line-pixel-height))
          (base-target (* 2 line-height))
          (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0)))
     (max 8 (round (* base-target size-factor)))))
-
-(defun disco-room--avatar-cw-width (nchars)
-  "Return image `:width' spec that occupies NCHARS columns."
-  (let ((cols (max 1 nchars)))
-    (if (string-version-lessp emacs-version "30.1")
-        (* cols (max 1 (frame-char-width)))
-      (cons cols 'cw))))
 
 (defun disco-room--avatar-factors (&optional cheight)
   "Return avatar (circle . margin) factors for CHEIGHT lines."
@@ -3013,54 +2978,6 @@ If needed, schedule async fetch and fall back to text placeholder."
     (cons (if (numberp circle) circle 0.8)
           (if (numberp margin) margin 0.1))))
 
-(defun disco-room--avatar-image-resized (image pixel-size)
-  "Return IMAGE resized to PIXEL-SIZE, or nil when IMAGE is invalid."
-  (when (disco-media-image-object-valid-p image)
-    (let* ((type (car image))
-           (props (copy-sequence (cdr image))))
-      (setq props (plist-put props :width pixel-size))
-      (setq props (plist-put props :height pixel-size))
-      (setq props (plist-put props :ascent 'center))
-      (cons type props))))
-
-(defun disco-room--avatar-text-fit-width (text width)
-  "Return TEXT truncated/padded to WIDTH columns."
-  (let* ((target (max 1 width))
-         (trimmed (truncate-string-to-width (or text "") target nil nil ""))
-         (trim-width (string-width trimmed)))
-    (if (< trim-width target)
-        (concat trimmed (make-string (- target trim-width) ?\s))
-      trimmed)))
-
-(defun disco-room--avatar-image-with-text (image fallback pixel-size &optional resized)
-  "Return IMAGE at PIXEL-SIZE with stable two-line fallback text.
-
-When RESIZED is non-nil, IMAGE is treated as already resized."
-  (when (disco-media-image-object-valid-p image)
-    (let* ((base-image (if resized
-                           image
-                         (disco-room--avatar-image-resized image pixel-size)))
-           (size-px (and (disco-media-image-object-valid-p base-image)
-                         (ignore-errors (image-size base-image t (selected-frame)))))
-           (width-px (or (and (consp size-px) (car size-px)) pixel-size))
-           (char-width (max 1 (frame-char-width)))
-           (logical-width (and (consp base-image)
-                               (plist-get (cdr base-image) :disco-char-width)))
-           (width-chars (if (and (integerp logical-width) (> logical-width 0))
-                            logical-width
-                          (max 1
-                               (ceiling (/ (float (max 1 width-px))
-                                           (float char-width)))))))
-      (when (disco-media-image-object-valid-p base-image)
-        (let* ((type (car base-image))
-               (props (copy-sequence (cdr base-image)))
-               (top-text (disco-room--avatar-text-fit-width fallback width-chars))
-               (bottom-text (make-string width-chars ?\s)))
-          (setq props (plist-put props :disco-char-width width-chars))
-          (setq props (plist-put props :width (disco-room--avatar-cw-width width-chars)))
-          (setq props (plist-put props :disco-text (list top-text bottom-text)))
-          (setq props (plist-put props :disco-nslices 2))
-          (cons type props))))))
 
 (defun disco-room--avatar-image-mime-type (file)
   "Return MIME type string for avatar FILE extension, or nil."
@@ -3099,7 +3016,7 @@ CHEIGHT is avatar height in lines (chars), typically 2."
              (> cheight 0))
     (let* ((attrs (file-attributes file))
            (mtime (and attrs (file-attribute-modification-time attrs)))
-           (line-height (disco-room--avatar-line-pixel-height))
+           (line-height (disco-chat-avatar-line-pixel-height))
            (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0))
            (round-scale (max 0.1 disco-room-avatar-round-size-factor))
            (factors (disco-room--avatar-factors cheight))
@@ -3141,100 +3058,23 @@ CHEIGHT is avatar height in lines (chars), typically 2."
             (svg-embed svg file mime nil
                        :x x :y y :width ch :height ch
                        :clip-path "url(#clip)")
-            (let* ((image (disco-room--avatar-svg-image
-                           svg
-                           :scale 1.0
-                           :width (disco-room--avatar-cw-width aw-chars)
-                           :ascent 'center
-                           :mask 'heuristic))
-                   (ttop (disco-room--avatar-text-fit-width fallback aw-chars))
-                   (tpad (make-string aw-chars ?\u00A0))
-                   (text (cons ttop (make-list (1- cheight) tpad))))
+            (let ((image (disco-room--avatar-svg-image
+                          svg
+                          :scale 1.0
+                          :width (disco-chat-avatar-column-width aw-chars)
+                          :ascent 'center
+                          :mask 'heuristic)))
               (when image
                 (let* ((type (car image))
                        (props (copy-sequence (cdr image))))
-                  (setq props (plist-put props :disco-char-width aw-chars))
-                  (setq props (plist-put props :disco-slice-height line-height))
-                  (setq props (plist-put props :disco-text text))
-                  (setq props (plist-put props :disco-nslices cheight))
+                  (setq props
+                        (plist-put props :disco-chat-avatar-char-width aw-chars))
+                  (setq props
+                        (plist-put props :disco-chat-avatar-slice-height
+                                   line-height))
                   (setq image (cons type props))
                   (puthash cache-key image disco-room--avatar-round-image-cache)
                   image))))))))
-
-(defun disco-room--avatar-image-text (image &optional slice-index)
-  "Return textual fallback for IMAGE and optional SLICE-INDEX."
-  (let ((text (and (consp image)
-                   (plist-get (cdr image) :disco-text))))
-    (cond
-     ((stringp text) text)
-     ((and (listp text)
-           (numberp slice-index)
-           (>= slice-index 0)
-           (< slice-index (length text)))
-      (nth slice-index text))
-     ((listp text)
-      (mapconcat #'identity text "\n"))
-     (t nil))))
-
-(defun disco-room--avatar-image-char-width (image)
-  "Return rendered width in columns for IMAGE, defaulting to 1."
-  (or (and (consp image)
-           (let ((w (plist-get (cdr image) :disco-char-width)))
-             (and (integerp w) (> w 0) w)))
-      (and (stringp (disco-room--avatar-image-text image 1))
-           (max 1 (string-width (disco-room--avatar-image-text image 1))))
-      (let* ((size-px (and (disco-media-image-object-valid-p image)
-                           (ignore-errors (image-size image t (selected-frame)))))
-             (width-px (and (consp size-px) (car size-px)))
-             (char-width (max 1 (frame-char-width))))
-        (max 1
-             (if (numberp width-px)
-                 (ceiling (/ (float width-px) (float char-width)))
-               (max 1 disco-room-avatar-rounding-default-char-width))))))
-
-(defun disco-room--avatar-image-slice-display (image slice-index &optional resized)
-  "Return display spec for IMAGE slice at SLICE-INDEX (0 or 1).
-
-When RESIZED is non-nil, IMAGE is treated as already resized."
-  (when (disco-media-image-object-valid-p image)
-    (let* ((display-size (disco-room--avatar-display-size))
-           (scaled (if resized
-                       image
-                     (disco-room--avatar-image-resized image display-size))))
-      (when (disco-media-image-object-valid-p scaled)
-        (let* ((size-px (ignore-errors (image-size scaled t (selected-frame))))
-               (height-px (if (and (consp size-px) (numberp (cdr size-px)))
-                              (cdr size-px)
-                            display-size))
-               (custom-slice-height (and (consp scaled)
-                                         (plist-get (cdr scaled) :disco-slice-height)))
-               (slice-height (if (and (integerp custom-slice-height)
-                                      (> custom-slice-height 0))
-                                 custom-slice-height
-                               (max 1 (/ height-px 2))))
-               (slice-y (if (= slice-index 0) 0 (* slice-height slice-index)))
-               (slice-max (max 1 (- height-px slice-y)))
-               (slice-height* (max 1 (min slice-height slice-max)))
-               (slice (list 'slice 0 slice-y 1.0 slice-height*)))
-          (list slice scaled))))))
-
-(defun disco-room--avatar-image-slice-string (image slice-index)
-  "Return propertized avatar slice string for IMAGE at SLICE-INDEX."
-  (let* ((text (or (disco-room--avatar-image-text image slice-index)
-                   (make-string (disco-room--avatar-image-char-width image) ?\s)))
-         (display (disco-room--avatar-image-slice-display image slice-index t)))
-    (if display
-        (propertize text 'display display 'rear-nonsticky '(display))
-      text)))
-
-(defun disco-room--pad-prefix-to-width (prefix width)
-  "Right-pad PREFIX with spaces so it occupies WIDTH columns."
-  (let* ((text (or prefix ""))
-         (target (max 0 width))
-         (current (max 0 (string-width text))))
-    (if (< current target)
-        (concat text (make-string (- target current) ?\s))
-      text)))
 
 (defun disco-room--avatar-one-line-image (msg)
   "Return avatar image sized for one text line for MSG, or nil."
@@ -3251,15 +3091,15 @@ When RESIZED is non-nil, IMAGE is treated as already resized."
           svg-avatar
         (let ((raw-image (disco-room--avatar-image msg)))
           (when (disco-media-image-object-valid-p raw-image)
-            (let ((line-height (disco-room--avatar-line-pixel-height)))
-              (disco-room--avatar-image-resized raw-image line-height))))))))
+            (let ((line-height (disco-chat-avatar-line-pixel-height)))
+              (disco-chat-avatar-resize-image raw-image line-height))))))))
 
 (defun disco-room--avatar-one-line-string (msg)
   "Return propertized string showing one-line inline avatar for MSG.
 Returns empty string when no avatar is available."
   (let ((image (disco-room--avatar-one-line-image msg)))
     (if (disco-media-image-object-valid-p image)
-        (let* ((char-width (disco-room--avatar-image-char-width image))
+        (let* ((char-width (disco-chat-avatar-image-char-width image))
                (text (make-string (max 1 char-width) ?\s)))
           (propertize text 'display image 'rear-nonsticky '(display)))
       "")))
@@ -3268,10 +3108,9 @@ Returns empty string when no avatar is available."
   "Return avatar-aware prefixes plist for MSG header/body lines."
   (let* ((image (disco-room--avatar-image msg))
          (fallback (disco-room--avatar-placeholder msg))
-         (fallback-indent (max 1 (1+ (string-width fallback)))))
+         (base-size (disco-room--avatar-display-size)))
     (if (disco-media-image-object-valid-p image)
-        (let* ((base-size (disco-room--avatar-display-size))
-               (pixel-size (if disco-room-avatar-round-images
+        (let* ((pixel-size (if disco-room-avatar-round-images
                                (max 8 (round (* base-size
                                                 (max 0.1 disco-room-avatar-round-size-factor))))
                              base-size))
@@ -3283,36 +3122,14 @@ Returns empty string when no avatar is available."
                                 (disco-room--avatar--create-svg
                                  cache-file
                                  fallback
-                                 2)))
-               (base-image (or svg-avatar
-                               (disco-room--avatar-image-resized image pixel-size)))
-               (scaled (disco-room--avatar-image-with-text
-                        base-image
-                        fallback
-                        pixel-size
-                        t))
-               (target-width-chars (max 1 (disco-room--avatar-image-char-width scaled)))
-               (image-indent (1+ target-width-chars))
-               (top (if (disco-media-image-object-valid-p scaled)
-                        (disco-room--avatar-image-slice-string scaled 0)
-                      fallback))
-               (bottom (if (disco-media-image-object-valid-p scaled)
-                           (disco-room--avatar-image-slice-string scaled 1)
-                         (make-string (max 1 target-width-chars) ?\s)))
-               (header-prefix (concat top " "))
-               (first-body-prefix (concat bottom " "))
-               (normalized-width (max image-indent
-                                      (string-width header-prefix)
-                                      (string-width first-body-prefix)))
-               (rest-prefix (make-string normalized-width ?\s)))
-          (list :header (disco-room--pad-prefix-to-width header-prefix normalized-width)
-                :first-body (disco-room--pad-prefix-to-width
-                             first-body-prefix normalized-width)
-                :rest-body rest-prefix))
-      (let ((rest-prefix (make-string fallback-indent ?\s)))
-        (list :header (disco-room--pad-prefix-to-width (concat fallback " ") fallback-indent)
-              :first-body rest-prefix
-              :rest-body rest-prefix)))))
+                                 2))))
+          (disco-chat-avatar-prefixes
+           (or svg-avatar image)
+           fallback
+           :pixel-size pixel-size
+           :resize (null svg-avatar)))
+      (disco-chat-avatar-prefixes
+       nil fallback :pixel-size base-size))))
 
 (defun disco-room--attachment-meta-line (attachment)
   "Return compact metadata line for ATTACHMENT object."
