@@ -16,9 +16,11 @@ This repository currently contains an MVP scaffold designed with these reference
   dedicated, lazy channel-directory buffer.
 - Fetch and display private channels (DM/group DM/ephemeral DM) in root.
 - Hide guild channels lacking `VIEW_CHANNEL` based on computed channel permissions.
-- Fetch and display thread channels nested under their parent channels.
+- Display active thread channels beneath expandable forum/media parents in each
+  guild directory.
 - Browse archived thread lists per parent channel.
-- Open channel timelines, including voice/stage text chats; forum/media parents open thread browsers; directory/lobby rows open inspect views.
+- Open channel timelines, including voice/stage text chats; forum/media parents
+  expand in their guild directory; directory/lobby rows open inspect views.
 - Room timeline supports telega-inspired compact same-sender grouping, date separators, and unread divider rendering.
 - Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
 - Send plain text message with `C-c C-c` in room buffer.
@@ -93,7 +95,9 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root-layout.el`: root layout registry, entry/view-spec structs, and layout composition helpers.
 - `disco-view.el`: shared cursor preservation helpers plus reusable one-line/list-view rendering helpers.
-- `disco-root-view.el`: root-specific view state, row-model helpers, inserters, EWOC/list renderers, and thread-browser/root layout builders; controller callbacks are injected from `disco-root.el`.
+- `disco-root-view.el`: root-specific view state, row-model helpers, inserters,
+  EWOC/list renderers, and archived-thread/root layout builders; controller
+  callbacks are injected from `disco-root.el`.
 - `disco-root.el`: root dashboard controllers, live updates, search commands, and buffer orchestration.
 - `disco-channel-directory.el`: lazy per-guild category/channel/thread browser.
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
@@ -150,7 +154,14 @@ built-in home/activity layouts, return an `items` view spec instead:
 ## Thread Commands
 
 - Root buffer: `A` opens archived thread browser for a selected parent channel.
-- Root buffer: `RET` on forum/media opens parent-thread list; that list fetches active threads via `/channels/{id}/threads/search` (`archived=false`) on open and on `g`.
+- Guild directory: `RET`/`TAB` on forum/media folds active posts inline; first
+  expansion lazily fetches every `/channels/{id}/threads/search`
+  (`archived=false`) page. Post rows consistently preview the returned starter
+  message; unhydrated posts remain under the parent loading state.
+- Guild directory: `g` on a forum/media row refreshes only that parent; `A` on
+  a parent or child post opens the parent's paginated archived-thread browser.
+- Threads beneath ordinary text channels are opened from messages, references,
+  or search results; they are not inserted into the guild channel directory.
 - Archived thread buffer: `g` refreshes from first page, `n` loads next page, `RET`/mouse opens selected thread.
 - Archived thread fetch only queries the `private` source when `MANAGE_THREADS` is present, and also suppresses expected permission-denied (`Missing Access`) source noise.
 - Thread room buffer: `C-c C-j` join, `C-c C-l` leave, `C-c C-t a` toggle archived state.
@@ -221,8 +232,12 @@ built-in home/activity layouts, return an `items` view spec instead:
 - Live updates use real Discord Gateway websocket flow (`HELLO`/heartbeat/identify/resume) and dispatch message events through a stable local hook contract.
 - Gateway dispatch now also mutates and emits channel/guild/thread structural events for live UI consistency.
 - Root EWOC state keeps channel-node indexes so message/read events can update rows incrementally.
+- Guild directories defer passive EWOC mutations while hidden, then coalesce
+  dirty channel IDs when redisplayed with real window metrics; this prevents
+  mixed pixel/character alignment after entering and leaving a thread room.
 - Room EWOC state keeps message-node indexes; reaction and poll-vote events patch rows locally while create/update/delete rerender fully to preserve grouping/day/unread layout correctness.
-- Shared `disco-ui` primitives are reused by room cards and forum/thread list buffers to keep UI interactions and list layout consistent.
+- Shared view primitives are reused by room cards, guild directories, and
+  archived-thread lists to keep UI interactions and list layout consistent.
 - Avatar fetch/render pipeline is asynchronous and rerenders room buffers when images become available.
 - Composer completion is token-boundary aware for `@`/`#`, with dynamic candidate lists and optional company backend integration (`disco-room-company-completion`).
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.

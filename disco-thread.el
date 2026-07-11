@@ -8,6 +8,7 @@
 
 ;;; Code:
 
+(require 'seq)
 (require 'subr-x)
 (require 'disco-util)
 (require 'disco-state)
@@ -50,6 +51,19 @@
   "Return non-nil when CHANNEL is a forum/media parent channel."
   (and (listp channel)
        (memq (alist-get 'type channel) disco-thread-forum-or-media-parent-types)))
+
+(defun disco-thread-starter-message (thread)
+  "Return THREAD's cached starter message, or nil.
+
+Discord forum starter messages share their snowflake with the thread channel."
+  (when-let* ((thread-id (alist-get 'id thread))
+              (thread-id (format "%s" thread-id)))
+    (seq-find
+     (lambda (message)
+       (equal thread-id
+              (and (alist-get 'id message)
+                   (format "%s" (alist-get 'id message)))))
+     (disco-state-messages thread-id))))
 
 (defun disco-thread-metadata (channel)
   "Return thread metadata alist for CHANNEL."

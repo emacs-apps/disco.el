@@ -41,15 +41,6 @@
 (defvar-local disco-root--archived-parent-channel nil
   "Parent channel object for archived thread list buffers.")
 
-(defvar-local disco-root--parent-threads-parent-channel nil
-  "Parent channel object for active-thread list buffers.")
-
-(defvar-local disco-root--parent-threads-refresh-generation 0
-  "Monotonic generation counter for parent-thread refresh callbacks.")
-
-(defvar-local disco-root--parent-threads-refresh-in-flight nil
-  "Non-nil while async active-thread fetch for parent-thread buffer runs.")
-
 (defvar-local disco-root--inspect-channel nil
   "Channel object rendered by the current inspect buffer.")
 
@@ -2798,12 +2789,6 @@ if structural reconciliation is required."
 (defun disco-root--live-updatable-buffer-mode-p ()
   "Return non-nil when current buffer supports root-style live updates."
   (memq major-mode '(disco-root-mode
-                     disco-root-parent-threads-mode
-                     disco-root-archived-threads-mode)))
-
-(defun disco-root--thread-browser-buffer-mode-p ()
-  "Return non-nil when current buffer is a thread browser list buffer."
-  (memq major-mode '(disco-root-parent-threads-mode
                      disco-root-archived-threads-mode)))
 
 (defun disco-root--queue-live-update (channel-ids &optional structural-p header-p)
@@ -2835,15 +2820,6 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
            #'disco-root--flush-live-updates
            (current-buffer)))))
 
-(defun disco-root--current-thread-browser-list-spec ()
-  "Return current thread-browser list spec for the active special buffer."
-  (pcase major-mode
-    ('disco-root-parent-threads-mode
-     (disco-root--parent-threads-list-spec))
-    ('disco-root-archived-threads-mode
-     (disco-root--archived-threads-list-spec))
-    (_ nil)))
-
 (defun disco-root--flush-live-updates (root-buffer)
   "Flush queued live updates into ROOT-BUFFER."
   (when (buffer-live-p root-buffer)
@@ -2865,14 +2841,13 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
             (setq disco-root--dirty-structure-p nil)
             (setq disco-root--dirty-header-p nil)
             (cond
-             ((disco-root--thread-browser-buffer-mode-p)
+             ((eq major-mode 'disco-root-archived-threads-mode)
               (when (or dirty-channel-ids needs-structural needs-header)
-                (when-let* ((spec (disco-root--current-thread-browser-list-spec)))
-                  (disco-view-render-list-spec-preserving-position
-                   spec
-                   :anchor-property 'disco-channel-id
-                   :preserve-window-start t
-                   :after-restore #'disco-root--update-window-points))))
+                (disco-view-render-list-spec-preserving-position
+                 (disco-root--archived-threads-list-spec)
+                 :anchor-property 'disco-channel-id
+                 :preserve-window-start t
+                 :after-restore #'disco-root--update-window-points)))
              (t
               (let* ((layout (disco-root--ensure-layout))
                      (layout-update-mode

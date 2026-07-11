@@ -4,6 +4,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'disco-channel-directory)
+(require 'disco-root)
 
 (defun disco-channel-directory-test--entry-types (entries)
   "Return type symbols from directory ENTRIES."
@@ -13,8 +14,9 @@
   "Return semantic ID represented by directory ENTRY."
   (pcase (disco-channel-directory-entry-type entry)
     ('group (disco-channel-directory-entry-group-id entry))
-    ('channel (alist-get 'id
-                         (disco-channel-directory-entry-channel entry)))
+    ((or 'channel 'thread-parent)
+     (alist-get 'id
+                (disco-channel-directory-entry-channel entry)))
     (_ nil)))
 
 (defmacro disco-channel-directory-test--with-guild (&rest body)
@@ -42,17 +44,31 @@
                   (lambda (&rest _args) t)))
          ,@body))))
 
-(ert-deftest disco-channel-directory-projects-categories-and-active-threads ()
+(ert-deftest disco-channel-directory-excludes-ordinary-channel-threads ()
   (disco-channel-directory-test--with-guild
     (let* ((entries (disco-channel-directory--project-loaded-entries))
            (ids (mapcar #'disco-channel-directory-test--entry-id entries)))
       (should
-       (equal '(group channel group channel channel)
+       (equal '(group channel group channel)
               (disco-channel-directory-test--entry-types entries)))
       (should
        (equal (list disco-channel-directory--uncategorized-group
-                    "c1" "cat" "c2" "t1")
+                    "c1" "cat" "c2")
               ids)))))
+
+(ert-deftest disco-channel-directory-ordinary-thread-upsert-keeps-projection ()
+  (disco-channel-directory-test--with-guild
+    (let ((before
+           (mapcar #'disco-channel-directory-entry-key
+                   (disco-channel-directory--project-loaded-entries))))
+      (disco-state-upsert-channel
+       '((id . "t2") (guild_id . "g1") (parent_id . "c1")
+         (name . "newly opened thread") (type . 11)
+         (message_count . 119) (member_count . 4)))
+      (should
+       (equal before
+              (mapcar #'disco-channel-directory-entry-key
+                      (disco-channel-directory--project-loaded-entries)))))))
 
 (ert-deftest disco-channel-directory-keyed-reconcile-preserves-unrelated-nodes ()
   (disco-channel-directory-test--with-guild
@@ -71,12 +87,7 @@
                 disco-channel-directory--node-table))
       (should-not
        (gethash (disco-channel-directory--entry-key-for-channel "t1")
-                disco-channel-directory--node-table))
-      (should-not
-       (gethash
-        (disco-channel-directory--entry-key-for-group
-         disco-channel-directory--orphan-thread-group)
-        disco-channel-directory--node-table)))))
+                disco-channel-directory--node-table)))))
 
 (ert-deftest disco-channel-directory-live-row-update-retains-node-identity ()
   (disco-channel-directory-test--with-guild
@@ -107,6 +118,166 @@
             #'disco-channel-directory-test--entry-id
             (disco-channel-directory--project-loaded-entries))))
       (should (equal '("cat" "c2") ids)))))
+
+(ert-deftest disco-channel-directory-forum-is-collapsed-and-excludes-archived-posts ()
+  (disco-channel-directory-test--with-guild
+    (disco-state-upsert-channel
+     '((id . "forum") (guild_id . "g1") (parent_id . "cat")
+       (name . "ideas") (type . 15) (position . 3)))
+    (disco-state-upsert-channel
+     '((id . "active") (guild_id . "g1") (parent_id . "forum")
+       (name . "active post") (type . 11)
+       (thread_metadata . ((archived . :false)))))
+    (disco-state-upsert-message
+     "active"
+     '((id . "active") (channel_id . "active")
+       (content . "starter")))
+    (disco-state-upsert-channel
+     '((id . "archived") (guild_id . "g1") (parent_id . "forum")
+       (name . "archived post") (type . 11)
+       (thread_metadata . ((archived . t)))))
+    (let* ((collapsed (disco-channel-directory--project-loaded-entries))
+           (forum-entry
+            (seq-find
+             (lambda (entry)
+               (equal "forum"
+                      (disco-channel-directory-test--entry-id entry)))
+             collapsed)))
+      (should (eq 'thread-parent
+                  (disco-channel-directory-entry-type forum-entry)))
+      (should-not (disco-channel-directory-entry-expanded forum-entry))
+      (should-not
+       (member "active"
+               (mapcar #'disco-channel-directory-test--entry-id collapsed)))
+      (puthash "forum" t disco-channel-directory--expanded-thread-parents)
+      (let ((expanded-ids
+             (mapcar #'disco-channel-directory-test--entry-id
+                     (disco-channel-directory--project-loaded-entries))))
+        (should (member "active" expanded-ids))
+        (should-not (member "archived" expanded-ids))))))
+
+(ert-deftest disco-channel-directory-forum-hides-unhydrated-posts ()
+  (disco-channel-directory-test--with-guild
+    (disco-state-upsert-channel
+     '((id . "forum") (guild_id . "g1") (parent_id . "cat")
+       (name . "ideas") (type . 15)))
+    (disco-state-upsert-channel
+     '((id . "post") (guild_id . "g1") (parent_id . "forum")
+       (name . "proposal") (type . 11)
+       (thread_metadata . ((archived . :false)))))
+    (puthash "forum" t disco-channel-directory--expanded-thread-parents)
+    (let ((ids
+           (mapcar #'disco-channel-directory-test--entry-id
+                   (disco-channel-directory--project-loaded-entries))))
+      (should-not (member "post" ids)))
+    (disco-state-upsert-message
+     "post" '((id . "post") (channel_id . "post") (content . "starter")))
+    (let ((ids
+           (mapcar #'disco-channel-directory-test--entry-id
+                   (disco-channel-directory--project-loaded-entries))))
+      (should (member "post" ids)))))
+
+(ert-deftest disco-channel-directory-excludes-orphaned-threads ()
+  (disco-channel-directory-test--with-guild
+    (disco-state-upsert-channel
+     '((id . "active") (guild_id . "g1") (parent_id . "missing")
+       (name . "active thread") (type . 11)
+       (thread_metadata . ((archived . :false)))))
+    (disco-state-upsert-channel
+     '((id . "archived") (guild_id . "g1") (parent_id . "missing")
+       (name . "archived post") (type . 11)
+       (thread_metadata . ((archived . t)))))
+    (let ((ids
+           (mapcar #'disco-channel-directory-test--entry-id
+                   (disco-channel-directory--project-loaded-entries))))
+      (should-not (member "active" ids))
+      (should-not (member "archived" ids))
+      (should-not (memq :orphan-threads ids)))))
+
+(ert-deftest disco-channel-directory-toggle-forum-loads-on-first-expansion ()
+  (disco-channel-directory-test--with-guild
+    (disco-state-upsert-channel
+     '((id . "forum") (guild_id . "g1") (name . "ideas") (type . 15)))
+    (let (loaded)
+      (cl-letf (((symbol-function
+                  'disco-directory-load-parent-threads-async)
+                 (lambda (parent-id &rest _args)
+                   (setq loaded parent-id)))
+                ((symbol-function 'disco-channel-directory--line-property)
+                 (lambda (property &optional _position)
+                   (and (eq property
+                            'disco-channel-directory-thread-parent-id)
+                        "forum"))))
+        (disco-channel-directory-toggle-thread-parent)
+        (should (equal "forum" loaded))
+        (should (gethash "forum"
+                         disco-channel-directory--expanded-thread-parents))
+        (disco-channel-directory-toggle-thread-parent)
+        (should-not (gethash "forum"
+                             disco-channel-directory--expanded-thread-parents))))))
+
+(ert-deftest disco-channel-directory-refresh-is-parent-scoped-on-forum-row ()
+  (disco-channel-directory-test--with-guild
+    (disco-state-upsert-channel
+     '((id . "forum") (guild_id . "g1") (name . "ideas") (type . 15)))
+    (let (request)
+      (cl-letf (((symbol-function
+                  'disco-directory-load-parent-threads-async)
+                 (lambda (parent-id &rest args)
+                   (setq request (cons parent-id args))))
+                ((symbol-function 'disco-channel-directory--line-property)
+                 (lambda (property &optional _position)
+                   (and (eq property
+                            'disco-channel-directory-thread-parent-id)
+                        "forum")))
+                ((symbol-function 'message) #'ignore))
+        (disco-channel-directory-refresh)
+        (should (equal '("forum" :force t) request))))))
+
+(ert-deftest disco-channel-directory-hidden-updates-defer-until-displayed ()
+  (disco-channel-directory-test--with-guild
+    (let ((displayed nil)
+          reconciled)
+      (cl-letf (((symbol-function 'disco-channel-directory--displayed-p)
+                 (lambda () displayed))
+                ((symbol-function 'disco-channel-directory--reconcile)
+                 (lambda (&optional channel-ids)
+                   (push channel-ids reconciled))))
+        (disco-channel-directory--request-reconcile '("c1" "c2"))
+        (disco-channel-directory--request-reconcile '("c2"))
+        (should disco-channel-directory--deferred-reconcile-p)
+        (should-not reconciled)
+        (setq displayed t)
+        (disco-channel-directory--request-reconcile)
+        (should-not disco-channel-directory--deferred-reconcile-p)
+        (should-not disco-channel-directory--deferred-channel-ids)
+        (should (equal '(("c1" "c2")) reconciled))))))
+
+(ert-deftest disco-channel-directory-thread-rows-use-parent-thread-layout ()
+  (with-temp-buffer
+    (let ((entry
+           (disco-channel-directory-entry-create
+            :key "channel:t1"
+            :type 'channel
+            :channel '((id . "t1") (type . 11) (name . "post"))
+            :indent 4))
+          captured)
+      (cl-letf (((symbol-function 'disco-root--insert-activity-channel-line)
+                 (lambda (channel indent scope width)
+                   (setq captured (list channel indent scope width)))))
+        (disco-channel-directory--insert-channel entry)
+        (should (equal 'parent-thread (nth 2 captured)))))))
+
+(ert-deftest disco-channel-directory-finds-equal-nonidentical-channel-id ()
+  (with-temp-buffer
+    (let* ((property-id (copy-sequence "123456789012345678"))
+           (lookup-id (copy-sequence "123456789012345678")))
+      (insert "  channel\n")
+      (add-text-properties
+       (point-min) (point-max) (list 'disco-channel-id property-id))
+      (should-not (eq property-id lookup-id))
+      (should (= (point-min)
+                 (disco-channel-directory--find-channel-position lookup-id))))))
 
 (ert-deftest disco-channel-directory-open-hydrates-only-selected-guild ()
   (disco-state-reset)

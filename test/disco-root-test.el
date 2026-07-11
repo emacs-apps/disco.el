@@ -76,14 +76,14 @@
         (disco-root--flush-live-updates (current-buffer))
         (should rendered)))))
 
-(ert-deftest disco-root-flush-live-updates-rerenders-parent-thread-buffer ()
+(ert-deftest disco-root-flush-live-updates-rerenders-archived-thread-buffer ()
   (with-temp-buffer
-    (disco-root-parent-threads-mode)
+    (disco-root-archived-threads-mode)
     (let ((disco-root--dirty-channel-ids '("t1"))
           (disco-root--dirty-structure-p nil)
           (disco-root--dirty-header-p nil)
           rendered)
-      (cl-letf (((symbol-function 'disco-root--current-thread-browser-list-spec)
+      (cl-letf (((symbol-function 'disco-root--archived-threads-list-spec)
                  (lambda () 'spec))
                 ((symbol-function 'disco-view-render-list-spec-preserving-position)
                  (lambda (_spec &rest _args)
@@ -664,23 +664,6 @@
       (disco-root-layout-render-view-spec view-spec)
       (should (string-match-p "hello" (buffer-string))))))
 
-(ert-deftest disco-root-parent-threads-list-spec-uses-layout-entry-inserter ()
-  (with-temp-buffer
-    (disco-root-parent-threads-mode)
-    (let ((disco-root--parent-threads-parent-channel '((id . "p1") (type . 15) (name . "Forum"))))
-      (cl-letf (((symbol-function 'disco-root--active-parent-threads)
-                 (lambda (_parent)
-                   '(((id . "t1") (type . 11) (name . "Thread")))))
-                ((symbol-function 'disco-root--channel-label)
-                 (lambda (&rest _args) "Forum")))
-        (let* ((spec (disco-root--parent-threads-list-spec))
-               (entries (disco-view-list-spec-items spec))
-               (first-entry (car entries)))
-          (should (eq 'disco-root--insert-layout-entry
-                      (disco-view-list-spec-item-inserter spec)))
-          (should (eq 'channel (disco-root-layout-entry-type first-entry)))
-          (should (eq 'parent-thread (disco-root-layout-entry-scope first-entry))))))))
-
 (ert-deftest disco-root-archived-threads-list-spec-uses-layout-entry-inserter ()
   (with-temp-buffer
     (disco-root-archived-threads-mode)
@@ -1147,7 +1130,7 @@
                (last_message_id . "m1")))
             (disco-state-put-messages
              "th1"
-             '(((id . "m1")
+             '(((id . "th1")
                 (channel_id . "th1")
                 (content . "hello world")
                 (author . ((username . "alice"))))))
@@ -1178,9 +1161,10 @@
         (cl-letf (((symbol-function 'disco-room-open)
                    (lambda (channel-id channel-name)
                      (setq opened (list channel-id channel-name))))
-                  ((symbol-function 'disco-root-open-parent-threads)
+                  ((symbol-function
+                    'disco-channel-directory-open-thread-parent)
                    (lambda (&rest _args)
-                     (ert-fail "voice channels should open room timelines"))))
+                     (ert-fail "voice channels should not open directories"))))
           (disco-root--open-channel "voice1")
           (should (equal '("voice1" "Voice") opened))))
     (disco-state-reset)))
@@ -1202,9 +1186,10 @@
                     ((symbol-function 'disco-room-open)
                      (lambda (&rest _args)
                        (ert-fail "directory channels should not open room timelines")))
-                    ((symbol-function 'disco-root-open-parent-threads)
+                    ((symbol-function
+                      'disco-channel-directory-open-thread-parent)
                      (lambda (&rest _args)
-                       (ert-fail "directory channels should not open thread browsers"))))
+                       (ert-fail "directory channels should not open guild directories"))))
             (disco-root--open-channel "dir1")
             (should (buffer-live-p opened-buffer))
             (with-current-buffer opened-buffer
@@ -1214,6 +1199,22 @@
       (when (buffer-live-p opened-buffer)
         (kill-buffer opened-buffer))
       (disco-state-reset))))
+
+(ert-deftest disco-root-open-channel-opens-forum-in-guild-directory ()
+  (disco-state-reset)
+  (unwind-protect
+      (let (opened)
+        (disco-state-upsert-channel
+         '((id . "forum1") (guild_id . "g1") (type . 15) (name . "Ideas")))
+        (cl-letf (((symbol-function
+                    'disco-channel-directory-open-thread-parent)
+                   (lambda (channel-id) (setq opened channel-id)))
+                  ((symbol-function 'disco-room-open)
+                   (lambda (&rest _args)
+                     (ert-fail "forum channels cannot open message timelines"))))
+          (disco-root--open-channel "forum1")
+          (should (equal "forum1" opened))))
+    (disco-state-reset)))
 
 (ert-deftest disco-root-search-channel-candidates-skip-unsearchable-types ()
   (disco-state-reset)
@@ -1295,7 +1296,28 @@
                channel nil 'directory)))
       (should queued))))
 
-(ert-deftest disco-root-thread-browser-preview-line-queues-preview-fetch-with-fallback ()
+(ert-deftest disco-root-forum-preview-is-active-post-count-without-message-fetch ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((forum '((id . "forum") (guild_id . "g1")
+                     (type . 15) (name . "Ideas")))
+            queued)
+        (disco-state-upsert-channel forum)
+        (disco-state-upsert-channel
+         '((id . "active") (guild_id . "g1") (parent_id . "forum")
+           (type . 11) (thread_metadata . ((archived . :false)))))
+        (disco-state-upsert-channel
+         '((id . "archived") (guild_id . "g1") (parent_id . "forum")
+           (type . 11) (thread_metadata . ((archived . t)))))
+        (cl-letf (((symbol-function 'disco-preview-request-channel)
+                   (lambda (_channel) (setq queued t))))
+          (should (equal "1 active post"
+                         (disco-root--activity-preview-line
+                          forum nil 'directory)))
+          (should-not queued)))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-parent-thread-preview-requires-cached-starter ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((thread '((id . "th1")
@@ -1308,9 +1330,51 @@
       (cl-letf (((symbol-function 'disco-preview-request-channel)
                  (lambda (_channel)
                    (setq queued t))))
-        (should (equal "8 msgs"
-                       (disco-root--activity-preview-line thread nil 'parent-thread)))
-        (should queued)))))
+        (should-error
+         (disco-root--activity-preview-line thread nil 'parent-thread))
+        (should-not queued)))))
+
+(ert-deftest disco-root-parent-thread-preview-prefers-cached-starter-message ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((thread '((id . "th1")
+                      (guild_id . "g1")
+                      (type . 11)
+                      (parent_id . "forum1")
+                      (last_message_id . "latest")))
+            queued)
+        (disco-state-upsert-channel thread)
+        (disco-state-upsert-message
+         "th1"
+         '((id . "th1")
+           (channel_id . "th1")
+           (content . "starter preview")
+           (author . ((username . "alice")))))
+        (disco-state-upsert-message
+         "th1"
+         '((id . "latest")
+           (channel_id . "th1")
+           (content . "latest preview")
+           (author . ((username . "bob")))))
+        (cl-letf (((symbol-function 'disco-preview-request-channel)
+                   (lambda (_channel) (setq queued t))))
+          (should
+           (equal "alice> starter preview"
+                  (disco-view-one-line-row-preview
+                   (disco-root--channel-one-line-row thread 'parent-thread))))
+          (should-not queued)))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-parent-thread-row-uses-thread-icon-not-guild-icon ()
+  (disco-state-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+        (disco-root--insert-activity-icon
+         '((id . "th1") (guild_id . "g1") (type . 11))
+         'parent-thread)
+        (should (equal "[T]" (buffer-string))))
+    (disco-state-reset)))
 
 (ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
   (disco-state-reset)

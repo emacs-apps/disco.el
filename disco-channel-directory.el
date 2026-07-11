@@ -23,6 +23,7 @@
 (require 'disco-permission)
 (require 'disco-root-view)
 (require 'disco-state)
+(require 'disco-thread)
 (require 'disco-view)
 
 (autoload 'disco-root-open "disco-root" nil t)
@@ -79,6 +80,12 @@
 (defvar-local disco-channel-directory--collapsed-groups nil
   "Hash table containing category/group IDs explicitly collapsed by the user.")
 
+(defvar-local disco-channel-directory--expanded-thread-parents nil
+  "Hash table containing forum/media parent IDs expanded by the user.")
+
+(defvar-local disco-channel-directory--pending-focus-channel-id nil
+  "Channel ID to focus after its guild snapshot becomes renderable.")
+
 (defvar-local disco-channel-directory--filter nil
   "Case-folded channel-name filter, or nil when no filter is active.")
 
@@ -100,11 +107,14 @@
 (defvar-local disco-channel-directory--render-pending nil
   "Non-nil when another reconciliation was requested while rendering.")
 
+(defvar-local disco-channel-directory--deferred-reconcile-p nil
+  "Non-nil when hidden-buffer updates await a display window.")
+
+(defvar-local disco-channel-directory--deferred-channel-ids nil
+  "Channel IDs accumulated while this directory has no display window.")
+
 (defconst disco-channel-directory--uncategorized-group :uncategorized
   "Synthetic group ID used for channels outside a category.")
-
-(defconst disco-channel-directory--orphan-thread-group :orphan-threads
-  "Synthetic group ID used for threads whose parent is unavailable.")
 
 (defun disco-channel-directory--normalize-id (value)
   "Return VALUE as an ID string, or nil."
@@ -234,20 +244,69 @@ but do not require the channel name to match."
       (string-lessp (downcase (disco-channel-directory--channel-name left))
                     (downcase (disco-channel-directory--channel-name right)))))))
 
-(defun disco-channel-directory--visible-threads (parent-id)
-  "Return sorted visible threads whose parent is PARENT-ID."
+(defun disco-channel-directory--active-forum-posts (parent-id)
+  "Return sorted active forum/media posts beneath PARENT-ID."
   (sort
-   (seq-filter #'disco-channel-directory--channel-matches-lens-p
-               (disco-state-parent-threads parent-id))
+   (seq-filter
+    (lambda (thread)
+      (and (not (disco-thread-archived-p thread))
+           (disco-channel-directory--displayable-channel-p thread)))
+    (disco-state-parent-threads parent-id))
    #'disco-channel-directory--thread-before-p))
+
+(defun disco-channel-directory--visible-forum-posts
+    (channel &optional ignore-name-filter)
+  "Return sorted visible active posts beneath forum/media CHANNEL.
+
+When IGNORE-NAME-FILTER is non-nil, retain unread and permission lenses while
+showing every child name."
+  (let ((ignore-name-filter
+         (or ignore-name-filter
+             (and disco-channel-directory--filter
+                  (disco-channel-directory--name-matches-p channel)))))
+    (sort
+     (seq-filter
+      (lambda (thread)
+        (and (not (disco-thread-archived-p thread))
+             (disco-thread-starter-message thread)
+             (disco-channel-directory--channel-matches-lens-p
+              thread ignore-name-filter)))
+      (disco-state-parent-threads (alist-get 'id channel)))
+     #'disco-channel-directory--thread-before-p)))
+
+(defun disco-channel-directory--channel-visible-p
+    (channel &optional ignore-name-filter)
+  "Return non-nil when CHANNEL belongs in the current directory lens.
+
+IGNORE-NAME-FILTER has the same meaning as in
+`disco-channel-directory--channel-matches-lens-p'."
+  (if (disco-channel-forum-or-media-p channel)
+      (or (and (disco-channel-directory--displayable-channel-p channel)
+               (or ignore-name-filter
+                   (disco-channel-directory--name-matches-p channel))
+               (not disco-channel-directory--unread-only))
+          (disco-channel-directory--visible-forum-posts
+           channel ignore-name-filter))
+    (disco-channel-directory--channel-matches-lens-p
+     channel ignore-name-filter)))
+
+(defun disco-channel-directory--thread-parent-expanded-p (parent-id)
+  "Return non-nil when PARENT-ID should expose inline active threads."
+  (or (disco-channel-directory--filter-active-p)
+      (gethash (disco-channel-directory--normalize-id parent-id)
+               disco-channel-directory--expanded-thread-parents)))
 
 (defun disco-channel-directory--channel-stamp (channel)
   "Return render-relevant state stamp for CHANNEL."
-  (let ((message (disco-msg-channel-last-cached-message channel)))
+  (let ((latest-message (disco-msg-channel-last-cached-message channel))
+        (starter-message
+         (and (disco-state-channel-thread-p channel)
+              (disco-thread-starter-message channel))))
     (list (disco-state-channel-effective-unread-count channel)
           (and (disco-state-channel-has-unread-p channel) t)
           (alist-get 'last_message_id channel)
-          (and message (sxhash-equal message)))))
+          (and latest-message (sxhash-equal latest-message))
+          (and starter-message (sxhash-equal starter-message)))))
 
 (defun disco-channel-directory--channel-entry (channel indent)
   "Return one directory entry for CHANNEL at INDENT."
@@ -260,6 +319,26 @@ but do not require the channel name to match."
      :indent indent
      :stamp (disco-channel-directory--channel-stamp channel))))
 
+(defun disco-channel-directory--thread-parent-entry (channel indent)
+  "Return one expandable forum/media CHANNEL entry at INDENT."
+  (let* ((parent-id
+          (disco-channel-directory--normalize-id (alist-get 'id channel)))
+         (threads (disco-channel-directory--active-forum-posts parent-id))
+         (state (disco-directory-parent-threads-state parent-id)))
+    (disco-channel-directory-entry-create
+     :key (disco-channel-directory--entry-key-for-channel parent-id)
+     :type 'thread-parent
+     :channel channel
+     :indent indent
+     :unread-count (disco-channel-directory--children-unread-count threads)
+     :expanded (disco-channel-directory--thread-parent-expanded-p parent-id)
+     :stamp (list (disco-channel-directory--channel-stamp channel)
+                  (plist-get state :status)
+                  (plist-get state :phase)
+                  (plist-get state :loaded-count)
+                  (plist-get state :total)
+                  (length threads)))))
+
 (defun disco-channel-directory--group-entry (group-id title unread-count expanded)
   "Return category GROUP-ID entry with TITLE, UNREAD-COUNT, and EXPANDED."
   (disco-channel-directory-entry-create
@@ -270,12 +349,13 @@ but do not require the channel name to match."
    :unread-count unread-count
    :expanded expanded))
 
-(defun disco-channel-directory--note-entry (note-id text &optional face)
-  "Return one status NOTE-ID entry displaying TEXT with FACE."
+(defun disco-channel-directory--note-entry (note-id text &optional face indent)
+  "Return one status NOTE-ID entry displaying TEXT with FACE at INDENT."
   (disco-channel-directory-entry-create
    :key (disco-channel-directory--entry-key-for-note note-id)
    :type 'note
    :text text
+   :indent indent
    :face (or face 'shadow)))
 
 (defun disco-channel-directory--children-unread-count (channels)
@@ -283,19 +363,81 @@ but do not require the channel name to match."
   (let ((total 0))
     (dolist (channel channels total)
       (setq total
-            (+ total (disco-state-channel-effective-unread-count channel))))))
+            (+ total
+               (if (disco-channel-forum-or-media-p channel)
+                   (+ (disco-state-channel-own-unread-count channel)
+                      (disco-channel-directory--children-unread-count
+                       (disco-channel-directory--active-forum-posts
+                        (alist-get 'id channel))))
+                 (disco-state-channel-effective-unread-count channel)))))))
 
-(defun disco-channel-directory--prepend-channel-and-threads
-    (entries channel channel-indent thread-indent)
-  "Prepend CHANNEL and visible child threads to reverse ENTRIES.
+(defun disco-channel-directory--prepend-channel-entries
+    (entries channel channel-indent post-indent &optional ignore-name-filter)
+  "Prepend CHANNEL and any visible forum posts to reverse ENTRIES.
 
-CHANNEL-INDENT and THREAD-INDENT control row indentation.  Return the extended
-reverse accumulator."
-  (push (disco-channel-directory--channel-entry channel channel-indent)
-        entries)
-  (dolist (thread
-           (disco-channel-directory--visible-threads (alist-get 'id channel)))
-    (push (disco-channel-directory--channel-entry thread thread-indent)
+CHANNEL-INDENT and POST-INDENT control row indentation.  IGNORE-NAME-FILTER
+is forwarded when a matching category reveals its children.  Return the
+extended reverse accumulator."
+  (if (disco-channel-forum-or-media-p channel)
+      (let* ((parent-id
+              (disco-channel-directory--normalize-id (alist-get 'id channel)))
+             (expanded
+              (disco-channel-directory--thread-parent-expanded-p parent-id))
+             (threads
+              (disco-channel-directory--visible-forum-posts
+               channel ignore-name-filter))
+             (state (disco-directory-parent-threads-state parent-id))
+             (status (plist-get state :status)))
+        (push (disco-channel-directory--thread-parent-entry
+               channel channel-indent)
+              entries)
+        (when expanded
+          (pcase status
+            ('unloaded
+             (push
+              (disco-channel-directory--note-entry
+               (list 'parent-threads parent-id)
+               "Active posts are not loaded. Press g to load them."
+               'shadow post-indent)
+              entries))
+            ('loading
+             (let ((loaded (or (plist-get state :loaded-count) 0))
+                   (total (plist-get state :total))
+                   (phase (plist-get state :phase)))
+               (push
+                (disco-channel-directory--note-entry
+                 (list 'parent-threads parent-id)
+                 (cond
+                  ((eq phase 'indexing)
+                   "Discord is indexing active posts…")
+                  ((and (numberp total) (> total 0))
+                   (format "Loading active posts… %d/%d" loaded total))
+                  ((> loaded 0)
+                   (format "Loading active posts… %d" loaded))
+                  (t "Loading active posts…"))
+                 'shadow post-indent)
+                entries)))
+            ('error
+             (push
+              (disco-channel-directory--note-entry
+               (list 'parent-threads parent-id)
+               (format "Active post loading failed: %s. Press g to retry."
+                       (disco-root--async-error-message
+                        (plist-get state :error)))
+               'error post-indent)
+              entries))
+            ('loaded
+             (unless threads
+               (push
+                (disco-channel-directory--note-entry
+                 (list 'parent-threads parent-id)
+                 "No active posts. Press A to browse archived posts."
+                 'shadow post-indent)
+                entries))))
+          (dolist (thread threads)
+            (push (disco-channel-directory--channel-entry thread post-indent)
+                  entries))))
+    (push (disco-channel-directory--channel-entry channel channel-indent)
           entries))
   entries)
 
@@ -320,7 +462,6 @@ reverse accumulator."
             channels)))
          (category-table (make-hash-table :test #'equal))
          (children-by-category (make-hash-table :test #'equal))
-         (parent-id-set (make-hash-table :test #'equal))
          uncategorized
          entries)
     (dolist (category categories)
@@ -329,10 +470,6 @@ reverse accumulator."
                     (alist-get 'id category))))
         (puthash category-id category category-table)))
     (dolist (channel parents)
-      (when-let* ((channel-id
-                   (disco-channel-directory--normalize-id
-                    (alist-get 'id channel))))
-        (puthash channel-id t parent-id-set))
       (let ((parent-id
              (disco-channel-directory--normalize-id
               (alist-get 'parent_id channel))))
@@ -345,9 +482,7 @@ reverse accumulator."
     (let ((visible-uncategorized
            (seq-filter
             (lambda (channel)
-              (or (disco-channel-directory--channel-matches-lens-p channel)
-                  (disco-channel-directory--visible-threads
-                   (alist-get 'id channel))))
+              (disco-channel-directory--channel-visible-p channel))
             uncategorized)))
       (when visible-uncategorized
         (let* ((group-id disco-channel-directory--uncategorized-group)
@@ -362,11 +497,9 @@ reverse accumulator."
            entries)
           (when expanded
             (dolist (channel visible-uncategorized)
-              (when (or (disco-channel-directory--channel-matches-lens-p channel)
-                        (disco-channel-directory--visible-threads
-                         (alist-get 'id channel)))
+              (when (disco-channel-directory--channel-visible-p channel)
                 (setq entries
-                      (disco-channel-directory--prepend-channel-and-threads
+                      (disco-channel-directory--prepend-channel-entries
                        entries channel 2 4))))))))
     (dolist (category categories)
       (let* ((category-id
@@ -376,12 +509,10 @@ reverse accumulator."
               (and disco-channel-directory--filter
                    (disco-channel-directory--name-matches-p category)))
              (visible-children
-              (seq-filter
+             (seq-filter
                (lambda (channel)
-                 (or (disco-channel-directory--channel-matches-lens-p
-                      channel category-name-matches)
-                     (disco-channel-directory--visible-threads
-                      (alist-get 'id channel))))
+                 (disco-channel-directory--channel-visible-p
+                  channel category-name-matches))
                children))
              (category-matches
               (disco-channel-directory--name-matches-p category))
@@ -403,38 +534,8 @@ reverse accumulator."
             (when expanded
               (dolist (channel visible-children)
                 (setq entries
-                      (disco-channel-directory--prepend-channel-and-threads
-                       entries channel 2 4))))))))
-    (let ((orphan-threads
-           (sort
-            (seq-filter
-             (lambda (thread)
-               (let ((thread-id
-                      (disco-channel-directory--normalize-id
-                       (alist-get 'id thread)))
-                     (parent-id
-                      (disco-channel-directory--normalize-id
-                       (alist-get 'parent_id thread))))
-                 (and thread-id
-                      (not (gethash parent-id parent-id-set))
-                      (disco-channel-directory--channel-matches-lens-p thread))))
-             (disco-state-guild-threads disco-channel-directory--guild-id))
-            #'disco-channel-directory--thread-before-p)))
-      (when orphan-threads
-        (let* ((group-id disco-channel-directory--orphan-thread-group)
-               (expanded (disco-channel-directory--group-expanded-p group-id)))
-          (push
-           (disco-channel-directory--group-entry
-            group-id
-            "Other active threads"
-            (disco-channel-directory--children-unread-count
-             orphan-threads)
-            expanded)
-           entries)
-          (when expanded
-            (dolist (thread orphan-threads)
-              (push (disco-channel-directory--channel-entry thread 2)
-                    entries))))))
+                      (disco-channel-directory--prepend-channel-entries
+                       entries channel 2 4 category-name-matches))))))))
     (or (nreverse entries)
         (list
          (disco-channel-directory--note-entry
@@ -469,9 +570,16 @@ reverse accumulator."
 
 (defun disco-channel-directory--usable-width ()
   "Return current usable directory width in columns."
-  (or (disco-view-window-fill-column
-       (get-buffer-window (current-buffer) t)
-       disco-channel-directory-margin-columns)
+  (or (when-let* ((widths
+                   (delq nil
+                         (mapcar
+                          (lambda (window)
+                            (disco-view-window-fill-column
+                             window
+                             disco-channel-directory-margin-columns))
+                          (get-buffer-window-list
+                           (current-buffer) nil t)))))
+        (apply #'max widths))
       disco-channel-directory--fill-column
       (max 40 (- (window-width) disco-channel-directory-margin-columns))))
 
@@ -499,11 +607,15 @@ reverse accumulator."
 
 (defun disco-channel-directory--insert-channel (entry)
   "Insert channel ENTRY as a responsive one-line row."
-  (let ((start (point)))
+  (let* ((start (point))
+         (channel (disco-channel-directory-entry-channel entry))
+         (scope (if (disco-state-channel-thread-p channel)
+                    'parent-thread
+                  'directory)))
     (disco-root--insert-activity-channel-line
-     (disco-channel-directory-entry-channel entry)
+     channel
      (or (disco-channel-directory-entry-indent entry) 0)
-     'directory
+     scope
      disco-channel-directory--fill-column)
     (add-text-properties
      start
@@ -512,10 +624,36 @@ reverse accumulator."
            'disco-channel-directory-key
            (disco-channel-directory-entry-key entry)))))
 
+(defun disco-channel-directory--insert-thread-parent (entry)
+  "Insert expandable forum/media parent ENTRY."
+  (let* ((start (point))
+         (channel (disco-channel-directory-entry-channel entry))
+         (parent-id
+          (disco-channel-directory--normalize-id (alist-get 'id channel)))
+         (expanded (disco-channel-directory-entry-expanded entry))
+         (unread (or (disco-channel-directory-entry-unread-count entry) 0))
+         (indent (or (disco-channel-directory-entry-indent entry) 0)))
+    (insert (make-string indent ?\s) (if expanded "▾ " "▸ "))
+    (disco-root--insert-activity-channel-line
+     channel 0 'directory disco-channel-directory--fill-column)
+    (add-text-properties
+     start
+     (point)
+     (list 'disco-channel-directory-row-type 'thread-parent
+           'disco-channel-directory-thread-parent-id parent-id
+           'disco-channel-directory-key
+           (disco-channel-directory-entry-key entry)
+           'disco-unread-count unread
+           'disco-has-unread (> unread 0)
+           'help-echo
+           "RET/TAB toggles active posts; g refreshes; A opens archived posts"))))
+
 (defun disco-channel-directory--insert-note (entry)
   "Insert lifecycle/status note ENTRY."
   (let ((start (point)))
-    (insert "  " (or (disco-channel-directory-entry-text entry) "") "\n")
+    (insert (make-string (or (disco-channel-directory-entry-indent entry) 2)
+                         ?\s)
+            (or (disco-channel-directory-entry-text entry) "") "\n")
     (add-text-properties
      start
      (point)
@@ -529,6 +667,7 @@ reverse accumulator."
   (pcase (disco-channel-directory-entry-type entry)
     ('group (disco-channel-directory--insert-group entry))
     ('channel (disco-channel-directory--insert-channel entry))
+    ('thread-parent (disco-channel-directory--insert-thread-parent entry))
     ('note (disco-channel-directory--insert-note entry))
     (type (error "Disco: unknown channel-directory entry type %S" type))))
 
@@ -584,7 +723,7 @@ are deleted and only new nodes are inserted."
        (format "  %s" (disco-directory-guild-status
                         disco-channel-directory--guild-id)))
      (if (string-empty-p lens) "" (concat "  [" lens "]"))
-     "    / filter  U unread  g refresh  q back")))
+     "    / filter  U unread  g refresh  A archived  q back")))
 
 (defun disco-channel-directory--reconcile (&optional force-channel-ids)
   "Reconcile the current EWOC, forcing rows in FORCE-CHANNEL-IDS."
@@ -607,6 +746,13 @@ are deleted and only new nodes are inserted."
                  force-channel-ids)))
             (when snapshot
               (disco-view-restore-position snapshot))
+            (when disco-channel-directory--pending-focus-channel-id
+              (when-let* ((position
+                           (disco-channel-directory--find-channel-position
+                            disco-channel-directory--pending-focus-channel-id)))
+                (goto-char position)
+                (beginning-of-line)
+                (setq disco-channel-directory--pending-focus-channel-id nil)))
             (force-mode-line-update)
             (force-window-update (current-buffer)))
         (setq disco-channel-directory--rendering nil))
@@ -614,11 +760,57 @@ are deleted and only new nodes are inserted."
         (setq disco-channel-directory--render-pending nil)
         (disco-channel-directory--reconcile)))))
 
+(defun disco-channel-directory--displayed-p ()
+  "Return non-nil when the current directory has a live display window."
+  (window-live-p (get-buffer-window (current-buffer) t)))
+
+(defun disco-channel-directory--request-reconcile (&optional force-channel-ids)
+  "Reconcile now when displayed, otherwise defer FORCE-CHANNEL-IDS.
+
+Directory rows use graphical window metrics for pixel alignment.  Mutating an
+EWOC while its buffer is hidden would mix character-aligned and pixel-aligned
+rows, so passive updates are coalesced until a real window is available."
+  (dolist (channel-id force-channel-ids)
+    (when channel-id
+      (cl-pushnew channel-id
+                  disco-channel-directory--deferred-channel-ids
+                  :test #'equal)))
+  (if (disco-channel-directory--displayed-p)
+      (let ((channel-ids
+             (prog1 (nreverse disco-channel-directory--deferred-channel-ids)
+               (setq disco-channel-directory--deferred-channel-ids nil
+                     disco-channel-directory--deferred-reconcile-p nil))))
+        (disco-channel-directory--reconcile channel-ids))
+    (setq disco-channel-directory--deferred-reconcile-p t)))
+
+(defun disco-channel-directory--window-buffer-change (window)
+  "Flush deferred directory updates when WINDOW displays the current buffer."
+  (when (and (window-live-p window)
+             (eq (window-buffer window) (current-buffer)))
+    (disco-channel-directory--reflow-to-width
+     (disco-channel-directory--usable-width))
+    (when disco-channel-directory--deferred-reconcile-p
+      (disco-channel-directory--request-reconcile))))
+
 (defun disco-channel-directory--line-property (property &optional position)
   "Return PROPERTY from row at POSITION or point."
   (let ((position (or position (point))))
     (or (get-text-property position property)
         (get-text-property (line-beginning-position) property))))
+
+(defun disco-channel-directory--find-channel-position (channel-id)
+  "Return the first row position whose channel ID equals CHANNEL-ID."
+  (let ((position (point-min))
+        found)
+    (while (and (< position (point-max)) (not found))
+      (when (equal (get-text-property position 'disco-channel-id)
+                   channel-id)
+        (setq found position))
+      (unless found
+        (setq position
+              (next-single-property-change
+               position 'disco-channel-id nil (point-max)))))
+    found))
 
 (defun disco-channel-directory--channel-line-positions (&optional unread-only)
   "Return channel-row positions, restricted to unread rows when UNREAD-ONLY."
@@ -686,6 +878,38 @@ are deleted and only new nodes are inserted."
       (puthash group-id t disco-channel-directory--collapsed-groups))
     (disco-channel-directory--reconcile)))
 
+(defun disco-channel-directory-toggle-thread-parent (&optional parent-id)
+  "Toggle inline active posts under forum/media PARENT-ID or the row at point."
+  (interactive)
+  (when (disco-channel-directory--filter-active-p)
+    (user-error "Disco: clear directory lenses before folding active posts"))
+  (setq parent-id
+        (disco-channel-directory--normalize-id
+         (or parent-id
+             (disco-channel-directory--line-property
+              'disco-channel-directory-thread-parent-id))))
+  (let ((parent (and parent-id (disco-state-channel parent-id))))
+    (unless (and parent (disco-channel-forum-or-media-p parent))
+      (user-error "Disco: point is not on a forum or media channel"))
+    (if (gethash parent-id disco-channel-directory--expanded-thread-parents)
+        (remhash parent-id disco-channel-directory--expanded-thread-parents)
+      (puthash parent-id t disco-channel-directory--expanded-thread-parents)
+      (disco-directory-load-parent-threads-async parent-id))
+    (disco-channel-directory--reconcile)))
+
+(defun disco-channel-directory-toggle-at-point ()
+  "Toggle the category or forum/media parent at point."
+  (interactive)
+  (cond
+   ((disco-channel-directory--line-property
+     'disco-channel-directory-group-id)
+    (disco-channel-directory-toggle-group))
+   ((disco-channel-directory--line-property
+     'disco-channel-directory-thread-parent-id)
+    (disco-channel-directory-toggle-thread-parent))
+   (t
+    (user-error "Disco: point is not on a foldable row"))))
+
 (defun disco-channel-directory-open-at-point ()
   "Toggle the category or open the channel at point."
   (interactive)
@@ -693,6 +917,9 @@ are deleted and only new nodes are inserted."
    ((disco-channel-directory--line-property
      'disco-channel-directory-group-id)
     (disco-channel-directory-toggle-group))
+   ((disco-channel-directory--line-property
+     'disco-channel-directory-thread-parent-id)
+    (disco-channel-directory-toggle-thread-parent))
    ((disco-channel-directory--line-property 'disco-channel-id)
     (disco-root--open-channel
      (disco-channel-directory--line-property 'disco-channel-id)))
@@ -700,11 +927,13 @@ are deleted and only new nodes are inserted."
     (disco-channel-directory-next-channel))))
 
 (defun disco-channel-directory-tab-dwim ()
-  "Toggle a category at point, otherwise move to the next channel."
+  "Toggle a foldable row at point, otherwise move to the next channel."
   (interactive)
-  (if (disco-channel-directory--line-property
-       'disco-channel-directory-group-id)
-      (disco-channel-directory-toggle-group)
+  (if (or (disco-channel-directory--line-property
+           'disco-channel-directory-group-id)
+          (disco-channel-directory--line-property
+           'disco-channel-directory-thread-parent-id))
+      (disco-channel-directory-toggle-at-point)
     (disco-channel-directory-next-channel)))
 
 (defun disco-channel-directory-mouse-open-at-point (event)
@@ -740,14 +969,45 @@ are deleted and only new nodes are inserted."
            (if disco-channel-directory--unread-only "enabled" "disabled")))
 
 (defun disco-channel-directory-refresh ()
-  "Force-refresh the current guild channel snapshot."
+  "Refresh the forum at point, or the current guild channel snapshot."
   (interactive)
-  (unless (disco-channel-directory--guild)
-    (user-error "Disco: this guild is no longer available"))
-  (disco-directory-load-guild-async
-   disco-channel-directory--guild-id :force t)
-  (message "Disco: refreshing %s channels…"
-           (disco-channel-directory--guild-name)))
+  (if-let* ((parent-id
+             (disco-channel-directory--line-property
+              'disco-channel-directory-thread-parent-id)))
+      (progn
+        (puthash parent-id t disco-channel-directory--expanded-thread-parents)
+        (disco-directory-load-parent-threads-async parent-id :force t)
+        (message "Disco: refreshing active posts in %s…"
+                 (disco-channel-directory--channel-name
+                  (disco-state-channel parent-id))))
+    (unless (disco-channel-directory--guild)
+      (user-error "Disco: this guild is no longer available"))
+    (disco-directory-load-guild-async
+     disco-channel-directory--guild-id :force t)
+    (message "Disco: refreshing %s channels…"
+             (disco-channel-directory--guild-name))))
+
+(defun disco-channel-directory--archived-parent-at-point ()
+  "Return a thread parent channel resolved from the current row."
+  (let* ((parent-id
+          (or (disco-channel-directory--line-property
+               'disco-channel-directory-thread-parent-id)
+              (when-let* ((channel-id
+                           (disco-channel-directory--line-property
+                            'disco-channel-id))
+                          (channel (disco-state-channel channel-id)))
+                (and (disco-state-channel-thread-p channel)
+                     (alist-get 'parent_id channel)))))
+         (parent (and parent-id (disco-state-channel parent-id))))
+    (and parent (disco-channel-thread-parent-p parent) parent)))
+
+(defun disco-channel-directory-open-archived-at-point ()
+  "Open paginated archived posts for the parent represented at point."
+  (interactive)
+  (let ((parent (disco-channel-directory--archived-parent-at-point)))
+    (unless parent
+      (user-error "Disco: point has no thread parent context"))
+    (disco-root-list-archived-threads (alist-get 'id parent))))
 
 (defun disco-channel-directory-open-root ()
   "Return to the global disco root buffer."
@@ -762,7 +1022,7 @@ are deleted and only new nodes are inserted."
 (defun disco-channel-directory--handle-gateway-event (event)
   "Reconcile current directory after a relevant gateway EVENT."
   (when (disco-channel-directory--event-relevant-p event)
-    (disco-channel-directory--reconcile
+    (disco-channel-directory--request-reconcile
      (disco-gateway-event-channel-ids event))))
 
 (defun disco-channel-directory--handle-directory-event (event)
@@ -774,7 +1034,7 @@ are deleted and only new nodes are inserted."
     (when (or (memq type '(index-loaded))
               (and guild-id
                    (equal guild-id disco-channel-directory--guild-id)))
-      (disco-channel-directory--reconcile))))
+      (disco-channel-directory--request-reconcile))))
 
 (defun disco-channel-directory--detach-live-updates ()
   "Detach the current directory from shared update streams."
@@ -867,7 +1127,9 @@ are deleted and only new nodes are inserted."
     (define-key map (kbd "TAB") #'disco-channel-directory-tab-dwim)
     (define-key map (kbd "<backtab>")
       #'disco-channel-directory-previous-channel)
-    (define-key map (kbd "t") #'disco-channel-directory-toggle-group)
+    (define-key map (kbd "t") #'disco-channel-directory-toggle-at-point)
+    (define-key map (kbd "A")
+      #'disco-channel-directory-open-archived-at-point)
     (define-key map (kbd "n") #'disco-channel-directory-next-channel)
     (define-key map (kbd "p") #'disco-channel-directory-previous-channel)
     (define-key map (kbd "u") #'disco-channel-directory-next-unread)
@@ -892,11 +1154,16 @@ are deleted and only new nodes are inserted."
               (make-hash-table :test #'equal))
   (setq-local disco-channel-directory--collapsed-groups
               (make-hash-table :test #'equal))
+  (setq-local disco-channel-directory--expanded-thread-parents
+              (make-hash-table :test #'equal))
+  (setq-local disco-channel-directory--pending-focus-channel-id nil)
   (setq-local disco-channel-directory--filter nil)
   (setq-local disco-channel-directory--unread-only nil)
   (setq-local disco-channel-directory--fill-column nil)
   (setq-local disco-channel-directory--rendering nil)
   (setq-local disco-channel-directory--render-pending nil)
+  (setq-local disco-channel-directory--deferred-reconcile-p nil)
+  (setq-local disco-channel-directory--deferred-channel-ids nil)
   (setq-local header-line-format
               '(:eval (disco-channel-directory--header-line)))
   (setq-local revert-buffer-function
@@ -907,6 +1174,8 @@ are deleted and only new nodes are inserted."
     (setq disco-channel-directory--ewoc
           (ewoc-create #'disco-channel-directory--ewoc-printer nil nil t)))
   (disco-channel-directory--ensure-window-size-hook)
+  (add-hook 'window-buffer-change-functions
+            #'disco-channel-directory--window-buffer-change nil t)
   (add-hook 'kill-buffer-hook
             #'disco-channel-directory--detach-live-updates nil t))
 
@@ -952,6 +1221,26 @@ are deleted and only new nodes are inserted."
       (disco-channel-directory--reconcile)
       (disco-directory-load-guild-async guild-id))
     buffer))
+
+;;;###autoload
+(defun disco-channel-directory-open-thread-parent (parent-channel-id)
+  "Open PARENT-CHANNEL-ID inline in its guild channel directory."
+  (let* ((parent-id
+          (disco-channel-directory--normalize-id parent-channel-id))
+         (parent (and parent-id (disco-state-channel parent-id)))
+         (guild-id (and parent (alist-get 'guild_id parent))))
+    (unless (and parent (disco-channel-forum-or-media-p parent))
+      (user-error "Disco: channel %s is not a forum or media channel"
+                  parent-channel-id))
+    (unless guild-id
+      (user-error "Disco: channel %s has no guild context" parent-id))
+    (let ((buffer (disco-channel-directory-open guild-id)))
+      (with-current-buffer buffer
+        (puthash parent-id t disco-channel-directory--expanded-thread-parents)
+        (setq disco-channel-directory--pending-focus-channel-id parent-id)
+        (disco-channel-directory--reconcile)
+        (disco-directory-load-parent-threads-async parent-id))
+      buffer)))
 
 (provide 'disco-channel-directory)
 

@@ -62,6 +62,170 @@
       (disco-directory-load-guild-async "g1")
       (should (= calls 2)))))
 
+(ert-deftest disco-directory-parent-thread-load-paginates-and-caches-previews ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+  (disco-state-put-channels
+   "g1" '(((id . "forum") (guild_id . "g1") (type . 15))))
+  (let (cursors events)
+    (cl-letf (((symbol-function
+                'disco-api-channel-search-threads-async)
+               (lambda (_parent-id &rest args)
+                 (let ((max-id (plist-get args :max-id)))
+                   (should (eq :false (plist-get args :archived)))
+                   (should (eq 'creation-time (plist-get args :sort-by)))
+                   (should (eq 'desc (plist-get args :sort-order)))
+                   (push max-id cursors)
+                   (funcall
+                    (plist-get args :on-success)
+                    (if (null max-id)
+                        '((threads . (((id . "t2") (parent_id . "forum")
+                                      (type . 11))))
+                          (first_messages
+                           . (((id . "t2") (channel_id . "t2")
+                               (content . "preview"))))
+                          (has_more . t)
+                          (total_results . 2))
+                      '((threads . (((id . "t1") (parent_id . "forum")
+                                    (type . 11))))
+                        (first_messages
+                         . (((id . "t1") (channel_id . "t1")
+                             (content . "older preview"))))
+                        (has_more . :false)
+                        (total_results . 1)))))))
+              (disco-directory-event-hook
+               (list (lambda (event) (push (plist-get event :type) events)))))
+      (should (eq 'loading
+                  (disco-directory-load-parent-threads-async "forum")))
+      (should (equal '(nil "t2") (nreverse cursors)))
+      (should (eq 'loaded
+                  (disco-directory-parent-threads-status "forum")))
+      (should (= 2 (plist-get
+                    (disco-directory-parent-threads-state "forum")
+                    :total)))
+      (should (equal '("t2" "t1")
+                     (mapcar (lambda (thread) (alist-get 'id thread))
+                             (disco-state-parent-threads "forum"))))
+      (should (equal "preview"
+                     (alist-get 'content
+                                (car (disco-state-messages "t2")))))
+      (should (equal "older preview"
+                     (alist-get 'content
+                                (car (disco-state-messages "t1")))))
+      (should (equal '(parent-threads-loading
+                       parent-threads-page
+                       parent-threads-loaded)
+                     (nreverse events))))))
+
+(ert-deftest disco-directory-parent-thread-load-coalesces-and-force-supersedes ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+  (disco-state-put-channels
+   "g1" '(((id . "forum") (guild_id . "g1") (type . 15))))
+  (let ((calls 0)
+        callbacks)
+    (cl-letf (((symbol-function
+                'disco-api-channel-search-threads-async)
+               (lambda (_parent-id &rest args)
+                 (cl-incf calls)
+                 (push (plist-get args :on-success) callbacks))))
+      (disco-directory-load-parent-threads-async "forum")
+      (disco-directory-load-parent-threads-async "forum")
+      (should (= 1 calls))
+      (disco-directory-load-parent-threads-async "forum" :force t)
+      (should (= 2 calls))
+      ;; The superseded callback must not overwrite the newer request.
+      (funcall (cadr callbacks)
+               '((threads . (((id . "stale") (parent_id . "forum")
+                              (type . 11))))
+                 (has_more . :false)))
+      (should-not (disco-state-channel "stale"))
+      (funcall (car callbacks)
+               '((threads . (((id . "fresh") (parent_id . "forum")
+                              (type . 11))))
+                 (first_messages
+                  . (((id . "fresh") (channel_id . "fresh")
+                      (content . "starter"))))
+                 (has_more . :false)))
+      (should (disco-state-channel "fresh"))
+      (should (eq 'loaded
+                  (disco-directory-parent-threads-status "forum"))))))
+
+(ert-deftest disco-directory-parent-thread-load-rejects-missing-starter ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+  (disco-state-put-channels
+   "g1" '(((id . "forum") (guild_id . "g1") (type . 15))))
+  (cl-letf (((symbol-function
+              'disco-api-channel-search-threads-async)
+             (lambda (_parent-id &rest args)
+               (funcall
+                (plist-get args :on-success)
+                '((threads . (((id . "missing") (parent_id . "forum")
+                               (type . 11))))
+                  (first_messages . nil)
+                  (has_more . :false))))))
+    (disco-directory-load-parent-threads-async "forum")
+    (let* ((state (disco-directory-parent-threads-state "forum"))
+           (error-value (plist-get state :error)))
+      (should (eq 'error (plist-get state :status)))
+      (should (equal '("missing") (plist-get error-value :thread-ids))))))
+
+(ert-deftest disco-directory-parent-thread-error-is-explicit-and-retryable ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+  (disco-state-put-channels
+   "g1" '(((id . "forum") (guild_id . "g1") (type . 15))))
+  (let ((calls 0)
+        failure)
+    (cl-letf (((symbol-function
+                'disco-api-channel-search-threads-async)
+               (lambda (_parent-id &rest args)
+                 (cl-incf calls)
+                 (setq failure (plist-get args :on-error)))))
+      (disco-directory-load-parent-threads-async "forum")
+      (funcall failure '(:status 500 :message "boom"))
+      (let ((state (disco-directory-parent-threads-state "forum")))
+        (should (eq 'error (plist-get state :status)))
+        (should (equal "boom" (plist-get (plist-get state :error) :message))))
+      (disco-directory-load-parent-threads-async "forum")
+      (should (= 2 calls)))))
+
+(ert-deftest disco-directory-parent-thread-load-retries-pending-index ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+  (disco-state-put-channels
+   "g1" '(((id . "forum") (guild_id . "g1") (type . 15))))
+  (let ((calls 0)
+        scheduled)
+    (cl-letf (((symbol-function
+                'disco-api-channel-search-threads-async)
+               (lambda (_parent-id &rest args)
+                 (cl-incf calls)
+                 (funcall
+                  (plist-get args :on-success)
+                  (if (= calls 1)
+                      '((code . 110000) (retry_after . 2))
+                    '((threads . nil) (has_more . :false))))))
+              ((symbol-function 'run-at-time)
+               (lambda (delay _repeat function &rest args)
+                 (setq scheduled (list delay function args))
+                 :timer)))
+      (disco-directory-load-parent-threads-async "forum")
+      (let ((state (disco-directory-parent-threads-state "forum")))
+        (should (eq 'loading (plist-get state :status)))
+        (should (eq 'indexing (plist-get state :phase))))
+      (should (= 2 (car scheduled)))
+      (apply (cadr scheduled) (caddr scheduled))
+      (should (= 2 calls))
+      (should (eq 'loaded
+                  (disco-directory-parent-threads-status "forum"))))))
+
 (provide 'disco-directory-test)
 
 ;;; disco-directory-test.el ends here

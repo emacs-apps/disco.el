@@ -34,9 +34,6 @@
 (defvar disco-root--archived-threads-cache)
 (defvar disco-root--archived-last-errors)
 (defvar disco-root--archived-thread-sources)
-(defvar disco-root--parent-threads-parent-channel)
-(defvar disco-root--parent-threads-refresh-generation)
-(defvar disco-root--parent-threads-refresh-in-flight)
 (defvar disco-root--inspect-channel)
 (defvar disco-root--tree-show-unread-section)
 (defvar disco-root--view-mode)
@@ -77,6 +74,8 @@
 (declare-function disco-root--section-expanded-p "disco-root" (section))
 (declare-function disco-root--toggle-node-at-point "disco-root" ())
 (declare-function disco-channel-directory-open "disco-channel-directory" (guild-id))
+(declare-function disco-channel-directory-open-thread-parent
+                  "disco-channel-directory" (parent-channel-id))
 
 (defvar disco-root-view-attach-live-updates-function nil
   "Function used by root view buffers to attach live updates.")
@@ -510,8 +509,9 @@ This prevents noisy permission errors for sources that require elevated access."
   "Return hover help text describing how CHANNEL will open."
   (let ((channel-id (alist-get 'id channel)))
     (pcase (disco-channel-open-mode channel)
-      ('thread-list
-       (format "Open threads under channel %s" channel-id))
+      ('thread-directory
+       (format "Expand active posts under channel %s in its guild directory"
+               channel-id))
       ('inspect
        (format "Inspect channel %s" channel-id))
       (_
@@ -697,8 +697,10 @@ Starts asynchronous fetch when cache miss occurs."
   (= (alist-get 'type channel) 4))
 
 (defun disco-root--thread-count-under-parent (channel)
-  "Return number of indexed threads under CHANNEL."
-  (length (disco-state-parent-threads (alist-get 'id channel))))
+  "Return number of indexed active threads under CHANNEL."
+  (length
+   (seq-remove #'disco-thread-archived-p
+               (disco-state-parent-threads (alist-get 'id channel)))))
 
 (defun disco-root--normalize-extra-info-value (value)
   "Normalize one provider VALUE into a flat list of non-empty strings."
@@ -897,8 +899,8 @@ Starts asynchronous fetch when cache miss occurs."
          (parts (cons name tag-labels)))
     (string-join (delq nil parts) " | ")))
 
-(defun disco-root--thread-browser-fallback-preview (thread)
-  "Return metadata preview fallback for THREAD browser rows, or nil."
+(defun disco-root--archived-thread-metadata-preview (thread)
+  "Return metadata preview for archived THREAD rows, or nil."
   (let* ((status-tags (disco-thread-status-tags thread))
          (message-count (or (alist-get 'total_message_sent thread)
                             (alist-get 'message_count thread)))
@@ -960,6 +962,9 @@ Starts asynchronous fetch when cache miss occurs."
 (defun disco-root--activity-secondary-placeholder (channel)
   "Return non-message placeholder preview for CHANNEL, or nil."
   (pcase (disco-channel-open-mode channel)
+    ('thread-directory
+     (let ((count (disco-root--thread-count-under-parent channel)))
+       (format "%d active post%s" count (if (= count 1) "" "s"))))
     ('inspect
      (format "(%s view)" (disco-channel-type-name channel)))
     (_ nil)))
@@ -977,8 +982,8 @@ The label stays message-oriented and avoids transport-status placeholders."
 (defun disco-root--activity-preview-label (channel &optional scope)
   "Return fallback preview label for CHANNEL one-line rows under SCOPE."
   (pcase scope
-    ((or 'parent-thread 'archived-thread)
-     (or (disco-root--thread-browser-fallback-preview channel)
+    ('archived-thread
+     (or (disco-root--archived-thread-metadata-preview channel)
          (disco-root--activity-secondary-label channel)))
     (_
      (disco-root--activity-secondary-label channel))))
@@ -1107,11 +1112,17 @@ Output includes formatted date/time and a trailing status symbol."
   "Return one-line preview text for CHANNEL row under SCOPE.
 
 When MESSAGE is non-nil, use it as cached preview source."
-  (or (and message (disco-msg-preview-line message))
-      (disco-msg-channel-preview-line channel)
-      (progn
-        (disco-preview-request-channel channel)
-        (disco-root--activity-preview-label channel scope))))
+  (if (eq scope 'parent-thread)
+      (if-let* ((starter (disco-thread-starter-message channel)))
+          (disco-msg-preview-line starter)
+        (error "Disco: forum post %s has no hydrated starter message"
+               (alist-get 'id channel)))
+    (or (and message (disco-msg-preview-line message))
+        (disco-msg-channel-preview-line channel)
+        (disco-root--activity-secondary-placeholder channel)
+        (progn
+          (disco-preview-request-channel channel)
+          (disco-root--activity-preview-label channel scope)))))
 
 (defun disco-root--insert-activity-icon (channel &optional scope)
   "Insert activity icon for CHANNEL.
@@ -1123,7 +1134,7 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
         (channel-type (alist-get 'type channel))
         (start (point)))
     (cond
-     ((and guild (not (eq scope 'directory)))
+     ((and guild (eq scope 'activity))
       (if disco-root-show-guild-icons
           (disco-root--insert-guild-icon guild)
         (insert (disco-root--guild-icon-fallback guild))))
@@ -1159,9 +1170,14 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
   "Return one-line row model for CHANNEL under SCOPE."
   (let* ((channel-id (alist-get 'id channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
+         (preview-message
+          (if (eq scope 'parent-thread)
+              (disco-thread-starter-message channel)
+            latest-message))
          (mention-count (disco-state-channel-effective-unread-count channel))
          (has-unread (disco-root--channel-has-unread-p channel))
-         (preview-text (disco-root--activity-preview-line channel latest-message scope))
+         (preview-text (disco-root--activity-preview-line
+                        channel preview-message scope))
          (time-text (if (memq scope '(parent-thread archived-thread))
                         (disco-root--thread-browser-time-label channel scope latest-message)
                       (disco-root--channel-last-activity-time-label channel latest-message))))
@@ -1171,7 +1187,7 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
      :context (disco-root--activity-context-label channel scope)
      :preview preview-text
      :preview-leading-length
-     (disco-root--preview-leading-length preview-text latest-message)
+     (disco-root--preview-leading-length preview-text preview-message)
      :preview-leading-face 'font-lock-keyword-face
      :time time-text
      :time-face 'shadow
@@ -1972,141 +1988,6 @@ Return plist with keys :threads and :errors for this page only."
           (or (alist-get 'name parent-channel) "(no-name)")
           (alist-get 'id parent-channel)))
 
-(defun disco-root--parent-threads-buffer-name (parent-channel)
-  "Return active-thread buffer name for PARENT-CHANNEL."
-  (format "*disco:threads:%s (%s)*"
-          (or (alist-get 'name parent-channel) "(no-name)")
-          (alist-get 'id parent-channel)))
-
-(defun disco-root--active-parent-threads (parent-channel)
-  "Return active thread channels under PARENT-CHANNEL."
-  (let ((parent-id (alist-get 'id parent-channel)))
-    (disco-root--sort-channels
-     (seq-filter #'disco-root--displayable-channel-p
-                 (disco-state-parent-threads parent-id)))))
-
-(defun disco-root--parent-threads-list-spec ()
-  "Return list spec for the current active parent-thread buffer."
-  (let* ((parent-channel disco-root--parent-threads-parent-channel)
-         (threads (and parent-channel
-                       (disco-root--active-parent-threads parent-channel))))
-    (disco-view-list-spec-create
-     :title (format "Threads: %s"
-                    (if parent-channel
-                        (disco-root--channel-label parent-channel 'parent-threads-parent)
-                      "(no parent)"))
-     :key-hints "g: refresh active   A: archived threads   RET/mouse-1: open thread   n/p/TAB: nav   q: quit"
-     :summary (format "Active threads indexed: %d"
-                      (length (or threads '())))
-     :loading-note (when disco-root--parent-threads-refresh-in-flight
-                     "[refreshing active threads...]")
-     :items (disco-root--channel-list-entries threads 2 'parent-thread)
-     :item-inserter #'disco-root--insert-layout-entry
-     :empty-text "(no active threads indexed)")))
-
-(defun disco-root--render-parent-threads-buffer ()
-  "Render active-thread buffer from local parent-thread state."
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (disco-view-render-list-spec
-     (disco-root--parent-threads-list-spec))
-    (goto-char (point-min))))
-
-(defun disco-root-parent-threads-refresh ()
-  "Refresh active-thread list in current parent-thread buffer."
-  (interactive)
-  (let* ((thread-buffer (current-buffer))
-         (parent-channel disco-root--parent-threads-parent-channel)
-         (parent-id (and parent-channel (alist-get 'id parent-channel)))
-         (guild-id (and parent-channel (alist-get 'guild_id parent-channel)))
-         (generation (1+ disco-root--parent-threads-refresh-generation)))
-    (unless parent-channel
-      (user-error "disco: thread buffer has no parent context"))
-    (unless guild-id
-      (user-error "disco: parent channel has no guild context"))
-    (setq disco-root--parent-threads-refresh-generation generation)
-    (setq disco-root--parent-threads-refresh-in-flight t)
-    (disco-root--render-parent-threads-buffer)
-    (disco-api-channel-search-active-threads-async
-     parent-id
-     :limit 25
-     :offset 0
-     :on-success
-     (lambda (result)
-       (when (and (buffer-live-p thread-buffer)
-                  (with-current-buffer thread-buffer
-                    (and (eq major-mode 'disco-root-parent-threads-mode)
-                         (= disco-root--parent-threads-refresh-generation generation))))
-         (with-current-buffer thread-buffer
-           (let ((threads
-                  (or (alist-get 'threads result) '())))
-             (disco-state-sync-threads guild-id (list parent-id) threads)
-             (setq disco-root--parent-threads-refresh-in-flight nil)
-             (disco-root--render-parent-threads-buffer)
-             (message "disco: loaded %d active threads"
-                      (length threads))))))
-     :on-error
-     (lambda (err)
-       (when (and (buffer-live-p thread-buffer)
-                  (with-current-buffer thread-buffer
-                    (and (eq major-mode 'disco-root-parent-threads-mode)
-                         (= disco-root--parent-threads-refresh-generation generation))))
-         (with-current-buffer thread-buffer
-           (setq disco-root--parent-threads-refresh-in-flight nil)
-           (disco-root--render-parent-threads-buffer)
-           (message "disco: active thread refresh failed: %s"
-                    (disco-root--async-error-message err))))))))
-
-(defun disco-root-parent-threads-open-archived ()
-  "Open archived-thread browser for current parent-thread buffer context."
-  (interactive)
-  (unless disco-root--parent-threads-parent-channel
-    (user-error "disco: thread buffer has no parent context"))
-  (disco-root-list-archived-threads
-   (alist-get 'id disco-root--parent-threads-parent-channel)))
-
-(defvar disco-root-parent-threads-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-root-parent-threads-refresh)
-    (define-key map (kbd "A") #'disco-root-parent-threads-open-archived)
-    (define-key map (kbd "RET") #'disco-root-open-at-point)
-    (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
-    (define-key map (kbd "n") #'disco-root-button-forward)
-    (define-key map (kbd "p") #'disco-root-button-backward)
-    (define-key map (kbd "TAB") #'disco-root-button-forward)
-    (define-key map (kbd "<backtab>") #'disco-root-button-backward)
-    (define-key map (kbd "?") #'disco-root-view--transient)
-    (define-key map (kbd "q") #'quit-window)
-    map)
-  "Keymap for `disco-root-parent-threads-mode'.")
-
-(define-derived-mode disco-root-parent-threads-mode special-mode "Disco-Threads"
-  "Major mode for active thread listing buffers."
-  (setq buffer-read-only t)
-  (setq truncate-lines t))
-
-(defun disco-root-open-parent-threads (&optional parent-channel-id)
-  "Open active thread list for PARENT-CHANNEL-ID.
-
-When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
-  (interactive)
-  (let* ((parent-channel
-          (or (and parent-channel-id (disco-state-channel parent-channel-id))
-              (disco-root--read-thread-parent-channel))))
-    (unless (and parent-channel
-                 (disco-root--thread-parent-channel-p parent-channel))
-      (user-error "disco: selected channel cannot contain threads"))
-    (let ((buf (get-buffer-create
-                (disco-root--parent-threads-buffer-name parent-channel))))
-      (with-current-buffer buf
-        (disco-root-parent-threads-mode)
-        (setq disco-root--parent-threads-parent-channel parent-channel)
-        (setq disco-root--parent-threads-refresh-generation 0)
-        (setq disco-root--parent-threads-refresh-in-flight nil)
-        (disco-root-view--attach-live-updates)
-        (disco-root-parent-threads-refresh))
-      (pop-to-buffer buf))))
-
 (defun disco-root--channel-inspect-buffer-name (channel)
   "Return inspect buffer name for CHANNEL."
   (format "*disco-channel:%s*"
@@ -2210,8 +2091,8 @@ When PARENT-CHANNEL-ID is nil, prompt for one parent channel."
     (unless open-mode
       (user-error "disco: channel %s does not support opening" channel-id))
     (pcase open-mode
-      ('thread-list
-       (disco-root-open-parent-threads channel-id))
+      ('thread-directory
+       (disco-channel-directory-open-thread-parent channel-id))
       ('inspect
        (disco-root-open-channel-inspect channel-id))
       (_

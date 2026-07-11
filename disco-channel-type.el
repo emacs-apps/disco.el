@@ -63,13 +63,13 @@
         :inspect-note "Directory channel browsing is not implemented yet. Use this view to inspect the raw channel metadata.")
     (15 :name "forum"
         :root-visible t
-        :open-mode thread-list
+        :open-mode thread-directory
         :thread-parent t
         :thread-only-parent t
         :forum-or-media t)
     (16 :name "media"
         :root-visible t
-        :open-mode thread-list
+        :open-mode thread-directory
         :thread-parent t
         :thread-only-parent t
         :forum-or-media t)

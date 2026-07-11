@@ -22,6 +22,19 @@
     (should (equal " [thread: archived, locked, private]"
                    (disco-thread-header-suffix channel)))))
 
+(ert-deftest disco-thread-starter-message-matches-thread-snowflake ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((thread '((id . "t1") (type . 11))))
+        (disco-state-upsert-message
+         "t1" '((id . "newer") (channel_id . "t1") (content . "latest")))
+        (disco-state-upsert-message
+         "t1" '((id . "t1") (channel_id . "t1") (content . "starter")))
+        (should
+         (equal "starter"
+                (alist-get 'content (disco-thread-starter-message thread)))))
+    (disco-state-reset)))
+
 (ert-deftest disco-thread-read-auto-archive-duration-supports-empty-and-required ()
   (cl-letf (((symbol-function 'completing-read)
              (lambda (&rest _args) "")))

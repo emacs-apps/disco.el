@@ -557,33 +557,6 @@ Response is an alist with keys including `threads' and `members'."
    :on-success on-success
    :on-error on-error))
 
-(defun disco-api-channel-search-active-threads (channel-id &optional limit offset)
-  "Search active threads under CHANNEL-ID.
-
-Uses `/channels/{channel.id}/threads/search' with `archived=false'."
-  (disco-api-channel-search-threads
-   channel-id
-   :archived :false
-   :sort-by 'last-message-time
-   :sort-order 'desc
-   :limit limit
-   :offset offset))
-
-(cl-defun disco-api-channel-search-active-threads-async
-    (channel-id &key limit offset on-success on-error)
-  "Search active threads under CHANNEL-ID asynchronously.
-
-Uses `/channels/{channel.id}/threads/search' with `archived=false'."
-  (disco-api-channel-search-threads-async
-   channel-id
-   :archived :false
-   :sort-by 'last-message-time
-   :sort-order 'desc
-   :limit limit
-   :offset offset
-   :on-success on-success
-   :on-error on-error))
-
 (cl-defun disco-api-guild-search-messages
     (guild-id &key limit offset max-id min-id slop content author-types author-ids mentions
               mention-everyone has pinned sort-by sort-order channel-ids include-nsfw)
