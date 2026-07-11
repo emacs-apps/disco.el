@@ -27,6 +27,7 @@
 (require 'disco-room)
 (require 'disco-root)
 (require 'disco-modes)
+(require 'disco-notifications)
 
 ;;;###autoload
 (defun disco ()

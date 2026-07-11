@@ -472,6 +472,27 @@ Nil GUILD-ID addresses the private-channel settings entry."
    (gethash (disco-state--normalize-id channel-id)
             disco-state--channel-notification-overrides)))
 
+(defun disco-state-channel-notification-level (channel)
+  "Return effective message notification level for CHANNEL.
+
+Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
+  (let* ((channel-id (alist-get 'id channel))
+         (guild-id (alist-get 'guild_id channel))
+         (override (disco-state-channel-notification-override channel-id))
+         (override-level (and override (alist-get 'message_notifications override)))
+         (setting (disco-state-user-guild-setting guild-id))
+         (guild-level (and setting (alist-get 'message_notifications setting)))
+         (guild (and guild-id
+                     (seq-find (lambda (it) (equal (alist-get 'id it) guild-id))
+                               disco-state--guilds)))
+         (default-level (and guild (alist-get 'default_message_notifications guild))))
+    (cond
+     ((disco-state-private-channel-p channel) 0)
+     ((and (integerp override-level) (/= override-level 3)) override-level)
+     ((and (integerp guild-level) (/= guild-level 3)) guild-level)
+     ((integerp default-level) default-level)
+     (t 1))))
+
 (defun disco-state-apply-user-guild-setting (setting)
   "Store one user guild SETTING and replace its channel override index."
   (when (listp setting)

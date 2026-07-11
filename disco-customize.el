@@ -37,6 +37,41 @@
   "Face for unread Discord mentions in the mode line."
   :group 'disco-modes)
 
+(defgroup disco-notifications nil
+  "Desktop notifications for disco.el."
+  :group 'disco)
+
+(defcustom disco-notifications-delay 0.5
+  "Seconds to delay a notification before rechecking room visibility."
+  :type 'number :group 'disco-notifications)
+
+(defcustom disco-notifications-timeout 4.0
+  "Seconds before closing the current desktop notification.
+
+Nil leaves notification lifetime to the desktop server."
+  :type '(choice (const :tag "Desktop default" nil) number)
+  :group 'disco-notifications)
+
+(defcustom disco-notifications-max-message-age 60
+  "Maximum incoming message age in seconds eligible for notification."
+  :type 'integer :group 'disco-notifications)
+
+(defcustom disco-notifications-body-limit 160
+  "Maximum notification body width in characters."
+  :type 'integer :group 'disco-notifications)
+
+(defcustom disco-notifications-show-preview t
+  "When non-nil, include a compact message preview."
+  :type 'boolean :group 'disco-notifications)
+
+(defcustom disco-notifications-history-ring-size 30
+  "Number of recent desktop notifications retained."
+  :type 'integer :group 'disco-notifications)
+
+(defcustom disco-notifications-extra-args nil
+  "Additional keyword arguments passed to `notifications-notify'."
+  :type '(repeat sexp) :group 'disco-notifications)
+
 (defcustom disco-token nil
   "Discord token used for authenticated API requests.
 
