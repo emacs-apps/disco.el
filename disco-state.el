@@ -35,6 +35,12 @@
 (defvar disco-state--messages-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> list of message objects.")
 
+(defvar disco-state--message-revision-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> latest message-cache mutation revision.")
+
+(defvar disco-state--message-revisions-by-channel (make-hash-table :test #'equal)
+  "Hash table channel-id -> hash table of message-id mutation revisions.")
+
 (defvar disco-state--read-states (make-hash-table :test #'equal)
   "Hash table (READ-STATE-TYPE . RESOURCE-ID) -> read-state object.")
 
@@ -163,6 +169,8 @@
   (clrhash disco-state--threads-by-parent)
   (clrhash disco-state--thread-ids-by-guild)
   (clrhash disco-state--messages-by-channel)
+  (clrhash disco-state--message-revision-by-channel)
+  (clrhash disco-state--message-revisions-by-channel)
   (clrhash disco-state--read-states)
   (clrhash disco-state--user-guild-settings)
   (clrhash disco-state--channel-notification-overrides)
@@ -632,11 +640,93 @@ Otherwise, replace threads only under the provided parent IDs."
 
 (defun disco-state-put-messages (channel-id messages)
   "Store MESSAGES list for CHANNEL-ID."
-  (puthash channel-id messages disco-state--messages-by-channel))
+  (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
+         (old (gethash normalized-channel-id disco-state--messages-by-channel))
+         (old-by-id (make-hash-table :test #'equal))
+         (new-by-id (make-hash-table :test #'equal))
+         changed-ids)
+    (dolist (message old)
+      (when-let* ((message-id
+                   (disco-state--normalize-id (alist-get 'id message))))
+        (puthash message-id message old-by-id)))
+    (dolist (message messages)
+      (when-let* ((message-id
+                   (disco-state--normalize-id (alist-get 'id message))))
+        (puthash message-id message new-by-id)))
+    (maphash
+     (lambda (message-id old-message)
+       (unless (equal old-message (gethash message-id new-by-id))
+         (push message-id changed-ids)))
+     old-by-id)
+    (maphash
+     (lambda (message-id new-message)
+       (unless (equal new-message (gethash message-id old-by-id))
+         (cl-pushnew message-id changed-ids :test #'equal)))
+     new-by-id)
+    (when changed-ids
+      (let* ((revision (1+ (gethash normalized-channel-id
+                                    disco-state--message-revision-by-channel
+                                    0)))
+             (revisions
+              (or (gethash normalized-channel-id
+                           disco-state--message-revisions-by-channel)
+                  (let ((table (make-hash-table :test #'equal)))
+                    (puthash normalized-channel-id table
+                             disco-state--message-revisions-by-channel)
+                    table))))
+        (puthash normalized-channel-id revision
+                 disco-state--message-revision-by-channel)
+        (dolist (message-id changed-ids)
+          (puthash message-id revision revisions))))
+    (puthash normalized-channel-id messages disco-state--messages-by-channel)))
 
 (defun disco-state-messages (channel-id)
   "Return messages list for CHANNEL-ID."
-  (gethash channel-id disco-state--messages-by-channel))
+  (gethash (disco-state--normalize-id channel-id)
+           disco-state--messages-by-channel))
+
+(defun disco-state-message-revision (channel-id)
+  "Return the latest message-cache mutation revision for CHANNEL-ID."
+  (gethash (disco-state--normalize-id channel-id)
+           disco-state--message-revision-by-channel
+           0))
+
+(defun disco-state--message-mutated-after-p (channel-id message-id revision)
+  "Return non-nil when MESSAGE-ID in CHANNEL-ID changed after REVISION."
+  (let ((revisions
+         (gethash (disco-state--normalize-id channel-id)
+                  disco-state--message-revisions-by-channel)))
+    (> (if revisions
+           (gethash (disco-state--normalize-id message-id) revisions 0)
+         0)
+       revision)))
+
+(defun disco-state-merge-message-page (channel-id messages request-revision)
+  "Merge REST page MESSAGES into CHANNEL-ID at REQUEST-REVISION.
+
+Gateway and local mutations newer than REQUEST-REVISION take precedence,
+including deletions.  Return the resulting newest-first message list."
+  (let ((seen (make-hash-table :test #'equal))
+        merged)
+    (dolist (message (append (disco-state-messages channel-id)
+                             (cl-remove-if
+                              (lambda (candidate)
+                                (when-let* ((message-id (alist-get 'id candidate)))
+                                  (disco-state--message-mutated-after-p
+                                   channel-id message-id request-revision)))
+                              messages)))
+      (when-let* ((message-id
+                   (disco-state--normalize-id (alist-get 'id message))))
+        (unless (gethash message-id seen)
+          (puthash message-id t seen)
+          (push message merged))))
+    (setq merged
+          (sort merged
+                (lambda (left right)
+                  (disco-state-snowflake< (alist-get 'id right)
+                                           (alist-get 'id left)))))
+    (disco-state-put-messages channel-id merged)
+    merged))
 
 (defun disco-state-upsert-message (channel-id message)
   "Insert or replace MESSAGE in CHANNEL-ID cache, returning new message list."
@@ -664,7 +754,7 @@ Otherwise, replace threads only under the provided parent IDs."
                    (> disco-state-message-preview-cache-limit 0)
                    (> (length updated) disco-state-message-preview-cache-limit))
           (setq updated (seq-take updated disco-state-message-preview-cache-limit)))
-        (puthash normalized-channel-id updated disco-state--messages-by-channel)
+        (disco-state-put-messages normalized-channel-id updated)
         updated))))
 
 (defun disco-state-insert-pending-message (channel-id nonce content current-user-id

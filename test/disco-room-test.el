@@ -921,24 +921,24 @@
         (disco-room-search-channel)
         (should (equal "c1" (alist-get 'id passed-channel)))))))
 
-(ert-deftest disco-room-fetch-around-pending-jump-replaces-cache-and-jumps ()
+(ert-deftest disco-room-fetch-around-pending-jump-merges-cache-and-jumps ()
   (with-temp-buffer
     (disco-room-mode)
     (let ((disco-room--channel-id "chan")
-          (disco-room--pending-jump-message-id "m2")
+          (disco-room--pending-jump-message-id "20")
           (disco-room--refresh-generation 0)
           jumped
           rendered)
       (disco-state-reset)
       (disco-state-put-messages
        "chan"
-       '(((id . "m9") (channel_id . "chan") (content . "newer"))))
+       '(((id . "90") (channel_id . "chan") (content . "newer"))))
       (cl-letf (((symbol-function 'disco-api-channel-messages-around-async)
                  (lambda (_channel-id _message-id &rest args)
                    (funcall (plist-get args :on-success)
-                            '(((id . "m3") (channel_id . "chan") (content . "older"))
-                              ((id . "m2") (channel_id . "chan") (content . "target"))
-                              ((id . "m1") (channel_id . "chan") (content . "oldest"))))))
+                            '(((id . "30") (channel_id . "chan") (content . "older"))
+                              ((id . "20") (channel_id . "chan") (content . "target"))
+                              ((id . "10") (channel_id . "chan") (content . "oldest"))))))
                 ((symbol-function 'disco-room--callback-active-p)
                  (lambda (&rest _args) t))
                 ((symbol-function 'disco-room-render)
@@ -952,11 +952,49 @@
                  (lambda (&rest _args) nil)))
         (disco-room--fetch-around-pending-jump)
         (should rendered)
-        (should (equal "m2" jumped))
+        (should (equal "20" jumped))
         (should-not disco-room--pending-jump-message-id)
-        (should (equal '("m3" "m2" "m1")
+        (should (equal '("90" "30" "20" "10")
                        (mapcar (lambda (msg) (alist-get 'id msg))
                                (disco-state-messages "chan"))))))))
+
+(ert-deftest disco-room-refresh-preserves-gateway-mutations-during-request ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (let ((disco-room--channel-id "chan")
+          (disco-room--refresh-generation 0))
+      (disco-state-reset)
+      (disco-state-put-messages
+       "chan"
+       '(((id . "20") (channel_id . "chan") (content . "baseline"))
+         ((id . "10") (channel_id . "chan") (content . "deleted soon"))))
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (disco-state-put-messages
+                    "chan"
+                    '(((id . "30") (channel_id . "chan") (content . "gateway create"))
+                      ((id . "20") (channel_id . "chan") (content . "gateway update"))))
+                   (funcall (plist-get args :on-success)
+                            '(((id . "20") (channel_id . "chan")
+                               (content . "stale REST value"))
+                              ((id . "10") (channel_id . "chan")
+                               (content . "stale deleted value"))
+                              ((id . "5") (channel_id . "chan")
+                               (content . "REST history"))))))
+                ((symbol-function 'disco-room--update-frame-preserving-point)
+                 #'ignore)
+                ((symbol-function 'disco-room--mark-read) #'ignore)
+                ((symbol-function 'disco-room--at-message-bottom-p) (lambda () t))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'disco-room--resolve-pending-jump) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-refresh)
+        (let ((messages (disco-state-messages "chan")))
+          (should (equal '("30" "20" "5")
+                         (mapcar (lambda (message) (alist-get 'id message))
+                                 messages)))
+          (should (equal "gateway update"
+                         (alist-get 'content (cadr messages)))))))))
 
 (ert-deftest disco-room-fetch-around-pending-jump-errors-when-target-missing ()
   (with-temp-buffer

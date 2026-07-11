@@ -618,6 +618,34 @@
     (should (equal "1000" (alist-get 'id (car messages))))
     (should-not (alist-get 'pending (car messages)))))
 
+(ert-deftest disco-state-merge-message-page-preserves-concurrent-mutations ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-put-messages
+         "chan"
+         '(((id . "20") (content . "baseline newest"))
+           ((id . "10") (content . "baseline oldest"))))
+        (let ((request-revision (disco-state-message-revision "chan")))
+          ;; Simulate a Gateway update, delete, and create while REST is in flight.
+          (disco-state-put-messages
+           "chan"
+           '(((id . "30") (content . "gateway create"))
+             ((id . "20") (content . "gateway update"))))
+          (let ((merged
+                 (disco-state-merge-message-page
+                  "chan"
+                  '(((id . "20") (content . "stale REST value"))
+                    ((id . "10") (content . "stale deleted value"))
+                    ((id . "5") (content . "REST history")))
+                  request-revision)))
+            (should (equal '("30" "20" "5")
+                           (mapcar (lambda (message) (alist-get 'id message))
+                                   merged)))
+            (should (equal "gateway update"
+                           (alist-get 'content (cadr merged)))))))
+    (disco-state-reset)))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

@@ -2031,20 +2031,6 @@ Unread counters are always cleared locally."
   (setq disco-room--oldest-message-id
         (and messages (alist-get 'id (car (last messages))))))
 
-(defun disco-room--merge-message-pages (existing older)
-  "Merge EXISTING newest-first messages with OLDER page, de-duplicated.
-
-Both EXISTING and OLDER are newest-first lists."
-  (let ((seen (make-hash-table :test #'equal))
-        merged)
-    (dolist (msg (append existing older))
-      (let ((message-id (alist-get 'id msg)))
-        (unless (and message-id (gethash message-id seen))
-          (when message-id
-            (puthash message-id t seen))
-          (push msg merged))))
-    (nreverse merged)))
-
 (defun disco-room--message-id-at-point ()
   "Return message ID at point, or signal a user error.
 
@@ -2255,19 +2241,13 @@ page."
             (push message merged)))))
     (disco-room--sort-messages-newest-first (nreverse merged))))
 
-(defun disco-room--replace-messages-around-target (messages)
-  "Replace current room cache with MESSAGES and refresh cursor state."
-  (let ((ordered (disco-room--sort-messages-newest-first messages)))
-    (disco-state-put-messages disco-room--channel-id ordered)
-    (disco-room--update-message-window-state ordered)
-    ordered))
-
 (defun disco-room--fetch-around-pending-jump ()
   "Fetch one message page around current pending jump target."
   (let* ((room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
          (target-id disco-room--pending-jump-message-id)
          (generation (1+ disco-room--refresh-generation))
+         (request-revision (disco-state-message-revision channel-id))
          (limit (max 1 (or disco-room-jump-context-limit 50))))
     (unless (and (stringp target-id) (not (string-empty-p target-id)))
       (user-error "disco: pending jump target is empty"))
@@ -2288,7 +2268,9 @@ page."
            (setq disco-room--history-exhausted nil)
            (if (disco-room--message-list-contains-id-p messages target-id)
                (progn
-                 (disco-room--replace-messages-around-target messages)
+                 (let ((merged (disco-state-merge-message-page
+                                channel-id messages request-revision)))
+                   (disco-room--update-message-window-state merged))
                  (disco-room-render)
                  (setq disco-room--pending-jump-message-id nil)
                  (if (disco-room--jump-to-visible-message target-id)
@@ -5631,7 +5613,8 @@ Return non-nil when handled without full room rerender."
       (disco-room-filter-refresh)
     (let* ((room-buffer (current-buffer))
            (channel-id disco-room--channel-id)
-           (generation (1+ disco-room--refresh-generation)))
+           (generation (1+ disco-room--refresh-generation))
+           (request-revision (disco-state-message-revision channel-id)))
       (setq disco-room--refresh-generation generation)
       (setq disco-room--refresh-in-flight t)
       (disco-room--update-frame-preserving-point)
@@ -5642,8 +5625,9 @@ Return non-nil when handled without full room rerender."
          (when (disco-room--callback-active-p room-buffer channel-id generation)
            (with-current-buffer room-buffer
              (setq disco-room--history-exhausted nil)
-             (disco-state-put-messages channel-id messages)
-             (disco-room--update-message-window-state messages)
+             (let ((merged (disco-state-merge-message-page
+                            channel-id messages request-revision)))
+               (disco-room--update-message-window-state merged))
              (disco-room--mark-read)
              (setq disco-room--refresh-in-flight nil)
              (if (disco-room--at-message-bottom-p)
@@ -7143,6 +7127,7 @@ When called with prefix argument, force draft edit in minibuffer first."
     (let* ((room-buffer (current-buffer))
            (channel-id disco-room--channel-id)
            (generation disco-room--refresh-generation)
+           (request-revision (disco-state-message-revision channel-id))
            (before (or disco-room--oldest-message-id
                        (user-error "disco: no oldest message cursor; refresh first"))))
       (setq disco-room--older-in-flight t)
@@ -7158,19 +7143,18 @@ When called with prefix argument, force draft edit in minibuffer first."
                (setq disco-room--older-in-flight nil)
                (if (/= generation disco-room--refresh-generation)
                    (message "disco: discarded stale older-history page")
-                 (let ((existing (or (disco-state-messages channel-id) '())))
-                   (if (null older)
-                       (progn
-                         (setq disco-room--history-exhausted t)
-                         (disco-room--render-preserving-point)
-                         (disco-room--resolve-pending-jump)
-                         (message "disco: reached beginning of history"))
-                     (let ((merged (disco-room--merge-message-pages existing older)))
-                       (disco-state-put-messages channel-id merged)
-                       (disco-room--update-message-window-state merged)
+                 (if (null older)
+                     (progn
+                       (setq disco-room--history-exhausted t)
                        (disco-room--render-preserving-point)
                        (disco-room--resolve-pending-jump)
-                       (message "disco: loaded %d older messages" (length older))))))))))
+                       (message "disco: reached beginning of history"))
+                   (let ((merged (disco-state-merge-message-page
+                                  channel-id older request-revision)))
+                     (disco-room--update-message-window-state merged)
+                     (disco-room--render-preserving-point)
+                     (disco-room--resolve-pending-jump)
+                     (message "disco: loaded %d older messages" (length older)))))))))
        :on-error
        (lambda (err)
          (when (buffer-live-p room-buffer)
