@@ -544,6 +544,23 @@
                             (alist-get 'user
                                        (disco-state-guild-member "g1" "u1"))))))
 
+(ert-deftest disco-state-known-unread-message-count-uses-cache-and-fallback ()
+  (disco-state-reset)
+  (let ((channel '((id . "c1") (type . 0) (last_message_id . "13"))))
+    (disco-state-upsert-channel channel)
+    (disco-state-set-channel-last-read-message-id "c1" "10")
+    (disco-state-put-messages
+     "c1" '(((id . "13")) ((id . "12")) ((id . "9"))))
+    (should (= 2 (disco-state-channel-known-unread-message-count channel))))
+  (let ((channel '((id . "c2") (type . 0) (last_message_id . "20"))))
+    (disco-state-upsert-channel channel)
+    (disco-state-set-channel-last-read-message-id "c2" "19")
+    (should (= 1 (disco-state-channel-known-unread-message-count channel))))
+  (let ((channel '((id . "c3") (type . 0) (last_message_id . "30"))))
+    (disco-state-upsert-channel channel)
+    (disco-state-set-channel-last-read-message-id "c3" "30")
+    (should (= 0 (disco-state-channel-known-unread-message-count channel)))))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

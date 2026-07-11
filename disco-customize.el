@@ -15,6 +15,28 @@
   "Discord client for Emacs."
   :group 'comm)
 
+(defgroup disco-modes nil
+  "Global presentation modes for disco.el."
+  :group 'disco)
+
+(defcustom disco-mode-line-string-format
+  '("  " (:eval (disco-client-mode-line-icon))
+    (:eval (disco-client-mode-line-unread))
+    (:eval (disco-client-mode-line-mentions)))
+  "Format used by `disco-client-mode-line-mode'."
+  :type 'sexp
+  :group 'disco-modes)
+
+(defface disco-mode-line-unread
+  '((t :inherit warning :weight bold))
+  "Face for unread Discord channels in the mode line."
+  :group 'disco-modes)
+
+(defface disco-mode-line-mention
+  '((t :inherit error :weight bold))
+  "Face for unread Discord mentions in the mode line."
+  :group 'disco-modes)
+
 (defcustom disco-token nil
   "Discord token used for authenticated API requests.
 

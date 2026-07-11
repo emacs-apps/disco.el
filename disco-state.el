@@ -446,6 +446,14 @@ MEMBER-COUNT is optional approximate thread member count."
   "Return channel object for CHANNEL-ID."
   (gethash channel-id disco-state--channels-by-id))
 
+(defun disco-state-channels ()
+  "Return all indexed channels without duplicates."
+  (let (channels)
+    (maphash (lambda (_channel-id channel)
+               (push channel channels))
+             disco-state--channels-by-id)
+    channels))
+
 (defun disco-state-parent-threads (parent-id)
   "Return list of threads under PARENT-ID."
   (or (gethash parent-id disco-state--threads-by-parent) '()))
@@ -1206,6 +1214,30 @@ Returns updated summaries list."
                  (disco-state-snowflake< last-read-id last-message-id)))
         (disco-state-channel-has-unread-pins-p channel))))
 
+(defun disco-state-channel-known-unread-message-count (channel)
+  "Return the locally known unread message count for CHANNEL.
+
+Count cached messages newer than the read cursor.  Like ningen's
+`ChannelCountUnreads', return one when the channel is known to be unread but
+the local cache cannot establish a larger count.  The result is therefore a
+useful lower bound, not a protocol-provided exact total."
+  (let* ((channel-id (alist-get 'id channel))
+         (last-read-id (and channel-id
+                            (disco-state-channel-last-read-message-id channel-id)))
+         (messages (and channel-id (disco-state-messages channel-id)))
+         (known
+          (if (stringp last-read-id)
+              (cl-count-if
+               (lambda (message)
+                 (when-let* ((message-id
+                              (disco-state--normalize-id (alist-get 'id message))))
+                   (disco-state-snowflake< last-read-id message-id)))
+               messages)
+            0)))
+    (if (> known 0)
+        known
+      (if (disco-state-channel-own-has-unread-p channel) 1 0))))
+
 (defun disco-state-channel-has-unread-p (channel)
   "Return non-nil when CHANNEL has unread state, including child threads."
   (or (disco-state-channel-own-has-unread-p channel)
@@ -1337,6 +1369,10 @@ counter is reset to zero. VERSION is stored when provided."
 (defun disco-state--channel-muted-p (channel)
   "Return non-nil when CHANNEL is muted."
   (eq t (alist-get 'muted channel)))
+
+(defun disco-state-channel-muted-p (channel)
+  "Return non-nil when CHANNEL is muted for the current user."
+  (disco-state--channel-muted-p channel))
 
 (defun disco-state--message-create-should-increment-unread-p (channel message current-user-id)
   "Return non-nil when MESSAGE_CREATE should increment unread for CHANNEL."
