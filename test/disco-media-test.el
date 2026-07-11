@@ -337,6 +337,148 @@
          (url . "https://example.invalid/voice.ogg")))
       (should (equal "/tmp/voice.ogg" started-source)))))
 
+(ert-deftest disco-media-open-remote-image-caches-and-opens-in-emacs ()
+  "Remote images are cached by their bytes and never sent to a browser."
+  (let* ((disco-media-preview-cache-directory
+          (make-temp-file "disco-media-open" t))
+         (disco-media-animate-gifs nil)
+         (resource '((url . "https://example.com/assets/no-extension")))
+         opened-file)
+    (unwind-protect
+        (cl-letf (((symbol-function 'url-copy-file)
+                   (lambda (_url target &optional _ok-if-already-exists)
+                     (with-temp-file target
+                       (set-buffer-multibyte nil)
+                       (insert "GIF89a-discovery"))))
+                  ((symbol-function 'browse-url)
+                   (lambda (&rest _args)
+                     (ert-fail "images must not open in a browser"))))
+          (let ((disco-media-open-file-function
+                 (lambda (file)
+                   (setq opened-file file))))
+            (disco-media-open-resource resource 'image "image:test"))
+          (should (disco-media-file-present-p opened-file))
+          (should (equal (file-name-extension opened-file) "gif"))
+          (should (file-in-directory-p
+                   opened-file disco-media-preview-cache-directory)))
+      (when (file-directory-p disco-media-preview-cache-directory)
+        (delete-directory disco-media-preview-cache-directory t)))))
+
+(ert-deftest disco-media-open-gif-starts-only-an-idle-animation ()
+  "Opening a GIF starts looping without toggling an active animation off."
+  (let ((disco-media-animate-gifs t)
+        (gif "/tmp/disco-animated.gif")
+        timer
+        (toggle-count 0))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'get-file-buffer)
+                 (lambda (_file) (current-buffer)))
+                ((symbol-function 'derived-mode-p)
+                 (lambda (&rest _modes) t))
+                ((symbol-function 'image-get-display-property)
+                 (lambda () '(image :type gif)))
+                ((symbol-function 'image-multi-frame-p)
+                 (lambda (_image) '(2 . 0.1)))
+                ((symbol-function 'image-animate-timer)
+                 (lambda (_image) timer))
+                ((symbol-function 'image-toggle-animation)
+                 (lambda () (cl-incf toggle-count))))
+        (disco-media--maybe-start-gif-animation gif)
+        (should (= toggle-count 1))
+        (should image-animate-loop)
+        (setq timer t)
+        (disco-media--maybe-start-gif-animation gif)
+        (should (= toggle-count 1))))))
+
+(ert-deftest disco-media-open-video-url-uses-configured-player ()
+  "Video URLs are passed to the configured player without a browser path."
+  (let ((disco-media-video-player-command "mpv --no-terminal")
+        command)
+    (cl-letf (((symbol-function 'disco-media--command-runnable-p)
+               (lambda (_configured-command) t))
+              ((symbol-function 'make-process)
+               (lambda (&rest properties)
+                 (setq command (plist-get properties :command))
+                 'disco-test-player))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "videos must not open in a browser"))))
+      (should
+       (eq (disco-media-open-resource
+            '((url . "https://example.com/movie.mp4")) 'video)
+           'disco-test-player))
+      (should (equal command
+                     '("mpv" "--no-terminal"
+                       "https://example.com/movie.mp4"))))))
+
+(ert-deftest disco-media-open-video-errors-when-player-is-unavailable ()
+  "Missing video players are explicit rather than browser fallbacks."
+  (let ((disco-media-video-player-command nil))
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "videos must not open in a browser"))))
+      (should-error
+       (disco-media-open-resource
+        '((url . "https://example.com/movie.mp4")) 'video)
+       :type 'user-error))))
+
+(ert-deftest disco-media-remote-file-download-streams-asynchronously-with-plz ()
+  (let ((disco-media--open-file-plz-queue nil)
+        queued-properties
+        success-value
+        failure)
+    (cl-letf (((symbol-function 'make-plz-queue) (lambda (&rest _) 'queue))
+              ((symbol-function 'plz-run) #'ignore)
+              ((symbol-function 'plz-queue)
+               (lambda (&rest arguments)
+                 (setq queued-properties (nthcdr 3 arguments))))
+              ((symbol-function 'url-copy-file)
+               (lambda (&rest _)
+                 (ert-fail "file downloads must not block on url-copy-file"))))
+      (disco-media-copy-or-download-resource-async
+       '((url . "https://example.com/report.pdf"))
+       "/tmp/disco-report.pdf"
+       (lambda (file) (setq success-value file))
+       (lambda (reason) (setq failure reason)))
+      (should-not success-value)
+      (should-not failure)
+      (should (equal (plist-get queued-properties :as)
+                     '(file "/tmp/disco-report.pdf")))
+      (funcall (plist-get queued-properties :then) "/tmp/disco-report.pdf")
+      (should (equal success-value "/tmp/disco-report.pdf")))))
+
+(ert-deftest disco-media-open-photo-attachment-uses-original-not-proxy-url ()
+  "The CDN proxy remains preview-only when opening a Discord image."
+  (let (opened-arguments)
+    (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+               (lambda (_attachment)
+                 '(:status not-downloaded :path "/missing/cat.png")))
+              ((symbol-function 'disco-media-open-resource)
+               (lambda (&rest arguments)
+                 (setq opened-arguments arguments))))
+      (disco-media-open-attachment
+       '((id . "42")
+         (filename . "cat.png")
+         (content_type . "image/png")
+         (url . "https://cdn.example.invalid/cat.png")
+         (proxy_url . "https://media.example.invalid/cat.png")))
+      (should (equal
+               (alist-get 'url (car opened-arguments))
+               "https://cdn.example.invalid/cat.png"))
+      (should (eq (nth 1 opened-arguments) 'image)))))
+
+(ert-deftest disco-media-action-properties-wrap-zero-argument-callbacks ()
+  (with-temp-buffer
+    (let ((called nil))
+      (insert "media")
+      (disco-media-add-action-properties
+       (point-min) (point-max) (lambda () (setq called t)) "Open media")
+      (let* ((map (get-text-property (point-min) 'keymap))
+             (command (lookup-key map (kbd "RET"))))
+        (should (commandp command))
+        (call-interactively command)
+        (should called)))))
+
 (provide 'disco-media-test)
 
 ;;; disco-media-test.el ends here

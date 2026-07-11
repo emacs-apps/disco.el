@@ -11,6 +11,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'cl-lib)
+(require 'image-mode)
 (require 'browse-url)
 (require 'url-handlers)
 (require 'dom)
@@ -58,12 +59,26 @@ Set to nil to disable per-render capping."
    ((executable-find "vlc") "vlc")
    ((executable-find "ffplay") "ffplay -autoexit")
    (t nil))
-  "Command used to play video URLs/files from cards.
+  "Command used to play video URLs and local files.
 
-When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
+An unset or unrunnable command is an explicit error; media is never silently
+sent to a web browser."
   :type '(choice
-          (const :tag "Use browser" nil)
+          (const :tag "No video player" nil)
           (string :tag "Command line"))
+  :group 'disco-media)
+
+(defcustom disco-media-open-file-function #'find-file
+  "Function used to open downloaded files and images.
+
+The default keeps media inside Emacs, matching telega's
+`telega-open-file-function'.  The function receives one local filename."
+  :type 'function
+  :group 'disco-media)
+
+(defcustom disco-media-animate-gifs t
+  "When non-nil, start GIF animation after opening it in `image-mode'."
+  :type 'boolean
   :group 'disco-media)
 
 (defcustom disco-media-audio-player-command
@@ -76,10 +91,10 @@ When nil, fallback uses browser handlers (`browse-url` / `browse-url-of-file`)."
 
 When this resolves to `ffplay', disco can track play/pause/progress inline in a
 telega-style attachment card.  Other players are launched as best-effort
-external commands without inline playback state.  When nil, fallback uses
-browser/file handlers."
+external commands without inline playback state.  An unavailable player is an
+explicit error."
   :type '(choice
-          (const :tag "Use browser/file handler" nil)
+          (const :tag "No audio player" nil)
           (string :tag "Command line"))
   :group 'disco-media)
 
@@ -94,7 +109,8 @@ browser/file handlers."
   :group 'disco-media)
 
 (defconst disco-media--cache-extensions
-  '("webp" "png" "jpg" "jpeg" "gif" "img")
+  '("webp" "png" "jpg" "jpeg" "gif" "bmp" "heic" "heif"
+    "tif" "tiff" "svg" "svgz" "img")
   "Preferred media cache file extension candidates.")
 
 (defconst disco-media--attachment-flag-is-spoiler (ash 1 3)
@@ -113,6 +129,9 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-media--attachment-preview-plz-queue nil
   "Shared plz queue used for asynchronous attachment preview downloads.")
+
+(defvar disco-media--open-file-plz-queue nil
+  "Shared plz queue used to cache remote files before opening them.")
 
 (defvar disco-media--attachment-preview-plz-queue-limit nil
   "Last applied queue limit for `disco-media--attachment-preview-plz-queue'.")
@@ -295,6 +314,61 @@ which keeps multi-attachment messages segment-aware.")
   (and (stringp url)
        (not (string-empty-p url))))
 
+(defun disco-media-file-present-p (file)
+  "Return non-nil when FILE names an existing local file."
+  (and (stringp file) (file-exists-p file)))
+
+(defun disco-media-url-filename (url)
+  "Extract a best-effort filename from URL."
+  (let* ((base (car (split-string (or url "") "[?#]")))
+         (name (file-name-nondirectory base)))
+    (and (disco-media-url-present-p name) name)))
+
+(defun disco-media-image-file-name-p (filename)
+  "Return non-nil when FILENAME looks like an image file."
+  (and (stringp filename)
+       (string-match-p
+        (rx "." (or "png" "jpg" "jpeg" "gif" "webp" "bmp" "svg"
+                    "svgz" "heic" "heif" "tif" "tiff") string-end)
+        (downcase (car (split-string filename "[?#]"))))))
+
+(defun disco-media-video-file-name-p (filename)
+  "Return non-nil when FILENAME looks like a video file."
+  (and (stringp filename)
+       (string-match-p
+        (rx "." (or "mp4" "mov" "mkv" "webm" "avi" "flv" "m4v")
+            string-end)
+        (downcase (car (split-string filename "[?#]"))))))
+
+(defun disco-media-gif-file-name-p (filename)
+  "Return non-nil when FILENAME looks like a GIF image."
+  (and (stringp filename)
+       (string-match-p
+        (rx ".gif" string-end)
+        (downcase (car (split-string filename "[?#]"))))))
+
+(defun disco-media-resource-name (resource)
+  "Return the best filename hint from RESOURCE."
+  (let ((file (alist-get 'file resource)))
+    (or (alist-get 'name resource)
+        (alist-get 'filename resource)
+        (alist-get 'file_name resource)
+        (and (stringp file) (file-name-nondirectory file))
+        (disco-media-url-filename (alist-get 'url resource)))))
+
+(defun disco-media-resource-kind (resource &optional kind)
+  "Return explicit KIND or infer a semantic open kind from RESOURCE."
+  (or kind
+      (let ((name (disco-media-resource-name resource))
+            (content-type
+             (downcase (or (alist-get 'content_type resource) ""))))
+        (cond
+         ((string-prefix-p "video/" content-type) 'video)
+         ((string-prefix-p "image/" content-type) 'image)
+         ((disco-media-video-file-name-p name) 'video)
+         ((disco-media-image-file-name-p name) 'image)
+         (t 'file)))))
+
 (defun disco-media--split-command-args (command)
   "Normalize COMMAND into argv list, or nil when unusable."
   (cond
@@ -342,44 +416,76 @@ which keeps multi-attachment messages segment-aware.")
     (and (disco-media--command-runnable-p command)
          (equal (disco-media--audio-player-program-name) "ffplay"))))
 
-(defun disco-media--start-video-player (source)
-  "Start configured video player for SOURCE and return non-nil on success."
+(defun disco-media-play-video-source (source)
+  "Play local file or URL SOURCE with the configured video player."
+  (unless (disco-media-url-present-p source)
+    (user-error "disco: video has no playable source"))
   (let* ((command (disco-media--configured-video-player-command))
          (argv (disco-media--split-command-args command))
          (program (car argv))
          (args (append (cdr argv) (list source))))
-    (when (and program
-               (disco-media--command-runnable-p command))
-      (condition-case nil
-          (progn
-            (make-process
-             :name "disco-video-player"
-             :buffer nil
-             :command (cons program args)
-             :noquery t)
-            t)
-        (error nil)))))
+    (unless (and program (disco-media--command-runnable-p command))
+      (user-error
+       "disco: video player is unavailable; customize `disco-media-video-player-command'"))
+    (let ((process
+           (make-process
+            :name "disco-video-player"
+            :buffer nil
+            :command (cons program args)
+            :noquery t)))
+      (message "disco: playing video with %s" (file-name-nondirectory program))
+      process)))
 
 (defun disco-media-play-video-url (url)
-  "Play video URL using configured player, falling back to browser."
-  (when (disco-media-url-present-p url)
-    (unless (disco-media--start-video-player url)
-      (browse-url url t))))
+  "Play video URL using the configured player."
+  (disco-media-play-video-source url))
 
 (defun disco-media-play-video-file (path)
-  "Play local video file at PATH using configured player or browser fallback."
-  (when (and (stringp path)
-             (file-exists-p path))
-    (unless (disco-media--start-video-player path)
-      (browse-url-of-file path))))
+  "Play local video file at PATH using the configured player."
+  (unless (and (stringp path) (file-exists-p path))
+    (user-error "disco: local video file does not exist: %s" path))
+  (disco-media-play-video-source path))
+
+(defun disco-media--maybe-start-gif-animation (file)
+  "Start GIF animation for FILE when its `image-mode' buffer is idle."
+  (when (and disco-media-animate-gifs
+             (disco-media-gif-file-name-p file))
+    (when-let* ((buffer (get-file-buffer file)))
+      (with-current-buffer buffer
+        (when (derived-mode-p 'image-mode)
+          (let ((image (image-get-display-property)))
+            (when (and image
+                       (image-multi-frame-p image)
+                       (not (image-animate-timer image)))
+              (setq-local image-animate-loop t)
+              (image-toggle-animation))))))))
+
+(defun disco-media-open-file (file)
+  "Open local FILE through `disco-media-open-file-function'.
+
+Refresh an existing unmodified file buffer's modtime before opening it.  GIFs
+opened in Emacs start looping automatically."
+  (unless (disco-media-file-present-p file)
+    (user-error "disco: local media file does not exist: %s" file))
+  (when-let* ((buffer (get-file-buffer file)))
+    (with-current-buffer buffer
+      (unless (buffer-modified-p)
+        (set-visited-file-modtime))))
+  (prog1
+      (funcall disco-media-open-file-function file)
+    (disco-media--maybe-start-gif-animation file)))
 
 (defun disco-media-add-action-properties (start end callback help-echo)
   "Attach CALLBACK mouse/key handlers to text between START and END."
   (when (and (functionp callback)
              (< start end))
-    (let ((action-map (make-sparse-keymap)))
-      (define-key action-map [mouse-1] callback)
-      (define-key action-map (kbd "RET") callback)
+    (let ((action-map (make-sparse-keymap))
+          (command
+           (lambda (&optional _event)
+             (interactive)
+             (funcall callback))))
+      (define-key action-map [mouse-1] command)
+      (define-key action-map (kbd "RET") command)
       (add-text-properties
        start
        end
@@ -487,6 +593,22 @@ or OneBot segments."
        (browse-url url t))
      (format "Open media: %s" url))))
 
+(defun disco-media-add-open-image-properties
+    (start end url &optional cache-key)
+  "Attach browser-free image open handlers to text between START and END.
+
+URL is cached under CACHE-KEY before being opened inside Emacs."
+  (when (and (disco-media-url-present-p url)
+             (< start end))
+    (disco-media-add-action-properties
+     start
+     end
+     (lambda (&optional _event)
+       (interactive)
+       (disco-media-open-resource
+        `((url . ,url)) 'image cache-key))
+     (format "Open image in Emacs: %s" url))))
+
 (defun disco-media-add-play-video-properties (start end video-url)
   "Attach mouse/key handlers to play VIDEO-URL for text START..END."
   (when (and (disco-media-url-present-p video-url)
@@ -525,8 +647,11 @@ or OneBot segments."
                          '(line-height t
                            rear-nonsticky (line-height)))))
 
-(defun disco-media-insert-image-slices (image &optional url prefix-str fallback)
-  "Insert IMAGE as line slices with optional URL open behavior."
+(defun disco-media-insert-image-slices
+    (image &optional action prefix-str fallback help-echo)
+  "Insert IMAGE as line slices with optional ACTION.
+
+FALLBACK is protocol alt text, not a synthetic media-kind label."
   (let* ((slice-count (disco-media-image-slice-count image))
          (slice-height-px (max 1
                                (or (ignore-errors (line-pixel-height))
@@ -543,7 +668,8 @@ or OneBot segments."
                          1.0
                          slice-height-px)))
         (insert-image image label nil slice)
-        (disco-media-add-open-url-properties slice-start (point) url)))))
+        (disco-media-add-action-properties
+         slice-start (point) action (or help-echo "Open media"))))))
 
 (defun disco-media--char-pixel-width ()
   "Return default character width in pixels for current frame."
@@ -1403,6 +1529,197 @@ attachment/download key associated with the update when available."
      (t fallback-extension)))
    (t fallback-extension)))
 
+(defun disco-media--open-cache-file-base (directory key)
+  "Return cache file base in DIRECTORY for logical KEY."
+  (expand-file-name (md5 (format "%s" key)) directory))
+
+(defun disco-media--open-cache-existing-file (directory key)
+  "Return an existing cached file in DIRECTORY for KEY, or nil."
+  (let ((base (disco-media--open-cache-file-base directory key)))
+    (seq-find
+     #'file-exists-p
+     (mapcar (lambda (extension) (format "%s.%s" base extension))
+             disco-media--cache-extensions))))
+
+(defun disco-media--delete-open-cache-files (cache-base)
+  "Delete cached media files rooted at CACHE-BASE."
+  (dolist (extension disco-media--cache-extensions)
+    (let ((file (format "%s.%s" cache-base extension)))
+      (when (file-exists-p file)
+        (ignore-errors (delete-file file))))))
+
+(defun disco-media--read-file-prefix (file limit)
+  "Return up to LIMIT literal bytes from FILE."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file nil 0 limit)
+    (buffer-string)))
+
+(defun disco-media--resource-image-cache-key (resource cache-key)
+  "Return a disk-cache key for image RESOURCE and optional CACHE-KEY."
+  (or cache-key
+      (when-let* ((url (alist-get 'url resource)))
+        (format "open-image-url:%s" url))))
+
+(defun disco-media--cache-image-resource-for-open
+    (resource cache-key cache-directory)
+  "Cache image RESOURCE in CACHE-DIRECTORY and return its local path."
+  (let* ((url (alist-get 'url resource))
+         (key (disco-media--resource-image-cache-key resource cache-key))
+         (existing (and key
+                        (disco-media--open-cache-existing-file
+                         cache-directory key))))
+    (if existing
+        existing
+      (unless (disco-media-url-present-p url)
+        (user-error "disco: image resource has no URL"))
+      (let* ((cache-base
+              (disco-media--open-cache-file-base cache-directory key))
+             (temporary (format "%s.part" cache-base))
+             (extension-hint
+              (downcase
+               (or (file-name-extension
+                    (or (disco-media-url-filename url) ""))
+                   "img")))
+             (url-extension
+              (if (member extension-hint disco-media--cache-extensions)
+                  extension-hint
+                "img"))
+             completed)
+        (make-directory cache-directory t)
+        (unwind-protect
+            (progn
+              (url-copy-file url temporary t)
+              (let* ((bytes
+                      (disco-media-normalize-image-bytes
+                       (disco-media--read-file-prefix temporary 64)))
+                     (extension
+                      (disco-media-bytes->extension bytes url-extension))
+                     (target (format "%s.%s" cache-base extension)))
+                (disco-media--delete-open-cache-files cache-base)
+                (rename-file temporary target t)
+                (setq completed t)
+                target))
+          (unless completed
+            (when (file-exists-p temporary)
+              (ignore-errors (delete-file temporary)))))))))
+
+(defun disco-media--open-file-ensure-queue ()
+  "Return the shared queue for files cached before opening."
+  (unless disco-media--open-file-plz-queue
+    (setq disco-media--open-file-plz-queue (make-plz-queue :limit 3)))
+  disco-media--open-file-plz-queue)
+
+(defun disco-media--async-error-text (error-data)
+  "Return a readable message for asynchronous ERROR-DATA."
+  (condition-case nil
+      (error-message-string error-data)
+    (error (format "%s" error-data))))
+
+(defun disco-media-copy-or-download-resource-async
+    (resource target success error)
+  "Copy or download RESOURCE into TARGET, then call SUCCESS or ERROR."
+  (let ((file (alist-get 'file resource))
+        (url (alist-get 'url resource)))
+    (condition-case err
+        (progn
+          (make-directory
+           (or (file-name-directory target) disco-media-download-directory) t)
+          (cond
+           ((disco-media-file-present-p file)
+            (unless (and (fboundp 'file-equal-p)
+                         (file-exists-p target)
+                         (file-equal-p file target))
+              (copy-file file target t))
+            (funcall success target))
+           ((disco-media-url-present-p url)
+            (let ((queue (disco-media--open-file-ensure-queue)))
+              (plz-queue
+                queue 'get url
+                :as `(file ,target)
+                :noquery t
+                :then (lambda (_file) (funcall success target))
+                :else (lambda (download-error)
+                        (funcall error
+                                 (disco-media--async-error-text
+                                  download-error))))
+              (plz-run queue)))
+           (t
+            (funcall error "resource has neither local file nor URL"))))
+      (error
+       (funcall error (error-message-string err))))))
+
+(defun disco-media--cache-file-resource-for-open
+    (resource cache-key cache-directory callback errback)
+  "Cache non-image RESOURCE, then pass its local path to CALLBACK."
+  (let* ((url (alist-get 'url resource))
+         (name (disco-media-sanitize-filename
+                (or (disco-media-resource-name resource) "media.bin")))
+         (key (or cache-key (format "open-file-url:%s" url)))
+         (directory (expand-file-name "open" cache-directory))
+         (target (expand-file-name
+                  (format "%s-%s"
+                          (substring (md5 (format "%s" key)) 0 10)
+                          name)
+                  directory)))
+    (if (disco-media-file-present-p target)
+        (funcall callback target)
+      (disco-media-copy-or-download-resource-async
+       resource target callback errback))))
+
+(cl-defun disco-media-open-resource
+    (resource &optional kind cache-key
+              &key
+              (cache-directory disco-media-preview-cache-directory)
+              cache-update-function
+              (client-label "disco"))
+  "Open RESOURCE according to semantic KIND without a browser fallback.
+
+Images and GIFs are cached and opened inside Emacs, videos use
+`disco-media-video-player-command', and other remote files are cached
+asynchronously before opening.  CACHE-KEY names the disk entry.
+CACHE-DIRECTORY selects its root.  CACHE-UPDATE-FUNCTION receives the updated
+resource after a remote file becomes local.  CLIENT-LABEL prefixes messages."
+  (let* ((resource (copy-tree resource))
+         (kind (disco-media-resource-kind resource kind))
+         (file (alist-get 'file resource))
+         (url (alist-get 'url resource)))
+    (cl-labels
+        ((remember (local-file)
+           (setf (alist-get 'file resource nil nil #'eq) local-file)
+           (when (functionp cache-update-function)
+             (funcall cache-update-function (copy-tree resource)))
+           local-file)
+         (open-local (local-file)
+           (disco-media-open-file (remember local-file))))
+      (pcase kind
+        ('video
+         (disco-media-play-video-source
+          (cond
+           ((disco-media-file-present-p file) file)
+           ((disco-media-url-present-p url) url)
+           (t
+            (user-error "%s: video resource has neither local file nor URL"
+                        client-label)))))
+        ('image
+         (open-local
+          (if (disco-media-file-present-p file)
+              file
+            (disco-media--cache-image-resource-for-open
+             resource cache-key cache-directory))))
+        (_
+         (if (disco-media-file-present-p file)
+             (open-local file)
+           (message "%s: downloading media…" client-label)
+           (disco-media--cache-file-resource-for-open
+            resource
+            cache-key
+            cache-directory
+            #'open-local
+            (lambda (reason)
+              (message "%s: failed to open media: %s"
+                       client-label reason)))))))))
+
 (defun disco-media--attachment-image-p (attachment)
   "Return non-nil when ATTACHMENT is image-like."
   (let ((content-type (downcase (or (alist-get 'content_type attachment) "")))
@@ -1826,7 +2143,7 @@ available."
         (string-join (nreverse parts) "  ")
       "size=n/a")))
 
-(defun disco-media--sanitize-filename (filename)
+(defun disco-media-sanitize-filename (filename)
   "Return filesystem-safe variant of FILENAME."
   (replace-regexp-in-string
    "[[:cntrl:]/\\]+"
@@ -1854,7 +2171,7 @@ available."
 (defun disco-media-attachment-download-path (attachment)
   "Return default local download path for ATTACHMENT."
   (let* ((key (disco-media-attachment-download-key attachment))
-         (safe-name (disco-media--sanitize-filename
+         (safe-name (disco-media-sanitize-filename
                      (disco-media-attachment-default-save-name attachment))))
     (expand-file-name
      (format "%s-%s" (substring (md5 key) 0 10) safe-name)
@@ -1927,7 +2244,7 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
                     path
                     (if fallback-p " (url fallback)" ""))
            (when open-after
-             (find-file path))
+             (disco-media-open-file path))
            (when (functionp on-success)
              (funcall on-success path)))
          (finish-error (current err)
@@ -2019,7 +2336,7 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
          (path (plist-get entry :path)))
     (unless (and (stringp path) (file-exists-p path))
       (user-error "disco: attachment file is not downloaded yet"))
-    (find-file path)))
+    (disco-media-open-file path)))
 
 (defun disco-media-play-attachment-video (attachment)
   "Play ATTACHMENT video preferring local file when available."
@@ -2273,7 +2590,8 @@ streamed Discord voice-message URLs."
           (disco-media--start-inline-audio-player attachment path paused-at)
         (disco-media--set-attachment-audio-pending-play attachment nil)
         (unless (disco-media--start-external-audio-player path)
-          (browse-url-of-file path))))
+          (user-error
+           "disco: audio player is unavailable; customize `disco-media-audio-player-command'"))))
      ((eq status 'downloading)
       (if (disco-media-attachment-audio-pending-play-p attachment)
           (progn
@@ -2331,12 +2649,21 @@ When TARGET-PATH is nil, prompt interactively for destination path."
     (pcase kind
       ('video (disco-media-play-attachment-video attachment))
       ('audio (disco-media-play-attachment-audio attachment))
-      (_
+      ('photo
+       (disco-media-open-resource
+        `((file . ,(and (disco-media-file-present-p path) path))
+          (url . ,url)
+          (filename . ,(disco-media-attachment-display-name attachment))
+          (content_type . ,(alist-get 'content_type attachment)))
+        'image
+        (format "attachment-open:%s"
+                (disco-media-attachment-download-key attachment))))
+      ('document
        (cond
-        ((and (stringp path) (file-exists-p path))
+        ((disco-media-file-present-p path)
          (disco-media-open-downloaded-attachment attachment))
         ((disco-media-url-present-p url)
-         (browse-url url t))
+         (disco-media-start-attachment-download attachment t))
         (t
          (user-error "disco: attachment has no openable source")))))))
 

@@ -339,12 +339,16 @@ the final card span."
      :prefix (or prefix "    ")
      :face face)))
 
-(cl-defun disco-ins-insert-attachment-url-line (url &key prefix face)
-  "Insert clickable attachment URL line when URL is non-empty."
+(cl-defun disco-ins-insert-attachment-url-line
+    (url &key prefix face action help-echo)
+  "Insert attachment URL and bind ACTION to it when non-empty."
   (when (disco-media-url-present-p url)
     (let ((start (point)))
       (insert url "\n")
-      (disco-media-add-open-url-properties start (max start (1- (point))) url)
+      (when (functionp action)
+        (disco-media-add-action-properties
+         start (max start (1- (point))) action
+         (or help-echo "Open attachment")))
       (disco-ui-apply-line-prefix start (point) (or prefix "    "))
       (when face
         (disco-ui-append-face start (point) face))
@@ -453,7 +457,8 @@ be shown yet."
                              (null cache-key))
                         nil)
                        ((not rendering-ok) "[preview disabled]")
-                       ((not (disco-media-url-present-p preview-url)) "[no preview URL]")
+                       ((not (disco-media-url-present-p preview-url))
+                        "[no preview URL]")
                        ((eq cache-state :missing)
                         (if video-p
                             "[video preview unavailable]"
@@ -466,19 +471,16 @@ be shown yet."
             (apply-face t))
         (if preview
             (condition-case _
-                (let ((slice-start (point)))
+                (progn
                   (setq apply-face nil)
                   (disco-media-insert-image-slices
                    preview
-                   (unless video-p preview-url)
+                   (lambda ()
+                     (disco-media-open-attachment attachment))
                    nil
-                   (if video-p "[video]" "[image]"))
-                  (when (and video-p
-                             (disco-media-url-present-p preview-url))
-                    (disco-media-add-play-video-properties
-                     slice-start
-                     (point)
-                     preview-url)))
+                   (or (alist-get 'description attachment)
+                       (if video-p "[video]" "[image]"))
+                   (if video-p "Play video" "Open image in Emacs")))
               (error
                (setq apply-face t)
                (insert (or placeholder
@@ -542,7 +544,8 @@ be shown yet."
            (disco-ins-insert-attachment-url-line
             (disco-media-attachment-download-url attachment)
             :prefix prefix-state
-            :face 'shadow)))))))
+            :face 'shadow
+            :action (lambda () (disco-media-open-attachment attachment)))))))))
 
 (cl-defun disco-ins-insert-attachment-photo (attachment &key prefix border-face
                                                         title-face meta-face
@@ -587,7 +590,9 @@ be shown yet."
            (disco-ins-insert-attachment-url-line
             (disco-media-attachment-download-url attachment)
             :prefix prefix-state
-            :face 'shadow)))))))
+            :face 'shadow
+            :action (lambda () (disco-media-open-attachment attachment))
+            :help-echo "Open image in Emacs")))))))
 
 (cl-defun disco-ins-insert-attachment-video (attachment &key prefix border-face
                                                         title-face meta-face
@@ -633,7 +638,9 @@ be shown yet."
            (disco-ins-insert-attachment-url-line
             (disco-media-attachment-download-url attachment)
             :prefix prefix-state
-            :face 'shadow)))))))
+            :face 'shadow
+            :action (lambda () (disco-media-open-attachment attachment))
+            :help-echo "Play video")))))))
 
 (defun disco-ins--attachment-audio-tag (attachment)
   "Return header tag string for ATTACHMENT audio payload."
@@ -774,7 +781,9 @@ be shown yet."
           (disco-ins-insert-attachment-url-line
            (disco-media-attachment-download-url attachment)
            :prefix prefix-state
-           :face 'shadow))))
+           :face 'shadow
+           :action (lambda () (disco-media-open-attachment attachment))
+           :help-echo "Play audio"))))
     (add-text-properties
      card-start (point)
      (list disco-media-card-context-property context))

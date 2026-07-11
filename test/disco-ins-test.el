@@ -196,7 +196,7 @@
                  (lambda (image)
                    (eq image :spoiler-preview)))
                 ((symbol-function 'disco-media-insert-image-slices)
-                 (lambda (_image &optional _url _prefix _fallback)
+                 (lambda (_image &rest _args)
                    (insert "[spoiler-preview]"))))
         (disco-ins-insert-attachment-spoiler-placeholder
          '((filename . "SPOILER_cat.png"))
@@ -260,7 +260,7 @@
                (lambda (_attachment)
                  :fake-preview))
               ((symbol-function 'disco-media-insert-image-slices)
-               (lambda (_image &optional _url _prefix _fallback)
+               (lambda (_image &rest _args)
                  (insert "[image-preview]"))))
       (disco-ins-insert-attachment-photo
        '((filename . "cat.png")
@@ -289,7 +289,9 @@
 (ert-deftest disco-ins-insert-attachment-video-uses-card-as-play-action ()
   (let ((video-file (make-temp-file "disco-ins-video" nil ".mp4"))
         played
-        decorated)
+        decorated
+        preview-action
+        preview-help)
     (unwind-protect
         (with-temp-buffer
           (cl-letf (((symbol-function 'disco-media-attachment-download-state)
@@ -306,7 +308,9 @@
                        (setq decorated image)
                        :decorated-preview))
                     ((symbol-function 'disco-media-insert-image-slices)
-                     (lambda (_image &optional _url _prefix _fallback)
+                     (lambda (_image &optional action _prefix _fallback help)
+                       (setq preview-action action
+                             preview-help help)
                        (insert "[video-preview]")))
                     ((symbol-function 'disco-media-play-attachment-video)
                      (lambda (_attachment)
@@ -328,11 +332,11 @@
             (goto-char (point-min))
             (disco-media-card-call-action 'open)
             (should played)
-            (goto-char (point-min))
-            (search-forward "[video-preview]")
-            (let ((pos (match-beginning 0)))
-              (should (string-match-p "Play video"
-                                      (or (get-text-property pos 'help-echo) ""))))))
+            (should (functionp preview-action))
+            (should (string-match-p "Play video" preview-help))
+            (setq played nil)
+            (funcall preview-action)
+            (should played)))
       (ignore-errors (delete-file video-file)))))
 
 (ert-deftest disco-ins-insert-attachment-transfer-line-renders-status-only ()

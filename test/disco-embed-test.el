@@ -101,6 +101,52 @@
         (should-not (nth 2 call))
         (should (consp (nth 3 call)))))))
 
+(ert-deftest disco-embed-preview-attachment-separates-source-and-proxy-urls ()
+  "Proxy URLs feed previews while the original CDN URL remains the open target."
+  (let* ((embed '((type . "rich")
+                  (image . ((url . "https://cdn.example.invalid/cat.png")
+                            (proxy_url . "https://media.example.invalid/cat.png")
+                            (width . 640)
+                            (height . 480)))))
+         (attachment
+          (disco-embed--preview-attachment '((id . "m1")) embed 1)))
+    (should (equal (alist-get 'url attachment)
+                   "https://cdn.example.invalid/cat.png"))
+    (should (equal (alist-get 'proxy_url attachment)
+                   "https://media.example.invalid/cat.png"))))
+
+(ert-deftest disco-embed-attachment-scheme-source-resolves-original-url ()
+  (let* ((msg '((id . "m1")
+                (attachments
+                 . (((filename . "cat.png")
+                     (url . "https://cdn.example.invalid/cat.png")
+                     (proxy_url . "https://media.example.invalid/cat.png"))))))
+         (embed '((type . "rich")
+                  (image . ((url . "attachment://cat.png")))))
+         (attachment (disco-embed--preview-attachment msg embed 1)))
+    (should (equal (alist-get 'url attachment)
+                   "https://cdn.example.invalid/cat.png"))
+    (should (equal (alist-get 'proxy_url attachment)
+                   "https://media.example.invalid/cat.png"))))
+
+(ert-deftest disco-embed-preview-slice-opens-image-through-shared-backend ()
+  (let (open-url open-key)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'image-size)
+                 (lambda (&rest _args) '(4 . 2)))
+                ((symbol-function 'insert-image)
+                 (lambda (_image fallback &optional _area _slice)
+                   (insert fallback)))
+                ((symbol-function 'disco-media-add-open-image-properties)
+                 (lambda (_start _end url &optional cache-key)
+                   (setq open-url url
+                         open-key cache-key))))
+        (disco-embed--insert-preview-image-slice
+         :image 0 "https://cdn.example.invalid/cat.png"
+         "[image]" "embed-open-image:cat")))
+    (should (equal open-url "https://cdn.example.invalid/cat.png"))
+    (should (equal open-key "embed-open-image:cat"))))
+
 (provide 'disco-embed-test)
 
 ;;; disco-embed-test.el ends here
