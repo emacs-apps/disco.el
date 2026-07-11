@@ -21,6 +21,7 @@
 (require 'disco-gateway)
 (require 'disco-msg)
 (require 'disco-permission)
+(require 'disco-preview)
 (require 'disco-room)
 (require 'disco-thread)
 (require 'disco-view)
@@ -48,14 +49,10 @@
 (defvar disco-root--search-thread-table)
 (defvar disco-root--section-order)
 (defvar disco-root--section-expanded)
-(defvar disco-root--guild-expanded)
-(defvar disco-root--guild-load-status)
-(defvar disco-root--category-expanded)
 (defvar disco-root--ewoc)
 (defvar disco-root--channel-node-table)
 (defvar disco-root--section-node-table)
 (defvar disco-root--guild-node-table)
-(defvar disco-root--category-node-table)
 (defvar disco-root--layout)
 (defvar disco-root--sort-mode)
 (defvar disco-root--fill-column)
@@ -70,6 +67,7 @@
 (defvar disco-root-activity-context-width)
 (defvar disco-root-activity-include-threads)
 (defvar disco-root-activity-time-format-alist)
+(defvar disco-root-activity-time-column-width)
 (defvar disco-root-auto-fill-margin-columns)
 (defvar disco-root-tree-unread-section-limit)
 (defvar disco-root-week-start-day)
@@ -77,18 +75,14 @@
 
 (declare-function disco-root--ensure-section-state "disco-root" (&optional sections))
 (declare-function disco-root--section-expanded-p "disco-root" (section))
-(declare-function disco-root--guild-expanded-p "disco-root" (guild-id))
-(declare-function disco-root--category-expanded-p "disco-root" (category-id))
 (declare-function disco-root--toggle-node-at-point "disco-root" ())
+(declare-function disco-channel-directory-open "disco-channel-directory" (guild-id))
 
 (defvar disco-root-view-attach-live-updates-function nil
   "Function used by root view buffers to attach live updates.")
 
 (defvar disco-root-view-load-more-function nil
   "Function used by root search rows to load more results.")
-
-(defvar disco-root-view-missing-preview-fetch-function nil
-  "Function used by root preview rows to request missing previews.")
 
 (defvar disco-root-view-queue-live-update-function nil
   "Function used by root view helpers to queue live rerenders.")
@@ -122,13 +116,6 @@ Signal a user-facing error when the root controller callback is missing."
   (disco-root-view--call-controller
    disco-root-view-load-more-function
    'load-more-at-point))
-
-(defun disco-root-view--queue-missing-preview-fetch (channel)
-  "Queue proactive preview fetch for CHANNEL through the controller."
-  (disco-root-view--call-controller
-   disco-root-view-missing-preview-fetch-function
-   'missing-preview-fetch
-   channel))
 
 (defun disco-root-view--queue-live-update (channel-ids &optional structural-p header-p)
   "Queue one controller-driven live update for CHANNEL-IDS."
@@ -311,10 +298,6 @@ Signal a user-facing error when the root controller callback is missing."
   "Return guild id for row at POS when row is a guild header."
   (disco-root--line-property 'disco-root-guild-id pos))
 
-(defun disco-root--line-category-id (&optional pos)
-  "Return category channel id for row at POS when row is a category header."
-  (disco-root--line-property 'disco-root-category-id pos))
-
 (defun disco-root--line-channel-id (&optional pos)
   "Return channel id for row at POS when row is channel/thread row."
   (disco-root--line-property 'disco-channel-id pos))
@@ -495,16 +478,6 @@ not jump between windows or reflow unpredictably."
           (and (window-live-p fallback-win)
                (disco-root--compute-fill-column buf fallback-win))
           (disco-root--compute-fill-column buf fallback-win)))))
-
-(defun disco-root--parse-decimal-integer (value)
-  "Parse decimal integer VALUE and return integer or nil."
-  (cond
-   ((integerp value)
-    value)
-   ((and (stringp value)
-         (string-match-p "\\`[0-9]+\\'" value))
-    (string-to-number value))
-   (t nil)))
 
 (defun disco-root--async-error-message (err)
   "Return user-facing error message extracted from async ERR payload."
@@ -722,33 +695,6 @@ Starts asynchronous fetch when cache miss occurs."
 (defun disco-root--channel-category-p (channel)
   "Return non-nil when CHANNEL is a guild category container."
   (= (alist-get 'type channel) 4))
-
-(defun disco-root--channel-sort-position (channel)
-  "Return sortable numeric position for CHANNEL.
-
-Discord channel position can arrive as integer or numeric string."
-  (let ((raw (alist-get 'position channel)))
-    (or (disco-root--parse-decimal-integer raw)
-        most-positive-fixnum)))
-
-(defun disco-root--sort-categories (categories)
-  "Sort category CHANNELS according to current root sort mode."
-  (let ((copy (copy-sequence (or categories '()))))
-    (pcase disco-root--sort-mode
-      ('name
-       (sort copy
-             (lambda (a b)
-               (string-lessp (disco-root--channel-display-name a)
-                             (disco-root--channel-display-name b)))))
-      (_
-       (sort copy
-             (lambda (a b)
-               (let ((a-pos (disco-root--channel-sort-position a))
-                     (b-pos (disco-root--channel-sort-position b)))
-                 (if (= a-pos b-pos)
-                     (string-lessp (disco-root--channel-display-name a)
-                                   (disco-root--channel-display-name b))
-                   (< a-pos b-pos)))))))))
 
 (defun disco-root--thread-count-under-parent (channel)
   "Return number of indexed threads under CHANNEL."
@@ -993,9 +939,13 @@ Discord channel position can arrive as integer or numeric string."
 
 (defun disco-root--activity-context-label (channel &optional scope)
   "Return context label for CHANNEL one-line rows under SCOPE."
-  (if (memq scope '(parent-thread archived-thread))
-      (disco-root--thread-browser-context-label channel)
-    (disco-root--activity-primary-label channel)))
+  (pcase scope
+    ((or 'parent-thread 'archived-thread)
+     (disco-root--thread-browser-context-label channel))
+    ('directory
+     (disco-root--channel-display-name channel))
+    (_
+     (disco-root--activity-primary-label channel))))
 
 (defun disco-root--activity-primary-label (channel)
   "Return activity-layout primary label for CHANNEL."
@@ -1017,24 +967,21 @@ Discord channel position can arrive as integer or numeric string."
 (defun disco-root--activity-secondary-label (channel)
   "Return fallback activity preview label for CHANNEL.
 
-Fallback stays message-oriented and avoids status-tag placeholders."
+The label stays message-oriented and avoids transport-status placeholders."
   (let ((channel-id (alist-get 'id channel)))
     (or (disco-root--activity-secondary-placeholder channel)
         (and channel-id
              (disco-state-channel-conversation-summary-preview channel-id))
-        (and (alist-get 'last_message_id channel)
-             ;; Keep this neutral: missing preview here means op34/cache did not
-             ;; materialize a message, not necessarily that summaries are
-             ;; unavailable for the guild/channel.
-             "(preview unavailable)")
-        "(no messages)")))
+        "")))
 
 (defun disco-root--activity-preview-label (channel &optional scope)
   "Return fallback preview label for CHANNEL one-line rows under SCOPE."
-  (if (memq scope '(parent-thread archived-thread))
-      (or (disco-root--thread-browser-fallback-preview channel)
-          (disco-root--activity-secondary-label channel))
-    (disco-root--activity-secondary-label channel)))
+  (pcase scope
+    ((or 'parent-thread 'archived-thread)
+     (or (disco-root--thread-browser-fallback-preview channel)
+         (disco-root--activity-secondary-label channel)))
+    (_
+     (disco-root--activity-secondary-label channel))))
 
 (defun disco-root--human-count (value)
   "Return VALUE formatted in compact human-readable form."
@@ -1163,19 +1110,20 @@ When MESSAGE is non-nil, use it as cached preview source."
   (or (and message (disco-msg-preview-line message))
       (disco-msg-channel-preview-line channel)
       (progn
-        (disco-root-view--queue-missing-preview-fetch channel)
+        (disco-preview-request-channel channel)
         (disco-root--activity-preview-label channel scope))))
 
-(defun disco-root--insert-activity-icon (channel)
+(defun disco-root--insert-activity-icon (channel &optional scope)
   "Insert activity icon for CHANNEL.
 
-Guild rows use real guild icons when available, with fixed text fallback."
+Guild rows use real guild icons when available, with fixed text fallback.
+SCOPE distinguishes guild activity rows from channel-directory rows."
   (let ((guild (and (alist-get 'guild_id channel)
                     (disco-root--guild-by-id (alist-get 'guild_id channel))))
         (channel-type (alist-get 'type channel))
         (start (point)))
     (cond
-     (guild
+     ((and guild (not (eq scope 'directory)))
       (if disco-root-show-guild-icons
           (disco-root--insert-guild-icon guild)
         (insert (disco-root--guild-icon-fallback guild))))
@@ -1185,6 +1133,16 @@ Guild rows use real guild icons when available, with fixed text fallback."
       (insert "[G]"))
      ((disco-state-channel-thread-p channel)
       (insert "[T]"))
+     ((eq channel-type 2)
+      (insert "[V]"))
+     ((eq channel-type 13)
+      (insert "[S]"))
+     ((eq channel-type 15)
+      (insert "[F]"))
+     ((eq channel-type 16)
+      (insert "[M]"))
+     ((eq channel-type 14)
+      (insert "[D]"))
      (t
       (insert "[#]")))
     (add-text-properties start (point) (list 'face 'shadow))))
@@ -1209,7 +1167,7 @@ Guild rows use real guild icons when available, with fixed text fallback."
                       (disco-root--channel-last-activity-time-label channel latest-message))))
     (disco-view-one-line-row-create
      :icon-inserter (lambda ()
-                      (disco-root--insert-activity-icon channel))
+                      (disco-root--insert-activity-icon channel scope))
      :context (disco-root--activity-context-label channel scope)
      :preview preview-text
      :preview-leading-length
@@ -1227,18 +1185,23 @@ Guild rows use real guild icons when available, with fixed text fallback."
      :help-echo (and (disco-root--openable-channel-p channel)
                      (disco-root--channel-open-help-echo channel)))))
 
-(defun disco-root--insert-activity-channel-line (channel indent &optional scope)
-  "Insert one activity-style CHANNEL row with INDENT under SCOPE."
+(defun disco-root--insert-activity-channel-line
+    (channel indent &optional scope width)
+  "Insert one activity-style CHANNEL row with INDENT under SCOPE.
+
+WIDTH overrides the root buffer's responsive fill column."
   (disco-view-insert-one-line-row
    (disco-root--channel-one-line-row channel scope)
    :indent indent
-   :width (max 60 (or disco-root--fill-column
+   :width (max 60 (or width
+                      disco-root--fill-column
                       (disco-root--compute-fill-column)))
    :icon-slot-width
    (max 2
         (ceiling (* disco-root--activity-icon-slot-width
                     (disco-root--text-scale-factor))))
-   :context-width-spec disco-root-activity-context-width))
+   :context-width-spec disco-root-activity-context-width
+   :time-slot-width disco-root-activity-time-column-width))
 
 (defun disco-root--search-message-seconds (message)
   "Return MESSAGE timestamp as float seconds, or nil on parse failure."
@@ -1309,7 +1272,8 @@ Guild rows use real guild icons when available, with fixed text fallback."
    (max 2
         (ceiling (* disco-root--activity-icon-slot-width
                     (disco-root--text-scale-factor))))
-   :context-width-spec disco-root-activity-context-width))
+   :context-width-spec disco-root-activity-context-width
+   :time-slot-width disco-root-activity-time-column-width))
 
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
@@ -1397,24 +1361,6 @@ SCOPE is a symbol describing where the row is rendered."
      guild
      (list :scope (or scope 'root)
            :guild-id guild-id
-           :unread unread-count))))
-
-(defun disco-root--category-label (category unread-count &optional scope)
-  "Return display label for CATEGORY with UNREAD-COUNT badge."
-  (let* ((category-name (or (disco-root--channel-display-name category)
-                            "(unnamed-category)"))
-         (category-id (alist-get 'id category))
-         (base-label (format "[category] %s%s"
-                             category-name
-                             (if (> unread-count 0)
-                                 (format " [%d]" unread-count)
-                               ""))))
-    (disco-root--append-extra-info
-     base-label
-     'category
-     category
-     (list :scope (or scope 'root)
-           :category-id category-id
            :unread unread-count))))
 
 (defun disco-root--channel-has-unread-p (channel)
@@ -1521,7 +1467,7 @@ current sort mode."
                (disco-root--collect-activity-candidates))))
 
 (defun disco-root--tree-unread-section-channels (unread-channels)
-  "Return channels to render in tree unread section from UNREAD-CHANNELS."
+  "Return home quick-section channels from UNREAD-CHANNELS."
   (let ((limit disco-root-tree-unread-section-limit))
     (if (and (integerp limit)
              (> limit 0)
@@ -1589,12 +1535,6 @@ Higher score means channel should appear earlier in activity mode."
                                   :guild guild
                                   :unread-count unread-count))
 
-(defun disco-root--entry-category (category unread-count)
-  "Return one category layout entry."
-  (disco-root-layout-entry-create :type 'category
-                                  :category category
-                                  :unread-count unread-count))
-
 (defun disco-root--entry-channel (channel indent &optional scope)
   "Return one channel layout entry for CHANNEL at INDENT in SCOPE."
   (disco-root-layout-entry-create :type 'channel
@@ -1646,37 +1586,20 @@ Higher score means channel should appear earlier in activity mode."
      :mouse-face 'highlight)))
 
 (defun disco-root--guild-label-row (guild unread-count)
-  "Return label row model for one GUILD heading with UNREAD-COUNT."
+  "Return navigation row model for GUILD with UNREAD-COUNT."
   (let* ((guild-id (alist-get 'id guild))
-         (expanded (disco-root--guild-expanded-p guild-id))
-         (indicator (if expanded "[-]" "[+]"))
          (label (disco-root--guild-label guild unread-count 'root)))
     (disco-view-label-row-create
      :label label
-     :prefix (format "  %s " indicator)
+     :prefix "  "
+     :suffix "  ›"
      :icon-inserter (lambda ()
                       (disco-root--insert-guild-icon guild))
      :icon-separator " "
      :face 'font-lock-function-name-face
      :line-properties (list 'disco-root-row-type 'guild
                             'disco-root-guild-id guild-id)
-     :help-echo "RET/TAB/t toggles this guild"
-     :mouse-face 'highlight)))
-
-(defun disco-root--category-label-row (category unread-count)
-  "Return label row model for one CATEGORY heading with UNREAD-COUNT."
-  (let* ((category-id (alist-get 'id category))
-         (expanded (disco-root--category-expanded-p category-id))
-         (indicator (if expanded "[-]" "[+]"))
-         (label (disco-root--category-label category unread-count 'root)))
-    (disco-view-label-row-create
-     :label label
-     :prefix (format "    %s " indicator)
-     :face 'font-lock-keyword-face
-     :line-properties (list 'disco-root-row-type 'category
-                            'disco-root-category-id category-id)
-     :help-echo "RET/TAB/t toggles this category"
-     :mouse-face 'highlight)))
+     :help-echo "RET or TAB opens this guild's channel directory")))
 
 (defun disco-root--search-section-label-row (title loaded-count &optional total-count loading)
   "Return label row model for one search section heading."
@@ -1722,9 +1645,6 @@ Higher score means channel should appear earlier in activity mode."
     ('guild
      (disco-root--guild-label-row (disco-root-layout-entry-guild entry)
                                   (or (disco-root-layout-entry-unread-count entry) 0)))
-    ('category
-     (disco-root--category-label-row (disco-root-layout-entry-category entry)
-                                     (or (disco-root-layout-entry-unread-count entry) 0)))
     ('search-section
      (disco-root--search-section-label-row (disco-root-layout-entry-title entry)
                                            (or (disco-root-layout-entry-loaded-count entry) 0)
@@ -1780,23 +1700,13 @@ Higher score means channel should appear earlier in activity mode."
     node))
 
 (defun disco-root--ewoc-insert-guild (guild unread-count)
-  "Insert one collapsible GUILD row with UNREAD-COUNT badge."
+  "Insert one navigable GUILD row with UNREAD-COUNT badge."
   (let* ((node (ewoc-enter-last disco-root--ewoc
                                 (disco-root--entry-guild guild unread-count)))
          (guild-id (alist-get 'id guild)))
     (when (and guild-id
                (hash-table-p disco-root--guild-node-table))
       (puthash guild-id node disco-root--guild-node-table))
-    node))
-
-(defun disco-root--ewoc-insert-category (category unread-count)
-  "Insert one collapsible CATEGORY row with UNREAD-COUNT badge."
-  (let* ((node (ewoc-enter-last disco-root--ewoc
-                                (disco-root--entry-category category unread-count)))
-         (category-id (alist-get 'id category)))
-    (when (and category-id
-               (hash-table-p disco-root--category-node-table))
-      (puthash category-id node disco-root--category-node-table))
     node))
 
 (defun disco-root--ewoc-insert-blank ()
@@ -1827,9 +1737,6 @@ Higher score means channel should appear earlier in activity mode."
     ('guild
      (disco-root--ewoc-insert-guild (disco-root-layout-entry-guild entry)
                                     (or (disco-root-layout-entry-unread-count entry) 0)))
-    ('category
-     (disco-root--ewoc-insert-category (disco-root-layout-entry-category entry)
-                                       (or (disco-root-layout-entry-unread-count entry) 0)))
     ('channel
      (disco-root--ewoc-insert-channel (disco-root-layout-entry-channel entry)
                                       (or (disco-root-layout-entry-indent entry) 0)
@@ -2444,15 +2351,18 @@ SCOPE is forwarded to extra-info providers."
       (message "disco: no previous channel"))))
 
 (defun disco-root-open-at-point ()
-  "Open/toggle row at point.
+  "Open or toggle the actionable row at point.
 
 If point is not on actionable row, jump to next channel row and open it."
   (interactive)
   (let ((search-action (disco-root--line-search-action))
         (search-message-id (disco-root--line-search-message-id))
+        (guild-id (disco-root--line-guild-id))
         (channel-id (disco-root--line-channel-id)))
     (cond
      ((disco-root--toggle-node-at-point))
+     (guild-id
+      (disco-channel-directory-open guild-id))
      ((eq search-action 'load-more)
       (disco-root-view--load-more-at-point))
      ((and search-message-id channel-id)
@@ -2492,147 +2402,11 @@ If point is not on actionable row, jump to next channel row and open it."
   (mouse-set-point event)
   (disco-root-open-at-point))
 
-(defun disco-root--parent-thread-entries (parent-channel rendered-thread-ids &optional indent)
-  "Return visible thread child entries under PARENT-CHANNEL.
-
-Mark rendered thread IDs in RENDERED-THREAD-IDS. INDENT controls child-thread
-row indentation and defaults to 8 spaces."
-  (let ((parent-id (alist-get 'id parent-channel))
-        entries)
-    (dolist (thread (disco-state-parent-threads parent-id))
-      (let ((thread-id (alist-get 'id thread)))
-        (when (and thread-id
-                   (disco-root--displayable-channel-p thread)
-                   (disco-root--channel-visible-in-view-p thread))
-          (puthash thread-id t rendered-thread-ids)
-          (push (disco-root--entry-channel thread (or indent 8) 'root)
-                entries))))
-    (nreverse entries)))
-
-(defun disco-root--guild-visible-parent-channels (guild-id)
-  "Return non-thread display channels for GUILD-ID."
-  (let (parents)
-    (dolist (channel (or (disco-state-guild-channels guild-id) '()))
-      (when (and (disco-root--displayable-channel-p channel)
-                 (disco-root--channel-visible-in-view-p channel)
-                 (not (disco-state-channel-thread-p channel)))
-        (push channel parents)))
-    (disco-root--sort-channels (nreverse parents))))
-
-(defun disco-root--guild-visible-categories (guild-id)
-  "Return visible category channels for GUILD-ID."
-  (let (categories)
-    (dolist (channel (or (disco-state-guild-channels guild-id) '()))
-      (when (and (disco-root--channel-category-p channel)
-                 (disco-permission-channel-viewable-p channel t))
-        (push channel categories)))
-    (disco-root--sort-categories (nreverse categories))))
-
-(defun disco-root--category-children-unread-total (children)
-  "Return aggregated unread count for one category CHILDREN list."
-  (let ((total 0))
-    (dolist (channel children)
-      (setq total (+ total (disco-state-channel-effective-unread-count channel))))
-    total))
-
-(defun disco-root--guild-entries (guild)
-  "Return EWOC entry list for GUILD and its visible children."
-  (let* ((guild-id (alist-get 'id guild))
-         (loaded-p (disco-state-guild-channels-loaded-p guild-id))
-         (load-status (and (hash-table-p disco-root--guild-load-status)
-                           (gethash guild-id disco-root--guild-load-status)))
-         (guild-unread (disco-root--guild-unread-total guild-id t))
-         (parents (disco-root--guild-visible-parent-channels guild-id))
-         (categories (disco-root--guild-visible-categories guild-id))
-         (category-id-set (make-hash-table :test #'equal))
-         (category-children (make-hash-table :test #'equal))
-         uncategorized-parents
-         (rendered-thread-ids (make-hash-table :test #'equal))
-         (has-visible-thread
-          (seq-some (lambda (thread)
-                      (and (disco-root--displayable-channel-p thread)
-                           (disco-root--channel-visible-in-view-p thread)))
-                    (or (disco-state-guild-threads guild-id) '())))
-         entries)
-    (dolist (category categories)
-      (let ((category-id (alist-get 'id category)))
-        (when category-id
-          (puthash category-id t category-id-set))))
-    (dolist (channel parents)
-      (let ((parent-id (alist-get 'parent_id channel)))
-        (if (and parent-id (gethash parent-id category-id-set))
-            (puthash parent-id
-                     (append (or (gethash parent-id category-children) '())
-                             (list channel))
-                     category-children)
-          (push channel uncategorized-parents))))
-    (setq uncategorized-parents (nreverse uncategorized-parents))
-    (let ((has-categorized-parents
-           (seq-some (lambda (category)
-                       (let ((category-id (alist-get 'id category)))
-                         (and category-id
-                              (gethash category-id category-children))))
-                     categories)))
-      (when (or (not loaded-p)
-                uncategorized-parents has-categorized-parents has-visible-thread)
-        (push (disco-root--entry-guild guild guild-unread)
-              entries)
-        (when (disco-root--guild-expanded-p guild-id)
-          (if (not loaded-p)
-              (push (disco-root--entry-text
-                     (pcase load-status
-                       ('loading "    Loading channels…")
-                       ('error "    Channel load failed; collapse and expand to retry")
-                       (_ "    Channels not loaded")))
-                    entries)
-            (dolist (channel uncategorized-parents)
-              (push (disco-root--entry-channel channel 4 'root)
-                    entries)
-              (when (disco-root--thread-parent-channel-p channel)
-                (dolist (entry (disco-root--parent-thread-entries
-                                channel rendered-thread-ids 8))
-                  (push entry entries))))
-            (dolist (category categories)
-              (let* ((category-id (alist-get 'id category))
-                     (children (and category-id
-                                    (gethash category-id category-children)))
-                     (category-unread
-                      (and children
-                           (disco-root--category-children-unread-total children))))
-                (when children
-                  (push (disco-root--entry-category category (or category-unread 0))
-                        entries)
-                  (when (disco-root--category-expanded-p category-id)
-                    (dolist (channel children)
-                      (push (disco-root--entry-channel channel 6 'root)
-                            entries)
-                      (when (disco-root--thread-parent-channel-p channel)
-                        (dolist (entry (disco-root--parent-thread-entries
-                                        channel rendered-thread-ids 10))
-                          (push entry entries))))))))
-            (let (orphan-threads)
-              (dolist (thread (or (disco-state-guild-threads guild-id) '()))
-                (let ((thread-id (alist-get 'id thread)))
-                  (when (and thread-id
-                             (disco-root--displayable-channel-p thread)
-                             (disco-root--channel-visible-in-view-p thread)
-                             (not (gethash thread-id rendered-thread-ids)))
-                    (push thread orphan-threads))))
-              (setq orphan-threads (nreverse orphan-threads))
-              (when orphan-threads
-                (push (disco-root--entry-text "    [threads]") entries)
-                (dolist (thread orphan-threads)
-                  (push (disco-root--entry-channel thread 8 'root)
-                        entries))))))
-        (push (disco-root--entry-blank) entries)
-        (nreverse entries)))))
-
 (defun disco-root--clear-ewoc-state ()
   "Clear root EWOC and node indexes for non-EWOC layouts."
   (setq disco-root--channel-node-table (make-hash-table :test #'equal))
   (setq disco-root--section-node-table (make-hash-table :test #'eq))
   (setq disco-root--guild-node-table (make-hash-table :test #'equal))
-  (setq disco-root--category-node-table (make-hash-table :test #'equal))
   (setq disco-root--ewoc nil))
 
 (defun disco-root--prepare-ewoc-state ()
@@ -2641,7 +2415,7 @@ row indentation and defaults to 8 spaces."
   (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t)))
 
 (defun disco-root--tree-layout-entries ()
-  "Return EWOC layout entries for the guild/category tree layout."
+  "Return EWOC entries for the root home layout."
   (let* ((show-unread disco-root--tree-show-unread-section)
          (unread-channels (and show-unread
                                (disco-root--collect-visible-unread-channels)))
@@ -2688,19 +2462,19 @@ row indentation and defaults to 8 spaces."
       (if (eq disco-root--view-mode 'dms)
           (push (disco-root--entry-text "  (guild sections hidden in dms view)")
                 items)
-        (let ((inserted 0))
-          (dolist (guild guilds)
-            (when-let* ((entries (disco-root--guild-entries guild)))
-              (setq inserted (1+ inserted))
-              (dolist (entry entries)
-                (push entry items))))
-          (when (= inserted 0)
-            (push (disco-root--entry-text "  (no visible guild channels)")
-                  items)))))
+        (if guilds
+            (dolist (guild guilds)
+              (push (disco-root--entry-guild
+                     guild
+                     (disco-root--guild-unread-total
+                      (alist-get 'id guild) t))
+                    items))
+          (push (disco-root--entry-text "  (no guilds loaded)")
+                items))))
     (nreverse items)))
 
 (defun disco-root--build-tree-layout-view-spec ()
-  "Return view spec for the guild/category tree layout."
+  "Return view spec for the root home layout."
   (disco-root-layout-ewoc-entry-view-spec-create
    (disco-root--tree-layout-entries)))
 

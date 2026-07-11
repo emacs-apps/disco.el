@@ -12,7 +12,8 @@ This repository currently contains an MVP scaffold designed with these reference
 
 - Configure token with `DISCO_TOKEN` environment variable (default), or override in-session with `M-x disco-set-token`.
 - Start client with `M-x disco`.
-- Fetch and display guild/channel list in `*disco*`.
+- Display a compact guild navigator in `*disco*`; opening a guild creates a
+  dedicated, lazy channel-directory buffer.
 - Fetch and display private channels (DM/group DM/ephemeral DM) in root.
 - Hide guild channels lacking `VIEW_CHANNEL` based on computed channel permissions.
 - Fetch and display thread channels nested under their parent channels.
@@ -48,13 +49,21 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room buffers update on channel/thread rename/state change and auto-close when backing channel/guild is deleted.
 - Gateway READY now ingests private channel payload and keeps local DM list in sync.
 - Root navigation adds telega-style keyboard flow (`n`/`p`/`TAB`, `RET`, `u`) plus layout cycle (`l`), explicit layout selection (`L`), sort toggle (`\`), view cycle (`v`: all/unread/dms), and unread-lens toggle (`U`).
-- Root now supports multiple layouts: telega-style activity list (non-collapsible, one-line rows as `<icon> [channel | category | guild] <preview> <time>`) and collapsible tree browse, with user-defined custom layouts via layout specs.
+- Root now supports multiple layouts: a compact account home, a telega-style
+  activity list (one-line rows as `<icon> [channel | category | guild]
+  <preview> <time>`), and user-defined custom layouts via layout specs.
 - Activity layout excludes thread rows by default to keep large guilds responsive; enable them with `disco-root-activity-include-threads` when needed.
 - Root startup is summary-first: guild and DM indexes load without a per-guild
-  REST fan-out. Guilds/categories start collapsed, READY channel snapshots are
-  reused, and expanding a guild hydrates only that guild. `g` refreshes the
-  index; `C-u g` explicitly refreshes every guild directory.
-- Root rendering uses EWOC plus debounced live-update aggregation; tree and activity layouts now patch rows incrementally, with activity row reordering to track sort changes without full buffer rebuilds.
+  REST fan-out.  READY channel snapshots are reused, and opening a guild
+  hydrates only that guild.  `g` refreshes the index; `C-u g` explicitly
+  refreshes every guild directory.
+- Guild directories use persistent keyed EWOCs, collapsible categories,
+  text/unread lenses, active-thread nesting, and incremental Gateway patches.
+  Missing latest-message previews are hydrated in serialized batches through
+  user Gateway opcode 34 (`LAST_MESSAGES`) instead of displaying a placeholder.
+- Root rendering uses EWOC plus debounced live-update aggregation; home and
+  activity layouts patch rows incrementally, with activity row reordering to
+  track sort changes without full buffer rebuilds.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
 - Optional telega-style global presentation modes: enable
@@ -79,11 +88,14 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-permission.el`: shared Discord permission bitfield constants/parsing/check helpers.
 - `disco-state.el`: in-memory guild/channel/message cache.
 - `disco-directory.el`: request owner for guild/DM indexes and lazy per-guild channel snapshots.
+- `disco-preview.el`: shared, rate-limit-aware lifecycle owner for channel
+  latest-message preview hydration.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root-layout.el`: root layout registry, entry/view-spec structs, and layout composition helpers.
 - `disco-view.el`: shared cursor preservation helpers plus reusable one-line/list-view rendering helpers.
 - `disco-root-view.el`: root-specific view state, row-model helpers, inserters, EWOC/list renderers, and thread-browser/root layout builders; controller callbacks are injected from `disco-root.el`.
 - `disco-root.el`: root dashboard controllers, live updates, search commands, and buffer orchestration.
+- `disco-channel-directory.el`: lazy per-guild category/channel/thread browser.
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
 - `disco-company.el`: composer completion engine (`@`/`#`, CAPF, optional company backend).
 
@@ -115,7 +127,7 @@ with `:update-mode full` and return a `list-spec`:
 ```
 
 If you want an EWOC-backed custom layout that reuses the same entry pipeline as
-built-in tree/activity layouts, return an `items` view spec instead:
+built-in home/activity layouts, return an `items` view spec instead:
 
 ```elisp
 (defun my-disco-root-build-people-ewoc ()
@@ -169,8 +181,15 @@ built-in tree/activity layouts, return an `items` view spec instead:
 - `disco-root-activity-context-width` controls the left context block width in activity rows (telega-like fixed/ratio/bounded semantics).
 - `disco-root-activity-include-threads` controls whether thread channels are listed in activity layout (default off for performance).
 - `disco-root-activity-time-format-alist` and `disco-root-week-start-day` control telega-like activity timestamp formatting buckets.
+- `disco-root-activity-time-column-width` reserves a stable right-aligned time
+  slot across short weekday, full-date, and empty timestamps.
 - `disco-root-auto-fill-on-window-size-change` keeps root rows auto-aligned when window width/text scale changes; `disco-root-auto-fill-margin-columns` reserves extra right margin, and `M-x disco-root-buffer-auto-fill` forces one manual reflow.
 - `disco-root-extra-info-functions` lets you inject extra row metadata without blocking network calls in the renderer.
+- Guild directories use `/` for a text lens, `U` for the unread lens,
+  `RET`/`TAB` to open channels or toggle categories, and `g` to force-refresh the
+  selected guild only.
+- `disco-preview-fetch-enabled`, `disco-preview-fetch-debounce`, and
+  `disco-preview-response-timeout` control opcode-34 preview hydration.
 
 ## Gateway Configuration
 
@@ -208,7 +227,9 @@ built-in tree/activity layouts, return an `items` view spec instead:
 - Composer completion is token-boundary aware for `@`/`#`, with dynamic candidate lists and optional company backend integration (`disco-room-company-completion`).
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
-- Thread channels are indexed by parent channel, rendered hierarchically in root, and updated from `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` gateway events.
+- Thread channels are indexed by parent channel, rendered hierarchically in
+  guild directories, and updated from
+  `THREAD_CREATE`/`THREAD_UPDATE`/`THREAD_DELETE`/`THREAD_LIST_SYNC` events.
 - Gateway thread membership deltas (`THREAD_MEMBER_UPDATE`/`THREAD_MEMBERS_UPDATE`) now update lightweight per-thread member caches.
 - Gateway reconnect uses exponential backoff with jitter for transport failures, and randomized delay handling for `INVALID_SESSION`.
 - Identify payload supports optional intents/capabilities/presence fields through customization.
@@ -216,7 +237,6 @@ built-in tree/activity layouts, return an `items` view spec instead:
 
 ## Next Milestones
 
-1. Add tree interaction controls (collapse/expand guilds and thread subtrees) on top of the EWOC root model.
-2. Improve mention/composer parity (mention candidate popup UX, optional multiline compose mode, fuller attach/options parity for `C-c C-e`/`C-c C-v`).
-3. Expand fast navigation (`M-g` prefix map for unread/mentions/reactions style jumps).
-4. Add queue prioritization/backpressure so user actions are favored over background work.
+1. Improve mention/composer parity (mention candidate popup UX, optional multiline compose mode, fuller attach/options parity for `C-c C-e`/`C-c C-v`).
+2. Expand fast navigation (`M-g` prefix map for unread/mentions/reactions style jumps).
+3. Add queue prioritization/backpressure so user actions are favored over background work.

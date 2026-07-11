@@ -109,6 +109,13 @@
   "Return VALUE normalized as string ID."
   (and value (format "%s" value)))
 
+(defun disco-state--channel-in-guild (channel guild-id)
+  "Return a copy of CHANNEL canonically owned by GUILD-ID."
+  (when (listp channel)
+    (let ((normalized (copy-tree channel)))
+      (setf (alist-get 'guild_id normalized) guild-id)
+      normalized)))
+
 (defun disco-state--non-empty-string-p (value)
   "Return non-nil when VALUE is a non-empty string."
   (and (stringp value)
@@ -452,6 +459,11 @@ MEMBER-COUNT is optional approximate thread member count."
 Active thread entities are an independent Gateway/API collection and remain
 indexed when the guild channel directory is refreshed."
   (setq guild-id (disco-state--normalize-id guild-id))
+  (setq channels
+        (delq nil
+              (mapcar (lambda (channel)
+                        (disco-state--channel-in-guild channel guild-id))
+                      channels)))
   (let* ((old-channels (copy-sequence
                         (or (gethash guild-id disco-state--channels-by-guild) '())))
          (new-ids (delq nil (mapcar (lambda (channel)
@@ -663,6 +675,12 @@ Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
 
 If PARENT-CHANNEL-IDS is nil, replace all known threads for that guild.
 Otherwise, replace threads only under the provided parent IDs."
+  (setq guild-id (disco-state--normalize-id guild-id))
+  (setq threads
+        (delq nil
+              (mapcar (lambda (thread)
+                        (disco-state--channel-in-guild thread guild-id))
+                      threads)))
   (let* ((target-parents (and parent-channel-ids (copy-sequence parent-channel-ids)))
          (old-thread-ids (or (gethash guild-id disco-state--thread-ids-by-guild) '())))
     (dolist (thread-id old-thread-ids)

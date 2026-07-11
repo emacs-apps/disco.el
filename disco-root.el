@@ -4,8 +4,8 @@
 
 ;;; Commentary:
 
-;; Root dashboard showing guilds and channels, inspired by telega/ement
-;; list-driven navigation style.
+;; Account-level dashboard showing unread channels, DMs, and compact guild
+;; navigation.  Guild channel trees live in dedicated lazy directory buffers.
 
 ;;; Code:
 
@@ -31,6 +31,9 @@
 (require 'disco-permission)
 (require 'disco-root-layout)
 (require 'disco-root-view)
+(require 'disco-channel-directory)
+
+(autoload 'disco-reset-session-state "disco" nil t)
 
 (defconst disco-root-buffer-name "*disco*"
   "Main root buffer name.")
@@ -77,9 +80,6 @@
 (defvar-local disco-root--refresh-in-flight nil
   "Non-nil while an async root refresh is in progress.")
 
-(defvar-local disco-root--guild-load-status nil
-  "Hash table guild-id -> directory request status for root projection.")
-
 (defvar-local disco-root--sort-mode 'activity
   "Root channel sorting mode.
 
@@ -97,10 +97,10 @@ Supported values: `all', `unread', and `dms'.")
   "Current root layout symbol.")
 
 (defvar-local disco-root--tree-show-unread-section t
-  "When non-nil, tree layout renders quick unread section.")
+  "When non-nil, the home layout renders its quick unread section.")
 
 (defvar-local disco-root--ewoc nil
-  "EWOC used to render the root tree list incrementally.")
+  "EWOC used to render the current root list incrementally.")
 
 (defvar-local disco-root--channel-node-table nil
   "Hash table mapping channel IDs to root EWOC node lists.")
@@ -111,9 +111,6 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--guild-node-table nil
   "Hash table mapping guild IDs to EWOC nodes.")
 
-(defvar-local disco-root--category-node-table nil
-  "Hash table mapping category IDs to EWOC nodes.")
-
 (defvar-local disco-root--live-update-timer nil
   "Debounce timer used to flush aggregated gateway updates.")
 
@@ -122,15 +119,6 @@ Supported values: `all', `unread', and `dms'.")
 
 (defvar-local disco-root--render-pending nil
   "Non-nil when an update arrives during a root render transaction.")
-
-(defvar-local disco-root--missing-preview-fetch-timer nil
-  "Debounce timer used to flush missing last-message fetch requests.")
-
-(defvar-local disco-root--missing-preview-pending-by-guild nil
-  "Hash table guild-id -> pending channel-id list for preview fetch.")
-
-(defvar-local disco-root--missing-preview-requested-last-message-id-by-channel nil
-  "Hash table channel-id -> last_message_id already requested via proactive op34.")
 
 (defvar-local disco-root--dirty-channel-ids nil
   "List of channel IDs queued for incremental live patching.")
@@ -157,12 +145,6 @@ Supported values: `all', `unread', and `dms'.")
   "Alist of section expansion state in root buffer.
 
 Each entry is (SECTION-SYMBOL . BOOLEAN).")
-
-(defvar-local disco-root--guild-expanded nil
-  "Hash table guild-id -> expansion state for guild rows.")
-
-(defvar-local disco-root--category-expanded nil
-  "Hash table category-channel-id -> expansion state for category rows.")
 
 (defvar-local disco-root--header-marker nil
   "Marker pointing at the start of the root header block.")
@@ -327,6 +309,13 @@ by default to keep root refresh and resize reflow responsive."
           :value-type string)
   :group 'disco)
 
+(defcustom disco-root-activity-time-column-width 9
+  "Columns reserved for right-aligned activity timestamps.
+
+The default fits the longest built-in date format plus its status symbol."
+  :type 'integer
+  :group 'disco)
+
 (defcustom disco-root-week-start-day 1
   "Day of week considered as start of week.
 
@@ -383,33 +372,9 @@ rows. Explicit header-dirty events bypass the throttle."
   :type 'integer
   :group 'disco)
 
-(defcustom disco-root-gateway-context-last-messages-per-guild 30
-  "Maximum channel IDs per guild for op34 last-message requests.
-
-Discord limits one request to at most 100 channel IDs."
-  :type 'integer
-  :group 'disco)
-
 (defcustom disco-root-gateway-context-request-channel-info t
   "When non-nil, request op43 channel metadata fields during root sync."
   :type 'boolean
-  :group 'disco)
-
-(defcustom disco-root-missing-preview-fetch-enabled t
-  "When non-nil, request missing activity-row last-message previews."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-root-missing-preview-fetch-debounce 0.6
-  "Seconds to debounce batched proactive last-message requests."
-  :type 'number
-  :group 'disco)
-
-(defcustom disco-root-missing-preview-fetch-max-per-guild 100
-  "Maximum number of channel IDs per guild in one proactive op34 request.
-
-Discord allows up to 100 channel IDs per op34 request."
-  :type 'integer
   :group 'disco)
 
 (defcustom disco-root-extra-info-functions nil
@@ -417,7 +382,7 @@ Discord allows up to 100 channel IDs per op34 request."
 
 Each function is called with arguments (KIND OBJECT CONTEXT) where:
 - KIND is one of `channel', `guild', or `category'.
-- OBJECT is the row object (channel/guild/category alist).
+- OBJECT is the row object (channel or guild alist).
 - CONTEXT is a plist with row metadata.
 
 A function should return nil, a string, or a list of strings. Returned
@@ -456,7 +421,7 @@ Values are image objects or the symbol `:missing'.")
           thread-create thread-update thread-delete thread-list-sync)))
 
 (defun disco-root--live-event-structural-p (event-type)
-  "Return non-nil when EVENT-TYPE requires a full tree reconcile."
+  "Return non-nil when EVENT-TYPE requires a full root reconcile."
   (memq event-type
         '(channel-create channel-update channel-delete
           guild-create guild-update guild-delete guild-sync
@@ -468,39 +433,6 @@ Values are image objects or the symbol `:missing'.")
   (memq event-type
         '(guild-feature-ack user-non-channel-ack notification-center-items-ack
           sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
-
-(defun disco-root--event-channel-ids (event)
-  "Extract channel IDs from gateway EVENT."
-  (let (ids)
-    (dolist (value (list (plist-get event :channel-id)
-                         (plist-get event :previous-channel-id)
-                         (plist-get event :thread-id)))
-      (when value
-        (push value ids)))
-    (dolist (item (or (plist-get event :channel-unread-updates) '()))
-      (when-let* ((id (or (alist-get 'id item)
-                          (alist-get 'channel_id item))))
-        (push id ids)))
-    (dolist (item (or (plist-get event :channels) '()))
-      (when-let* ((id (or (alist-get 'id item)
-                          (alist-get 'channel_id item))))
-        (push id ids)))
-    (dolist (item (or (plist-get event :updated-channels) '()))
-      (when-let* ((id (or (alist-get 'id item)
-                          (alist-get 'channel_id item))))
-        (push id ids)))
-    (dolist (item (or (plist-get event :messages) '()))
-      (when-let* ((id (alist-get 'channel_id item)))
-        (push id ids)))
-    (dolist (item (or (plist-get event :threads) '()))
-      (when-let* ((thread-id (alist-get 'id item)))
-        (push thread-id ids))
-      (when-let* ((parent-id (alist-get 'parent_id item)))
-        (push parent-id ids)))
-    (dolist (value (or (plist-get event :channel-ids) '()))
-      (when value
-        (push value ids)))
-    (seq-uniq (nreverse ids) #'equal)))
 
 (defun disco-root-set-layout (layout)
   "Set root LAYOUT and rerender the current root buffer."
@@ -544,7 +476,7 @@ Values are image objects or the symbol `:missing'.")
 (defun disco-root-toggle-unread-lens ()
   "Toggle unread lens for current layout.
 
-Tree layout toggles unread quick section visibility. Other layouts toggle
+The home layout toggles unread quick section visibility.  Other layouts toggle
 between current view mode and unread-only filter."
   (interactive)
   (if (eq (disco-root--ensure-layout) 'tree)
@@ -552,7 +484,7 @@ between current view mode and unread-only filter."
         (setq disco-root--tree-show-unread-section
               (not disco-root--tree-show-unread-section))
         (disco-root--render-preserving-position)
-        (message "disco: tree unread section %s"
+        (message "disco: home unread section %s"
                  (if disco-root--tree-show-unread-section
                      "shown"
                    "hidden")))
@@ -563,7 +495,7 @@ between current view mode and unread-only filter."
     (message "disco: root view mode -> %s" disco-root--view-mode)))
 
 (defun disco-root--render-preserving-position ()
-  "Render root tree and keep point near previous line/column."
+  "Render root and keep point near the previous line and column."
   (disco-view-render-preserving-position
    #'disco-root-render
    :preserve-window-start t)
@@ -630,12 +562,6 @@ after passive EWOC and full-buffer updates."
         disco-root--search-domain)
       (disco-root--search-current-channel-domain)
       (when-let* ((guild-id (disco-root--line-guild-id)))
-        (list :kind 'guild
-              :id guild-id
-              :label (or (disco-root--guild-name-by-id guild-id) guild-id)))
-      (when-let* ((category-id (disco-root--line-category-id))
-                  (category (disco-state-channel category-id))
-                  (guild-id (alist-get 'guild_id category)))
         (list :kind 'guild
               :id guild-id
               :label (or (disco-root--guild-name-by-id guild-id) guild-id)))
@@ -1893,11 +1819,7 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
 (defun disco-root-menu-reset-session-state ()
   "Reset in-memory session state for disco.el."
   (interactive)
-  (disco-gateway-stop)
-  (disco-state-reset)
-  (disco-api-reset-rate-limit-state)
-  (disco-http-reset-queue-state)
-  (message "disco: in-memory state reset"))
+  (disco-reset-session-state))
 
 (defun disco-root-menu-toggle-active-thread-prefetch ()
   "Toggle `disco-fetch-guild-active-threads' and refresh root when relevant."
@@ -2577,96 +2499,34 @@ With FORCE non-nil, rerender even if width has not changed."
     (push (cons section (and expanded t)) disco-root--section-expanded))
   (and expanded t))
 
-(defun disco-root--ensure-collapse-state-tables ()
-  "Ensure root guild/category expansion tables exist."
-  (unless (hash-table-p disco-root--guild-expanded)
-    (setq disco-root--guild-expanded (make-hash-table :test #'equal)))
-  (unless (hash-table-p disco-root--category-expanded)
-    (setq disco-root--category-expanded (make-hash-table :test #'equal))))
-
-(defun disco-root--node-expanded-p (table key)
-  "Return expansion state for KEY in TABLE, defaulting to collapsed."
-  (disco-root--ensure-collapse-state-tables)
-  (if (null key) t (and (gethash key table) t)))
-
-(defun disco-root--set-node-expanded (table key expanded)
-  "Store EXPANDED for KEY in TABLE."
-  (disco-root--ensure-collapse-state-tables)
-  (when key
-    (puthash key (and expanded t) table))
-  (and expanded t))
-
-(defun disco-root--guild-expanded-p (guild-id)
-  "Return non-nil when GUILD-ID is expanded."
-  (disco-root--node-expanded-p disco-root--guild-expanded guild-id))
-
-(defun disco-root--set-guild-expanded (guild-id expanded)
-  "Set GUILD-ID expansion to EXPANDED."
-  (disco-root--set-node-expanded disco-root--guild-expanded guild-id expanded))
-
-(defun disco-root--category-expanded-p (category-id)
-  "Return non-nil when CATEGORY-ID is expanded."
-  (disco-root--node-expanded-p disco-root--category-expanded category-id))
-
-(defun disco-root--set-category-expanded (category-id expanded)
-  "Set CATEGORY-ID expansion to EXPANDED."
-  (disco-root--set-node-expanded disco-root--category-expanded category-id expanded))
-
 (defun disco-root--toggle-section (section)
   "Toggle root SECTION expansion and rerender the projection."
   (disco-root--set-section-expanded
    section (not (disco-root--section-expanded-p section)))
   (disco-root--render-preserving-position))
 
-(defun disco-root--toggle-guild (guild-id)
-  "Toggle GUILD-ID expansion, hydrating its directory when opened."
-  (unless guild-id
-    (user-error "disco: missing guild id at point"))
-  (let ((expanding (not (disco-root--guild-expanded-p guild-id))))
-    (disco-root--set-guild-expanded guild-id expanding)
-    (when expanding
-      (disco-directory-load-guild-async guild-id))
-    (disco-root--render-preserving-position)))
-
-(defun disco-root--toggle-category (category-id)
-  "Toggle CATEGORY-ID expansion and rerender the projection."
-  (unless category-id
-    (user-error "disco: missing category id at point"))
-  (disco-root--set-category-expanded
-   category-id (not (disco-root--category-expanded-p category-id)))
-  (disco-root--render-preserving-position))
-
 (defun disco-root--toggle-node-at-point ()
-  "Apply the controller action for the collapsible row at point."
-  (cond
-   ((disco-root--line-section)
-    (disco-root--toggle-section (disco-root--line-section))
-    t)
-   ((disco-root--line-guild-id)
-    (disco-root--toggle-guild (disco-root--line-guild-id))
-    t)
-   ((disco-root--line-category-id)
-    (disco-root--toggle-category (disco-root--line-category-id))
-    t)
-   (t nil)))
+  "Toggle the root section at point and return non-nil on success."
+  (when-let* ((section (disco-root--line-section)))
+    (disco-root--toggle-section section)
+    t))
 
 
 (defun disco-root-toggle-section-at-point ()
-  "Toggle collapsible node at point.
-
-Supports top-level sections, guild rows, and category rows. In layouts
-without collapsible nodes, move to next channel row."
+  "Toggle the top-level root section at point."
   (interactive)
   (unless (disco-root--toggle-node-at-point)
-    (if (eq (disco-root--ensure-layout) 'activity)
-        (disco-root-button-forward 1)
-      (user-error "disco: point is not on a collapsible row"))))
+    (user-error "disco: point is not on a root section")))
 
 (defun disco-root-tab-dwim ()
-  "On collapsible row, toggle it; otherwise move to next channel row."
+  "Toggle a section, enter a guild, or move to the next channel row."
   (interactive)
-  (unless (disco-root--toggle-node-at-point)
-    (disco-root-button-forward 1)))
+  (cond
+   ((disco-root--toggle-node-at-point))
+   ((disco-root--line-guild-id)
+    (disco-channel-directory-open (disco-root--line-guild-id)))
+   (t
+    (disco-root-button-forward 1))))
 
 (defun disco-root--refresh-channel-node (channel-id)
   "Refresh one CHANNEL-ID row in EWOC.
@@ -2901,37 +2761,6 @@ if structural reconciliation is required."
     (disco-root--refresh-section-node 'guilds
                                       (length (or (disco-state-guilds) '())))))
 
-(defun disco-root--category-id-for-channel (channel)
-  "Return category ID that CHANNEL belongs to, or nil."
-  (when channel
-    (let* ((parent-id (alist-get 'parent_id channel))
-           (parent-channel (and parent-id (disco-state-channel parent-id))))
-      (cond
-       ((disco-state-channel-thread-p channel)
-        (let* ((category-id (and parent-channel
-                                 (alist-get 'parent_id parent-channel)))
-               (category (and category-id (disco-state-channel category-id))))
-          (when (and category (disco-root--channel-category-p category))
-            category-id)))
-       ((and parent-channel
-             (disco-root--channel-category-p parent-channel))
-        parent-id)
-       (t nil)))))
-
-(defun disco-root--category-visible-children (category)
-  "Return visible child parent-channels under CATEGORY."
-  (let ((category-id (and category (alist-get 'id category)))
-        (guild-id (and category (alist-get 'guild_id category)))
-        children)
-    (when (and category-id guild-id)
-      (dolist (channel (or (disco-state-guild-channels guild-id) '()))
-        (when (and (equal (alist-get 'parent_id channel) category-id)
-                   (disco-root--displayable-channel-p channel)
-                   (disco-root--channel-visible-in-view-p channel)
-                   (not (disco-state-channel-thread-p channel)))
-          (push channel children))))
-    (disco-root--sort-channels (nreverse children))))
-
 (defun disco-root--refresh-guild-node (guild-id)
   "Patch one guild header node by GUILD-ID, returning non-nil on update."
   (let ((node (and guild-id
@@ -2948,51 +2777,23 @@ if structural reconciliation is required."
             (ewoc-invalidate disco-root--ewoc node)
             t))))))
 
-(defun disco-root--refresh-category-node (category-id)
-  "Patch one category header node by CATEGORY-ID, returning non-nil on update."
-  (let ((node (and category-id
-                   (hash-table-p disco-root--category-node-table)
-                   (gethash category-id disco-root--category-node-table))))
-    (when (and node disco-root--ewoc)
-      (let ((category (disco-state-channel category-id)))
-        (when category
-          (let* ((children (disco-root--category-visible-children category))
-                 (entry (copy-sequence (ewoc-data node))))
-            (setf (disco-root-layout-entry-category entry) category)
-            (setf (disco-root-layout-entry-unread-count entry)
-                  (disco-root--category-children-unread-total children))
-            (ewoc-set-data node entry)
-            (ewoc-invalidate disco-root--ewoc node)
-            t))))))
-
 (defun disco-root--refresh-heading-nodes (channel-ids)
-  "Patch section/guild/category heading rows related to CHANNEL-IDS."
-  (let (guild-ids
-        category-ids)
+  "Patch section and guild heading rows related to CHANNEL-IDS."
+  (let (guild-ids)
     (dolist (channel-id channel-ids)
       (let ((channel (disco-state-channel channel-id)))
         (when channel
           (when-let* ((guild-id (alist-get 'guild_id channel)))
-            (cl-pushnew guild-id guild-ids :test #'equal))
-          (when-let* ((category-id (disco-root--category-id-for-channel channel)))
-            (cl-pushnew category-id category-ids :test #'equal)))))
+            (cl-pushnew guild-id guild-ids :test #'equal)))))
     (disco-root--refresh-section-nodes)
     (dolist (guild-id guild-ids)
-      (disco-root--refresh-guild-node guild-id))
-    (dolist (category-id category-ids)
-      (disco-root--refresh-category-node category-id))))
+      (disco-root--refresh-guild-node guild-id))))
 
 (defun disco-root--cancel-live-update-timer ()
   "Cancel pending root live-update debounce timer when present."
   (when (timerp disco-root--live-update-timer)
     (cancel-timer disco-root--live-update-timer)
     (setq disco-root--live-update-timer nil)))
-
-(defun disco-root--cancel-missing-preview-fetch-timer ()
-  "Cancel pending proactive missing-preview fetch timer when present."
-  (when (timerp disco-root--missing-preview-fetch-timer)
-    (cancel-timer disco-root--missing-preview-fetch-timer)
-    (setq disco-root--missing-preview-fetch-timer nil)))
 
 (defun disco-root--live-updatable-buffer-mode-p ()
   "Return non-nil when current buffer supports root-style live updates."
@@ -3004,99 +2805,6 @@ if structural reconciliation is required."
   "Return non-nil when current buffer is a thread browser list buffer."
   (memq major-mode '(disco-root-parent-threads-mode
                      disco-root-archived-threads-mode)))
-
-(defun disco-root--schedule-missing-preview-fetch ()
-  "Schedule debounced proactive fetch for missing preview messages."
-  (unless (timerp disco-root--missing-preview-fetch-timer)
-    (setq disco-root--missing-preview-fetch-timer
-          (run-with-timer
-           (max 0 (or disco-root-missing-preview-fetch-debounce 0))
-           nil
-           #'disco-root--flush-missing-preview-fetches
-           (current-buffer)))))
-
-(defun disco-root--flush-missing-preview-fetches (root-buffer)
-  "Flush queued missing-preview requests in ROOT-BUFFER via op34."
-  (when (buffer-live-p root-buffer)
-    (with-current-buffer root-buffer
-      (when (disco-root--live-updatable-buffer-mode-p)
-        (setq disco-root--missing-preview-fetch-timer nil)
-        (when (and (disco-gateway-running-p)
-                   (hash-table-p disco-root--missing-preview-pending-by-guild)
-                   (> (hash-table-count disco-root--missing-preview-pending-by-guild) 0))
-          (let ((max-per-guild
-                 (max 1 (or disco-root-missing-preview-fetch-max-per-guild 1)))
-                next-pending)
-            (maphash
-             (lambda (guild-id pending-channel-ids)
-               (let* ((ordered (disco-util-normalize-id-list pending-channel-ids))
-                      (batch (seq-take ordered max-per-guild))
-                      (remaining (nthcdr (length batch) ordered)))
-                 (cond
-                  ((null ordered)
-                   nil)
-                  ((not guild-id)
-                   (push (cons guild-id ordered) next-pending))
-                  ((not (disco-gateway-send-queue-slot-available-p))
-                   (push (cons guild-id ordered) next-pending))
-                  ((and batch
-                        (disco-gateway-request-last-messages guild-id batch))
-                   (when remaining
-                     (push (cons guild-id remaining) next-pending)))
-                  (t
-                   (push (cons guild-id ordered) next-pending)))))
-             disco-root--missing-preview-pending-by-guild)
-            (clrhash disco-root--missing-preview-pending-by-guild)
-            (dolist (entry next-pending)
-              (puthash (car entry)
-                       (cdr entry)
-                       disco-root--missing-preview-pending-by-guild))
-            (when next-pending
-              (disco-root--schedule-missing-preview-fetch))))))))
-
-(defun disco-root--queue-missing-preview-fetch (channel)
-  "Queue proactive op34 fetch for CHANNEL missing cached preview message.
-
-Each channel `last_message_id' is only requested once per root session."
-  (when (and disco-root-missing-preview-fetch-enabled
-             (listp channel)
-             (disco-gateway-running-p))
-    (let* ((guild-id (and (alist-get 'guild_id channel)
-                          (format "%s" (alist-get 'guild_id channel))))
-           (channel-id (and (alist-get 'id channel)
-                            (format "%s" (alist-get 'id channel))))
-           (last-message-id (and (alist-get 'last_message_id channel)
-                                 (format "%s" (alist-get 'last_message_id channel))))
-           (pending-by-guild
-            (or disco-root--missing-preview-pending-by-guild
-                (setq-local disco-root--missing-preview-pending-by-guild
-                            (make-hash-table :test #'equal))))
-           (requested-by-channel
-            (or disco-root--missing-preview-requested-last-message-id-by-channel
-                (setq-local
-                 disco-root--missing-preview-requested-last-message-id-by-channel
-                 (make-hash-table :test #'equal))))
-           (requested-last-message-id
-            (and channel-id
-                 (gethash channel-id requested-by-channel))))
-      (when (and guild-id
-                 channel-id
-                 (stringp last-message-id)
-                 (not (equal requested-last-message-id last-message-id))
-                 (not (disco-msg-channel-last-cached-message channel)))
-        (puthash channel-id last-message-id requested-by-channel)
-        (let ((pending (copy-sequence (or (gethash guild-id pending-by-guild)
-                                          '()))))
-          (cl-pushnew channel-id pending :test #'equal)
-          (puthash guild-id pending pending-by-guild))
-        (disco-root--schedule-missing-preview-fetch)))))
-
-(defun disco-root--maybe-queue-missing-preview-fetch (channel)
-  "Queue a fetch when CHANNEL could have a preview but none is cached."
-  (when (and (listp channel)
-             (alist-get 'last_message_id channel)
-             (not (disco-msg-channel-last-cached-message channel)))
-    (disco-root--queue-missing-preview-fetch channel)))
 
 (defun disco-root--queue-live-update (channel-ids &optional structural-p header-p)
   "Queue CHANNEL-IDS for debounced UI update.
@@ -3237,7 +2945,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
     (when (eq event-type 'guild-members-chunk)
       (disco-root--search-refresh-active-completions (plist-get event :guild-id)))
     (when (disco-root--live-event-p event-type)
-      (let ((channel-ids (disco-root--event-channel-ids event))
+      (let ((channel-ids (disco-gateway-event-channel-ids event))
             (structural (disco-root--live-event-structural-p event-type))
             (header (disco-root--live-event-header-p event-type)))
         (disco-root--debug-log
@@ -3264,18 +2972,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                    (format "%s: %s" (car entry)
                            (disco-root--async-error-message (cdr entry))))
                  errors "; "))))
-    ('guild-loading
-     (puthash (plist-get event :guild-id) 'loading
-              disco-root--guild-load-status)
-     (disco-root--queue-live-update nil t nil))
     ('guild-loaded
-     (puthash (plist-get event :guild-id) 'loaded
-              disco-root--guild-load-status)
      (disco-root--queue-live-update nil t nil))
     ('guild-error
-     (puthash (plist-get event :guild-id) 'error
-              disco-root--guild-load-status)
-     (disco-root--queue-live-update nil t nil)
      (message "disco: failed to load guild %s channels: %s"
               (plist-get event :guild-id)
               (disco-root--async-error-message (plist-get event :error))))
@@ -3294,14 +2993,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
   (when disco-root--directory-handler
     (remove-hook 'disco-directory-event-hook disco-root--directory-handler))
   (disco-root--cancel-live-update-timer)
-  (disco-root--cancel-missing-preview-fetch-timer)
   (setq disco-root--dirty-channel-ids nil)
   (setq disco-root--dirty-structure-p nil)
   (setq disco-root--dirty-header-p nil)
-  (when (hash-table-p disco-root--missing-preview-pending-by-guild)
-    (clrhash disco-root--missing-preview-pending-by-guild))
-  (when (hash-table-p disco-root--missing-preview-requested-last-message-id-by-channel)
-    (clrhash disco-root--missing-preview-requested-last-message-id-by-channel))
   (let ((root-buffer (current-buffer)))
     (setq disco-root--gateway-handler
           (lambda (event)
@@ -3323,14 +3017,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 (defun disco-root--detach-live-updates ()
   "Detach root buffer from global gateway update stream."
   (disco-root--cancel-live-update-timer)
-  (disco-root--cancel-missing-preview-fetch-timer)
   (setq disco-root--dirty-channel-ids nil)
   (setq disco-root--dirty-structure-p nil)
   (setq disco-root--dirty-header-p nil)
-  (when (hash-table-p disco-root--missing-preview-pending-by-guild)
-    (clrhash disco-root--missing-preview-pending-by-guild))
-  (when (hash-table-p disco-root--missing-preview-requested-last-message-id-by-channel)
-    (clrhash disco-root--missing-preview-requested-last-message-id-by-channel))
   (when disco-root--gateway-handler
     (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
     (setq disco-root--gateway-handler nil))
@@ -3619,33 +3308,6 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                    (alist-get 'id guild))
                  (seq-take sorted max-guilds)))))))
 
-(defun disco-root--gateway-last-message-eligible-p (channel)
-  "Return non-nil when CHANNEL should be included in op34 last-message sync."
-  (and (listp channel)
-       (alist-get 'guild_id channel)
-       (disco-permission-channel-viewable-p channel t)
-       (memq (alist-get 'type channel) '(0 2 5 10 11 12 13 15 16))))
-
-(defun disco-root--gateway-last-message-channel-ids (guild-id)
-  "Return prioritized channel IDs for op34 request in GUILD-ID."
-  (let* ((limit (max 0 (or disco-root-gateway-context-last-messages-per-guild 0)))
-         (channels
-          (append (or (disco-state-guild-channels guild-id) '())
-                  (or (disco-state-guild-threads guild-id) '()))))
-    (if (<= limit 0)
-        '()
-      (let ((eligible
-             (seq-filter #'disco-root--gateway-last-message-eligible-p channels)))
-        (setq eligible
-              (sort eligible
-                    (lambda (left right)
-                      (> (disco-root--channel-activity-score left)
-                         (disco-root--channel-activity-score right)))))
-        (disco-util-normalize-id-list
-         (mapcar (lambda (channel)
-                   (alist-get 'id channel))
-                 (seq-take eligible limit)))))))
-
 (defun disco-root-sync-gateway-context (&optional quiet)
   "Request additional gateway context for current root state.
 
@@ -3656,8 +3318,7 @@ When QUIET is non-nil, suppress minibuffer status messages."
         (requested-guilds 0))
     (when (disco-gateway-running-p)
       (dolist (guild-id guild-ids)
-        (let ((guild-requested nil)
-              (channel-ids (disco-root--gateway-last-message-channel-ids guild-id)))
+        (let ((guild-requested nil))
           (when (disco-gateway-request-channel-statuses guild-id)
             (setq requests (1+ requests))
             (setq guild-requested t))
@@ -3665,10 +3326,6 @@ When QUIET is non-nil, suppress minibuffer status messages."
                      (disco-gateway-request-channel-info
                       guild-id
                       '("status" "voice_start_time")))
-            (setq requests (1+ requests))
-            (setq guild-requested t))
-          (when (and channel-ids
-                     (disco-gateway-request-last-messages guild-id channel-ids))
             (setq requests (1+ requests))
             (setq guild-requested t))
           (when guild-requested
@@ -3732,7 +3389,6 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (buffer-disable-undo)
   (setq-local buffer-undo-list t)
   (disco-root--cancel-live-update-timer)
-  (disco-root--cancel-missing-preview-fetch-timer)
   (disco-root--ensure-window-size-hook)
   (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
   (setq-local disco-root--sort-mode 'activity)
@@ -3746,16 +3402,10 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (setq-local disco-root--channel-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--section-node-table (make-hash-table :test #'eq))
   (setq-local disco-root--guild-node-table (make-hash-table :test #'equal))
-  (setq-local disco-root--category-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--live-update-timer nil)
   (setq-local disco-root--directory-handler nil)
   (setq-local disco-root--rendering nil)
   (setq-local disco-root--render-pending nil)
-  (setq-local disco-root--missing-preview-fetch-timer nil)
-  (setq-local disco-root--missing-preview-pending-by-guild
-              (make-hash-table :test #'equal))
-  (setq-local disco-root--missing-preview-requested-last-message-id-by-channel
-              (make-hash-table :test #'equal))
   (setq-local disco-root--dirty-channel-ids nil)
   (setq-local disco-root--dirty-structure-p nil)
   (setq-local disco-root--dirty-header-p nil)
@@ -3771,15 +3421,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (setq-local disco-root--search-in-flight nil)
   (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
   (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
-  (setq-local disco-root--search-prev-layout nil)
-  (setq-local disco-root--guild-expanded (make-hash-table :test #'equal))
-  (setq-local disco-root--category-expanded (make-hash-table :test #'equal))
-  (setq-local disco-root--guild-load-status (make-hash-table :test #'equal))
-  (dolist (guild (disco-state-guilds))
-    (when-let* ((guild-id (alist-get 'id guild))
-                (status (disco-directory-guild-status guild-id)))
-      (unless (memq status '(loaded unloaded))
-        (puthash guild-id status disco-root--guild-load-status)))))
+  (setq-local disco-root--search-prev-layout nil))
 
 (defun disco-root-open ()
   "Open root buffer and render current state."
@@ -3788,17 +3430,17 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
     (with-current-buffer buf
       (unless (derived-mode-p 'disco-root-mode)
         (disco-root-mode))
-      (setq-local buffer-undo-list t)
+      (setq-local buffer-undo-list t))
+    (pop-to-buffer buf)
+    (with-current-buffer buf
       (disco-root--attach-live-updates)
       (disco-root-render))
-    (pop-to-buffer buf)))
+    buf))
 
 (setq disco-root-view-attach-live-updates-function
       #'disco-root--attach-live-updates
       disco-root-view-load-more-function
       #'disco-root-search-load-more-at-point
-      disco-root-view-missing-preview-fetch-function
-      #'disco-root--maybe-queue-missing-preview-fetch
       disco-root-view-queue-live-update-function
       #'disco-root--queue-live-update
       disco-root-view-render-preserving-position-function

@@ -191,6 +191,25 @@
      :width 80)
     (should (eq 'highlight (get-text-property (point-min) 'mouse-face)))))
 
+(ert-deftest disco-view-one-line-row-keeps-context-column-across-time-formats ()
+  (with-temp-buffer
+    (dolist (time '("" "Thu•" "29.06.26•"))
+      (disco-view-insert-one-line-row
+       (disco-view-one-line-row-create
+        :context "channel"
+        :preview "preview"
+        :time time)
+       :width 80
+       :time-slot-width 9))
+    (let (targets)
+      (goto-char (point-min))
+      (dotimes (_ 3)
+        (let ((line-end (line-end-position)))
+          (should (search-forward "]" line-end t))
+          (push (get-text-property (- (point) 2) 'display) targets))
+        (forward-line 1))
+      (should (= 1 (length (delete-dups targets)))))))
+
 (ert-deftest disco-view-chars-xwidth-does-not-select-display-window ()
   (let ((original-window (selected-window))
         other-window
@@ -230,14 +249,14 @@
         (should (eq (car display-prop) 'space))
         (should (plist-member (cdr display-prop) :align-to))))))
 
-(ert-deftest disco-view-move-to-column-does-not-align-backwards ()
+(ert-deftest disco-view-move-to-column-always-inserts-absolute-spacer ()
   (with-temp-buffer
     (insert "abcdef")
     (let ((insert-pos (point)))
       (disco-view-move-to-column 2)
-      (should (= (point) insert-pos))
-      (should-not (get-text-property (max (point-min) (1- insert-pos))
-                                     'display)))))
+      (should (= (point) (1+ insert-pos)))
+      (should (equal '(space :align-to 2)
+                     (get-text-property insert-pos 'display))))))
 
 (ert-deftest disco-view-window-fill-column-uses-remapped-width-and-margins ()
   (let* ((win (selected-window))
@@ -263,6 +282,38 @@
 (ert-deftest disco-view-elide-string-noop-when-string-fits ()
   (let ((text "short"))
     (should (equal text (disco-view-elide-string text 12 'shadow)))))
+
+(ert-deftest disco-view-elide-string-for-columns-uses-pixel-width ()
+  (cl-labels ((pixel-width
+               (text)
+               (let ((total 0))
+                 (dolist (character (string-to-list text) total)
+                   (setq total
+                         (+ total
+                            (cond
+                             ((= character ?🏆) 30)
+                             ((= character ?…) 10)
+                             (t 10))))))))
+    (cl-letf (((symbol-function 'disco-view--string-pixel-width)
+               (lambda (text &optional _face) (pixel-width text)))
+              ((symbol-function 'disco-view--chars-xwidth)
+               (lambda (columns &optional _window) (* columns 10))))
+      (let* ((text "🏆abcdefgh")
+             (elided (disco-view-elide-string-for-columns text 5 'shadow))
+             (display-position
+              (next-single-property-change 0 'display elided)))
+        (should (= 2 display-position))
+        (should (equal "…"
+                       (get-text-property display-position 'display elided)))
+        (should
+         (= 50
+            (pixel-width
+             (concat (substring elided 0 display-position) "…"))))))))
+
+(ert-deftest disco-view-safe-elide-boundary-preserves-emoji-clusters ()
+  (should (= 0 (disco-view--safe-elide-boundary "👍🏽ok" 1)))
+  (should (= 1 (disco-view--safe-elide-boundary "👩‍💻ok" 2)))
+  (should (= 0 (disco-view--safe-elide-boundary "🇨🇳ok" 1))))
 
 (ert-deftest disco-view-insert-label-row-applies-struct-fields ()
   (with-temp-buffer

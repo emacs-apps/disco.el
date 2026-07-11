@@ -634,6 +634,24 @@
         (should (member "thread" (disco-state-guild-thread-ids "g1"))))
     (disco-state-reset)))
 
+(ert-deftest disco-state-guild-snapshots-canonicalize-channel-ownership ()
+  (disco-state-reset)
+  (let ((channel '((id . "channel") (type . 0)))
+        (thread '((id . "thread") (parent_id . "channel") (type . 11))))
+    (unwind-protect
+        (progn
+          (disco-state-put-channels 42 (list channel))
+          (disco-state-sync-threads 42 nil (list thread))
+          (should (equal "42"
+                         (alist-get 'guild_id
+                                    (disco-state-channel "channel"))))
+          (should (equal "42"
+                         (alist-get 'guild_id
+                                    (disco-state-channel "thread"))))
+          (should-not (alist-get 'guild_id channel))
+          (should-not (alist-get 'guild_id thread)))
+      (disco-state-reset))))
+
 (ert-deftest disco-state-merge-message-page-preserves-concurrent-mutations ()
   (disco-state-reset)
   (unwind-protect

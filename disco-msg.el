@@ -394,9 +394,9 @@ ID comparison is normalized for snowflake strings."
                                 (alist-get 'last_message_id channel))))
          (messages (and channel-id
                         (disco-state-messages channel-id))))
-    (or (and last-message-id
-             (disco-msg-find-in-messages messages last-message-id))
-        (car messages))))
+    (if last-message-id
+        (disco-msg-find-in-messages messages last-message-id)
+      (car messages))))
 
 (defun disco-msg-channel-preview-line (channel)
   "Return best-effort cached preview line for CHANNEL, or nil."

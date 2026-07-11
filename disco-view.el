@@ -40,7 +40,7 @@ errors because incremental reconciliation cannot identify such rows."
     nodes))
 
 (defun disco-view--validate-keyed-entries (entries key-function)
-  "Require every entry in ENTRIES to have one unique stable key."
+  "Require KEY-FUNCTION to return one unique stable key for each of ENTRIES."
   (let ((seen (make-hash-table :test #'equal)))
     (dolist (entry entries)
       (let ((key (funcall key-function entry)))
@@ -115,7 +115,7 @@ Return non-nil when the keyed node exists."
 When ANCHOR-PROPERTY is non-nil, also capture its value at point (or line
 beginning), so restore can anchor by semantic row identity.
 
-When PRESERVE-WINDOW-START is non-nil, capture window-start as a 1-based line
+When PRESERVE-WINDOW-START is non-nil, capture `window-start' as a 1-based line
 index for the current buffer window."
   (let* ((anchor-value (and anchor-property
                             (or (get-text-property (point) anchor-property)
@@ -154,7 +154,7 @@ index for the current buffer window."
            (get-text-property (1- pos) property))))
 
 (defun disco-view--move-to-anchor-line-offset (anchor-property anchor-value offset)
-  "Move forward up to OFFSET lines while staying within ANCHOR-VALUE row."
+  "Move OFFSET lines within the ANCHOR-PROPERTY row named ANCHOR-VALUE."
   (let ((remaining (max 0 (or offset 0))))
     (while (> remaining 0)
       (let ((next-pos (save-excursion
@@ -171,7 +171,7 @@ index for the current buffer window."
   "Restore point/window state from SNAPSHOT.
 
 If SNAPSHOT carries an anchor property/value and the anchor is still present,
-restore by anchor first. Otherwise restore by line/column fallback."
+restore by anchor first.  Otherwise restore by line/column fallback."
   (let* ((anchor-property (disco-view--snapshot-anchor-property snapshot))
          (anchor-value (disco-view--snapshot-anchor-value snapshot))
          (anchor-line-offset (disco-view--snapshot-anchor-line-offset snapshot))
@@ -207,7 +207,7 @@ restore by anchor first. Otherwise restore by line/column fallback."
     (render-fn &key anchor-property preserve-window-start after-restore)
   "Call RENDER-FN, then restore cursor/viewport context.
 
-RENDER-FN must redraw current buffer. ANCHOR-PROPERTY and
+RENDER-FN must redraw current buffer.  ANCHOR-PROPERTY and
 PRESERVE-WINDOW-START are forwarded to `disco-view-capture-position'.
 AFTER-RESTORE, when non-nil, is called after point/window restoration."
   (let ((snapshot (disco-view-capture-position
@@ -244,7 +244,10 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
 
 (cl-defun disco-view-render-list-spec-preserving-position
     (spec &key anchor-property preserve-window-start after-restore)
-  "Render list SPEC and restore cursor/viewport context."
+  "Render list SPEC and restore cursor/viewport context.
+
+ANCHOR-PROPERTY, PRESERVE-WINDOW-START, and AFTER-RESTORE are forwarded to
+`disco-view-render-preserving-position'."
   (disco-view-render-preserving-position
    (lambda ()
      (let ((inhibit-read-only t))
@@ -294,7 +297,10 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
 (cl-defun disco-view-insert-label-line
     (label &key prefix suffix icon-inserter icon-separator
            face line-properties help-echo mouse-face)
-  "Insert LABEL as one styled line with optional prefix, suffix, and icon."
+  "Insert LABEL as one styled line.
+
+PREFIX, SUFFIX, ICON-INSERTER, ICON-SEPARATOR, FACE, LINE-PROPERTIES,
+HELP-ECHO, and MOUSE-FACE customize its presentation and interaction."
   (disco-view-insert-label-row
    (disco-view-label-row-create
     :label label
@@ -309,7 +315,7 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
 
 (cl-defun disco-view-insert-heading-line
     (text &key face line-properties help-echo mouse-face)
-  "Insert heading TEXT as one styled line."
+  "Insert heading TEXT using FACE, LINE-PROPERTIES, HELP-ECHO, and MOUSE-FACE."
   (disco-view-insert-label-line
    text
    :face face
@@ -319,7 +325,7 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
 
 (cl-defun disco-view-insert-note-line
     (text &key face line-properties help-echo mouse-face)
-  "Insert note TEXT as one styled line."
+  "Insert note TEXT using FACE, LINE-PROPERTIES, HELP-ECHO, and MOUSE-FACE."
   (disco-view-insert-heading-line
    text
    :face (or face 'shadow)
@@ -329,7 +335,9 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
 
 (cl-defun disco-view-insert-action-line
     (label &key prefix suffix face line-properties help-echo mouse-face)
-  "Insert clickable action LABEL as one styled line."
+  "Insert a clickable action line for LABEL.
+
+PREFIX, SUFFIX, FACE, LINE-PROPERTIES, HELP-ECHO, and MOUSE-FACE customize it."
   (disco-view-insert-label-line
    label
    :prefix (or prefix "  [")
@@ -383,7 +391,7 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
       (concat trimmed (make-string padding ?\s)))))
 
 (defun disco-view-elide-string (str max &optional face)
-  "Return STR visually elided to MAX columns using display properties."
+  "Return STR elided to MAX columns using display properties and FACE."
   (let* ((text (or str ""))
          (str-width (string-width text))
          (limit (max 0 (or max 0))))
@@ -418,6 +426,99 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
                'face face)
          result)
         result))))
+
+(defun disco-view--string-pixel-width (text &optional face)
+  "Return graphical pixel width of TEXT rendered with FACE.
+
+Return nil when the current buffer has no graphical display window."
+  (when-let* ((window (get-buffer-window (current-buffer) t))
+              ((window-live-p window))
+              (frame (window-frame window))
+              ((display-graphic-p frame))
+              ((fboundp 'string-pixel-width)))
+    (let ((measured (copy-sequence (or text ""))))
+      (when (and face (> (length measured) 0))
+        (add-face-text-property 0 (length measured) face t measured))
+      (string-pixel-width measured (current-buffer)))))
+
+(defun disco-view--pixel-continuation-char-p (character)
+  "Return non-nil when CHARACTER continues the preceding display cluster."
+  (and character
+       (or (memq (get-char-code-property character 'general-category)
+                 '(Mn Mc Me))
+           (<= #xFE00 character #xFE0F)
+           (<= #xE0100 character #xE01EF)
+           (<= #x1F3FB character #x1F3FF)
+           (= character #x20E3))))
+
+(defun disco-view--regional-indicator-p (character)
+  "Return non-nil when CHARACTER is a regional-indicator symbol."
+  (and character (<= #x1F1E6 character #x1F1FF)))
+
+(defun disco-view--safe-elide-boundary (text boundary)
+  "Move BOUNDARY left to a safe display-cluster edge in TEXT."
+  (let ((position (max 0 (min (length text) boundary)))
+        changed)
+    (while (and (> position 0) (< position (length text))
+                (progn
+                  (setq changed nil)
+                  (cond
+                   ((disco-view--pixel-continuation-char-p
+                     (aref text position))
+                    (setq position (1- position)
+                          changed t))
+                   ((= (aref text (1- position)) #x200D)
+                    (setq position (1- position)
+                          changed t))
+                   ((and (disco-view--regional-indicator-p
+                          (aref text (1- position)))
+                         (disco-view--regional-indicator-p
+                          (aref text position)))
+                    (setq position (1- position)
+                          changed t)))
+                  changed)))
+    position))
+
+(defun disco-view--elide-string-to-pixels (text pixel-limit face)
+  "Return TEXT right-elided within PIXEL-LIMIT using FACE metrics."
+  (let* ((ellipsis "…")
+         (text-length (length text))
+         (low 0)
+         (high (max 0 (1- text-length)))
+         (best 0))
+    (while (<= low high)
+      (let* ((middle (/ (+ low high) 2))
+             (candidate (concat (substring text 0 middle) ellipsis))
+             (width (disco-view--string-pixel-width candidate face)))
+        (if (and (numberp width) (<= width pixel-limit))
+            (setq best middle
+                  low (1+ middle))
+          (setq high (1- middle)))))
+    (setq best (disco-view--safe-elide-boundary text best))
+    (let ((result (copy-sequence text)))
+      (add-text-properties
+       best text-length
+       (list 'display ellipsis
+             'rear-nonsticky '(display)
+             'face face)
+       result)
+      result)))
+
+(defun disco-view-elide-string-for-columns (str max &optional face)
+  "Return STR visually elided to MAX display columns.
+
+Graphical buffers use actual font pixels so emoji and variable-width glyphs
+cannot push following aligned columns to the right.  Terminals use ordinary
+column widths.  FACE supplies the font metrics used for measurement."
+  (let* ((text (or str ""))
+         (limit (max 0 (or max 0)))
+         (pixel-width (disco-view--string-pixel-width text face)))
+    (if (numberp pixel-width)
+        (let ((pixel-limit (disco-view--chars-xwidth limit)))
+          (if (<= pixel-width pixel-limit)
+              text
+            (disco-view--elide-string-to-pixels text pixel-limit face)))
+      (disco-view-elide-string text limit face))))
 
 (defun disco-view--chars-xwidth (columns &optional window)
   "Return pixel width for COLUMNS using WINDOW metrics."
@@ -478,17 +579,15 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of right."
     (or align-column (current-column))))
 
 (defun disco-view-move-to-column (column)
-  "Insert one forward-only align-to spacer for COLUMN."
+  "Insert one absolute align-to spacer for COLUMN."
   (let* ((target (max 0 (or column 0)))
-         (current (disco-view-current-column))
          (win (get-buffer-window (current-buffer) t))
          (frame (and (window-live-p win) (window-frame win))))
-    (when (>= target current)
-      (let ((align-to (if (and (frame-live-p frame)
-                               (display-graphic-p frame))
-                          (list (disco-view--chars-xwidth target win))
-                        target)))
-        (insert (propertize " " 'display `(space :align-to ,align-to)))))))
+    (let ((align-to (if (and (frame-live-p frame)
+                             (display-graphic-p frame))
+                        (list (disco-view--chars-xwidth target win))
+                      target)))
+      (insert (propertize " " 'display `(space :align-to ,align-to))))))
 
 (defun disco-view-window-fill-column (&optional window margin-columns)
   "Return telega-style usable columns for WINDOW.
@@ -521,7 +620,7 @@ edge.  Return nil when WINDOW is not live."
                   line-number-columns))))))
 
 (defun disco-view-one-line-column-widths (content-width context-width-spec)
-  "Return one-line context/preview width split for CONTENT-WIDTH."
+  "Split CONTENT-WIDTH using CONTEXT-WIDTH-SPEC for the context column."
   (let* ((max-context-inner (max 8 (- content-width 3)))
          (context-inner-width
           (max 8
@@ -538,14 +637,15 @@ edge.  Return nil when WINDOW is not live."
   (string-trim
    (replace-regexp-in-string "[\t\n\r ]+" " " (or text "") nil t)))
 
-(cl-defun disco-view-insert-one-line-row (row &key indent width
-                                               icon-slot-width context-width-spec)
+(cl-defun disco-view-insert-one-line-row
+    (row &key indent width icon-slot-width context-width-spec time-slot-width)
   "Insert ROW using one-line activity-style layout.
 
-ROW is a `disco-view-one-line-row' object. INDENT is left padding in spaces.
-WIDTH sets the total row width. ICON-SLOT-WIDTH reserves columns for the
-icon slot. CONTEXT-WIDTH-SPEC controls context width using
-`disco-view-canonicalize-number' semantics."
+ROW is a `disco-view-one-line-row' object.  INDENT is left padding in spaces.
+WIDTH sets the total row width.  ICON-SLOT-WIDTH reserves columns for the
+icon slot.  CONTEXT-WIDTH-SPEC controls context width using
+`disco-view-canonicalize-number' semantics.  TIME-SLOT-WIDTH reserves a stable
+right-aligned timestamp column."
   (let* ((padding (make-string (max 0 (or indent 0)) ?\s))
          (context-text
           (disco-view--one-line-text (disco-view-one-line-row-context row)))
@@ -553,9 +653,11 @@ icon slot. CONTEXT-WIDTH-SPEC controls context width using
           (disco-view--one-line-text (disco-view-one-line-row-preview row)))
          (time-text
           (disco-view--one-line-text (disco-view-one-line-row-time row)))
-         (time-width (if (string-empty-p time-text)
-                         0
-                       (max 6 (string-width time-text))))
+         (time-width
+          (max (max 0 (or time-slot-width 0))
+               (if (string-empty-p time-text)
+                   0
+                 (max 6 (string-width time-text)))))
          (line-start (point)))
     (insert padding)
     (let* ((icon-start (disco-view-current-column))
@@ -580,14 +682,16 @@ icon slot. CONTEXT-WIDTH-SPEC controls context width using
            (separator-width (or (plist-get widths :separator-width) 0)))
       (let ((context-start (disco-view-current-column)))
         (insert "[")
-        (insert (disco-view-elide-string context-text context-inner-width 'default))
+        (insert (disco-view-elide-string-for-columns
+                 context-text context-inner-width 'default))
         (disco-view-move-to-column (+ context-start 1 context-inner-width))
         (insert "]"))
       (when (> preview-width 0)
         (when (> separator-width 0)
           (insert " "))
         (let ((preview-start (point)))
-          (insert (disco-view-elide-string preview-text preview-width 'shadow))
+          (insert (disco-view-elide-string-for-columns
+                   preview-text preview-width 'shadow))
           (add-text-properties preview-start (point) (list 'face 'shadow))
           (let ((leading-length (disco-view-one-line-row-preview-leading-length row))
                 (leading-face (disco-view-one-line-row-preview-leading-face row)))

@@ -2,7 +2,7 @@
 
 (package "disco"
          "0.1.0"
-         "Discord client for Emacs")
+         "Discord client")
 
 (website-url "https://github.com/0WD0/disco.el")
 (keywords "comm")
@@ -16,4 +16,3 @@
 (depends-on "plz" "0.8")
 (depends-on "websocket" "1.16")
 (depends-on "transient" "0.5.0")
-(depends-on "taxy-magit-section" "0.14.3")

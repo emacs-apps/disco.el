@@ -33,6 +33,13 @@
     (should (equal "m2"
                    (alist-get 'id (disco-msg-channel-last-cached-message channel))))))
 
+(ert-deftest disco-msg-channel-last-cached-message-rejects-stale-preview ()
+  (disco-state-reset)
+  (let ((channel '((id . "c1") (last_message_id . "m2")))
+        (older '((id . "m1") (content . "older"))))
+    (disco-state-put-messages "c1" (list older))
+    (should-not (disco-msg-channel-last-cached-message channel))))
+
 (ert-deftest disco-msg-time-and-type-helpers-normalize-message-fields ()
   (let ((message '((timestamp . "2026-03-08T12:34:56.000000+00:00")
                    (type . "19"))))

@@ -18,12 +18,12 @@
   :group 'disco)
 
 (defcustom disco-root-tree-default-show-unread-section t
-  "When non-nil, tree layout renders the unread quick section by default."
+  "When non-nil, the home layout shows its unread quick section by default."
   :type 'boolean
   :group 'disco)
 
 (defcustom disco-root-tree-unread-section-limit 40
-  "Maximum unread rows shown by the tree layout quick unread section.
+  "Maximum unread rows shown by the home layout's quick unread section.
 
 When nil, show all unread rows without truncation."
   :type '(choice (const :tag "No limit" nil)
@@ -62,7 +62,6 @@ Custom entries can override built-in layouts when NAME matches."
   count
   guild
   unread-count
-  category
   text
   face
   channel
@@ -78,11 +77,11 @@ Custom entries can override built-in layouts when NAME matches."
 
 (defconst disco-root-layout-builtin-specs
   '((tree
-     :label "Tree"
+     :label "Home"
      :build disco-root--build-tree-layout-view-spec
      :update-mode incremental
      :unread-mode section
-     :toggle-hint "toggle section/guild/category or next channel"
+     :toggle-hint "toggle section, enter guild, or next channel"
      :refresh-headings disco-root--refresh-heading-nodes)
     (activity
      :label "Activity"
@@ -129,7 +128,7 @@ Signal an error when the selected layout is not registered."
   (let* ((name (disco-root-layout--active-layout layout))
          (spec (alist-get name (disco-root-layout-specs) nil nil #'eq)))
     (or spec
-        (error "disco: root layout is not registered: %S" name))))
+        (error "Disco: root layout is not registered: %S" name))))
 
 (defun disco-root-layout-label (&optional layout)
   "Return display label for LAYOUT (or active layout)."
@@ -142,7 +141,7 @@ Signal an error when the selected layout is not registered."
   (plist-get (disco-root-layout-spec layout) :build))
 
 (cl-defun disco-root-layout-list-spec-view-spec-create (list-spec &key after-render)
-  "Return one root layout view spec wrapping LIST-SPEC."
+  "Wrap LIST-SPEC in a root view spec with optional AFTER-RENDER callback."
   (disco-root-layout-view-spec-create
    :kind 'list-spec
    :list-spec list-spec
@@ -153,8 +152,8 @@ Signal an error when the selected layout is not registered."
   "Return one EWOC-backed root layout view spec for ENTRY list ENTRIES.
 
 When BEFORE-RENDER or ENTRY-INSERTER are omitted, use the standard root EWOC
-helpers so custom `:build' layouts can reuse the built-in tree/activity entry
-pipeline without re-declaring private hooks."
+helpers so custom `:build' layouts can reuse the built-in home/activity entry
+pipeline without re-declaring private hooks.  AFTER-RENDER runs afterward."
   (disco-root-layout-view-spec-create
    :kind 'entries
    :before-render (or before-render 'disco-root--prepare-ewoc-state)
@@ -194,10 +193,10 @@ builder."
   (let* ((name (disco-root-layout--active-layout layout))
          (builder (disco-root-layout-builder name)))
     (unless (functionp builder)
-      (error "disco: root layout %S has no callable builder" name))
+      (error "Disco: root layout %S has no callable builder" name))
     (let ((view-spec (funcall builder)))
       (unless (disco-root-layout-view-spec-p view-spec)
-        (error "disco: root layout %S returned an invalid view spec" name))
+        (error "Disco: root layout %S returned an invalid view spec" name))
       (disco-root-layout-render-view-spec view-spec))))
 
 (defun disco-root-layout-update-mode (&optional layout)

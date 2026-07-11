@@ -6,11 +6,11 @@
 
 (require 'disco-root)
 
-(ert-deftest disco-root-event-channel-ids-aggregates-and-dedupes ()
+(ert-deftest disco-gateway-event-channel-ids-aggregates-and-dedupes ()
   (should
    (equal
     '("c0" "t0" "c1" "c2" "c3" "c4" "p4" "c5")
-    (disco-root--event-channel-ids
+    (disco-gateway-event-channel-ids
      '(:channel-id "c0"
        :thread-id "t0"
        :channel-unread-updates (((id . "c1"))
@@ -24,11 +24,11 @@
                  ((id . "c2") (parent_id . "p4")))
        :channel-ids ("c5" "c0"))))))
 
-(ert-deftest disco-root-event-channel-ids-includes-voice-move-and-message-payloads ()
+(ert-deftest disco-gateway-event-channel-ids-includes-voice-move-and-message-payloads ()
   (should
    (equal
     '("c2" "c1" "c3")
-    (disco-root--event-channel-ids
+    (disco-gateway-event-channel-ids
      '(:channel-id "c2"
        :previous-channel-id "c1"
        :messages (((channel_id . "c3"))
@@ -507,38 +507,47 @@
         (disco-root-toggle-unread-lens)
         (should (eq disco-root--view-mode 'all))))))
 
-(ert-deftest disco-root-guilds-default-collapsed-and-hydrate-on-expand ()
+(ert-deftest disco-root-guild-row-opens-separate-channel-directory ()
   (with-temp-buffer
     (disco-root-mode)
-    (let (requested rendered)
-      (cl-letf (((symbol-function 'disco-directory-load-guild-async)
-                 (lambda (guild-id &rest _args)
-                   (setq requested guild-id)))
-                ((symbol-function 'disco-root--render-preserving-position)
-                 (lambda () (setq rendered t))))
-        (should-not (disco-root--guild-expanded-p "g1"))
-        (disco-root--toggle-guild "g1")
-        (should (disco-root--guild-expanded-p "g1"))
-        (should (equal "g1" requested))
-        (should rendered)))))
+    (let ((inhibit-read-only t)
+          opened)
+      (disco-view-insert-label-row
+       (disco-root--guild-label-row
+        '((id . "g1") (name . "Guild")) 0))
+      (should-not
+       (text-property-not-all (point-min) (point-max) 'mouse-face nil))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'disco-channel-directory-open)
+                 (lambda (guild-id)
+                   (setq opened guild-id))))
+        (disco-root-open-at-point)
+        (should (equal "g1" opened))))))
 
-(ert-deftest disco-root-unloaded-guild-remains-visible-with-explicit-status ()
+(ert-deftest disco-root-tree-projects-guild-navigation-without-channel-children ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((guild '((id . "g1") (name . "Guild"))))
-      (disco-state-reset)
-      (disco-state-set-guilds (list guild))
-      (let ((collapsed (disco-root--guild-entries guild)))
-        (should (eq 'guild (disco-root-layout-entry-type (car collapsed)))))
-      (disco-root--set-guild-expanded "g1" t)
-      (puthash "g1" 'loading disco-root--guild-load-status)
-      (let ((expanded (disco-root--guild-entries guild)))
-        (should (seq-some
-                 (lambda (entry)
-                   (and (eq 'text (disco-root-layout-entry-type entry))
-                        (equal "    Loading channels…"
-                               (disco-root-layout-entry-text entry))))
-                 expanded))))))
+    (disco-state-reset)
+    (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+    (disco-state-put-channels
+     "g1"
+     '(((id . "cat") (guild_id . "g1") (name . "Category") (type . 4))
+       ((id . "c1") (guild_id . "g1") (parent_id . "cat")
+        (name . "general") (type . 0))))
+    (let* ((disco-root--tree-show-unread-section nil)
+           (entries (disco-root--tree-layout-entries))
+           (guild-entries
+            (seq-filter
+             (lambda (entry)
+               (eq (disco-root-layout-entry-type entry) 'guild))
+             entries))
+           (channel-entries
+            (seq-filter
+             (lambda (entry)
+               (eq (disco-root-layout-entry-type entry) 'channel))
+             entries)))
+      (should (= 1 (length guild-entries)))
+      (should-not channel-entries))))
 
 (ert-deftest disco-root-refresh-index-is-lazy-unless-prefix-is-given ()
   (with-temp-buffer
@@ -697,6 +706,25 @@
     (disco-root-mode)
     (should (eq buffer-undo-list t))
     (should-not switch-to-buffer-preserve-window-point)))
+
+(ert-deftest disco-root-open-displays-buffer-before-rendering ()
+  (let ((disco-root-buffer-name " *disco-root-open-test*")
+        order
+        displayed)
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _args)
+                 (push 'pop order)
+                 (setq displayed buffer)))
+              ((symbol-function 'disco-root--attach-live-updates)
+               (lambda () (push 'attach order)))
+              ((symbol-function 'disco-root-render)
+               (lambda () (push 'render order))))
+      (unwind-protect
+          (let ((result (disco-root-open)))
+            (should (eq displayed result))
+            (should (equal '(pop attach render) (nreverse order))))
+        (when (buffer-live-p displayed)
+          (kill-buffer displayed))))))
 
 (ert-deftest disco-root-open-at-point-jumps-to-search-message ()
   (with-temp-buffer
@@ -1048,16 +1076,11 @@
             (should (eq t (plist-get (cdr captured) :include-nsfw)))))
       (disco-state-reset))))
 
-(ert-deftest disco-root-toggle-section-at-point-activity-falls-forward ()
+(ert-deftest disco-root-toggle-section-at-point-requires-section-row ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((disco-root--layout 'activity)
-          moved)
-      (cl-letf (((symbol-function 'disco-root-button-forward)
-                 (lambda (&optional _n)
-                   (setq moved t))))
-        (disco-root-toggle-section-at-point)
-        (should moved)))))
+    (should-error (disco-root-toggle-section-at-point)
+                  :type 'user-error)))
 
 (ert-deftest disco-root-activity-primary-label-includes-channel-category-guild ()
   (disco-state-reset)
@@ -1204,16 +1227,12 @@
     (disco-state-reset)))
 
 (ert-deftest disco-root-activity-secondary-label-uses-directory-placeholder ()
-  (let ((queued nil)
-        (channel '((id . "dir1") (type . 14) (name . "Directory") (last_message_id . "42"))))
-    (cl-letf (((symbol-function 'disco-root--queue-missing-preview-fetch)
-               (lambda (&rest _args)
-                 (setq queued t))))
-      (should (equal "(directory view)"
-                     (disco-root--activity-secondary-label channel)))
-      (should-not queued))))
+  (let ((channel '((id . "dir1") (type . 14) (name . "Directory")
+                   (last_message_id . "42"))))
+    (should (equal "(directory view)"
+                   (disco-root--activity-secondary-label channel)))))
 
-(ert-deftest disco-root-activity-secondary-label-uses-message-placeholders ()
+(ert-deftest disco-root-activity-secondary-label-keeps-missing-preview-blank ()
   (disco-state-reset)
   (let ((channel '((id . "c1")
                    (type . 0)
@@ -1223,7 +1242,7 @@
         (progn
           (disco-state-upsert-channel channel)
           (let ((label (disco-root--activity-secondary-label channel)))
-            (should (equal "(preview unavailable)" label))
+            (should (equal "" label))
             (should-not (string-match-p "pins" label))
             (should-not (string-match-p "unread" label))))
       (disco-state-reset))))
@@ -1252,12 +1271,29 @@
                      (type . 0)
                      (last_message_id . "44")))
           queued)
-      (cl-letf (((symbol-function 'disco-root--queue-missing-preview-fetch)
+      (cl-letf (((symbol-function 'disco-preview-request-channel)
                  (lambda (_channel)
                    (setq queued t))))
-        (should (equal "(preview unavailable)"
+        (should (equal ""
                        (disco-root--activity-preview-line channel nil 'activity)))
         (should queued)))))
+
+(ert-deftest disco-root-directory-preview-queues-fetch-without-placeholder ()
+  (let ((channel '((id . "c1") (type . 0) (name . "general")
+                   (last_message_id . "100")))
+        queued)
+    (cl-letf (((symbol-function 'disco-msg-channel-last-cached-message)
+               (lambda (_channel) nil))
+              ((symbol-function 'disco-state-channel-conversation-summary-preview)
+               (lambda (_channel-id) nil))
+              ((symbol-function 'disco-preview-request-channel)
+               (lambda (_channel)
+                 (setq queued t))))
+      (should
+       (equal ""
+              (disco-root--activity-preview-line
+               channel nil 'directory)))
+      (should queued))))
 
 (ert-deftest disco-root-thread-browser-preview-line-queues-preview-fetch-with-fallback ()
   (with-temp-buffer
@@ -1269,125 +1305,12 @@
                     (last_message_id . "44")
                     (message_count . 8)))
           queued)
-      (cl-letf (((symbol-function 'disco-root--queue-missing-preview-fetch)
+      (cl-letf (((symbol-function 'disco-preview-request-channel)
                  (lambda (_channel)
                    (setq queued t))))
         (should (equal "8 msgs"
                        (disco-root--activity-preview-line thread nil 'parent-thread)))
         (should queued)))))
-
-(ert-deftest disco-root-queue-missing-preview-fetch-dedupes-same-last-message-id ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (let ((channel '((id . "c1")
-                     (guild_id . "g1")
-                     (type . 0)
-                     (last_message_id . "44")))
-          (updated-channel '((id . "c1")
-                             (guild_id . "g1")
-                             (type . 0)
-                             (last_message_id . "45")))
-          scheduled)
-      (cl-letf (((symbol-function 'disco-gateway-running-p)
-                 (lambda () t))
-                ((symbol-function 'disco-root--schedule-missing-preview-fetch)
-                 (lambda ()
-                   (setq scheduled (1+ (or scheduled 0))))))
-        (disco-root--queue-missing-preview-fetch channel)
-        (disco-root--queue-missing-preview-fetch channel)
-        (disco-root--queue-missing-preview-fetch updated-channel)
-        (should (= 2 scheduled))
-        (should (equal '("c1")
-                       (gethash "g1"
-                                disco-root--missing-preview-pending-by-guild)))
-        (should (equal "45"
-                       (gethash
-                        "c1"
-                        disco-root--missing-preview-requested-last-message-id-by-channel)))))))
-
-(ert-deftest disco-root-flush-missing-preview-fetches-batches-op34 ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (let (calls)
-      (puthash "g1" '("c1" "c2")
-               disco-root--missing-preview-pending-by-guild)
-      (cl-letf (((symbol-function 'disco-gateway-running-p)
-                 (lambda () t))
-                ((symbol-function 'disco-gateway-request-last-messages)
-                 (lambda (guild-id channel-ids)
-                   (push (list guild-id channel-ids) calls)
-                   t)))
-        (disco-root--flush-missing-preview-fetches (current-buffer))
-        (should (equal '(("g1" ("c1" "c2")))
-                       (nreverse calls)))
-        (should (= 0
-                   (hash-table-count
-                    disco-root--missing-preview-pending-by-guild)))))))
-
-(ert-deftest disco-root-flush-missing-preview-fetches-runs-in-parent-thread-mode ()
-  (with-temp-buffer
-    (disco-root-parent-threads-mode)
-    (let (calls)
-      (setq-local disco-root--missing-preview-pending-by-guild
-                  (make-hash-table :test #'equal))
-      (puthash "g1" '("t1")
-               disco-root--missing-preview-pending-by-guild)
-      (cl-letf (((symbol-function 'disco-gateway-running-p)
-                 (lambda () t))
-                ((symbol-function 'disco-gateway-request-last-messages)
-                 (lambda (guild-id channel-ids)
-                   (push (list guild-id channel-ids) calls)
-                   t)))
-        (disco-root--flush-missing-preview-fetches (current-buffer))
-        (should (equal '(("g1" ("t1"))) calls))))))
-
-(ert-deftest disco-root-flush-missing-preview-fetches-keeps-overflow-queued ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (let ((disco-root-missing-preview-fetch-max-per-guild 1)
-          calls
-          rescheduled)
-      (puthash "g1" '("c1" "c2" "c3")
-               disco-root--missing-preview-pending-by-guild)
-      (cl-letf (((symbol-function 'disco-gateway-running-p)
-                 (lambda () t))
-                ((symbol-function 'disco-root--schedule-missing-preview-fetch)
-                 (lambda ()
-                   (setq rescheduled t)))
-                ((symbol-function 'disco-gateway-request-last-messages)
-                 (lambda (guild-id channel-ids)
-                   (push (list guild-id channel-ids) calls)
-                   t)))
-        (disco-root--flush-missing-preview-fetches (current-buffer))
-        (should (equal '(("g1" ("c1")))
-                       (nreverse calls)))
-        (should rescheduled)
-        (should (equal '("c2" "c3")
-                       (gethash "g1" disco-root--missing-preview-pending-by-guild)))))))
-
-(ert-deftest disco-root-flush-missing-preview-fetches-defers-when-send-queue-full ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (let (requested
-          rescheduled)
-      (puthash "g1" '("c1" "c2")
-               disco-root--missing-preview-pending-by-guild)
-      (cl-letf (((symbol-function 'disco-gateway-running-p)
-                 (lambda () t))
-                ((symbol-function 'disco-gateway-send-queue-slot-available-p)
-                 (lambda (&optional _slots) nil))
-                ((symbol-function 'disco-root--schedule-missing-preview-fetch)
-                 (lambda ()
-                   (setq rescheduled t)))
-                ((symbol-function 'disco-gateway-request-last-messages)
-                 (lambda (&rest _args)
-                   (setq requested t)
-                   t)))
-        (disco-root--flush-missing-preview-fetches (current-buffer))
-        (should-not requested)
-        (should rescheduled)
-        (should (equal '("c1" "c2")
-                       (gethash "g1" disco-root--missing-preview-pending-by-guild)))))))
 
 (ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
   (disco-state-reset)

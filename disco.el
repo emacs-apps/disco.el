@@ -1,4 +1,4 @@
-;;; disco.el --- Discord client for Emacs -*- lexical-binding: t; -*-
+;;; disco.el --- Discord client -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 0WD0
 
@@ -7,12 +7,12 @@
 ;; Keywords: comm
 ;; URL: https://github.com/0WD0/disco.el
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.3") (taxy-magit-section "0.14.3"))
+;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.5.0"))
 
 ;;; Commentary:
 
 ;; disco.el provides an MVP Discord client experience in Emacs:
-;; - open root buffer with guild/channel list
+;; - open a compact account root and lazy per-guild channel directories
 ;; - open a channel timeline
 ;; - send text messages
 
@@ -25,6 +25,7 @@
 (require 'disco-api)
 (require 'disco-http)
 (require 'disco-gateway)
+(require 'disco-preview)
 (require 'disco-room)
 (require 'disco-root)
 (require 'disco-modes)
@@ -48,6 +49,7 @@ If neither session token nor `DISCO_TOKEN' is available, prompt once."
   "Clear all in-memory caches used by disco.el."
   (interactive)
   (disco-gateway-stop)
+  (disco-preview-reset)
   (disco-directory-reset)
   (disco-state-reset)
   (disco-api-reset-rate-limit-state)

@@ -25,6 +25,7 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'seq)
 (require 'subr-x)
 (require 'disco-api)
 (require 'disco-customize)
@@ -326,6 +327,74 @@ FIELDS should be a list of strings such as `status' and
 (defun disco-gateway--emit (event)
   "Emit EVENT plist to `disco-gateway-event-hook'."
   (run-hook-with-args 'disco-gateway-event-hook event))
+
+(defun disco-gateway-event-channel-ids (event)
+  "Return normalized channel IDs carried by gateway EVENT.
+
+The extractor covers scalar IDs and the collection payloads emitted by
+passive updates, guild sync, last-message responses, and thread sync."
+  (let (ids)
+    (dolist (value (list (plist-get event :channel-id)
+                         (plist-get event :previous-channel-id)
+                         (plist-get event :thread-id)))
+      (when value
+        (push (format "%s" value) ids)))
+    (dolist (item (append
+                   (or (plist-get event :channel-unread-updates) '())
+                   (or (plist-get event :channels) '())
+                   (or (plist-get event :updated-channels) '())))
+      (when-let* ((id (or (alist-get 'id item)
+                          (alist-get 'channel_id item))))
+        (push (format "%s" id) ids)))
+    (dolist (item (or (plist-get event :messages) '()))
+      (when-let* ((id (alist-get 'channel_id item)))
+        (push (format "%s" id) ids)))
+    (dolist (item (or (plist-get event :threads) '()))
+      (when-let* ((thread-id (alist-get 'id item)))
+        (push (format "%s" thread-id) ids))
+      (when-let* ((parent-id (alist-get 'parent_id item)))
+        (push (format "%s" parent-id) ids)))
+    (dolist (value (or (plist-get event :channel-ids) '()))
+      (when value
+        (push (format "%s" value) ids)))
+    (seq-uniq (nreverse ids) #'equal)))
+
+(defun disco-gateway-event-guild-ids (event)
+  "Return normalized guild IDs affected by gateway EVENT.
+
+Guild IDs are read directly from EVENT payload objects and inferred from
+currently indexed channels when an event only carries channel IDs."
+  (let (ids)
+    (cl-labels
+        ((add-id (value)
+           (when value
+             (push (format "%s" value) ids)))
+         (add-object (object)
+           (when (listp object)
+             (add-id (or (alist-get 'guild_id object)
+                         (and (alist-get 'id object)
+                              (memq (plist-get event :type)
+                                    '(guild-create guild-update guild-delete))
+                              (alist-get 'id object)))))))
+      (add-id (plist-get event :guild-id))
+      (dolist (guild-id (or (plist-get event :guild-ids) '()))
+        (add-id guild-id))
+      (add-object (plist-get event :guild))
+      (add-object (plist-get event :channel))
+      (add-object (plist-get event :message))
+      (dolist (collection
+               (list (plist-get event :guilds)
+                     (plist-get event :channels)
+                     (plist-get event :updated-channels)
+                     (plist-get event :channel-unread-updates)
+                     (plist-get event :threads)
+                     (plist-get event :messages)))
+        (dolist (object (or collection '()))
+          (add-object object)))
+      (dolist (channel-id (disco-gateway-event-channel-ids event))
+        (when-let* ((channel (disco-state-channel channel-id)))
+          (add-id (alist-get 'guild_id channel)))))
+    (seq-uniq (nreverse ids) #'equal)))
 
 (defun disco-gateway--emit-channel-event (event-type channel)
   "Emit CHANNEL mutation as EVENT-TYPE to `disco-gateway-event-hook'."

@@ -695,6 +695,22 @@
                          :guild-id "g" :setting ,setting)
                        emitted))))))
 
+(ert-deftest disco-gateway-event-guild-ids-infers-indexed-and-deleted-channels ()
+  (disco-state-reset)
+  (disco-state-upsert-channel
+   '((id . "c1") (guild_id . "g1") (type . 0)))
+  (should
+   (equal '("g1")
+          (disco-gateway-event-guild-ids
+           '(:type message-create :channel-id "c1"))))
+  (disco-state-delete-channel "c1")
+  (should
+   (equal '("g1")
+          (disco-gateway-event-guild-ids
+           '(:type channel-delete
+             :channel-id "c1"
+             :channel ((id . "c1") (guild_id . "g1")))))))
+
 (provide 'disco-gateway-test)
 
 ;;; disco-gateway-test.el ends here
