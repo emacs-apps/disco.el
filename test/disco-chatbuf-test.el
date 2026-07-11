@@ -8,8 +8,6 @@
 
 (require 'disco-chatbuf)
 
-(defvar-local disco-chatbuf-test--cached-input nil)
-
 (ert-deftest disco-chatbuf-install-prompt-creates-tail-input-region ()
   (with-temp-buffer
     (insert "timeline\n")
@@ -57,7 +55,7 @@
       (should-not disco-chatbuf--input-options-plist)
       (should-not disco-chatbuf--prompt-button))))
 
-(ert-deftest disco-chatbuf-input-cache-set-clear-and-sync-preserve-properties ()
+(ert-deftest disco-chatbuf-input-state-set-clear-and-sync-preserve-properties ()
   (with-temp-buffer
     (disco-chatbuf-init-state 8)
     (let ((text (copy-sequence "[file] a.txt")))
@@ -65,48 +63,42 @@
                            (list disco-chatbuf-input-object-property
                                  '(:kind attachment :path "/tmp/a.txt"))
                            text)
-      (disco-chatbuf-input-cache-set 'disco-chatbuf-test--cached-input text)
-      (should (disco-chatbuf-string-has-objects-p disco-chatbuf-test--cached-input))
+      (disco-chatbuf-input-state-set text)
+      (should (disco-chatbuf-string-has-objects-p
+               (disco-chatbuf-input-state)))
       (setq-local disco-chatbuf--input-idx 3)
       (setq-local disco-chatbuf--input-pending "pending")
-      (disco-chatbuf-input-cache-clear
-       'disco-chatbuf-test--cached-input :reset-history-p t)
-      (should (equal "" disco-chatbuf-test--cached-input))
+      (disco-chatbuf-input-state-clear :reset-history-p t)
+      (should (equal "" (disco-chatbuf-input-state)))
       (should-not disco-chatbuf--input-idx)
       (should-not disco-chatbuf--input-pending)
       (disco-chatbuf-install-prompt ">>> ")
-      (disco-chatbuf-input-set-text text)
+      (insert text)
       (setq-local disco-chatbuf--input-idx 1)
       (setq-local disco-chatbuf--input-pending "later")
-      (let ((result (disco-chatbuf-input-cache-sync-from-buffer
-                     'disco-chatbuf-test--cached-input)))
+      (let ((result (disco-chatbuf-input-state-sync)))
         (should (eq t (plist-get result :changed-p)))
         (should (disco-chatbuf-string-has-objects-p
                  (plist-get result :value)))
         (should (disco-chatbuf-string-has-objects-p
-                 disco-chatbuf-test--cached-input))
+                 (disco-chatbuf-input-state)))
         (should-not disco-chatbuf--input-idx)
         (should-not disco-chatbuf--input-pending))
       (setq-local disco-chatbuf--input-idx 2)
       (setq-local disco-chatbuf--input-pending "keep")
-      (let ((result (disco-chatbuf-input-cache-sync-from-buffer
-                     'disco-chatbuf-test--cached-input)))
+      (let ((result (disco-chatbuf-input-state-sync)))
         (should-not (plist-get result :changed-p))
         (should (= 2 disco-chatbuf--input-idx))
         (should (equal "keep" disco-chatbuf--input-pending))))))
 
-(ert-deftest disco-chatbuf-input-cache-current-prefers-live-input-region ()
+(ert-deftest disco-chatbuf-input-mutations-update-canonical-state ()
   (with-temp-buffer
     (disco-chatbuf-init-state 8)
-    (setq-local disco-chatbuf-test--cached-input "cached")
-    (should (equal "cached"
-                   (disco-chatbuf-input-cache-current
-                    'disco-chatbuf-test--cached-input)))
+    (disco-chatbuf-input-state-set "cached")
+    (should (equal "cached" (disco-chatbuf-input-state)))
     (disco-chatbuf-install-prompt ">>> ")
     (disco-chatbuf-input-set-text "live")
-    (should (equal "live"
-                   (disco-chatbuf-input-cache-current
-                    'disco-chatbuf-test--cached-input)))))
+    (should (equal "live" (disco-chatbuf-input-state)))))
 
 (ert-deftest disco-chatbuf-input-replace-preserves-relative-point-offset ()
   (with-temp-buffer

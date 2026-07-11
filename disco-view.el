@@ -61,10 +61,24 @@ deleted, and new rows are inserted.  FORCE-KEYS invalidates matching rows even
 when their entry data compares equal, for presentation-only changes such as a
 newly cached image."
   (disco-view--validate-keyed-entries entries key-function)
-  (let ((available (disco-view--keyed-ewoc-nodes ewoc key-function))
-        (next-node (ewoc-nth ewoc 0))
+  (let* ((available (disco-view--keyed-ewoc-nodes ewoc key-function))
+         (target-keys (disco-view--key-set
+                       (mapcar key-function entries)))
+         stale-keys
+         (next-node nil)
         (new-table (make-hash-table :test #'equal))
         (forced (disco-view--key-set force-keys)))
+    ;; Remove vanished rows before positional reconciliation.  Otherwise a
+    ;; surviving row after a deleted prefix appears to be a move and loses its
+    ;; EWOC node identity unnecessarily.
+    (maphash (lambda (key _node)
+               (unless (gethash key target-keys)
+                 (push key stale-keys)))
+             available)
+    (dolist (key stale-keys)
+      (ewoc-delete ewoc (gethash key available))
+      (remhash key available))
+    (setq next-node (ewoc-nth ewoc 0))
     (dolist (entry entries)
       (let* ((key (funcall key-function entry))
              (existing (and key (gethash key available)))
@@ -109,6 +123,21 @@ Return non-nil when the keyed node exists."
   anchor-line-offset
   window-start-line)
 
+(defun disco-view-find-property-value (start end property value)
+  "Return first position from START to END whose PROPERTY equals VALUE.
+
+Unlike `text-property-any', comparison uses `equal'.  Chat message identifiers
+are commonly distinct string objects with the same contents, so identity
+comparison is not a valid lookup rule."
+  (let ((position start)
+        found)
+    (while (and (< position end) (not found))
+      (if (equal (get-text-property position property) value)
+          (setq found position)
+        (setq position
+              (next-single-property-change position property nil end))))
+    found))
+
 (cl-defun disco-view-capture-position (&key anchor-property preserve-window-start)
   "Capture current position context for later restoration.
 
@@ -123,11 +152,9 @@ index for the current buffer window."
                                                    anchor-property))))
          (anchor-target (and anchor-property
                              anchor-value
-                             (text-property-any
-                              (point-min)
-                              (point-max)
-                              anchor-property
-                              anchor-value)))
+                             (disco-view-find-property-value
+                              (point-min) (point-max)
+                              anchor-property anchor-value)))
          (anchor-line-offset (and anchor-target
                                   (max 0 (- (line-number-at-pos)
                                             (save-excursion
@@ -167,23 +194,28 @@ index for the current buffer window."
           (goto-char next-pos)
           (setq remaining (1- remaining)))))))
 
-(defun disco-view-restore-position (snapshot)
+(defun disco-view-restore-position (snapshot &optional anchor-value-map)
   "Restore point/window state from SNAPSHOT.
 
 If SNAPSHOT carries an anchor property/value and the anchor is still present,
-restore by anchor first.  Otherwise restore by line/column fallback."
+restore by anchor first.  Otherwise restore by line/column fallback.
+ANCHOR-VALUE-MAP is an alist mapping old anchor values to their new identities
+after an explicit keyed-row rekey."
   (let* ((anchor-property (disco-view--snapshot-anchor-property snapshot))
-         (anchor-value (disco-view--snapshot-anchor-value snapshot))
+         (captured-anchor-value
+          (disco-view--snapshot-anchor-value snapshot))
+         (anchor-value
+          (if-let* ((mapping (assoc captured-anchor-value anchor-value-map)))
+              (cdr mapping)
+            captured-anchor-value))
          (anchor-line-offset (disco-view--snapshot-anchor-line-offset snapshot))
          (line (max 1 (or (disco-view--snapshot-line snapshot) 1)))
          (column (max 0 (or (disco-view--snapshot-column snapshot) 0)))
          (target (and anchor-property
                       anchor-value
-                      (text-property-any
-                       (point-min)
-                       (point-max)
-                       anchor-property
-                       anchor-value))))
+                      (disco-view-find-property-value
+                       (point-min) (point-max)
+                       anchor-property anchor-value))))
     (if target
         (progn
           (goto-char target)

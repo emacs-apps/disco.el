@@ -186,7 +186,7 @@
                    (disco-chatbuf-string-plain-text
                     (disco-room--current-draft))))))
 
-(ert-deftest disco-room-current-draft-prefers-live-input-region ()
+(ert-deftest disco-room-current-draft-tracks-live-input-through-state-sync ()
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
@@ -197,7 +197,7 @@
        (type . 0)
        (guild_id . "g1")
        (permissions . "2048")))
-    (disco-chatbuf-input-cache-set-state "cached")
+    (disco-chatbuf-input-state-set "cached")
     (disco-room-render)
     (disco-chatbuf-input-set-text "live")
     (should (equal "live"
@@ -216,8 +216,8 @@
              (concat "pending "
                      (disco-room--attachment-input-object-string
                       (disco-room--make-attachment-input-object path :filename "a.txt"))))
-            (let ((orig-update (symbol-function 'disco-room--update-frame-preserving-point)))
-              (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
+            (let ((orig-update (symbol-function 'disco-room--update-frame)))
+              (cl-letf (((symbol-function 'disco-room--update-frame)
                          (lambda (&rest args)
                            (setq render-calls (1+ render-calls))
                            (apply orig-update args))))
@@ -244,7 +244,7 @@
     (setq-local disco-room--channel-name "chat")
     (cl-letf (((symbol-function 'disco-room--ensure-action-available)
                (lambda (&rest _args) nil))
-              ((symbol-function 'disco-room--update-frame-preserving-point)
+              ((symbol-function 'disco-room--update-frame)
                (lambda (&rest _args) nil))
               ((symbol-function 'message)
                (lambda (&rest _args) nil)))
@@ -393,7 +393,7 @@
           (frame-called nil))
       (cl-letf (((symbol-function 'disco-room--channel-object)
                  (lambda () '((id . "chan") (name . "new"))))
-                ((symbol-function 'disco-room--update-frame-preserving-point)
+                ((symbol-function 'disco-room--update-frame)
                  (lambda () (setq frame-called t))))
         (disco-room--handle-gateway-event
          '(:type channel-pins-update
@@ -422,10 +422,9 @@
         (content . "first")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
-    (let ((ewoc disco-room--ewoc)
-          (node-m1 (gethash "m1" disco-room--message-node-table))
-          full-render
-          preserve-render)
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          (node-m1 (disco-chat-timeline-node "m1"))
+          render-called)
       (disco-state-put-messages
        "chat"
        '(((id . "m2")
@@ -439,9 +438,7 @@
           (content . "first")
           (author . ((id . "u1") (username . "alice"))))))
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq full-render t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-render t)))
+                 (lambda () (setq render-called t)))
                 ((symbol-function 'disco-room--mark-read)
                  (lambda (&rest _args) nil))
                 ((symbol-function 'message)
@@ -454,13 +451,12 @@
                      (timestamp . "2026-03-08T00:05:00.000000+00:00")
                      (content . "second")
                      (author . ((id . "u1") (username . "alice")))))))
-      (should-not full-render)
-      (should-not preserve-render)
-      (should (eq ewoc disco-room--ewoc))
-      (should (eq node-m1 (gethash "m1" disco-room--message-node-table)))
-      (should (gethash "m2" disco-room--message-node-table))
-      (should (equal '("m1" "m2") disco-room--displayed-message-ids))
-      (should (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+      (should-not render-called)
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
+      (should (eq node-m1 (disco-chat-timeline-node "m1")))
+      (should (disco-chat-timeline-node "m2"))
+      (should (equal '("m1" "m2") (disco-chat-timeline-keys)))
+      (should (plist-get (disco-chat-timeline-context "m2")
                          :compact))
       (should (string-match-p "second" (buffer-string))))))
 
@@ -490,12 +486,11 @@
         (content . "first")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
-    (should (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+    (should (plist-get (disco-chat-timeline-context "m2")
                        :compact))
-    (let ((ewoc disco-room--ewoc)
-          (node-m2 (gethash "m2" disco-room--message-node-table))
-          full-render
-          preserve-render)
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          (node-m2 (disco-chat-timeline-node "m2"))
+          render-called)
       (disco-state-put-messages
        "chat"
        '(((id . "m2")
@@ -504,22 +499,19 @@
           (content . "second")
           (author . ((id . "u1") (username . "alice"))))))
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq full-render t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-render t)))
+                 (lambda () (setq render-called t)))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room--handle-gateway-event
          '(:type message-delete
            :channel-id "chat"
            :message-id "m1")))
-      (should-not full-render)
-      (should-not preserve-render)
-      (should (eq ewoc disco-room--ewoc))
-      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
-      (should-not (gethash "m1" disco-room--message-node-table))
-      (should (equal '("m2") disco-room--displayed-message-ids))
-      (should-not (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+      (should-not render-called)
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
+      (should (eq node-m2 (disco-chat-timeline-node "m2")))
+      (should-not (disco-chat-timeline-node "m1"))
+      (should (equal '("m2") (disco-chat-timeline-keys)))
+      (should-not (plist-get (disco-chat-timeline-context "m2")
                              :compact))
       (should (string-match-p "alice" (buffer-string))))))
 
@@ -555,10 +547,9 @@
         (content . "source one")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
-    (let ((ewoc disco-room--ewoc)
-          (node-m3 (gethash "m3" disco-room--message-node-table))
-          full-render
-          preserve-render)
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          (node-m3 (disco-chat-timeline-node "m3"))
+          render-called)
       (disco-state-put-messages
        "chat"
        '(((id . "m3")
@@ -580,9 +571,7 @@
           (content . "source edited")
           (author . ((id . "u1") (username . "alice"))))))
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq full-render t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-render t)))
+                 (lambda () (setq render-called t)))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room--handle-gateway-event
@@ -593,10 +582,9 @@
                      (timestamp . "2026-03-08T00:00:00.000000+00:00")
                      (content . "source edited")
                      (author . ((id . "u1") (username . "alice")))))))
-      (should-not full-render)
-      (should-not preserve-render)
-      (should (eq ewoc disco-room--ewoc))
-      (should (eq node-m3 (gethash "m3" disco-room--message-node-table)))
+      (should-not render-called)
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
+      (should (eq node-m3 (disco-chat-timeline-node "m3")))
       (should (string-match-p "↪ alice: source edited" (buffer-string))))))
 
 (ert-deftest disco-room-handle-gateway-message-delete-refreshes-thread-starter-preview ()
@@ -625,10 +613,9 @@
         (content . "thread source")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
-    (let ((ewoc disco-room--ewoc)
-          (node-m2 (gethash "m2" disco-room--message-node-table))
-          full-render
-          preserve-render)
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          (node-m2 (disco-chat-timeline-node "m2"))
+          render-called)
       (disco-state-put-messages
        "chat"
        '(((id . "m2")
@@ -639,19 +626,16 @@
                                 (channel_id . "chat")))
           (author . ((id . "u2") (username . "bob"))))))
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq full-render t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-render t)))
+                 (lambda () (setq render-called t)))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room--handle-gateway-event
          '(:type message-delete
            :channel-id "chat"
            :message-id "m1")))
-      (should-not full-render)
-      (should-not preserve-render)
-      (should (eq ewoc disco-room--ewoc))
-      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
+      (should-not render-called)
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
+      (should (eq node-m2 (disco-chat-timeline-node "m2")))
       (should (string-match-p "Sorry, we couldn't load the first message in this thread."
                               (buffer-string))))))
 
@@ -677,24 +661,20 @@
                                (timestamp . "2026-03-08T00:00:00.000000+00:00"))])
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
-    (let ((ewoc disco-room--ewoc)
-          (node-m1 (gethash "m1" disco-room--message-node-table))
-          full-render
-          preserve-render)
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          (node-m1 (disco-chat-timeline-node "m1"))
+          render-called)
       (disco-state-upsert-channel '((id . "src") (type . 0) (guild_id . "g1") (name . "new-src")))
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq full-render t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-render t)))
+                 (lambda () (setq render-called t)))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room--handle-gateway-event
          '(:type channel-update
            :channel-id "src")))
-      (should-not full-render)
-      (should-not preserve-render)
-      (should (eq ewoc disco-room--ewoc))
-      (should (eq node-m1 (gethash "m1" disco-room--message-node-table)))
+      (should-not render-called)
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
+      (should (eq node-m1 (disco-chat-timeline-node "m1")))
       (should (string-match-p "Guild / #new-src" (buffer-string))))))
 
 (ert-deftest disco-room-handle-message-update-refreshes-composer-reply-context ()
@@ -703,7 +683,7 @@
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
     (disco-room--set-composer-aux-state nil "m1")
-    (disco-chatbuf-input-cache-set-state "hello")
+    (disco-chatbuf-input-state-set "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "chat")
@@ -718,9 +698,8 @@
         (content . "source one")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
-    (let ((ewoc disco-room--ewoc)
-          full-render
-          preserve-render)
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          render-called)
       (disco-state-put-messages
        "chat"
        '(((id . "m1")
@@ -729,9 +708,7 @@
           (content . "source edited")
           (author . ((id . "u1") (username . "alice"))))))
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq full-render t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-render t)))
+                 (lambda () (setq render-called t)))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room--handle-gateway-event
@@ -742,9 +719,8 @@
                      (timestamp . "2026-03-08T00:00:00.000000+00:00")
                      (content . "source edited")
                      (author . ((id . "u1") (username . "alice")))))))
-      (should-not full-render)
-      (should-not preserve-render)
-      (should (eq ewoc disco-room--ewoc))
+      (should-not render-called)
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
       (should (string-match-p "> source edited" (buffer-string))))))
 
 (ert-deftest disco-room-handle-message-ack-moves-unread-divider-in-place ()
@@ -778,31 +754,27 @@
     (disco-state-apply-message-ack "chat" "m1" 1)
     (disco-room-render)
     (should (disco-util-json-true-p
-             (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+             (plist-get (disco-chat-timeline-context "m2")
                         :insert-unread)))
-    (let ((ewoc disco-room--ewoc)
-          (node-m2 (gethash "m2" disco-room--message-node-table))
-          (node-m3 (gethash "m3" disco-room--message-node-table))
-          full-render
-          preserve-render)
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          (node-m2 (disco-chat-timeline-node "m2"))
+          (node-m3 (disco-chat-timeline-node "m3"))
+          render-called)
       (disco-state-apply-message-ack "chat" "m2" 0)
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq full-render t)))
-                ((symbol-function 'disco-room--render-preserving-point)
-                 (lambda () (setq preserve-render t))))
+                 (lambda () (setq render-called t))))
         (disco-room--handle-gateway-event
          '(:type message-ack
            :channel-id "chat"
            :message-id "m2")))
-      (should-not full-render)
-      (should-not preserve-render)
-      (should (eq ewoc disco-room--ewoc))
-      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
-      (should (eq node-m3 (gethash "m3" disco-room--message-node-table)))
-      (should-not (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+      (should-not render-called)
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
+      (should (eq node-m2 (disco-chat-timeline-node "m2")))
+      (should (eq node-m3 (disco-chat-timeline-node "m3")))
+      (should-not (plist-get (disco-chat-timeline-context "m2")
                              :insert-unread))
       (should (disco-util-json-true-p
-               (plist-get (gethash "m3" disco-room--render-context-by-message-id)
+               (plist-get (disco-chat-timeline-context "m3")
                           :insert-unread))))))
 
 (ert-deftest disco-room-mark-read-applies-optimistic-unread-patch ()
@@ -836,7 +808,7 @@
     (disco-state-apply-message-ack "chat" "m1" 1)
     (disco-room-render)
     (should (disco-util-json-true-p
-             (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+             (plist-get (disco-chat-timeline-context "m2")
                         :insert-unread)))
     (cl-letf (((symbol-function 'disco-api-ack-message-async)
                (lambda (&rest _args) nil))
@@ -845,9 +817,9 @@
       (disco-room--mark-read "m3"))
     (should (equal "m3" (disco-state-channel-last-read-message-id "chat")))
     (should disco-room--pending-optimistic-read-ack)
-    (should-not (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+    (should-not (plist-get (disco-chat-timeline-context "m2")
                            :insert-unread))
-    (should-not (plist-get (gethash "m3" disco-room--render-context-by-message-id)
+    (should-not (plist-get (disco-chat-timeline-context "m3")
                            :insert-unread))))
 
 (ert-deftest disco-room-mark-read-rolls-back-optimistic-unread-patch-on-error ()
@@ -891,9 +863,9 @@
     (should-not disco-room--pending-optimistic-read-ack)
     (should (equal "m1" (disco-state-channel-last-read-message-id "chat")))
     (should (disco-util-json-true-p
-             (plist-get (gethash "m2" disco-room--render-context-by-message-id)
+             (plist-get (disco-chat-timeline-context "m2")
                         :insert-unread)))
-    (should-not (plist-get (gethash "m3" disco-room--render-context-by-message-id)
+    (should-not (plist-get (disco-chat-timeline-context "m3")
                            :insert-unread))))
 
 (ert-deftest disco-room-resolve-pending-jump-fetches-around-once ()
@@ -981,10 +953,9 @@
                                (content . "stale deleted value"))
                               ((id . "5") (channel_id . "chan")
                                (content . "REST history"))))))
-                ((symbol-function 'disco-room--update-frame-preserving-point)
+                ((symbol-function 'disco-room--update-frame)
                  #'ignore)
                 ((symbol-function 'disco-room--mark-read) #'ignore)
-                ((symbol-function 'disco-room--at-message-bottom-p) (lambda () t))
                 ((symbol-function 'disco-room-render) #'ignore)
                 ((symbol-function 'disco-room--resolve-pending-jump) #'ignore)
                 ((symbol-function 'message) #'ignore))
@@ -1032,7 +1003,7 @@
                               (messages (((id . "m1")
                                           (channel_id . "chan")
                                           (content . "hello"))))))))
-                ((symbol-function 'disco-room--render-preserving-point)
+                ((symbol-function 'disco-room-render)
                  (lambda () (setq rendered t)))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
@@ -1133,7 +1104,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "readonly")
     (setq-local disco-room--channel-name "readonly")
-    (disco-chatbuf-input-cache-set-state "hello")
+    (disco-chatbuf-input-state-set "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "readonly")
@@ -1168,7 +1139,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (disco-chatbuf-input-cache-set-state "hello")
+    (disco-chatbuf-input-state-set "hello")
     (disco-room--set-composer-aux-state nil "m42")
     (setq-local disco-room--pending-attachments
                 '((:token-id 1 :path "/tmp/a.txt")
@@ -1222,7 +1193,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (disco-chatbuf-input-cache-set-state "saved draft")
+    (disco-chatbuf-input-state-set "saved draft")
     (let ((msg '((id . "m1")
                  (channel_id . "chat")
                  (content . "old body")
@@ -1271,7 +1242,7 @@
          (guild_id . "g1")
          (permissions . "2048")))
       (disco-state-put-messages "chat" (list msg))
-      (disco-chatbuf-input-cache-set-state "saved draft [file:1]")
+      (disco-chatbuf-input-state-set "saved draft [file:1]")
       (puthash "1" '(:token-id "1" :path "/tmp/a.txt") disco-room--attachment-token-table)
       (setq-local disco-room--attachment-token-seq 1)
       (disco-room--sync-pending-attachments-from-draft)
@@ -1306,7 +1277,7 @@
         (should-not send-called)
         (should-not (disco-room--composer-edit-active-p))
         (should-not (disco-chatbuf-aux-active-p))
-        (let ((restored-draft (disco-chatbuf-input-cache-state)))
+        (let ((restored-draft (disco-chatbuf-input-state)))
           (should (equal "saved draft [file:1]"
                          (disco-chatbuf-string-plain-text restored-draft)))
           (should-not disco-room--pending-reply-to)
@@ -1319,7 +1290,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (disco-chatbuf-input-cache-set-state "hello")
+    (disco-chatbuf-input-state-set "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "chat")
@@ -1336,7 +1307,7 @@
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
     (setq-local disco-room--channel-name "chat")
-    (disco-chatbuf-input-cache-set-state "hello")
+    (disco-chatbuf-input-state-set "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "chat")
@@ -1344,15 +1315,15 @@
        (guild_id . "g1")
        (permissions . "2048")))
     (disco-room-render)
-    (let ((ewoc disco-room--ewoc)
+    (let ((ewoc (disco-chat-timeline-ewoc))
           (input-marker disco-chatbuf--input-marker)
           (prompt-marker disco-chatbuf--prompt-marker)
           frame-update-called)
-      (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
+      (cl-letf (((symbol-function 'disco-room--update-frame)
                  (lambda (&rest _args)
                    (setq frame-update-called t))))
         (disco-room--set-draft "updated body"))
-      (should (eq ewoc disco-room--ewoc))
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
       (should (eq input-marker disco-chatbuf--input-marker))
       (should (eq prompt-marker disco-chatbuf--prompt-marker))
       (should-not frame-update-called)
@@ -1371,7 +1342,7 @@
        (permissions . "2048")))
     (disco-room-render)
     (let ((frame-update-called nil))
-      (cl-letf (((symbol-function 'disco-room--update-frame-preserving-point)
+      (cl-letf (((symbol-function 'disco-room--update-frame)
                  (lambda (&rest _args)
                    (setq frame-update-called t))))
         (disco-room--set-draft
@@ -1471,21 +1442,21 @@
      '(((id . "m2") (channel_id . "chat") (content . "two"))
        ((id . "m1") (channel_id . "chat") (content . "one"))))
     (disco-room-render)
-    (let ((ewoc disco-room--ewoc)
-          (node-m1 (gethash "m1" disco-room--message-node-table))
-          (node-m2 (gethash "m2" disco-room--message-node-table)))
+    (let ((ewoc (disco-chat-timeline-ewoc))
+          (node-m1 (disco-chat-timeline-node "m1"))
+          (node-m2 (disco-chat-timeline-node "m2")))
       (disco-state-put-messages
        "chat"
        '(((id . "m3") (channel_id . "chat") (content . "three"))
          ((id . "m2") (channel_id . "chat") (content . "two updated"))
          ((id . "m1") (channel_id . "chat") (content . "one"))))
       (disco-room-render)
-      (should (eq ewoc disco-room--ewoc))
-      (should (eq node-m1 (gethash "m1" disco-room--message-node-table)))
-      (should (eq node-m2 (gethash "m2" disco-room--message-node-table)))
-      (should (gethash "m3" disco-room--message-node-table))
+      (should (eq ewoc (disco-chat-timeline-ewoc)))
+      (should (eq node-m1 (disco-chat-timeline-node "m1")))
+      (should (eq node-m2 (disco-chat-timeline-node "m2")))
+      (should (disco-chat-timeline-node "m3"))
       (should (equal '("m1" "m2" "m3")
-                     disco-room--displayed-message-ids))
+                     (disco-chat-timeline-keys)))
       (should (string-match-p "two updated" (buffer-string))))))
 
 (ert-deftest disco-room-render-shows-plain-attachment-lines-when-rich-cards-disabled ()
@@ -1566,18 +1537,23 @@
 (ert-deftest disco-room-handle-media-rerender-invalidates-only-affected-audio-message ()
   (with-temp-buffer
     (disco-room-mode)
-    (let ((disco-room--displayed-message-ids '("m1" "m2"))
-          invalidated
-          rerendered)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat") (type . 0) (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m2")
+        (channel_id . "chat")
+        (attachments . (((id . "a2") (filename . "two.ogg")))))
+       ((id . "m1")
+        (channel_id . "chat")
+        (attachments . (((id . "a1") (filename . "one.ogg")))))))
+    (disco-room-render)
+    (let (invalidated rerendered)
       (disco-media-record-notification 'audio "a2")
-      (cl-letf (((symbol-function 'disco-room--message-by-id)
-                 (lambda (message-id)
-                   (pcase message-id
-                     ("m1" '((id . "m1")
-                              (attachments . (((id . "a1") (filename . "one.ogg"))))) )
-                     ("m2" '((id . "m2")
-                              (attachments . (((id . "a2") (filename . "two.ogg"))))) ))))
-                ((symbol-function 'disco-room--invalidate-message-ids-preserving-point)
+      (cl-letf (((symbol-function 'disco-chat-timeline-invalidate)
                  (lambda (message-ids)
                    (setq invalidated message-ids)))
                 ((symbol-function 'disco-room--rerender-open-rooms)
@@ -1745,7 +1721,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (disco-room--set-composer-aux-state '(:type edit :message-id "m1" :saved-state nil) nil)
-    (disco-chatbuf-input-cache-set-state "[file:1]")
+    (disco-chatbuf-input-state-set "[file:1]")
     (should-error (disco-room-remove-attachment-token-at-point) :type 'user-error)))
 
 (ert-deftest disco-room-delete-message-errors-without-manage-messages ()
@@ -1897,7 +1873,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "sysdm")
-    (disco-chatbuf-input-cache-set-state "hello")
+    (disco-chatbuf-input-state-set "hello")
     (disco-state-reset)
     (disco-state-upsert-channel
      '((id . "sysdm")
@@ -1972,7 +1948,7 @@
       (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
                  (lambda (&rest _args)
                    (setq api-called t)))
-                ((symbol-function 'disco-room--render-preserving-point)
+                ((symbol-function 'disco-room-render)
                  (lambda () nil)))
         (disco-room--inplace-search-dispatch '(:query "beta") t)
         (should-not api-called)
@@ -1990,7 +1966,7 @@
         (insert "alpha\n")
         (add-text-properties (point-min) (point-max) '(disco-message-id "m1")))
       (goto-char (point-min))
-      (cl-letf (((symbol-function 'disco-room--render-preserving-point)
+      (cl-letf (((symbol-function 'disco-room-render)
                  (lambda () (setq rendered t))))
         (disco-room--inplace-search-dispatch '(:query "alpha") t)
         (should rendered)))))
@@ -2056,7 +2032,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chan")
-    (disco-chatbuf-input-cache-set-state "first line\nsecond line\nthird line")
+    (disco-chatbuf-input-state-set "first line\nsecond line\nthird line")
     (disco-state-reset)
     (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "2048")))
     (let ((disco-api--message-content-limit 12)
@@ -2096,7 +2072,7 @@
            sent-content
            sent-attachments
            captured-file-body)
-      (disco-chatbuf-input-cache-set-state long-text)
+      (disco-chatbuf-input-state-set long-text)
       (disco-room--sync-shared-input-options-state)
       (disco-state-reset)
       (disco-state-upsert-channel '((id . "chan") (type . 0) (permissions . "2048")))
@@ -2137,7 +2113,7 @@
     (with-temp-buffer
       (disco-room-mode)
       (setq-local disco-room--channel-id "chan")
-      (disco-chatbuf-input-cache-set-state
+      (disco-chatbuf-input-state-set
        (make-string (1+ disco-api--message-content-limit) ?a))
       (disco-room--sync-shared-input-options-state)
       (disco-state-reset)
@@ -2190,7 +2166,7 @@
                  (lambda () '((id . "target") (type . 0))))
                 ((symbol-function 'disco-permission-ensure-channel) #'ignore)
                 ((symbol-function 'disco-room--ensure-jump-permissions) #'ignore)
-                ((symbol-function 'disco-room--update-frame-preserving-point) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
                 ((symbol-function 'disco-room--render-send-state-change)
                  (lambda () (setq rendered t)))
                 ((symbol-function 'disco-room-refresh)

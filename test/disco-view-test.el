@@ -81,6 +81,23 @@
       (should (= 2 prints))
       (should-not (disco-view-invalidate-keyed-ewoc-node ewoc nodes 'missing)))))
 
+(ert-deftest disco-view-keyed-ewoc-retains-node-after-deleted-prefix ()
+  (with-temp-buffer
+    (let* ((ewoc (ewoc-create
+                  (lambda (entry)
+                    (insert (disco-view-test-entry-text entry) "\n"))
+                  nil nil t))
+           (a (disco-view-test-entry-create :key 'a :text "A"))
+           (b (disco-view-test-entry-create :key 'b :text "B"))
+           (nodes (disco-view-reconcile-keyed-ewoc
+                   ewoc (list a b) #'disco-view-test-entry-key))
+           (b-node (gethash 'b nodes)))
+      (setq nodes
+            (disco-view-reconcile-keyed-ewoc
+             ewoc (list b) #'disco-view-test-entry-key))
+      (should (eq b-node (gethash 'b nodes)))
+      (should (equal "B\n" (buffer-string))))))
+
 (ert-deftest disco-view-keyed-ewoc-rejects-duplicate-keys ()
   (with-temp-buffer
     (let ((ewoc (ewoc-create #'ignore nil nil t))

@@ -40,7 +40,6 @@
 
 (declare-function disco-room--active-highlight-query "disco-room")
 (declare-function disco-room--async-error-message "disco-room" (err))
-(declare-function disco-room--at-message-bottom-p "disco-room")
 (declare-function disco-room--channel-object "disco-room")
 (declare-function disco-room--display-messages "disco-room")
 (declare-function disco-room--message-at-point "disco-room")
@@ -49,8 +48,7 @@
 (declare-function disco-room--message-by-id "disco-room" (message-id))
 (declare-function disco-room--message-id-at-point "disco-room")
 (declare-function disco-room--msg-filter-active-p "disco-room")
-(declare-function disco-room--render-preserving-point "disco-room")
-(declare-function disco-room--update-frame-preserving-point "disco-room")
+(declare-function disco-room--update-frame "disco-room")
 (declare-function disco-room-jump-to-message "disco-room"
                   (message-id &optional channel-id))
 (declare-function disco-room-render "disco-room")
@@ -391,7 +389,7 @@ When APPEND is non-nil, load the next page of matching messages."
     (when append
       (setq-local disco-room--msg-filter
                   (plist-put disco-room--msg-filter :items existing)))
-    (disco-room--render-preserving-point)
+    (disco-room-render)
     (disco-room--search-current-channel-async
      :query (plist-get filter :query)
      :author-id (plist-get filter :author-id)
@@ -420,9 +418,7 @@ When APPEND is non-nil, load the next page of matching messages."
                                              (< (length items) total)
                                            (= (length page)
                                               disco-room-search-filter-limit))))
-             (if (disco-room--at-message-bottom-p)
-                 (disco-room-render)
-               (disco-room--render-preserving-point))
+             (disco-room-render)
              (message "disco: filter -> %s"
                       (disco-room--msg-filter-title disco-room--msg-filter))))))
      :on-error
@@ -431,7 +427,7 @@ When APPEND is non-nil, load the next page of matching messages."
               room-buffer channel-id generation)
          (with-current-buffer room-buffer
            (setq-local disco-room--filter-in-flight nil)
-           (disco-room--update-frame-preserving-point)
+           (disco-room--update-frame)
            (message "disco: filter search failed: %s"
                     (disco-room--async-error-message err))))))))
 
@@ -493,7 +489,7 @@ With BY-SENDER-P, also prompt for a sender and restrict matches to that user."
     (setq-local disco-room--filter-in-flight nil)
     (if (or (null message-id)
             (disco-msg-find-in-channel disco-room--channel-id message-id))
-        (disco-room--render-preserving-point)
+        (disco-room-render)
       (disco-room-render)
       (disco-room-jump-to-message message-id))
     (message "disco: message filter canceled")))
@@ -539,7 +535,7 @@ non-nil, overrides the message id at point as the search boundary."
           (when-let* ((query (plist-get filter :query)))
             (setq-local disco-room--last-search-query query))
           (unless (equal old-query (disco-room--active-highlight-query))
-            (disco-room--render-preserving-point))
+            (disco-room-render))
           (message "disco: %s" title))
       (let* ((room-buffer (current-buffer))
              (channel-id disco-room--channel-id)
@@ -557,7 +553,7 @@ non-nil, overrides the message id at point as the search boundary."
           (when-let* ((query (plist-get filter :query)))
             (setq-local disco-room--last-search-query query))
           (unless (equal old-query (disco-room--active-highlight-query))
-            (disco-room--render-preserving-point))
+            (disco-room-render))
           (message "disco: searching %s..." title)
           (disco-room--search-current-channel-async
            :query (plist-get filter :query)

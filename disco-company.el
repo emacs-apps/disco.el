@@ -45,6 +45,8 @@ completion row height stays stable across CAPF/Corfu and company popups."
 (defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--typing-users nil)
 
+(declare-function disco-room--sync-draft-from-buffer "disco-room")
+
 (defun disco-company--as-list (value)
   "Return VALUE normalized as a proper list."
   (cond
@@ -98,15 +100,7 @@ completion row height stays stable across CAPF/Corfu and company popups."
 
 (defun disco-company--sync-room-draft ()
   "Sync room draft state after completion insertion."
-  (if (fboundp 'disco-room--sync-draft-from-buffer)
-      (funcall #'disco-room--sync-draft-from-buffer)
-    (let ((bounds (disco-chatbuf-input-region-bounds)))
-      (when bounds
-        (disco-chatbuf-input-cache-set-state
-         (replace-regexp-in-string
-          "[\n\r]+\\'"
-          ""
-          (buffer-substring-no-properties (car bounds) (cdr bounds))))))))
+  (disco-room--sync-draft-from-buffer))
 
 (defun disco-company--completion-token-boundary-p (char)
   "Return non-nil when CHAR is a valid left boundary for token completion."

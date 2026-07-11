@@ -21,6 +21,7 @@
 (require 'plz)
 (require 'svg nil t)
 (require 'disco-chatbuf)
+(require 'disco-chat-timeline)
 (require 'disco-ins)
 (require 'disco-ui)
 (require 'disco-util)
@@ -76,20 +77,13 @@
 
 (defun disco-room--render-send-state-change ()
   "Render an explicit local send-state mutation without fetching history."
-  (if (disco-room--at-message-bottom-p)
-      (disco-room-render)
-    (disco-room--render-preserving-point)))
+  (disco-room-render))
 (defvar-local disco-room--last-search-query nil)
 (defvar-local disco-room--msg-filter nil)
 (defvar-local disco-room--filter-generation 0)
 (defvar-local disco-room--filter-in-flight nil)
 (defvar-local disco-room--inplace-search-filter nil)
 (defvar-local disco-room--inplace-search-generation 0)
-(defvar-local disco-room--rendering nil)
-(defvar-local disco-room--ewoc nil)
-(defvar-local disco-room--message-node-table nil)
-(defvar-local disco-room--displayed-message-ids nil)
-(defvar-local disco-room--render-context-by-message-id nil)
 (defvar-local disco-room--chat-fill-column nil)
 (defvar-local disco-room--pending-attachments nil)
 (defvar-local disco-room--attachment-token-table nil)
@@ -1210,7 +1204,7 @@ state that was present before edit mode was entered."
     (setq disco-room--attachment-token-seq 0)
     (when (hash-table-p disco-room--attachment-token-table)
       (clrhash disco-room--attachment-token-table))
-    (disco-room--update-frame-preserving-point)
+    (disco-room--update-frame)
     (message "disco: editing message %s in composer" message-id)))
 
 (cl-defun disco-room--poll-owned-by-current-user-p (msg &optional (unknown-value t))
@@ -1340,8 +1334,8 @@ If current user identity is unknown, return UNKNOWN-VALUE."
     (with-current-buffer buffer
       (setq disco-room--typing-expire-timer nil)
       (when (disco-room--typing-prune-expired)
-        (unless disco-room--rendering
-          (disco-room--update-frame-preserving-point)))
+        (unless (disco-chatbuf-rendering-p)
+          (disco-room--update-frame)))
       (disco-room--typing-reschedule-expire-timer))))
 
 (defun disco-room--typing-reschedule-expire-timer ()
@@ -1388,8 +1382,8 @@ If current user identity is unknown, return UNKNOWN-VALUE."
                        disco-room--typing-users)
               (disco-room--typing-reschedule-expire-timer)
               (when changed
-                (unless disco-room--rendering
-                  (disco-room--update-frame-preserving-point))))))))))
+                (unless (disco-chatbuf-rendering-p)
+                  (disco-room--update-frame))))))))))
 
 (defun disco-room--typing-stop-user (user-id &optional no-rerender)
   "Remove USER-ID from typing indicators.
@@ -1401,8 +1395,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
                (gethash normalized-id disco-room--typing-users))
       (remhash normalized-id disco-room--typing-users)
       (disco-room--typing-reschedule-expire-timer)
-      (unless (or no-rerender disco-room--rendering)
-        (disco-room--update-frame-preserving-point)))))
+      (unless (or no-rerender (disco-chatbuf-rendering-p))
+        (disco-room--update-frame)))))
 
 (defun disco-room--latest-message-id ()
   "Return newest known message ID for current room, or nil."
@@ -1458,7 +1452,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--current-draft ()
   "Return current room draft string, preserving text properties."
-  (disco-chatbuf-input-cache-current-state))
+  (disco-chatbuf-input-state))
 
 (defun disco-room--attachment-input-object-p (object)
   "Return non-nil when OBJECT is a queued attachment input object."
@@ -1759,7 +1753,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--post-command ()
   "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
-  (unless disco-room--rendering
+  (unless (disco-chatbuf-rendering-p)
     (disco-chatbuf-post-command-clamp-point)
     (let ((current-message-id (or (get-text-property (point) 'disco-message-id)
                                   (get-text-property (line-beginning-position)
@@ -1774,7 +1768,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync shared chatbuf draft cache from editable input region."
-  (let ((text (plist-get (disco-chatbuf-input-cache-sync-state-from-buffer)
+  (let ((text (plist-get (disco-chatbuf-input-state-sync)
                          :value)))
     (disco-room--prune-unused-attachment-tokens text)
     (disco-room--sync-pending-attachments-from-draft text)))
@@ -1783,7 +1777,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
   "Keep draft state synced after editable-region changes from BEG to END."
   (disco-chatbuf-after-change
    beg end
-   :rendering-p disco-room--rendering
+   :rendering-p (disco-chatbuf-rendering-p)
    :prune-broken-objects t
    :sync-function #'disco-room--sync-draft-from-buffer))
 
@@ -1795,10 +1789,10 @@ unchanged, update the live input directly in telega-like fashion.  Otherwise,
 callers can use the returned metadata to decide whether a frame refresh is
 needed."
   (let ((old-attachments (copy-tree disco-room--pending-attachments))
-        (live-input-p (and (not disco-room--rendering)
+        (live-input-p (and (not (disco-chatbuf-rendering-p))
                            (disco-chatbuf-input-start-position))))
     (let ((draft
-           (disco-chatbuf-input-cache-set-state
+           (disco-chatbuf-input-state-set
             text
             :reset-history-p reset-history-p)))
       (disco-room--prune-unused-attachment-tokens draft)
@@ -1806,8 +1800,7 @@ needed."
       (let ((attachments-changed-p
              (not (equal old-attachments disco-room--pending-attachments))))
         (when (and live-input-p (not attachments-changed-p))
-          (let ((disco-room--rendering t)
-                (inhibit-read-only t))
+          (disco-chatbuf-with-structural-update
             (disco-chatbuf-input-replace draft)
             (disco-room--apply-input-text-properties)))
         (list :draft (disco-chatbuf-copy-string draft)
@@ -1819,13 +1812,13 @@ needed."
   "Set room draft TEXT and refresh composer surfaces as needed."
   (let ((result (disco-room--apply-draft-state text)))
     (when (plist-get result :attachments-changed-p)
-      (disco-room--update-frame-preserving-point))))
+      (disco-room--update-frame))))
 
 (defun disco-room--clear-draft ()
   "Clear room draft and reset draft history navigation state."
   (let ((result (disco-room--apply-draft-state "" :reset-history-p t)))
     (when (plist-get result :attachments-changed-p)
-      (disco-room--update-frame-preserving-point))))
+      (disco-room--update-frame))))
 
 (defun disco-room-draft-prev (&optional n)
   "Replace draft with N previous entries from draft history."
@@ -1902,7 +1895,7 @@ needed."
      0
      (plist-get ack-fields :flags)
      (plist-get ack-fields :last-viewed))
-    (disco-room--apply-read-state-change-partially)
+    (disco-room--apply-read-state-change)
     seq))
 
 (defun disco-room--optimistic-read-ack-clear (seq)
@@ -1934,7 +1927,7 @@ needed."
           (previous-token (plist-get disco-room--pending-optimistic-read-ack :previous-token)))
       (setq disco-room--pending-optimistic-read-ack nil)
       (disco-room--restore-channel-read-state channel-id previous-state previous-token)
-      (disco-room--apply-read-state-change-partially)
+      (disco-room--apply-read-state-change)
       t)))
 
 (defun disco-room--mark-read (&optional message-id)
@@ -1970,7 +1963,7 @@ Unread counters are always cleared locally."
                  (disco-room--optimistic-read-ack-clear optimistic-seq)
                  (disco-state-apply-message-ack channel-id target-id 0)
                  (disco-state-apply-channel-ack-response channel-id response)
-                 (disco-room--apply-read-state-change-partially))))
+                 (disco-room--apply-read-state-change))))
            :on-error
            (lambda (err)
              (when (disco-room--callback-active-p room-buffer channel-id generation)
@@ -2031,32 +2024,17 @@ Message lines carry the `disco-message-id' text property."
 
 (defun disco-room--invalidate-message-node (message-id)
   "Invalidate the rendered node for MESSAGE-ID when present."
-  (when (and message-id disco-room--ewoc disco-room--message-node-table)
-    (let ((node (gethash message-id disco-room--message-node-table)))
-      (when node
-        (let* ((anchor-at-point
-                (or (get-text-property (point) 'disco-message-id)
-                    (get-text-property (line-beginning-position)
-                                       'disco-message-id)))
-               (snapshot (and anchor-at-point
-                              (disco-view-capture-position
-                               :anchor-property 'disco-message-id
-                               :preserve-window-start t)))
-               (disco-room--rendering t)
-               (inhibit-read-only t)
-               (buffer-undo-list t))
-          (ewoc-invalidate disco-room--ewoc node)
-          (when snapshot
-            (disco-view-restore-position snapshot))
-          t)))))
+  (when (and message-id
+             (disco-chat-timeline-live-p)
+             (disco-chat-timeline-node message-id))
+    (disco-chat-timeline-invalidate (list message-id))))
 
 (defun disco-room--redisplay-msg (msg)
   "Force MSG to be rerendered in the current room."
   (let ((message-id (and (listp msg) (alist-get 'id msg))))
     (unless (and (stringp message-id) (not (string-empty-p message-id)))
       (user-error "disco: message has no id to redisplay"))
-    (unless (disco-room--invalidate-message-node message-id)
-      (disco-room--render-preserving-point))))
+    (disco-room--invalidate-message-node message-id)))
 
 (defun disco-room-toggle-message-spoilers (message-id)
   "Toggle all rendered spoilers for MESSAGE-ID, telega-style."
@@ -2070,67 +2048,6 @@ Message lines carry the `disco-message-id' text property."
     (when (and previous (not (equal previous message-id)))
       (disco-room--invalidate-message-node previous))
     (disco-room--invalidate-message-node message-id)))
-
-(defun disco-room--capture-window-input-offsets ()
-  "Return (WINDOW . OFFSET) pairs for windows currently in draft input."
-  (let ((bounds (disco-chatbuf-input-region-bounds))
-        offsets)
-    (when bounds
-      (let ((start (car bounds))
-            (end (cdr bounds)))
-        (dolist (win (get-buffer-window-list (current-buffer) nil t))
-          (let ((window-point (window-point win)))
-            (when (and (<= start window-point)
-                       (<= window-point end))
-              (push (cons win (- window-point start)) offsets))))))
-    offsets))
-
-(defun disco-room--restore-window-input-offsets (offsets)
-  "Restore window points in OFFSETS relative to current draft input start."
-  (let ((start (disco-chatbuf-input-start-position))
-        (logical-end (disco-chatbuf-input-logical-end-position)))
-    (when (and (number-or-marker-p start)
-               (number-or-marker-p logical-end))
-      (dolist (entry offsets)
-        (let ((win (car entry))
-              (offset (cdr entry)))
-          (when (and (window-live-p win)
-                     (eq (window-buffer win) (current-buffer)))
-            (set-window-point
-             win
-             (min logical-end
-                  (max start (+ start offset))))))))))
-
-(defun disco-room--at-message-bottom-p ()
-  "Return non-nil when point is at timeline bottom, outside draft input."
-  (and (= (point) (point-max))
-       (not (disco-chatbuf-point-in-input-p))))
-
-(defun disco-room--render-preserving-point ()
-  "Rerender room while preserving message reading position.
-
-This follows telega-like behavior: preserve anchor + viewport for passive
-updates, and keep draft cursor stable when point is in the composer."
-  (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
-         (input-start (disco-chatbuf-input-start-position))
-         (in-input (and (number-or-marker-p input-start)
-                        (disco-chatbuf-point-in-input-p)))
-         (input-offset (and in-input (- (point) input-start))))
-    (unwind-protect
-        (if (and in-input (numberp input-offset))
-            (progn
-              (disco-room-render)
-              (let ((new-start (disco-chatbuf-input-start-position))
-                    (logical-end (disco-chatbuf-input-logical-end-position)))
-                (when (and (number-or-marker-p new-start)
-                           (number-or-marker-p logical-end))
-                  (goto-char (min logical-end
-                                  (max new-start (+ new-start input-offset)))))))
-          (disco-view-render-preserving-position
-           #'disco-room-render
-           :anchor-property 'disco-message-id
-           :preserve-window-start t))
-      (disco-room--restore-window-input-offsets window-input-offsets))))
 
 (defun disco-room--filtered-message-by-id (message-id)
   "Return filtered room message object for MESSAGE-ID, or nil."
@@ -2171,16 +2088,10 @@ updates, and keep draft cursor stable when point is in the composer."
 
 (defun disco-room--message-position (message-id)
   "Return buffer position for MESSAGE-ID in current room render, or nil."
-  (when (and (stringp message-id) (not (string-empty-p message-id)))
-    (let ((pos (point-min))
-          found)
-      (while (and (< pos (point-max)) (not found))
-        (when (equal (get-text-property pos 'disco-message-id) message-id)
-          (setq found pos))
-        (setq pos (or (next-single-property-change
-                       pos 'disco-message-id nil (point-max))
-                      (point-max))))
-      found)))
+  (when (and (stringp message-id)
+             (not (string-empty-p message-id))
+             (disco-chat-timeline-live-p))
+    (disco-chat-timeline-key-position message-id)))
 
 (defcustom disco-room-jump-context-limit 50
   "Number of messages to request around a jump target.
@@ -2239,7 +2150,7 @@ page."
     (setq disco-room--refresh-generation generation)
     (setq disco-room--jump-in-flight t)
     (setq disco-room--refresh-in-flight t)
-    (disco-room--update-frame-preserving-point)
+    (disco-room--update-frame)
     (disco-api-channel-messages-around-async
      channel-id
      target-id
@@ -2262,7 +2173,7 @@ page."
                      (message "disco: jumped to message %s" target-id)
                    (message "disco: failed to render jump target %s" target-id)))
              (setq disco-room--pending-jump-message-id nil)
-             (disco-room--update-frame-preserving-point)
+             (disco-room--update-frame)
              (message "disco: message %s not found in around fetch" target-id)))))
      :on-error
      (lambda (err)
@@ -2271,7 +2182,7 @@ page."
            (setq disco-room--jump-in-flight nil)
            (setq disco-room--refresh-in-flight nil)
            (setq disco-room--pending-jump-message-id nil)
-           (disco-room--update-frame-preserving-point)
+           (disco-room--update-frame)
            (message "disco: jump fetch failed: %s"
                     (disco-room--async-error-message err))))))))
 
@@ -2492,10 +2403,7 @@ When WIN is nil, use best room window from `disco-room--render-window'."
           (next (disco-room--update-chat-fill-column)))
       (when (and (numberp next)
                  (not (equal old next)))
-        (disco-view-render-preserving-position
-         #'disco-room-render
-         :anchor-property 'disco-message-id
-         :preserve-window-start t)))))
+        (disco-room-render)))))
 
 (defun disco-room--line-fill-column ()
   "Return target fill column for current message line."
@@ -2550,18 +2458,6 @@ additional columns at line start (for future `line-prefix' application)."
               (<= (abs (- current-time previous-time))
                   (max 0 disco-room-group-messages-timespan))))))
 
-(defun disco-room--set-message-render-context (message-id context)
-  "Store render CONTEXT for MESSAGE-ID in current room buffer."
-  (when (and message-id disco-room--render-context-by-message-id)
-    (puthash message-id context disco-room--render-context-by-message-id)))
-
-(defun disco-room--message-render-context (msg)
-  "Return render context plist for MSG, or nil when missing."
-  (let ((message-id (and (listp msg) (alist-get 'id msg))))
-    (and message-id
-         disco-room--render-context-by-message-id
-         (gethash message-id disco-room--render-context-by-message-id))))
-
 (defun disco-room--insert-divider-row (text face)
   "Insert read-only divider row TEXT with FACE, spanning full window width."
   (disco-ins-insert-divider-row
@@ -2579,15 +2475,14 @@ additional columns at line start (for future `line-prefix' application)."
    "Unread Messages"
    'disco-room-unread-divider))
 
-(defun disco-room--insert-system-divider-message (msg)
-  "Insert MSG as a centered system divider line (telega-style).
+(defun disco-room--insert-system-divider-message (msg context)
+  "Insert MSG with projected CONTEXT as a centered system divider line.
 
 The message content is rendered as ────( avatar content )──── with
 horizontal bars filling both sides to span the full line width.
 The author name is propertized with its colour face and an inline
 avatar image is prepended when available."
-  (let* ((context (or (disco-room--message-render-context msg) '()))
-         (insert-date (plist-get context :insert-date))
+  (let* ((insert-date (plist-get context :insert-date))
          (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
          (message-id (alist-get 'id msg))
          (content (disco-room--message-display-content msg))
@@ -2904,31 +2799,12 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
   (message "disco: avatar cache reset; refetching"))
 
 (defun disco-room--rerender-open-rooms ()
-  "Rerender all open room buffers while preserving reading position."
+  "Synchronize all open room buffers from current state."
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (eq major-mode 'disco-room-mode)
-          (disco-view-render-preserving-position
-           #'disco-room-render
-           :anchor-property 'disco-message-id
-           :preserve-window-start t))))))
-
-(defun disco-room--message-has-attachment-download-key-p (msg attachment-key)
-  "Return non-nil when MSG renders an attachment with ATTACHMENT-KEY."
-  (and (stringp attachment-key)
-       (seq-some (lambda (attachment)
-                   (equal (disco-media-attachment-download-key attachment)
-                          attachment-key))
-                 (or (disco-room--message-effective-attachments msg) '()))))
-
-(defun disco-room--displayed-message-ids-for-attachment-key (attachment-key)
-  "Return displayed message ids whose rendered attachments match ATTACHMENT-KEY."
-  (let (matches)
-    (dolist (message-id (or disco-room--displayed-message-ids '()) (nreverse matches))
-      (when-let* ((msg (disco-room--message-by-id message-id)))
-        (when (disco-room--message-has-attachment-download-key-p msg attachment-key)
-          (push message-id matches))))))
+          (disco-room-render))))))
 
 (defun disco-room--invalidate-attachment-key-in-open-rooms (attachment-key)
   "Invalidate rendered rows referencing ATTACHMENT-KEY in open room buffers."
@@ -2937,12 +2813,14 @@ When IMAGE is nil and TARGET-FILE exists, delete TARGET-FILE."
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (and (eq major-mode 'disco-room-mode)
-                     (stringp attachment-key))
+                     (stringp attachment-key)
+                     (disco-chat-timeline-live-p))
             (let ((message-ids
-                   (disco-room--displayed-message-ids-for-attachment-key attachment-key)))
+                   (disco-chat-timeline-dependent-keys
+                    (list (list :attachment attachment-key)))))
               (when message-ids
                 (setq updated t)
-                (disco-room--invalidate-message-ids-preserving-point message-ids)))))))))
+                (disco-chat-timeline-invalidate message-ids)))))))))
 
 (defun disco-room--handle-media-rerender ()
   "Handle media refreshes with targeted invalidation when possible."
@@ -4275,8 +4153,8 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
         (setf (alist-get 'poll updated nil 'remove) poll)
         updated))))
 
-(defun disco-room--apply-live-poll-vote-event-partially (event)
-  "Apply poll vote EVENT to local room state and EWOC incrementally."
+(defun disco-room--apply-live-poll-vote-event (event)
+  "Apply poll vote EVENT to local room state and projected timeline."
   (let* ((event-type (plist-get event :type))
          (message-id (plist-get event :message-id))
          (raw-answer-id (plist-get event :answer-id))
@@ -4510,7 +4388,8 @@ otherwise selected flag is cleared and count is decreased."
     (setq updated-list (nreverse updated-list))
     (disco-state-put-messages disco-room--channel-id updated-list)
     (when updated-msg
-      (disco-room--upsert-message-node updated-msg))
+      (disco-room--sync-timeline
+       :changed-resources (list (list :message message-id))))
     updated-msg))
 
 (defun disco-room--event-emoji->input (emoji)
@@ -4544,8 +4423,8 @@ otherwise selected flag is cleared and count is decreased."
     (setf (alist-get 'reactions updated nil 'remove) (nreverse next))
     updated))
 
-(defun disco-room--apply-live-reaction-event-partially (event)
-  "Apply reaction EVENT to local room state and EWOC incrementally.
+(defun disco-room--apply-live-reaction-event (event)
+  "Apply reaction EVENT to local room state and projected timeline.
 
 Return non-nil when a local message update was applied."
   (let* ((event-type (plist-get event :type))
@@ -4655,12 +4534,11 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
            :button-action (lambda ()
                             (disco-room-jump-to-message ref-id ref-channel))))))))
 
-(defun disco-room--insert-message (msg)
-  "Insert one message MSG in current buffer."
+(defun disco-room--insert-message (msg context)
+  "Insert one message MSG using projected render CONTEXT."
   (if (disco-room--message-system-divider-p msg)
-      (disco-room--insert-system-divider-message msg)
-    (let* ((context (or (disco-room--message-render-context msg) '()))
-           (compact (disco-util-json-true-p (plist-get context :compact)))
+      (disco-room--insert-system-divider-message msg context)
+    (let* ((compact (disco-util-json-true-p (plist-get context :compact)))
            (insert-date (plist-get context :insert-date))
            (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
            (timestamp (disco-util-format-time (or (alist-get 'timestamp msg) "")))
@@ -4812,9 +4690,11 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
               (or (alist-get 'guild_id msg)
                   disco-room--guild-id)))))))
 
-(defun disco-room--ewoc-printer (msg)
-  "EWOC pretty-printer for one room message MSG."
-  (disco-room--insert-message msg))
+(defun disco-room--ewoc-printer (row)
+  "EWOC pretty-printer for one projected room ROW."
+  (disco-room--insert-message
+   (disco-chat-timeline-row-payload row)
+   (or (disco-chat-timeline-row-context row) '())))
 
 (defun disco-room--header-help-text (&optional channel)
   "Return header help text for room actions in CHANNEL."
@@ -5021,84 +4901,22 @@ current effective input-options state.  Return the normalized state plist."
   "Build EWOC footer text for the current room state."
   (disco-room--input-footer-text))
 
-(defun disco-room--ensure-ewoc (&optional channel draft)
-  "Ensure current room buffer owns one persistent EWOC instance."
-  (unless (hash-table-p disco-room--message-node-table)
-    (setq disco-room--message-node-table (make-hash-table :test #'equal)))
-  (unless (hash-table-p disco-room--render-context-by-message-id)
-    (setq disco-room--render-context-by-message-id (make-hash-table :test #'equal)))
-  (unless disco-room--ewoc
-    (let ((disco-room--rendering t)
-          (inhibit-read-only t)
-          (buffer-undo-list t))
-      (erase-buffer)
-      (setq disco-room--displayed-message-ids nil)
-      (setq disco-room--ewoc
-            (ewoc-create
-             #'disco-room--ewoc-printer
-             (disco-room--header-text channel)
-             (disco-room--footer-text draft)
-             t)))))
+(defun disco-room--ensure-timeline (&optional channel draft)
+  "Ensure current room buffer owns one shared projected timeline."
+  (disco-chat-timeline-ensure
+   :printer #'disco-room--ewoc-printer
+   :anchor-property 'disco-message-id
+   :header (disco-room--header-text channel)
+   :footer (disco-room--footer-text draft)
+   :after-mutation-function #'disco-room--update-context-mode))
 
-(defun disco-room--set-ewoc-frame (&optional channel draft)
-  "Update current room EWOC header/footer in place."
-  (disco-room--ensure-ewoc channel draft)
-  (let ((disco-room--rendering t)
-        (inhibit-read-only t)
-        (buffer-undo-list t))
-    (disco-chatbuf-clear-prompt-and-input)
-    (ewoc-set-hf disco-room--ewoc
-                 (disco-room--header-text channel)
-                 (disco-room--footer-text draft))
-    (disco-room--bind-input-region-from-footer)))
-
-(defun disco-room--clear-timeline ()
-  "Remove all currently rendered message nodes from the room EWOC."
-  (disco-room--ensure-ewoc)
-  (let ((disco-room--rendering t)
-        (inhibit-read-only t)
-        (buffer-undo-list t))
-    (ewoc-filter disco-room--ewoc (lambda (_msg) nil)))
-  (setq disco-room--displayed-message-ids nil)
-  (clrhash disco-room--message-node-table)
-  (clrhash disco-room--render-context-by-message-id))
-
-(defun disco-room--message-ids-in-order (messages)
-  "Return MESSAGE ids in render order, skipping missing ids."
-  (delq nil
-        (mapcar (lambda (msg)
-                  (and (listp msg) (alist-get 'id msg)))
-                (or messages '()))))
-
-(defun disco-room--timeline-order-compatible-p (current-ids target-ids)
-  "Return non-nil when CURRENT-IDS can be reconciled into TARGET-IDS in place."
-  (let ((current-set (make-hash-table :test #'equal))
-        common-current
-        common-target)
-    (dolist (message-id current-ids)
-      (puthash message-id t current-set))
-    (dolist (message-id current-ids)
-      (when (member message-id target-ids)
-        (push message-id common-current)))
-    (dolist (message-id target-ids)
-      (when (gethash message-id current-set)
-        (push message-id common-target)))
-    (equal (nreverse common-current)
-           (nreverse common-target))))
-
-(defun disco-room--insert-message-node-before (msg before-node)
-  "Insert one message node for MSG before BEFORE-NODE, or at end when nil."
-  (when disco-room--ewoc
-    (let ((disco-room--rendering t)
-          (inhibit-read-only t)
-          (buffer-undo-list t))
-      (let* ((node (if before-node
-                       (ewoc-enter-before disco-room--ewoc before-node msg)
-                     (ewoc-enter-last disco-room--ewoc msg)))
-             (message-id (and (listp msg) (alist-get 'id msg))))
-        (when (and node message-id disco-room--message-node-table)
-          (puthash message-id node disco-room--message-node-table))
-        node))))
+(defun disco-room--update-frame (&optional channel draft)
+  "Update current room header, footer, and composer in place."
+  (disco-room--ensure-timeline channel draft)
+  (disco-chat-timeline-set-frame
+   (disco-room--header-text channel)
+   (disco-room--footer-text draft)
+   :bind-input-function #'disco-room--bind-input-region-from-footer))
 
 (defun disco-room--first-unread-message-id (ordered-messages)
   "Return first unread message id in ORDERED-MESSAGES, or nil."
@@ -5132,91 +4950,6 @@ current effective input-options state.  Return the normalized state plist."
           :insert-date insert-date
           :insert-unread (and insert-unread t))))
 
-(defun disco-room--rebuild-render-contexts (ordered-messages)
-  "Recompute full render contexts for ORDERED-MESSAGES in display order."
-  (unless (hash-table-p disco-room--render-context-by-message-id)
-    (setq disco-room--render-context-by-message-id (make-hash-table :test #'equal)))
-  (clrhash disco-room--render-context-by-message-id)
-  (let ((first-unread-id (disco-room--first-unread-message-id ordered-messages))
-        (previous-msg nil))
-    (dolist (msg ordered-messages)
-      (let ((message-id (alist-get 'id msg)))
-        (when message-id
-          (disco-room--set-message-render-context
-           message-id
-           (disco-room--compute-message-render-context
-            previous-msg msg first-unread-id))))
-      (setq previous-msg msg))))
-
-(defun disco-room--neighbor-ids-in-sequence (message-ids target-id)
-  "Return prev/current/next ids around TARGET-ID within MESSAGE-IDS."
-  (when-let* ((index (cl-position target-id message-ids :test #'equal)))
-    (delq nil
-          (list (nth (1- index) message-ids)
-                (nth index message-ids)
-                (nth (1+ index) message-ids)))))
-
-(defun disco-room--message-neighborhood-ids (current-ids target-ids message-id)
-  "Return local ids affected by MESSAGE-ID moving from CURRENT-IDS to TARGET-IDS."
-  (delete-dups
-   (append (disco-room--neighbor-ids-in-sequence current-ids message-id)
-           (disco-room--neighbor-ids-in-sequence target-ids message-id))))
-
-(defun disco-room--recompute-render-contexts-for-ids (ordered-messages message-ids)
-  "Recompute render contexts in ORDERED-MESSAGES only for MESSAGE-IDS."
-  (unless (hash-table-p disco-room--render-context-by-message-id)
-    (setq disco-room--render-context-by-message-id (make-hash-table :test #'equal)))
-  (let ((target-set (make-hash-table :test #'equal))
-        (first-unread-id (disco-room--first-unread-message-id ordered-messages))
-        (previous-msg nil)
-        seen)
-    (dolist (message-id message-ids)
-      (when message-id
-        (puthash message-id t target-set)))
-    (dolist (msg ordered-messages)
-      (let ((message-id (alist-get 'id msg)))
-        (when (and message-id (gethash message-id target-set))
-          (disco-room--set-message-render-context
-           message-id
-           (disco-room--compute-message-render-context
-            previous-msg msg first-unread-id))
-          (push message-id seen))
-        (setq previous-msg msg)))
-    (dolist (message-id message-ids)
-      (when (and message-id (not (member message-id seen)))
-        (remhash message-id disco-room--render-context-by-message-id)))))
-
-(defun disco-room--copy-render-contexts-for-ids (message-ids)
-  "Return alist snapshot of current render contexts for MESSAGE-IDS."
-  (let (snapshot)
-    (dolist (message-id message-ids)
-      (when message-id
-        (push (cons message-id
-                    (copy-tree (gethash message-id
-                                        disco-room--render-context-by-message-id)))
-              snapshot)))
-    snapshot))
-
-(defun disco-room--changed-render-context-ids (message-ids old-snapshot)
-  "Return ids in MESSAGE-IDS whose render context changed from OLD-SNAPSHOT."
-  (let (changed)
-    (dolist (message-id message-ids)
-      (when message-id
-        (let ((previous (alist-get message-id old-snapshot nil nil #'equal))
-              (current (gethash message-id disco-room--render-context-by-message-id)))
-          (unless (equal previous current)
-            (push message-id changed)))))
-    (nreverse changed)))
-
-(defun disco-room--current-first-unread-message-id ()
-  "Return message id currently rendering the unread divider, or nil."
-  (seq-find
-   (lambda (message-id)
-     (disco-util-json-true-p
-      (plist-get (gethash message-id disco-room--render-context-by-message-id)
-                 :insert-unread)))
-   (or disco-room--displayed-message-ids '())))
-
 (defun disco-room--message-reference-targets-current-room-p (msg)
   "Return non-nil when MSG references a message in the current room."
   (let ((ref-channel-id (disco-msg-reference-channel-id msg)))
@@ -5224,325 +4957,101 @@ current effective input-options state.  Return the normalized state plist."
         (equal (disco-msg-normalize-id ref-channel-id)
                (disco-msg-normalize-id disco-room--channel-id)))))
 
-(defun disco-room--reply-reference-targets-current-room-p (msg)
-  "Return non-nil when MSG replies to a message in the current room."
-  (disco-room--message-reference-targets-current-room-p msg))
-
-(defun disco-room--reply-dependent-message-ids (ordered-messages message-id)
-  "Return displayed reply message ids depending on MESSAGE-ID."
-  (let (dependent-ids)
-    (dolist (msg ordered-messages)
-      (let ((dependent-id (alist-get 'id msg)))
-        (when (and dependent-id
-                   (disco-msg-reply-type-p msg)
-                   (disco-room--reply-reference-targets-current-room-p msg)
-                   (equal (disco-room--reply-reference-id msg) message-id))
-          (push dependent-id dependent-ids))))
-    (nreverse dependent-ids)))
-
-(defun disco-room--thread-starter-dependent-message-ids (ordered-messages message-id)
-  "Return displayed thread-starter ids depending on MESSAGE-ID."
-  (let (dependent-ids)
-    (dolist (msg ordered-messages)
-      (let ((dependent-id (alist-get 'id msg)))
-        (when (and dependent-id
-                   (= (disco-msg-type msg) 21)
-                   (disco-room--message-reference-targets-current-room-p msg)
-                   (equal (disco-msg-reference-id msg) message-id))
-          (push dependent-id dependent-ids))))
-    (nreverse dependent-ids)))
-
-(defun disco-room--forward-source-dependent-message-ids (ordered-messages
-                                                         &optional source-channel-id source-guild-id)
-  "Return forwarded message ids depending on SOURCE-CHANNEL-ID or SOURCE-GUILD-ID."
-  (let ((normalized-channel-id (disco-msg-normalize-id source-channel-id))
-        (normalized-guild-id (disco-msg-normalize-id source-guild-id))
-        dependent-ids)
-    (dolist (msg ordered-messages)
-      (let* ((dependent-id (alist-get 'id msg))
-             (ref-channel-id (disco-msg-reference-channel-id msg))
-             (resolved-guild-id
-              (or (disco-msg-reference-guild-id msg)
-                  (and ref-channel-id
-                       (disco-msg-normalize-id
-                        (alist-get 'guild_id (disco-state-channel ref-channel-id)))))))
-        (when (and dependent-id
-                   (disco-room--message-forwarded-p msg)
-                   (or (and normalized-channel-id
-                            ref-channel-id
-                            (equal (disco-msg-normalize-id ref-channel-id)
-                                   normalized-channel-id))
-                       (and normalized-guild-id
-                            resolved-guild-id
-                            (equal resolved-guild-id normalized-guild-id))))
-          (push dependent-id dependent-ids))))
-    (nreverse dependent-ids)))
+(defun disco-room--message-dependency-keys (msg)
+  "Return opaque resource keys that can change rendered MSG."
+  (let ((reference-id (disco-msg-reference-id msg))
+        (reference-channel-id (disco-msg-reference-channel-id msg))
+        dependencies)
+    (when (and (stringp reference-id)
+               (disco-room--message-reference-targets-current-room-p msg)
+               (or (disco-msg-reply-type-p msg)
+                   (= (disco-msg-type msg) 21)))
+      (push (list :message reference-id) dependencies))
+    (when (disco-room--message-forwarded-p msg)
+      (when-let* ((channel-id (disco-msg-normalize-id reference-channel-id)))
+        (push (list :channel channel-id) dependencies))
+      (when-let* ((guild-id
+                   (or (disco-msg-reference-guild-id msg)
+                       (and reference-channel-id
+                            (disco-msg-normalize-id
+                             (alist-get 'guild_id
+                                        (disco-state-channel
+                                         reference-channel-id)))))))
+        (push (list :guild guild-id) dependencies)))
+    (dolist (attachment (disco-room--message-effective-attachments msg))
+      (when-let* ((key (disco-media-attachment-download-key attachment)))
+        (push (list :attachment key) dependencies)))
+    (delete-dups (delq nil dependencies))))
 
 (defun disco-room--message-affects-composer-context-p (message-id)
   "Return non-nil when MESSAGE-ID is used by current composer context."
   (or (equal message-id (disco-room--composer-reply-message-id))
       (equal message-id (disco-room--composer-edit-message-id))))
 
-(defun disco-room--mutate-timeline-preserving-point (mutator)
-  "Run MUTATOR while preserving chat reading and composer position."
-  (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
-         (input-start (disco-chatbuf-input-start-position))
-         (in-input (and (number-or-marker-p input-start)
-                        (disco-chatbuf-point-in-input-p)))
-         (input-offset (and in-input (- (point) input-start)))
-         (at-bottom (and (not in-input) (disco-room--at-message-bottom-p)))
-         (snapshot (and (not in-input)
-                        (not at-bottom)
-                        (disco-view-capture-position
-                         :anchor-property 'disco-message-id
-                         :preserve-window-start t))))
-    (unwind-protect
-        (progn
-          (funcall mutator)
-          (cond
-           ((and in-input (numberp input-offset))
-            (let ((new-start (disco-chatbuf-input-start-position))
-                  (logical-end (disco-chatbuf-input-logical-end-position)))
-              (when (and (number-or-marker-p new-start)
-                         (number-or-marker-p logical-end))
-                (goto-char (min logical-end
-                                (max new-start (+ new-start input-offset)))))))
-           (at-bottom
-            (goto-char (point-max)))
-           (snapshot
-            (disco-view-restore-position snapshot))))
-      (disco-room--restore-window-input-offsets window-input-offsets))))
+(defun disco-room--project-timeline (ordered-messages)
+  "Project ORDERED-MESSAGES into shared timeline rows."
+  (let ((first-unread-id
+         (disco-room--first-unread-message-id ordered-messages)))
+    (disco-chat-timeline-project
+     ordered-messages
+     (lambda (message) (alist-get 'id message))
+     :context-function
+     (lambda (previous message)
+       (disco-room--compute-message-render-context
+        previous message first-unread-id))
+     :dependencies-function #'disco-room--message-dependency-keys)))
 
-(defun disco-room--reconcile-timeline (ordered-messages)
-  "Reconcile room EWOC nodes against ORDERED-MESSAGES in display order."
-  (disco-room--ensure-ewoc)
-  (let* ((target-ids (disco-room--message-ids-in-order ordered-messages))
-         (current-ids (or disco-room--displayed-message-ids '()))
-         (target-set (make-hash-table :test #'equal)))
-    (dolist (message-id target-ids)
-      (puthash message-id t target-set))
-    (unless (disco-room--timeline-order-compatible-p current-ids target-ids)
-      (disco-room--clear-timeline)
-      (setq current-ids '()))
-    (dolist (message-id current-ids)
-      (unless (gethash message-id target-set)
-        (disco-room--delete-message-node message-id)))
-    (cl-loop for msg in ordered-messages
-             for index from 0 do
-             (let* ((message-id (alist-get 'id msg))
-                    (node (and message-id
-                               (gethash message-id disco-room--message-node-table))))
-               (if node
-                   (let ((disco-room--rendering t)
-                         (inhibit-read-only t)
-                         (buffer-undo-list t))
-                     (ewoc-set-data node msg))
-                 (let ((before-node
-                        (cl-loop for later-id in (nthcdr (1+ index) target-ids)
-                                 for later-node = (gethash later-id disco-room--message-node-table)
-                                 when later-node return later-node)))
-                   (disco-room--insert-message-node-before msg before-node)))))
-    (setq disco-room--displayed-message-ids target-ids)
-    (disco-room--rebuild-render-contexts ordered-messages)
-    (let ((disco-room--rendering t)
-          (inhibit-read-only t)
-          (buffer-undo-list t))
-      (ewoc-refresh disco-room--ewoc))))
+(cl-defun disco-room--sync-timeline
+    (&key ordered-messages force-keys changed-resources rekeys)
+  "Synchronize projected room rows through the shared keyed controller."
+  (disco-room--ensure-timeline)
+  (let ((messages (or ordered-messages
+                      (reverse (or (disco-room--display-messages) '())))))
+    (disco-chat-timeline-sync
+     (disco-room--project-timeline messages)
+     :force-keys force-keys
+     :changed-resources changed-resources
+     :rekeys rekeys)))
 
-(defun disco-room--apply-single-message-change-partially (message-id ordered-messages)
-  "Apply one MESSAGE-ID change against ORDERED-MESSAGES incrementally."
-  (let* ((current-ids (or disco-room--displayed-message-ids '()))
-         (target-ids (disco-room--message-ids-in-order ordered-messages))
-         (present-before (member message-id current-ids))
-         (present-after (member message-id target-ids))
-         (affected-ids (disco-room--message-neighborhood-ids
-                        current-ids target-ids message-id))
-         (reply-dependent-ids
-          (disco-room--reply-dependent-message-ids ordered-messages message-id))
-         (thread-starter-dependent-ids
-          (disco-room--thread-starter-dependent-message-ids ordered-messages message-id))
-         (target-message (seq-find (lambda (msg)
-                                     (equal (alist-get 'id msg) message-id))
-                                   ordered-messages))
-         (context-snapshot
-          (disco-room--copy-render-contexts-for-ids affected-ids))
-         (composer-context-affected-p
-          (disco-room--message-affects-composer-context-p message-id)))
-    (when (and message-id
-               disco-room--ewoc
-               (or present-before present-after)
-               (disco-room--timeline-order-compatible-p current-ids target-ids))
-      (disco-room--mutate-timeline-preserving-point
-       (lambda ()
-         (cond
-          ((and present-before (not present-after))
-           (disco-room--delete-message-node message-id))
-          ((and present-after (not present-before) target-message)
-           (let ((before-node
-                  (cl-loop for later-id in (cdr (member message-id target-ids))
-                           for later-node = (gethash later-id disco-room--message-node-table)
-                           when later-node return later-node)))
-             (disco-room--insert-message-node-before target-message before-node)))
-          ((and present-after target-message)
-           (let ((node (gethash message-id disco-room--message-node-table)))
-             (when node
-               (let ((disco-room--rendering t)
-                     (inhibit-read-only t)
-                     (buffer-undo-list t))
-                 (ewoc-set-data node target-message))))))
-         (setq disco-room--displayed-message-ids target-ids)
-         (disco-room--recompute-render-contexts-for-ids ordered-messages affected-ids)
-         (when composer-context-affected-p
-           (disco-room--set-ewoc-frame))
-         (let ((invalidate-ids
-                (delete-dups
-                 (append
-                  (and present-after (list message-id))
-                  reply-dependent-ids
-                  thread-starter-dependent-ids
-                  (disco-room--changed-render-context-ids
-                   affected-ids context-snapshot)))))
-           (dolist (affected-id invalidate-ids)
-             (when-let* ((node (gethash affected-id disco-room--message-node-table)))
-               (let ((disco-room--rendering t)
-                     (inhibit-read-only t)
-                     (buffer-undo-list t))
-                 (ewoc-invalidate disco-room--ewoc node)))))))
-      (disco-room--update-message-window-state
-       (or (disco-state-messages disco-room--channel-id) '()))
-      t)))
+(defun disco-room--apply-read-state-change ()
+  "Synchronize projected unread-divider context after read-state changes."
+  (when (and (disco-chat-timeline-live-p)
+             (not (disco-room--msg-filter-active-p)))
+    (disco-room--sync-timeline)
+    t))
 
-(defun disco-room--update-frame-preserving-point ()
-  "Refresh room header/footer while preserving message and input position."
-  (let* ((window-input-offsets (disco-room--capture-window-input-offsets))
-         (input-start (disco-chatbuf-input-start-position))
-         (in-input (and (number-or-marker-p input-start)
-                        (disco-chatbuf-point-in-input-p)))
-         (input-offset (and in-input (- (point) input-start)))
-         (anchor-at-point (and (not in-input)
-                               (or (get-text-property (point) 'disco-message-id)
-                                   (get-text-property (line-beginning-position)
-                                                      'disco-message-id))))
-         (snapshot (and anchor-at-point
-                        (disco-view-capture-position
-                         :anchor-property 'disco-message-id
-                         :preserve-window-start t))))
-    (unwind-protect
-        (progn
-          (disco-room--set-ewoc-frame)
-          (if (and in-input (numberp input-offset))
-              (let ((new-start (disco-chatbuf-input-start-position))
-                    (logical-end (disco-chatbuf-input-logical-end-position)))
-                (when (and (number-or-marker-p new-start)
-                           (number-or-marker-p logical-end))
-                  (goto-char (min logical-end
-                                  (max new-start (+ new-start input-offset))))))
-            (when snapshot
-              (disco-view-restore-position snapshot))))
-      (disco-room--restore-window-input-offsets window-input-offsets))))
-
-(defun disco-room--insert-message-node (msg)
-  "Insert one message node for MSG at the end of room EWOC."
-  (disco-room--insert-message-node-before msg nil))
-
-(defun disco-room--upsert-message-node (msg)
-  "Insert or update EWOC node for message MSG.
-
-Return non-nil when EWOC was updated."
-  (let ((message-id (and (listp msg) (alist-get 'id msg))))
-    (when (and message-id disco-room--ewoc disco-room--message-node-table)
-      (let ((node (gethash message-id disco-room--message-node-table)))
-        (if node
-            (let* ((anchor-at-point
-                    (or (get-text-property (point) 'disco-message-id)
-                        (get-text-property (line-beginning-position)
-                                           'disco-message-id)))
-                   (snapshot (and anchor-at-point
-                                  (disco-view-capture-position
-                                   :anchor-property 'disco-message-id
-                                   :preserve-window-start t)))
-                   (disco-room--rendering t)
-                   (inhibit-read-only t)
-                   (buffer-undo-list t))
-              (ewoc-set-data node msg)
-              (ewoc-invalidate disco-room--ewoc node)
-              (when snapshot
-                (disco-view-restore-position snapshot))
-              t)
-          (and (disco-room--insert-message-node msg) t))))))
-
-(defun disco-room--delete-message-node (message-id)
-  "Delete EWOC node identified by MESSAGE-ID.
-
-Return non-nil when a node is removed."
-  (let ((node (and message-id
-                   disco-room--message-node-table
-                   (gethash message-id disco-room--message-node-table))))
-    (when (and node disco-room--ewoc)
-      (let ((disco-room--rendering t)
-            (inhibit-read-only t)
-            (buffer-undo-list t))
-        (ewoc-delete disco-room--ewoc node)
-        (remhash message-id disco-room--message-node-table)
+(defun disco-room--apply-forward-source-change (&optional source-channel-id
+                                                          source-guild-id)
+  "Synchronize rows depending on SOURCE-CHANNEL-ID or SOURCE-GUILD-ID."
+  (when (and (disco-chat-timeline-live-p)
+             (not (disco-room--msg-filter-active-p)))
+    (let ((resources
+           (delq nil
+                 (list
+                  (and source-channel-id
+                       (list :channel
+                             (disco-msg-normalize-id source-channel-id)))
+                  (and source-guild-id
+                       (list :guild
+                             (disco-msg-normalize-id source-guild-id)))))))
+      (when resources
+        (disco-room--sync-timeline :changed-resources resources)
         t))))
 
-(defun disco-room--invalidate-message-ids-preserving-point (message-ids)
-  "Invalidate MESSAGE-IDS in current room EWOC while preserving position."
-  (when (and disco-room--ewoc message-ids)
-    (let ((ids (delete-dups (delq nil message-ids))))
-      (when ids
-        (disco-room--mutate-timeline-preserving-point
-         (lambda ()
-           (dolist (message-id ids)
-             (when-let* ((node (gethash message-id disco-room--message-node-table)))
-               (let ((disco-room--rendering t)
-                     (inhibit-read-only t)
-                     (buffer-undo-list t))
-                 (ewoc-invalidate disco-room--ewoc node))))))
-        t))))
-
-(defun disco-room--apply-read-state-change-partially ()
-  "Patch unread divider placement in the persistent EWOC when possible."
-  (when (and disco-room--ewoc
-             (not (disco-room--msg-filter-active-p))
-             disco-room--displayed-message-ids)
-    (let* ((ordered-messages (reverse (or (disco-state-messages disco-room--channel-id) '())))
-           (old-unread-id (disco-room--current-first-unread-message-id))
-           (new-unread-id (disco-room--first-unread-message-id ordered-messages))
-           (affected-ids (delete-dups (delq nil (list old-unread-id new-unread-id))))
-           (context-snapshot (disco-room--copy-render-contexts-for-ids affected-ids)))
-      (when affected-ids
-        (disco-room--mutate-timeline-preserving-point
-         (lambda ()
-           (disco-room--recompute-render-contexts-for-ids ordered-messages affected-ids)
-           (dolist (affected-id (disco-room--changed-render-context-ids
-                                 affected-ids context-snapshot))
-             (when-let* ((node (gethash affected-id disco-room--message-node-table)))
-               (let ((disco-room--rendering t)
-                     (inhibit-read-only t)
-                     (buffer-undo-list t))
-                 (ewoc-invalidate disco-room--ewoc node))))))
-        t))))
-
-(defun disco-room--apply-forward-source-change-partially (&optional source-channel-id source-guild-id)
-  "Invalidate forwarded message cards depending on SOURCE-CHANNEL-ID/GUILD-ID."
-  (when (and disco-room--ewoc
-             (not (disco-room--msg-filter-active-p))
-             disco-room--displayed-message-ids)
-    (disco-room--invalidate-message-ids-preserving-point
-     (disco-room--forward-source-dependent-message-ids
-      (reverse (or (disco-state-messages disco-room--channel-id) '()))
-      source-channel-id
-      source-guild-id))))
-
-(defun disco-room--apply-live-message-event-partially (event)
-  "Apply EVENT with EWOC-local message updates when possible.
-
-Return non-nil when handled without full room rerender."
+(defun disco-room--apply-live-message-event (event)
+  "Apply live message EVENT through canonical projected synchronization."
   (let* ((event-type (plist-get event :type))
          (event-message (plist-get event :message))
          (message-id (or (and (listp event-message) (alist-get 'id event-message))
-                         (plist-get event :message-id))))
+                         (plist-get event :message-id)))
+         (nonce (and (listp event-message)
+                     (disco-msg-normalize-id
+                      (alist-get 'nonce event-message))))
+         (rekeys
+          (and nonce message-id
+               (not (equal nonce message-id))
+               (disco-chat-timeline-node nonce)
+               (list (cons nonce message-id)))))
     (cond
      ((disco-room--msg-filter-active-p)
       'filtered)
@@ -5550,37 +5059,39 @@ Return non-nil when handled without full room rerender."
       (error "disco: unsupported live message event: %S" event-type))
      ((not message-id)
       (error "disco: live message event has no message id: %S" event))
-     ((disco-room--apply-single-message-change-partially
-       message-id
-       (reverse (or (disco-state-messages disco-room--channel-id) '())))
-      'updated)
      (t
-      (error "disco: room timeline cannot reconcile message %s" message-id)))))
+      (disco-room--sync-timeline
+       :changed-resources (list (list :message message-id))
+       :rekeys rekeys)
+      (disco-room--update-message-window-state
+       (or (disco-state-messages disco-room--channel-id) '()))
+      (when (disco-room--message-affects-composer-context-p message-id)
+        (disco-room--update-frame))
+      'updated))))
 
 (defun disco-room-render ()
-  "Render timeline for current room buffer."
+  "Synchronize the room frame and projected timeline from local state."
   (let* ((channel (disco-room--channel-object))
          (messages (disco-room--display-messages))
          (draft (disco-room--current-draft))
+         (initial-p (not (disco-chat-timeline-live-p)))
          (disco-room--avatar-fetch-budget
           (when (numberp disco-room-avatar-max-fetches-per-render)
             (max 0 disco-room-avatar-max-fetches-per-render)))
          (preview-fetch-budget
           (when (numberp disco-media-preview-max-fetches-per-render)
             (max 0 disco-media-preview-max-fetches-per-render))))
-    (setq disco-room--rendering t)
     (disco-media-set-preview-fetch-budget preview-fetch-budget)
     (unwind-protect
         (progn
-          (disco-room--set-ewoc-frame channel draft)
+          (disco-room--update-frame channel draft)
           ;; API returns newest-first by default; reverse for chat-like display.
-          (disco-room--reconcile-timeline (reverse messages))
-          (when (disco-chatbuf-input-start-position)
+          (disco-room--sync-timeline :ordered-messages (reverse messages))
+          (when (and initial-p (disco-chatbuf-input-start-position))
             (let ((logical-end (disco-chatbuf-input-logical-end-position)))
               (when logical-end
                 (goto-char logical-end)))))
       (disco-media-set-preview-fetch-budget nil)
-      (setq disco-room--rendering nil)
       (disco-room--update-context-mode))))
 
 (defun disco-room-refresh ()
@@ -5594,7 +5105,7 @@ Return non-nil when handled without full room rerender."
            (request-revision (disco-state-message-revision channel-id)))
       (setq disco-room--refresh-generation generation)
       (setq disco-room--refresh-in-flight t)
-      (disco-room--update-frame-preserving-point)
+      (disco-room--update-frame)
       (disco-api-channel-messages-async
        channel-id
        :on-success
@@ -5607,9 +5118,7 @@ Return non-nil when handled without full room rerender."
                (disco-room--update-message-window-state merged))
              (disco-room--mark-read)
              (setq disco-room--refresh-in-flight nil)
-             (if (disco-room--at-message-bottom-p)
-                 (disco-room-render)
-               (disco-room--render-preserving-point))
+             (disco-room-render)
              (disco-room--resolve-pending-jump)
              (message "disco: loaded %d messages" (length messages)))))
        :on-error
@@ -5617,7 +5126,7 @@ Return non-nil when handled without full room rerender."
          (when (disco-room--callback-active-p room-buffer channel-id generation)
            (with-current-buffer room-buffer
              (setq disco-room--refresh-in-flight nil)
-             (disco-room--update-frame-preserving-point)
+             (disco-room--update-frame)
              (message "disco: room refresh failed: %s"
                       (disco-room--async-error-message err)))))))))
 
@@ -5649,7 +5158,7 @@ REASON is shown in the minibuffer."
                (or disco-room--channel-name disco-room--channel-id))))
      ((and (memq event-type '(guild-update guild-delete))
            event-guild-id)
-      (when (disco-room--apply-forward-source-change-partially nil event-guild-id)
+      (when (disco-room--apply-forward-source-change nil event-guild-id)
         t))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(channel-update
@@ -5661,17 +5170,17 @@ REASON is shown in the minibuffer."
       (let ((channel (disco-room--channel-object)))
         (when (and channel (alist-get 'name channel))
           (setq disco-room--channel-name (alist-get 'name channel)))
-        (disco-room--update-frame-preserving-point)
-        (disco-room--apply-forward-source-change-partially event-channel-id event-guild-id)))
+        (disco-room--update-frame)
+        (disco-room--apply-forward-source-change event-channel-id event-guild-id)))
      ((and event-channel-id
            (memq event-type '(channel-update thread-update channel-delete thread-delete)))
-      (when (disco-room--apply-forward-source-change-partially event-channel-id event-guild-id)
+      (when (disco-room--apply-forward-source-change event-channel-id event-guild-id)
         t))
      ((and (equal event-channel-id disco-room--channel-id)
            (eq event-type 'message-ack))
       (disco-room--optimistic-read-ack-confirm (plist-get event :message-id))
-      (unless (disco-room--apply-read-state-change-partially)
-        (disco-room--update-frame-preserving-point)))
+      (unless (disco-room--apply-read-state-change)
+        (disco-room--update-frame)))
      ((and (equal event-channel-id disco-room--channel-id)
            (eq event-type 'typing-start))
       (disco-room--typing-track-user
@@ -5689,7 +5198,7 @@ REASON is shown in the minibuffer."
         (when author-id
           ;; Message arrival implicitly ends visible typing state for sender.
           (disco-room--typing-stop-user author-id t))
-        (disco-room--apply-live-message-event-partially event)
+        (disco-room--apply-live-message-event event)
         (when (and (eq event-type 'message-create)
                    (stringp message-id))
           (disco-room--mark-read message-id))))
@@ -5698,11 +5207,11 @@ REASON is shown in the minibuffer."
                               message-reaction-remove
                               message-reaction-remove-all
                               message-reaction-remove-emoji)))
-      (disco-room--apply-live-reaction-event-partially event))
+      (disco-room--apply-live-reaction-event event))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-poll-vote-add
                               message-poll-vote-remove)))
-      (disco-room--apply-live-poll-vote-event-partially event)))))
+      (disco-room--apply-live-poll-vote-event event)))))
 
 (defun disco-room--attach-live-updates ()
   "Attach this room buffer to live update event stream."
@@ -5821,7 +5330,7 @@ REASON is shown in the minibuffer."
      (object-bounds
       (delete-region (car object-bounds) (cdr object-bounds))
       (disco-room--sync-draft-from-buffer)
-      (disco-room--update-frame-preserving-point)
+      (disco-room--update-frame)
       (message "disco: removed attachment"))
      (token-bounds
       (let* ((token-text (buffer-substring-no-properties (car token-bounds) (cdr token-bounds)))
@@ -5831,7 +5340,7 @@ REASON is shown in the minibuffer."
         (disco-room--sync-draft-from-buffer)
         (when token-id
           (remhash token-id disco-room--attachment-token-table))
-        (disco-room--update-frame-preserving-point)
+        (disco-room--update-frame)
         (message "disco: removed attachment %s" (or token-id ""))))
      (t
       (let* ((ref (disco-room--choose-attachment-ref "Remove attachment: "))
@@ -5895,7 +5404,7 @@ REASON is shown in the minibuffer."
            (plist-get ref :start)
            (plist-get ref :end)
            replacement)))))
-    (disco-room--update-frame-preserving-point)
+    (disco-room--update-frame)
     (if (string-empty-p next)
         (message "disco: cleared description for %s" (plist-get ref :label))
       (message "disco: updated description for %s" (plist-get ref :label)))))
@@ -6180,7 +5689,7 @@ Each item is (LABEL . ANSWER-ID)."
 (defun disco-room--stage-poll-selection (message-id selection)
   "Stage poll SELECTION for MESSAGE-ID and rerender room buffer."
   (disco-room--poll-set-draft-selection message-id selection)
-  (disco-room--render-preserving-point))
+  (disco-room-render))
 
 (defun disco-room-vote-poll-answer (&optional answer-id message-id)
   "Stage ANSWER-ID as selected for poll MESSAGE-ID.
@@ -6618,7 +6127,7 @@ CONTENT is optional extra text sent alongside the poll."
      required-permissions
      :action "sending poll")
     (setq disco-room--send-in-flight t)
-    (disco-room--update-frame-preserving-point)
+    (disco-room--update-frame)
     (disco-api-create-message-async
      channel-id
      :content content
@@ -6636,7 +6145,7 @@ CONTENT is optional extra text sent alongside the poll."
        (when (disco-room--channel-buffer-p room-buffer channel-id)
          (with-current-buffer room-buffer
            (setq disco-room--send-in-flight nil)
-           (disco-room--update-frame-preserving-point)
+           (disco-room--update-frame)
            (message "disco: send poll failed: %s"
                     (disco-room--async-error-message err))))))))
 
@@ -6825,7 +6334,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                     (user-error "disco: editing via composer does not support attachments yet"))
                   (disco-room--clear-draft)
                   (setq disco-room--send-in-flight t)
-                  (disco-room--update-frame-preserving-point)
+                  (disco-room--update-frame)
                   (disco-api-edit-message-async
                    channel-id
                    edit-message-id
@@ -6848,7 +6357,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                        (with-current-buffer room-buffer
                          (setq disco-room--send-in-flight nil)
                          (disco-room--apply-draft-state normalized)
-                         (disco-room--update-frame-preserving-point)
+                         (disco-room--update-frame)
                          (message "disco: edit failed for %s: %s"
                                   edit-message-id
                                   (disco-room--async-error-message err)))))))
@@ -6865,7 +6374,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                 (disco-chatbuf-input-history-push normalized))
               (disco-room--clear-draft)
               (setq disco-room--send-in-flight t)
-              (disco-room--update-frame-preserving-point)
+              (disco-room--update-frame)
               (cl-labels
                   ((room-active-p ()
                      (disco-room--channel-buffer-p room-buffer channel-id))
@@ -6948,12 +6457,12 @@ When called with prefix argument, force draft edit in minibuffer first."
                                       (disco-room--set-composer-aux-state nil nil)
                                       (when has-attachments
                                         (disco-room--clear-pending-attachment-state))
-                                      (disco-room--update-frame-preserving-point)
+                                      (disco-room--update-frame)
                                       (message "disco: sent %d/%d split messages; restored remaining draft: %s"
                                                sent-count total
                                                (disco-room--async-error-message err)))
                                   (disco-room--apply-draft-state content)
-                                  (disco-room--update-frame-preserving-point)
+                                  (disco-room--update-frame)
                                   (message "disco: send failed: %s"
                                            (disco-room--async-error-message err))))))
                           (send-next (remaining sent-count)
@@ -6994,7 +6503,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                               (with-current-buffer room-buffer
                                 (setq disco-room--send-in-flight nil)
                                 (disco-room--apply-draft-state content)
-                                (disco-room--update-frame-preserving-point)
+                                (disco-room--update-frame)
                                 (message "disco: send failed: %s"
                                          (disco-room--async-error-message err))))))
                        (ignore-errors
@@ -7020,7 +6529,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                           (setq disco-room--send-in-flight nil)
                           (disco-room--apply-draft-state
                            (if has-attachments content normalized))
-                          (disco-room--update-frame-preserving-point)
+                          (disco-room--update-frame)
                           (message "disco: send failed: %s"
                                    (disco-room--async-error-message err)))))))))))))))))
 
@@ -7042,7 +6551,7 @@ When called with prefix argument, force draft edit in minibuffer first."
            (before (or disco-room--oldest-message-id
                        (user-error "disco: no oldest message cursor; refresh first"))))
       (setq disco-room--older-in-flight t)
-      (disco-room--update-frame-preserving-point)
+      (disco-room--update-frame)
       (disco-api-channel-messages-async
        channel-id
        :before before
@@ -7057,13 +6566,13 @@ When called with prefix argument, force draft edit in minibuffer first."
                  (if (null older)
                      (progn
                        (setq disco-room--history-exhausted t)
-                       (disco-room--render-preserving-point)
+                       (disco-room-render)
                        (disco-room--resolve-pending-jump)
                        (message "disco: reached beginning of history"))
                    (let ((merged (disco-state-merge-message-page
                                   channel-id older request-revision)))
                      (disco-room--update-message-window-state merged)
-                     (disco-room--render-preserving-point)
+                     (disco-room-render)
                      (disco-room--resolve-pending-jump)
                      (message "disco: loaded %d older messages" (length older)))))))))
        :on-error
@@ -7072,7 +6581,7 @@ When called with prefix argument, force draft edit in minibuffer first."
            (with-current-buffer room-buffer
              (when (equal channel-id disco-room--channel-id)
                (setq disco-room--older-in-flight nil)
-               (disco-room--update-frame-preserving-point)
+               (disco-room--update-frame)
                (message "disco: older history load failed: %s"
                         (disco-room--async-error-message err)))))))))))
 
@@ -7108,7 +6617,7 @@ When called interactively, defaults to message under point."
   (when (disco-room--composer-edit-active-p)
     (disco-room--composer-edit-clear t))
   (disco-room--set-composer-aux-state nil message-id)
-  (disco-room--update-frame-preserving-point)
+  (disco-room--update-frame)
   (message "disco: next message will reply to %s" message-id))
 
 (defun disco-room--forward-msg (msg)
@@ -7191,7 +6700,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
      :action "forwarding messages")
     (disco-room--ensure-jump-permissions source-channel-id source-channel)
     (setq disco-room--send-in-flight t)
-    (disco-room--update-frame-preserving-point)
+    (disco-room--update-frame)
     (cl-labels
         ((room-active-p ()
            (disco-room--channel-buffer-p room-buffer target-channel-id))
@@ -7209,7 +6718,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
            (when (room-active-p)
              (with-current-buffer room-buffer
                (setq disco-room--send-in-flight nil)
-               (disco-room--update-frame-preserving-point)
+               (disco-room--update-frame)
                (message "%s" text))))
          (send-forward (forward-content)
            (when (room-active-p)
@@ -7234,11 +6743,11 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
   (cond
    ((disco-room--composer-edit-active-p)
     (disco-room--composer-edit-clear t)
-    (disco-room--update-frame-preserving-point)
+    (disco-room--update-frame)
     (message "disco: edit target cleared"))
    ((disco-room--composer-reply-message-id)
     (disco-room--set-composer-aux-state nil nil)
-    (disco-room--update-frame-preserving-point)
+    (disco-room--update-frame)
     (message "disco: reply target cleared"))
    (t
     (message "disco: no composer context to cancel"))))
@@ -7427,7 +6936,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
          (updated (disco-api-set-thread-archived
                    disco-room--channel-id next-archived nil)))
     (disco-room--resolve-thread-update updated)
-    (disco-room--render-preserving-point)
+    (disco-room-render)
     (message "disco: thread %s" (if next-archived "archived" "unarchived"))))
 
 (defun disco-room-rename-thread (name)
@@ -7453,7 +6962,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
     (user-error "disco: unknown thread in state"))
   (let ((updated (disco-api-update-thread disco-room--channel-id :name name)))
     (disco-room--resolve-thread-update updated)
-    (disco-room--render-preserving-point)
+    (disco-room-render)
     (message "disco: thread renamed to %s" name)))
 
 (defun disco-room-toggle-thread-locked ()
@@ -7469,7 +6978,7 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
          (updated (disco-api-update-thread
                    disco-room--channel-id :locked next-locked)))
     (disco-room--resolve-thread-update updated)
-    (disco-room--render-preserving-point)
+    (disco-room-render)
     (message "disco: thread %s" (if next-locked "locked" "unlocked"))))
 
 (defun disco-room-set-thread-slowmode (seconds)
@@ -7494,7 +7003,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
                   disco-room--channel-id
                   :rate-limit-per-user seconds)))
     (disco-room--resolve-thread-update updated)
-    (disco-room--render-preserving-point)
+    (disco-room-render)
     (message "disco: thread slowmode -> %ss" seconds)))
 
 (defun disco-room-set-thread-auto-archive-duration (minutes)
@@ -7520,7 +7029,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
                   disco-room--channel-id
                   :auto-archive-duration minutes)))
     (disco-room--resolve-thread-update updated)
-    (disco-room--render-preserving-point)
+    (disco-room-render)
     (message "disco: auto archive -> %s minutes" minutes)))
 
 (defun disco-room-set-thread-muted (muted)
@@ -7597,7 +7106,7 @@ When called interactively, empty input clears slowmode (sets to 0)."
             :archived archived
             :locked locked)))
       (disco-room--resolve-thread-update updated)
-      (disco-room--render-preserving-point)
+      (disco-room-render)
       (message "disco: updated thread settings"))))
 
 (declare-function disco-root-list-archived-threads "disco-root" (&optional parent-channel-id))
@@ -7872,7 +7381,6 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local filter-buffer-substring-function
               #'disco-room--buffer-substring-filter)
   (disco-room--typing-cancel-expire-timer)
-  (disco-chatbuf-input-cache-clear-state)
   (disco-chatbuf-reset-state disco-room-input-history-size)
   (disco-room--set-composer-aux-state nil nil)
   (disco-room--sync-shared-input-options-state)
@@ -7899,10 +7407,7 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)
   (setq-local disco-room--inplace-search-generation 0)
-  (setq-local disco-room--rendering nil)
-  (setq-local disco-room--ewoc nil)
-  (setq-local disco-room--displayed-message-ids nil)
-  (setq-local disco-room--render-context-by-message-id (make-hash-table :test #'equal))
+  (disco-chat-timeline-reset)
   (setq-local disco-room--chat-fill-column nil)
   (setq-local disco-room--pending-attachments nil)
   (setq-local disco-room--attachment-token-table (make-hash-table :test #'equal))
@@ -7913,7 +7418,6 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local disco-room--revealed-spoiler-message-id nil)
   (setq-local disco-room--optimistic-read-ack-seq 0)
   (setq-local disco-room--pending-optimistic-read-ack nil)
-  (setq-local disco-room--message-node-table (make-hash-table :test #'equal))
   (funcall #'disco-company-setup-room-buffer)
   (add-hook 'window-size-change-functions #'disco-room--on-window-size-change nil t)
   (add-hook 'display-line-numbers-mode-hook #'disco-room--on-window-size-change nil t)
