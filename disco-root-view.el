@@ -1105,8 +1105,7 @@ When MESSAGE is non-nil, use it as cached preview source."
   (if (eq scope 'parent-thread)
       (if-let* ((starter (disco-thread-starter-message channel)))
           (disco-msg-preview-line starter)
-        (error "Disco: forum post %s has no hydrated starter message"
-               (alist-get 'id channel)))
+        (propertize "Original post unavailable" 'face 'shadow))
     (or (and message (disco-msg-preview-line message))
         (disco-msg-channel-preview-line channel)
         (disco-root--activity-secondary-placeholder channel)

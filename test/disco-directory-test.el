@@ -176,26 +176,41 @@
       (should (eq 'loaded
                   (disco-directory-parent-threads-status "forum"))))))
 
-(ert-deftest disco-directory-parent-thread-load-rejects-missing-starter ()
+(ert-deftest disco-directory-parent-thread-load-records-unavailable-starter ()
   (disco-state-reset)
   (disco-directory-reset)
   (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
   (disco-state-put-channels
    "g1" '(((id . "forum") (guild_id . "g1") (type . 15))))
-  (cl-letf (((symbol-function
-              'disco-api-channel-search-threads-async)
-             (lambda (_parent-id &rest args)
-               (funcall
-                (plist-get args :on-success)
-                '((threads . (((id . "missing") (parent_id . "forum")
-                               (type . 11))))
-                  (first_messages . nil)
-                  (has_more . :false))))))
-    (disco-directory-load-parent-threads-async "forum")
-    (let* ((state (disco-directory-parent-threads-state "forum"))
-           (error-value (plist-get state :error)))
-      (should (eq 'error (plist-get state :status)))
-      (should (equal '("missing") (plist-get error-value :thread-ids))))))
+  (let ((calls 0))
+    (cl-letf (((symbol-function
+                'disco-api-channel-search-threads-async)
+               (lambda (_parent-id &rest args)
+                 (cl-incf calls)
+                 (funcall
+                  (plist-get args :on-success)
+                  (if (null (plist-get args :max-id))
+                      '((threads . (((id . "hydrated")
+                                     (parent_id . "forum") (type . 11))))
+                        (first_messages
+                         . (((id . "hydrated") (channel_id . "hydrated")
+                             (content . "available"))))
+                        (has_more . t))
+                    '((threads . (((id . "missing")
+                                   (parent_id . "forum") (type . 11))))
+                      (first_messages . nil)
+                      (has_more . :false)))))))
+      (disco-directory-load-parent-threads-async "forum")
+      (let ((state (disco-directory-parent-threads-state "forum")))
+        (should (eq 'loaded (plist-get state :status)))
+        (should (equal '("missing")
+                       (plist-get state :starter-unavailable-ids)))
+        (should
+         (disco-directory-parent-thread-starter-unavailable-p
+          "forum" "missing")))
+      (should (eq 'loaded
+                  (disco-directory-load-parent-threads-async "forum")))
+      (should (= 2 calls)))))
 
 (ert-deftest disco-directory-parent-thread-error-is-explicit-and-retryable ()
   (disco-state-reset)

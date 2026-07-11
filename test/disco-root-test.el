@@ -1359,7 +1359,7 @@
           (should-not queued)))
     (disco-state-reset)))
 
-(ert-deftest disco-root-parent-thread-preview-requires-cached-starter ()
+(ert-deftest disco-root-parent-thread-preview-shows-unavailable-state ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((thread '((id . "th1")
@@ -1372,8 +1372,12 @@
       (cl-letf (((symbol-function 'disco-preview-request-channel)
                  (lambda (_channel)
                    (setq queued t))))
-        (should-error
-         (disco-root--activity-preview-line thread nil 'parent-thread))
+        (let ((preview
+               (disco-root--activity-preview-line
+                thread nil 'parent-thread)))
+          (should (equal "Original post unavailable"
+                         (substring-no-properties preview)))
+          (should (eq 'shadow (get-text-property 0 'face preview))))
         (should-not queued)))))
 
 (ert-deftest disco-root-parent-thread-preview-prefers-cached-starter-message ()

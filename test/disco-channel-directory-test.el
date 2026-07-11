@@ -177,6 +177,24 @@
                    (disco-channel-directory--project-loaded-entries))))
       (should (member "post" ids)))))
 
+(ert-deftest disco-channel-directory-forum-shows-confirmed-unavailable-starter ()
+  (disco-channel-directory-test--with-guild
+    (disco-state-upsert-channel
+     '((id . "forum") (guild_id . "g1") (parent_id . "cat")
+       (name . "ideas") (type . 15)))
+    (disco-state-upsert-channel
+     '((id . "post") (guild_id . "g1") (parent_id . "forum")
+       (name . "orphaned original") (type . 11)
+       (thread_metadata . ((archived . :false)))))
+    (puthash "forum"
+             '(:status loaded :starter-unavailable-ids ("post"))
+             disco-directory--parent-thread-state)
+    (puthash "forum" t disco-channel-directory--expanded-thread-parents)
+    (let ((ids
+           (mapcar #'disco-channel-directory-test--entry-id
+                   (disco-channel-directory--project-loaded-entries))))
+      (should (member "post" ids)))))
+
 (ert-deftest disco-channel-directory-excludes-orphaned-threads ()
   (disco-channel-directory-test--with-guild
     (disco-state-upsert-channel

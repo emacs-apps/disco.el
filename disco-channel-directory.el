@@ -268,7 +268,10 @@ showing every child name."
      (seq-filter
       (lambda (thread)
         (and (not (disco-thread-archived-p thread))
-             (disco-thread-starter-message thread)
+             (or (disco-thread-starter-message thread)
+                 (disco-directory-parent-thread-starter-unavailable-p
+                  (alist-get 'id channel)
+                  (alist-get 'id thread)))
              (disco-channel-directory--channel-matches-lens-p
               thread ignore-name-filter)))
       (disco-state-parent-threads (alist-get 'id channel)))

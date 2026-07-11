@@ -89,7 +89,9 @@ The result is `loading', `error', `loaded', or `unloaded'."
 
 The returned plist has a `:status' value of `unloaded', `loading', `loaded',
 or `error'.  Loading state may also expose `:loaded-count', `:total', and
-`:phase'; error state exposes the original `:error' payload."
+`:phase'.  Loaded and loading states expose `:starter-unavailable-ids' for
+threads whose original post was omitted by Discord.  Error state exposes the
+original `:error' payload."
   (or (gethash (format "%s" parent-channel-id)
                disco-directory--parent-thread-state)
       '(:status unloaded :loaded-count 0)))
@@ -97,6 +99,17 @@ or `error'.  Loading state may also expose `:loaded-count', `:total', and
 (defun disco-directory-parent-threads-status (parent-channel-id)
   "Return active-thread request status for PARENT-CHANNEL-ID."
   (plist-get (disco-directory-parent-threads-state parent-channel-id) :status))
+
+(defun disco-directory-parent-thread-starter-unavailable-p
+    (parent-channel-id thread-id)
+  "Return non-nil when THREAD-ID under PARENT-CHANNEL-ID has no starter.
+
+This state is authoritative only after Discord returned the thread in a search
+page without its corresponding `first_messages' entry."
+  (member (format "%s" thread-id)
+          (plist-get
+           (disco-directory-parent-threads-state parent-channel-id)
+           :starter-unavailable-ids)))
 
 (defun disco-directory--parent-thread-request-active-p (parent-id token)
   "Return non-nil when TOKEN still owns PARENT-ID's active request."
@@ -148,13 +161,30 @@ or `error'.  Loading state may also expose `:loaded-count', `:total', and
                   (format "%s" (alist-get 'id thread)))))
          threads)))
 
+(defun disco-directory--merge-starter-unavailable-ids (existing threads)
+  "Update unavailable starter IDs in EXISTING from one page of THREADS."
+  (let ((page-ids
+         (delq nil
+               (mapcar (lambda (thread)
+                         (when-let* ((thread-id (alist-get 'id thread)))
+                           (format "%s" thread-id)))
+                       threads))))
+    (delete-dups
+     (append
+      (seq-remove (lambda (thread-id) (member thread-id page-ids)) existing)
+      (disco-directory--missing-thread-starter-ids threads)))))
+
 (defun disco-directory--parent-thread-previews-complete-p (parent-id)
-  "Return non-nil when every active thread below PARENT-ID has a starter."
-  (seq-every-p
-   (lambda (thread)
-     (or (disco-thread-archived-p thread)
-         (disco-thread-starter-message thread)))
-   (disco-state-parent-threads parent-id)))
+  "Return non-nil when every active thread below PARENT-ID is resolved."
+  (let ((unavailable-ids
+         (plist-get (disco-directory-parent-threads-state parent-id)
+                    :starter-unavailable-ids)))
+    (seq-every-p
+     (lambda (thread)
+       (or (disco-thread-archived-p thread)
+           (disco-thread-starter-message thread)
+           (member (format "%s" (alist-get 'id thread)) unavailable-ids)))
+     (disco-state-parent-threads parent-id))))
 
 (defun disco-directory--thread-search-retry-delay (result)
   "Return protocol retry delay in seconds for index-pending RESULT."
@@ -184,13 +214,15 @@ or `error'.  Loading state may also expose `:loaded-count', `:total', and
      'parent-threads-error)))
 
 (defun disco-directory--load-parent-thread-page
-    (parent-id guild-id token max-id accumulated total index-retries)
+    (parent-id guild-id token max-id accumulated total
+               starter-unavailable-ids index-retries)
   "Load one active-thread page for PARENT-ID owned by TOKEN.
 
 GUILD-ID owns the parent.  MAX-ID is the stable creation-time cursor,
 ACCUMULATED contains prior unique results, TOTAL is Discord's latest total
-count, and INDEX-RETRIES counts delayed index retries already attempted for
-this page."
+count, STARTER-UNAVAILABLE-IDS records threads explicitly returned without an
+original post, and INDEX-RETRIES counts delayed index retries already attempted
+for this page."
   (disco-api-channel-search-threads-async
    parent-id
    :archived :false
@@ -212,6 +244,8 @@ this page."
                              :token token
                              :loaded-count (length accumulated)
                              :total total
+                             :starter-unavailable-ids
+                             starter-unavailable-ids
                              :retry-after delay)))
                  (disco-directory--put-parent-thread-state
                   parent-id state 'parent-threads-loading)
@@ -222,7 +256,7 @@ this page."
                            parent-id token)
                       (disco-directory--load-parent-thread-page
                        parent-id guild-id token max-id accumulated total
-                       (1+ index-retries))))))
+                       starter-unavailable-ids (1+ index-retries))))))
              (disco-directory--fail-parent-thread-request
               parent-id guild-id token
               (list :status 202
@@ -239,14 +273,10 @@ this page."
                  (and page (alist-get 'id (car (last page))))))
            (disco-directory--ingest-thread-search-page
             guild-id page (or (alist-get 'first_messages result) '()))
-           (let ((missing-starter-ids
-                  (disco-directory--missing-thread-starter-ids page)))
+           (let ((next-starter-unavailable-ids
+                  (disco-directory--merge-starter-unavailable-ids
+                   starter-unavailable-ids page)))
              (cond
-              (missing-starter-ids
-               (disco-directory--fail-parent-thread-request
-                parent-id guild-id token
-                (list :message "Thread search omitted starter messages"
-                      :thread-ids missing-starter-ids)))
               ((and has-more
                     (or (null next-max-id)
                         (equal (format "%s" next-max-id) max-id)))
@@ -261,12 +291,14 @@ this page."
                       :guild-id guild-id
                       :token token
                       :loaded-count (length merged)
-                      :total next-total)
+                      :total next-total
+                      :starter-unavailable-ids
+                      next-starter-unavailable-ids)
                 (if has-more 'parent-threads-page 'parent-threads-loaded))
                (when has-more
                  (disco-directory--load-parent-thread-page
                   parent-id guild-id token (format "%s" next-max-id)
-                  merged next-total 0)))))))))
+                  merged next-total next-starter-unavailable-ids 0)))))))))
    :on-error
    (lambda (error-value)
      (disco-directory--fail-parent-thread-request
@@ -303,11 +335,12 @@ loads are coalesced; FORCE supersedes an in-flight or completed request."
                           :guild-id guild-id
                           :token token
                           :loaded-count 0
-                          :total nil)))
+                          :total nil
+                          :starter-unavailable-ids nil)))
         (disco-directory--put-parent-thread-state
          parent-id state 'parent-threads-loading)
         (disco-directory--load-parent-thread-page
-         parent-id guild-id token nil nil nil 0)
+         parent-id guild-id token nil nil nil nil 0)
         'loading)))))
 
 (defun disco-directory--guild-known-p (guild-id)
