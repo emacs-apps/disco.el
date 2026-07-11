@@ -19,7 +19,12 @@
          (disco-preview--in-flight-by-guild
           (make-hash-table :test #'equal))
          (disco-preview--blocked-until-by-guild
-          (make-hash-table :test #'equal)))
+          (make-hash-table :test #'equal))
+         (disco-preview-update-hook nil)
+         (disco-preview--generation 0)
+         (disco-preview--pending-private nil)
+         (disco-preview--in-flight-private nil)
+         (disco-preview--flushing-private nil))
      ,@body))
 
 (ert-deftest disco-preview-request-channel-dedupes-message-id ()
@@ -65,6 +70,266 @@
         (setq running t)
         (disco-preview--handle-gateway-event '(:type ready))
         (should (= disco-preview-fetch-debounce scheduled-delay))))))
+
+(ert-deftest disco-preview-private-channel-schedules-without-gateway ()
+  (disco-preview-test--with-state
+    (let (scheduled-delay)
+      (cl-letf (((symbol-function 'disco-msg-channel-last-cached-message)
+                 (lambda (_channel) nil))
+                ((symbol-function 'disco-gateway-running-p) (lambda () nil))
+                ((symbol-function 'run-with-timer)
+                 (lambda (delay _repeat _function &rest _args)
+                   (setq scheduled-delay delay)
+                   'preview-timer)))
+        (should
+         (disco-preview-request-channel
+          '((id . "dm1") (type . 1) (last_message_id . "m1"))))
+        (should (= disco-preview-fetch-debounce scheduled-delay))))))
+
+(ert-deftest disco-preview-private-batch-hydrates-exact-last-message ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let* ((channel '((id . "dm1") (type . 1) (last_message_id . "m1")))
+           requested
+           updated)
+      (unwind-protect
+          (progn
+            (disco-state-set-private-channels (list channel))
+            (let ((disco-preview-update-hook
+                   (list (lambda (channel-id) (setq updated channel-id)))))
+              (cl-letf (((symbol-function 'disco-preview--schedule) #'ignore)
+                        ((symbol-function
+                          'disco-api-preload-channel-messages-async)
+                         (lambda (channel-ids &rest args)
+                           (setq requested channel-ids)
+                           (funcall
+                            (plist-get args :on-success)
+                            '(((id . "m1") (channel_id . "dm1")
+                               (content . "private preview")))))))
+                (should (disco-preview-request-channel channel))
+                (disco-preview--flush-private)))
+            (should (equal '("dm1") requested))
+            (should (equal "dm1" updated))
+            (should (equal "private preview"
+                           (alist-get
+                            'content
+                            (disco-msg-channel-last-cached-message channel))))
+            (should-not disco-preview--pending-private)
+            (should-not disco-preview--in-flight-private))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-private-batch-matches-responses-by-channel ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let ((channels
+           '(((id . "dm1") (type . 1) (last_message_id . "m1"))
+             ((id . "dm2") (type . 3) (last_message_id . "m2")))))
+      (unwind-protect
+          (progn
+            (disco-state-set-private-channels channels)
+            (cl-letf (((symbol-function 'disco-preview--schedule) #'ignore)
+                      ((symbol-function
+                        'disco-api-preload-channel-messages-async)
+                       (lambda (_channel-ids &rest args)
+                         (funcall
+                          (plist-get args :on-success)
+                          '(((id . "m2") (channel_id . "dm2")
+                             (content . "second"))
+                            ((id . "m1") (channel_id . "dm1")
+                             (content . "first")))))))
+              (dolist (channel channels)
+                (disco-preview-request-channel channel))
+              (disco-preview--flush-private))
+            (should
+             (equal
+              '("first" "second")
+              (mapcar
+               (lambda (channel)
+                 (alist-get
+                  'content
+                  (disco-msg-channel-last-cached-message channel)))
+               channels))))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-private-batch-ignores-callback-after-reset ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let ((channel '((id . "dm1") (type . 1) (last_message_id . "m1")))
+          callback
+          updated)
+      (unwind-protect
+          (progn
+            (disco-state-set-private-channels (list channel))
+            (let ((disco-preview-update-hook
+                   (list (lambda (_channel-id) (setq updated t)))))
+              (cl-letf (((symbol-function 'disco-preview--schedule) #'ignore)
+                        ((symbol-function
+                          'disco-api-preload-channel-messages-async)
+                         (lambda (_channel-ids &rest args)
+                           (setq callback (plist-get args :on-success)))))
+                (disco-preview-request-channel channel)
+                (disco-preview--flush-private)
+                (disco-preview-reset)
+                (funcall
+                 callback
+                 '(((id . "m1") (channel_id . "dm1")
+                    (content . "stale session"))))))
+            (should-not updated)
+            (should-not (disco-state-messages "dm1")))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-private-batch-rejects-nonmatching-response ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let ((channel '((id . "dm1") (type . 1) (last_message_id . "m1")))
+          updated)
+      (unwind-protect
+          (progn
+            (disco-state-set-private-channels (list channel))
+            (let ((disco-preview-update-hook
+                   (list (lambda (_channel-id) (setq updated t)))))
+              (cl-letf (((symbol-function 'disco-preview--schedule) #'ignore)
+                        ((symbol-function
+                          'disco-api-preload-channel-messages-async)
+                         (lambda (_channel-ids &rest args)
+                           (funcall
+                            (plist-get args :on-success)
+                            '(((id . "m2") (channel_id . "dm1")
+                               (content . "wrong message")))))))
+                (should (disco-preview-request-channel channel))
+                (disco-preview--flush-private)
+                (should-not (disco-preview-request-channel channel))))
+            (should-not updated)
+            (should-not (disco-state-messages "dm1"))
+            (should-not disco-preview--in-flight-private))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-private-channels-use-one-batch ()
+  (disco-preview-test--with-state
+    (let (requests)
+      (cl-letf (((symbol-function 'disco-msg-channel-last-cached-message)
+                 (lambda (_channel) nil))
+                ((symbol-function 'disco-preview--schedule) #'ignore)
+                ((symbol-function
+                  'disco-api-preload-channel-messages-async)
+                 (lambda (channel-ids &rest args)
+                   (push (cons channel-ids
+                               (plist-get args :on-success))
+                         requests))))
+        (dolist (id '("dm1" "dm2" "dm3"))
+          (disco-preview-request-channel
+           `((id . ,id) (type . 1) (last_message_id . ,(concat "m-" id)))))
+        (should-not requests)
+        (disco-preview--flush-private)
+        (should (= 1 (length requests)))
+        (should (equal '("dm1" "dm2" "dm3") (caar requests)))
+        (should-not disco-preview--pending-private)
+        (should disco-preview--in-flight-private)))))
+
+(ert-deftest disco-preview-private-channels-serialize-batches ()
+  (disco-preview-test--with-state
+    (let ((disco-api-preload-channel-messages-limit 2)
+          requests)
+      (cl-letf (((symbol-function 'disco-msg-channel-last-cached-message)
+                 (lambda (_channel) nil))
+                ((symbol-function 'disco-preview--schedule) #'ignore)
+                ((symbol-function
+                  'disco-api-preload-channel-messages-async)
+                 (lambda (channel-ids &rest args)
+                   (setq requests
+                         (append requests
+                                 (list
+                                  (cons channel-ids
+                                        (plist-get args :on-success))))))))
+        (dolist (id '("dm1" "dm2" "dm3"))
+          (disco-preview-request-channel
+           `((id . ,id) (type . 1) (last_message_id . ,(concat "m-" id)))))
+        (disco-preview--flush-private)
+        (should (equal '(("dm1" "dm2")) (mapcar #'car requests)))
+        (should (equal '("dm3") disco-preview--pending-private))
+        (funcall (cdar requests) nil)
+        (should (equal '(("dm1" "dm2") ("dm3"))
+                       (mapcar #'car requests)))
+        (should-not disco-preview--pending-private)
+        (should disco-preview--in-flight-private)))))
+
+(ert-deftest disco-preview-private-batch-serializes-newer-message ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let* ((old-channel
+            '((id . "dm1") (type . 1) (last_message_id . "m1")))
+           (new-channel
+            '((id . "dm1") (type . 1) (last_message_id . "m2")))
+           requests
+           updated)
+      (unwind-protect
+          (progn
+            (disco-state-set-private-channels (list old-channel))
+            (let ((disco-preview-update-hook
+                   (list (lambda (channel-id) (push channel-id updated)))))
+              (cl-letf (((symbol-function 'disco-preview--schedule) #'ignore)
+                        ((symbol-function
+                          'disco-api-preload-channel-messages-async)
+                         (lambda (_channel-ids &rest args)
+                           (let* ((entry
+                                   (car
+                                    (plist-get
+                                     disco-preview--in-flight-private
+                                     :entries)))
+                                  (message-id
+                                   (plist-get entry :message-id)))
+                             (setq requests
+                                   (append
+                                    requests
+                                    (list
+                                     (cons message-id
+                                           (plist-get args :on-success)))))))))
+                (should (disco-preview-request-channel old-channel))
+                (disco-preview--flush-private)
+                (disco-state-upsert-channel new-channel)
+                (should (disco-preview-request-channel new-channel))
+                (should (equal '("m1") (mapcar #'car requests)))
+                (should (equal '("dm1") disco-preview--pending-private))
+                (funcall
+                 (cdar requests)
+                 '(((id . "m1") (channel_id . "dm1")
+                    (content . "stale"))))
+                (should (equal '("m1" "m2") (mapcar #'car requests)))
+                (should-not
+                 (disco-msg-channel-last-cached-message new-channel))
+                (funcall
+                 (cdr (cadr requests))
+                 '(((id . "m2") (channel_id . "dm1")
+                    (content . "current"))))))
+            (should (equal '("dm1") updated))
+            (should (equal
+                     "current"
+                     (alist-get
+                      'content
+                      (disco-msg-channel-last-cached-message new-channel)))))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-private-batch-retries-after-transport-error ()
+  (disco-preview-test--with-state
+    (let ((channel
+           '((id . "dm1") (type . 1) (last_message_id . "m1")))
+          requests)
+      (cl-letf (((symbol-function 'disco-msg-channel-last-cached-message)
+                 (lambda (_channel) nil))
+                ((symbol-function 'disco-preview--schedule) #'ignore)
+                ((symbol-function
+                  'disco-api-preload-channel-messages-async)
+                 (lambda (_channel-ids &rest args)
+                   (push (plist-get args :on-error) requests))))
+        (should (disco-preview-request-channel channel))
+        (disco-preview--flush-private)
+        (funcall (car requests) '(:status 503))
+        (should-not
+         (gethash "dm1"
+                  disco-preview--requested-message-id-by-channel))
+        (should (disco-preview-request-channel channel))
+        (disco-preview--flush-private)
+        (should (= 2 (length requests)))))))
 
 (ert-deftest disco-preview-flush-serializes-batches-per-guild ()
   (disco-preview-test--with-state
@@ -156,6 +421,7 @@
     (puthash "g1" '(:channel-ids ("c1") :sent-at 100.0)
              disco-preview--in-flight-by-guild)
     (cl-letf (((symbol-function 'float-time) (lambda (&optional _time) 100.0))
+              ((symbol-function 'disco-gateway-running-p) (lambda () t))
               ((symbol-function 'disco-preview--schedule) #'ignore))
       (disco-preview--handle-gateway-event
        '(:type rate-limited

@@ -4,23 +4,27 @@
 
 ;;; Commentary:
 
-;; Owns the request lifecycle for Discord client Gateway opcode 34 (Request
-;; Last Messages).  Views submit channels whose `last_message_id' is known but
-;; whose message object is absent from local state.  Requests are deduplicated,
-;; grouped by guild, limited to one in-flight batch per guild, and retried after
-;; Gateway reconnects, rate limits, or response timeouts.
+;; Owns hydration of channels whose `last_message_id' is known but whose message
+;; object is absent from local state.  Guild channels use Discord client Gateway
+;; opcode 34 (Request Last Messages), grouped into batches by guild.  Private
+;; channels use Discord's Preload Messages endpoint in batches of up to 100.
+;; Both paths accept only an exact `last_message_id' match.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'disco-api)
+(require 'disco-channel-type)
 (require 'disco-customize)
 (require 'disco-gateway)
 (require 'disco-msg)
+(require 'disco-state)
 (require 'disco-util)
 
 (defcustom disco-preview-fetch-enabled t
-  "When non-nil, hydrate missing channel previews through Gateway opcode 34."
+  "When non-nil, hydrate missing channel previews from Discord."
   :type 'boolean
   :group 'disco)
 
@@ -56,6 +60,21 @@
 (defvar disco-preview--blocked-until-by-guild (make-hash-table :test #'equal)
   "Hash table mapping rate-limited guild IDs to retry deadlines.")
 
+(defvar disco-preview-update-hook nil
+  "Hook run with a channel ID after its preview message is hydrated.")
+
+(defvar disco-preview--generation 0
+  "Generation token invalidating callbacks from an earlier preview session.")
+
+(defvar disco-preview--pending-private nil
+  "Ordered private channel IDs awaiting REST preview hydration.")
+
+(defvar disco-preview--in-flight-private nil
+  "In-flight private preview batch plist, or nil.")
+
+(defvar disco-preview--flushing-private nil
+  "Non-nil while private preview requests are being dispatched.")
+
 (defun disco-preview--cancel-scheduled-pass ()
   "Cancel the currently scheduled lifecycle pass, if any."
   (when (timerp disco-preview--timer)
@@ -65,20 +84,34 @@
 
 (defun disco-preview-reset ()
   "Reset all preview request lifecycle state."
+  (cl-incf disco-preview--generation)
   (disco-preview--cancel-scheduled-pass)
   (clrhash disco-preview--pending-by-guild)
   (clrhash disco-preview--requested-message-id-by-channel)
   (clrhash disco-preview--in-flight-by-guild)
-  (clrhash disco-preview--blocked-until-by-guild))
+  (clrhash disco-preview--blocked-until-by-guild)
+  (setq disco-preview--pending-private nil)
+  (setq disco-preview--in-flight-private nil))
 
 (defun disco-preview--pending-p ()
   "Return non-nil when at least one guild has queued channel IDs."
   (> (hash-table-count disco-preview--pending-by-guild) 0))
 
-(defun disco-preview--work-p ()
-  "Return non-nil when pending or in-flight preview work exists."
+(defun disco-preview--gateway-work-p ()
+  "Return non-nil when pending or in-flight Gateway preview work exists."
   (or (disco-preview--pending-p)
       (> (hash-table-count disco-preview--in-flight-by-guild) 0)))
+
+(defun disco-preview--private-dispatchable-p ()
+  "Return non-nil when a private preview batch can be sent now."
+  (and disco-preview--pending-private
+       (null disco-preview--in-flight-private)))
+
+(defun disco-preview--schedulable-p ()
+  "Return non-nil when some preview lifecycle work needs a timer."
+  (or (disco-preview--private-dispatchable-p)
+      (and (disco-gateway-running-p)
+           (disco-preview--gateway-work-p))))
 
 (defun disco-preview--blocked-until (guild-id)
   "Return the effective rate-limit deadline for GUILD-ID, or nil."
@@ -96,28 +129,31 @@
   "Return seconds until the next useful lifecycle pass."
   (let ((now (float-time))
         deadline
-        sendable)
-    (maphash
-     (lambda (guild-id pending)
-       (when pending
-         (let ((request (gethash guild-id disco-preview--in-flight-by-guild))
-               (blocked-until (disco-preview--blocked-until guild-id)))
-           (cond
-            (request
-             nil)
-            ((and (numberp blocked-until) (> blocked-until now))
-             (setq deadline (min (or deadline most-positive-fixnum)
-                                 blocked-until)))
-            (t
-             (setq sendable t))))))
-     disco-preview--pending-by-guild)
-    (maphash
-     (lambda (_guild-id request)
-       (when-let* ((sent-at (plist-get request :sent-at)))
-         (setq deadline
-               (min (or deadline most-positive-fixnum)
-                    (+ sent-at (max 0.1 disco-preview-response-timeout))))))
-     disco-preview--in-flight-by-guild)
+        (sendable (disco-preview--private-dispatchable-p)))
+    (when (disco-gateway-running-p)
+      (maphash
+       (lambda (guild-id pending)
+         (when pending
+           (let ((request (gethash guild-id
+                                   disco-preview--in-flight-by-guild))
+                 (blocked-until (disco-preview--blocked-until guild-id)))
+             (cond
+              (request
+               nil)
+              ((and (numberp blocked-until) (> blocked-until now))
+               (setq deadline (min (or deadline most-positive-fixnum)
+                                   blocked-until)))
+              (t
+               (setq sendable t))))))
+       disco-preview--pending-by-guild)
+      (maphash
+       (lambda (_guild-id request)
+         (when-let* ((sent-at (plist-get request :sent-at)))
+           (setq deadline
+                 (min (or deadline most-positive-fixnum)
+                      (+ sent-at
+                         (max 0.1 disco-preview-response-timeout))))))
+       disco-preview--in-flight-by-guild))
     (if sendable
         (max 0 disco-preview-fetch-debounce)
       (max 0.01 (- (or deadline
@@ -127,8 +163,7 @@
 (defun disco-preview--schedule ()
   "Schedule the next useful request or timeout lifecycle pass."
   (if (not (and disco-preview-fetch-enabled
-                (disco-preview--work-p)
-                (disco-gateway-running-p)))
+                (disco-preview--schedulable-p)))
       (disco-preview--cancel-scheduled-pass)
     (let* ((delay (disco-preview--retry-delay))
            (deadline (+ (float-time) delay)))
@@ -150,31 +185,158 @@
                disco-preview--pending-by-guild)
       t)))
 
+(defun disco-preview--enqueue-private-channel-id (channel-id)
+  "Queue private CHANNEL-ID while preserving insertion order."
+  (unless (member channel-id disco-preview--pending-private)
+    (setq disco-preview--pending-private
+          (append disco-preview--pending-private (list channel-id)))
+    t))
+
+(defun disco-preview--private-request-entry (channel-id)
+  "Return immutable request metadata for private CHANNEL-ID, or nil."
+  (when-let* ((message-id
+               (gethash channel-id
+                        disco-preview--requested-message-id-by-channel)))
+    (list :channel-id channel-id
+          :message-id message-id
+          :revision (disco-state-message-revision channel-id))))
+
+(defun disco-preview--private-response-index (messages)
+  "Index REST MESSAGES by normalized channel ID."
+  (let ((index (make-hash-table :test #'equal)))
+    (dolist (message (and (listp messages) messages))
+      (when-let* ((channel-id
+                   (and (listp message)
+                        (disco-msg-normalize-id
+                         (alist-get 'channel_id message)))))
+        (puthash channel-id message index)))
+    index))
+
+(defun disco-preview--hydrate-private-entry (entry response-index)
+  "Hydrate one private preview request ENTRY from RESPONSE-INDEX.
+
+Return the channel ID only when a previously absent exact message was cached."
+  (let* ((channel-id (plist-get entry :channel-id))
+         (message-id (plist-get entry :message-id))
+         (revision (plist-get entry :revision))
+         (latest-request-id
+          (gethash channel-id
+                   disco-preview--requested-message-id-by-channel))
+         (channel (disco-state-channel channel-id))
+         (current-message-id
+          (and channel
+               (disco-msg-normalize-id
+                (alist-get 'last_message_id channel))))
+         (message (gethash channel-id response-index)))
+    (when (and (equal latest-request-id message-id)
+               (equal current-message-id message-id)
+               (not (disco-msg-channel-last-cached-message channel))
+               (equal message-id
+                      (disco-msg-normalize-id
+                       (and message (alist-get 'id message)))))
+      (disco-state-merge-message-page channel-id (list message) revision)
+      (when (disco-msg-channel-last-cached-message channel)
+        channel-id))))
+
+(defun disco-preview--finish-private-request
+    (generation entries messages failed-p)
+  "Finish one private preview batch.
+
+GENERATION and ENTRIES identify the request.  MESSAGES is the successful REST
+response.  FAILED-P is non-nil when the transport failed."
+  (let ((request disco-preview--in-flight-private))
+    (when (and request
+               (= generation disco-preview--generation)
+               (= generation (plist-get request :generation))
+               (equal entries (plist-get request :entries)))
+      (setq disco-preview--in-flight-private nil)
+      (if failed-p
+          (dolist (entry entries)
+            (let ((channel-id (plist-get entry :channel-id))
+                  (message-id (plist-get entry :message-id)))
+              (when (equal message-id
+                           (gethash
+                            channel-id
+                            disco-preview--requested-message-id-by-channel))
+                ;; A later render may retry a transport failure.  Successful
+                ;; omissions remain deduplicated because the server has already
+                ;; answered for this exact `last_message_id'.
+                (remhash channel-id
+                         disco-preview--requested-message-id-by-channel))))
+        (let ((response-index
+               (disco-preview--private-response-index messages)))
+          (dolist (entry entries)
+            (when-let* ((channel-id
+                         (disco-preview--hydrate-private-entry
+                          entry response-index)))
+              (run-hook-with-args 'disco-preview-update-hook channel-id)))))
+      (disco-preview--flush-private)
+      (disco-preview--schedule))))
+
+(defun disco-preview--flush-private ()
+  "Dispatch one queued Preload Messages batch when none is in flight."
+  (unless disco-preview--flushing-private
+    (let ((disco-preview--flushing-private t))
+      (when (disco-preview--private-dispatchable-p)
+        (let* ((channel-ids
+                (seq-take disco-preview--pending-private
+                          disco-api-preload-channel-messages-limit))
+               (entries
+                (delq nil
+                      (mapcar #'disco-preview--private-request-entry
+                              channel-ids)))
+               (generation disco-preview--generation))
+          (setq disco-preview--pending-private
+                (nthcdr (length channel-ids)
+                        disco-preview--pending-private))
+          (when entries
+            (setq disco-preview--in-flight-private
+                  (list :generation generation :entries entries))
+            (disco-api-preload-channel-messages-async
+             (mapcar (lambda (entry) (plist-get entry :channel-id)) entries)
+             :on-success
+             (lambda (messages)
+               (disco-preview--finish-private-request
+                generation entries messages nil))
+             :on-error
+             (lambda (_error-value)
+               (disco-preview--finish-private-request
+                generation entries nil t)))))))))
+
 (defun disco-preview-request-channel (channel)
   "Queue CHANNEL preview hydration.
 
 Return non-nil when CHANNEL was newly queued."
   (when (and disco-preview-fetch-enabled (listp channel))
-    (let* ((guild-id (and (alist-get 'guild_id channel)
-                          (format "%s" (alist-get 'guild_id channel))))
-           (channel-id (and (alist-get 'id channel)
-                            (format "%s" (alist-get 'id channel))))
-           (message-id (and (alist-get 'last_message_id channel)
-                            (format "%s" (alist-get 'last_message_id channel))))
+    (let* ((guild-id
+            (disco-msg-normalize-id (alist-get 'guild_id channel)))
+           (channel-id
+            (disco-msg-normalize-id (alist-get 'id channel)))
+           (message-id
+            (disco-msg-normalize-id (alist-get 'last_message_id channel)))
            (requested-id
             (and channel-id
                  (gethash channel-id
                           disco-preview--requested-message-id-by-channel))))
-      (when (and guild-id
-                 channel-id
+      (when (and channel-id
                  message-id
                  (not (disco-msg-channel-last-cached-message channel))
                  (not (equal requested-id message-id)))
-        (puthash channel-id message-id
-                 disco-preview--requested-message-id-by-channel)
-        (let ((queued (disco-preview--enqueue-channel-id guild-id channel-id)))
-          (disco-preview--schedule)
-          queued)))))
+        (cond
+         (guild-id
+          (puthash channel-id message-id
+                   disco-preview--requested-message-id-by-channel)
+          (let ((queued
+                 (disco-preview--enqueue-channel-id guild-id channel-id)))
+            (disco-preview--schedule)
+            queued))
+         ((disco-channel-private-p channel)
+          (puthash channel-id message-id
+                   disco-preview--requested-message-id-by-channel)
+          (let ((queued
+                 (disco-preview--enqueue-private-channel-id channel-id)))
+            (disco-preview--schedule)
+            queued)))))))
 
 (defun disco-preview--requeue-batch (guild-id channel-ids)
   "Return CHANNEL-IDS to the front of GUILD-ID's pending queue."
@@ -219,42 +381,43 @@ Return non-nil when CHANNEL was newly queued."
     (and (numberp deadline) (> deadline now))))
 
 (defun disco-preview--flush ()
-  "Send one pending opcode 34 batch per available guild."
+  "Dispatch pending private and guild preview batches."
   (setq disco-preview--timer nil
         disco-preview--timer-deadline nil)
-  (when (and disco-preview-fetch-enabled
-             (disco-gateway-running-p))
-    (let ((now (float-time))
-          updates)
-      (disco-preview--expire-in-flight now)
-      (disco-preview--expire-rate-limits now)
-      (maphash
-       (lambda (guild-id pending)
-         (let ((ordered (disco-util-normalize-id-list pending)))
-           (cond
-            ((null ordered)
-             (push (cons guild-id nil) updates))
-            ((gethash guild-id disco-preview--in-flight-by-guild)
-             nil)
-            ((disco-preview--guild-blocked-p guild-id now)
-             nil)
-            ((not (disco-gateway-send-queue-slot-available-p))
-             nil)
-            (t
-             (let* ((batch (seq-take ordered
-                                     disco-preview--gateway-batch-limit))
-                    (remaining (nthcdr (length batch) ordered)))
-               (when (disco-gateway-request-last-messages guild-id batch)
-                 (puthash guild-id
-                          (list :channel-ids batch :sent-at now)
-                          disco-preview--in-flight-by-guild)
-                 (push (cons guild-id remaining) updates)))))))
-       disco-preview--pending-by-guild)
-      (dolist (update updates)
-        (if (cdr update)
-            (puthash (car update) (cdr update)
-                     disco-preview--pending-by-guild)
-          (remhash (car update) disco-preview--pending-by-guild))))
+  (when disco-preview-fetch-enabled
+    (disco-preview--flush-private)
+    (when (disco-gateway-running-p)
+      (let ((now (float-time))
+            updates)
+        (disco-preview--expire-in-flight now)
+        (disco-preview--expire-rate-limits now)
+        (maphash
+         (lambda (guild-id pending)
+           (let ((ordered (disco-util-normalize-id-list pending)))
+             (cond
+              ((null ordered)
+               (push (cons guild-id nil) updates))
+              ((gethash guild-id disco-preview--in-flight-by-guild)
+               nil)
+              ((disco-preview--guild-blocked-p guild-id now)
+               nil)
+              ((not (disco-gateway-send-queue-slot-available-p))
+               nil)
+              (t
+               (let* ((batch (seq-take ordered
+                                       disco-preview--gateway-batch-limit))
+                      (remaining (nthcdr (length batch) ordered)))
+                 (when (disco-gateway-request-last-messages guild-id batch)
+                   (puthash guild-id
+                            (list :channel-ids batch :sent-at now)
+                            disco-preview--in-flight-by-guild)
+                   (push (cons guild-id remaining) updates)))))))
+         disco-preview--pending-by-guild)
+        (dolist (update updates)
+          (if (cdr update)
+              (puthash (car update) (cdr update)
+                       disco-preview--pending-by-guild)
+            (remhash (car update) disco-preview--pending-by-guild)))))
     (disco-preview--schedule)))
 
 (defun disco-preview--requeue-all-in-flight ()

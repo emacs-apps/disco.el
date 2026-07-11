@@ -91,6 +91,39 @@
                  nil nil nil nil)
                captured)))))
 
+(ert-deftest disco-api-preload-channel-messages-async-builds-payload ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest args)
+                 (setq captured (list method endpoint args))
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-preload-channel-messages-async
+            '("dm1" "dm2")
+            :on-success #'ignore
+            :on-error #'ignore)))
+      (should
+       (equal
+        '("POST"
+          "/channels/preload-messages"
+          (:payload ((channel_ids "dm1" "dm2"))
+                    :on-success ignore
+                    :on-error ignore))
+        captured)))))
+
+(ert-deftest disco-api-preload-channel-messages-async-validates-batch ()
+  (cl-letf (((symbol-function 'disco-api--request-async)
+             (lambda (&rest _args)
+               (ert-fail "invalid batch reached the transport"))))
+    (should-error
+     (disco-api-preload-channel-messages-async nil)
+     :type 'error)
+    (let ((disco-api-preload-channel-messages-limit 2))
+      (should-error
+       (disco-api-preload-channel-messages-async '("dm1" "dm2" "dm3"))
+       :type 'error))))
+
 (ert-deftest disco-api-channel-search-messages-tabs-builds-endpoint-and-payload ()
   (let (captured)
     (cl-letf (((symbol-function 'disco-api--request)

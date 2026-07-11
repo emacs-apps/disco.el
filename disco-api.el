@@ -941,6 +941,27 @@ LIMIT defaults to `disco-message-fetch-limit'."
      :on-success on-success
      :on-error on-error)))
 
+(defconst disco-api-preload-channel-messages-limit 100
+  "Maximum private channels accepted by Preload Messages.")
+
+(cl-defun disco-api-preload-channel-messages-async
+    (channel-ids &key on-success on-error)
+  "Preload the last message from each private channel in CHANNEL-IDS."
+  (let ((normalized-channel-ids
+         (disco-util-normalize-id-list channel-ids)))
+    (unless normalized-channel-ids
+      (error "disco: Preload Messages requires at least one channel ID"))
+    (when (> (length normalized-channel-ids)
+             disco-api-preload-channel-messages-limit)
+      (error "disco: Preload Messages accepts at most %d channel IDs"
+             disco-api-preload-channel-messages-limit))
+    (disco-api--request-async
+     "POST"
+     "/channels/preload-messages"
+     :payload `((channel_ids . ,normalized-channel-ids))
+     :on-success on-success
+     :on-error on-error)))
+
 (defun disco-api-channel-messages-around (channel-id message-id &optional limit)
   "Fetch one message page around MESSAGE-ID in CHANNEL-ID."
   (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit)))

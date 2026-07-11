@@ -29,6 +29,7 @@
 (require 'disco-state)
 (require 'disco-thread)
 (require 'disco-permission)
+(require 'disco-preview)
 (require 'disco-root-layout)
 (require 'disco-root-view)
 (require 'disco-channel-directory)
@@ -67,6 +68,9 @@
 
 (defvar-local disco-root--directory-handler nil
   "Buffer-local directory lifecycle event handler closure.")
+
+(defvar-local disco-root--preview-handler nil
+  "Buffer-local preview hydration handler closure.")
 
 (defvar-local disco-root--refresh-in-flight nil
   "Non-nil while an async root refresh is in progress.")
@@ -2917,6 +2921,11 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
               (plist-get event :guild-id)
               (disco-root--async-error-message (plist-get event :error))))))
 
+(defun disco-root--handle-preview-update (channel-id)
+  "Refresh root row for hydrated preview CHANNEL-ID."
+  (when channel-id
+    (disco-root--queue-live-update (list channel-id) nil nil)))
+
 (defun disco-root--attach-live-updates ()
   "Attach root buffer to global gateway update stream."
   (when disco-root--gateway-handler
@@ -2924,6 +2933,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
     (disco-gateway-unwatch-global))
   (when disco-root--directory-handler
     (remove-hook 'disco-directory-event-hook disco-root--directory-handler))
+  (when disco-root--preview-handler
+    (remove-hook 'disco-preview-update-hook disco-root--preview-handler))
+  (setq disco-root--directory-handler nil)
+  (setq disco-root--preview-handler nil)
   (disco-root--cancel-live-update-timer)
   (setq disco-root--dirty-channel-ids nil)
   (setq disco-root--dirty-structure-p nil)
@@ -2939,10 +2952,17 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
             (lambda (event)
               (when (buffer-live-p root-buffer)
                 (with-current-buffer root-buffer
-                  (disco-root--handle-directory-event event)))))))
+                  (disco-root--handle-directory-event event)))))
+      (setq disco-root--preview-handler
+            (lambda (channel-id)
+              (when (buffer-live-p root-buffer)
+                (with-current-buffer root-buffer
+                  (disco-root--handle-preview-update channel-id)))))))
   (add-hook 'disco-gateway-event-hook disco-root--gateway-handler)
   (when disco-root--directory-handler
     (add-hook 'disco-directory-event-hook disco-root--directory-handler))
+  (when disco-root--preview-handler
+    (add-hook 'disco-preview-update-hook disco-root--preview-handler))
   (disco-gateway-watch-global)
   (add-hook 'kill-buffer-hook #'disco-root--detach-live-updates nil t))
 
@@ -2958,6 +2978,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
   (when disco-root--directory-handler
     (remove-hook 'disco-directory-event-hook disco-root--directory-handler)
     (setq disco-root--directory-handler nil))
+  (when disco-root--preview-handler
+    (remove-hook 'disco-preview-update-hook disco-root--preview-handler)
+    (setq disco-root--preview-handler nil))
   (disco-gateway-unwatch-global))
 
 (defun disco-root-toggle-sort-mode ()

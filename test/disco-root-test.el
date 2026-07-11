@@ -1321,6 +1321,16 @@
                        (disco-root--activity-preview-line channel nil 'activity)))
         (should queued)))))
 
+(ert-deftest disco-root-preview-update-queues-channel-row-refresh ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (queued)
+      (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                 (lambda (channel-ids structural header)
+                   (setq queued (list channel-ids structural header)))))
+        (disco-root--handle-preview-update "dm1")
+        (should (equal '(("dm1") nil nil) queued))))))
+
 (ert-deftest disco-root-directory-preview-queues-fetch-without-placeholder ()
   (let ((channel '((id . "c1") (type . 0) (name . "general")
                    (last_message_id . "100")))
