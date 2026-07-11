@@ -606,6 +606,18 @@
   (should-not (disco-state-channel-notification-override "old"))
   (should (disco-state-channel-notification-override "new")))
 
+(ert-deftest disco-state-server-message-reconciles-pending-by-nonce ()
+  (disco-state-reset)
+  (disco-state-insert-pending-message "c" "900" "hello" "me")
+  (should (alist-get 'pending (car (disco-state-messages "c"))))
+  (disco-state-upsert-message
+   "c" '((id . "1000") (nonce . "900") (channel_id . "c")
+         (content . "hello") (author (id . "me"))))
+  (let ((messages (disco-state-messages "c")))
+    (should (= 1 (length messages)))
+    (should (equal "1000" (alist-get 'id (car messages))))
+    (should-not (alist-get 'pending (car messages)))))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

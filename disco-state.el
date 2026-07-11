@@ -641,7 +641,8 @@ Otherwise, replace threads only under the provided parent IDs."
 (defun disco-state-upsert-message (channel-id message)
   "Insert or replace MESSAGE in CHANNEL-ID cache, returning new message list."
   (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
-         (message-id (disco-state--normalize-id (alist-get 'id message))))
+         (message-id (disco-state--normalize-id (alist-get 'id message)))
+         (nonce (disco-state--normalize-id (alist-get 'nonce message))))
     (when (and normalized-channel-id
                message-id
                (listp message))
@@ -652,8 +653,12 @@ Otherwise, replace threads only under the provided parent IDs."
              (updated (cons message
                             (cl-remove-if
                              (lambda (it)
-                               (equal (disco-state--normalize-id (alist-get 'id it))
-                                      message-id))
+                               (or (equal (disco-state--normalize-id (alist-get 'id it))
+                                          message-id)
+                                   (and nonce
+                                        (equal (disco-state--normalize-id
+                                                (alist-get 'nonce it))
+                                               nonce))))
                              existing))))
         (when (and (integerp disco-state-message-preview-cache-limit)
                    (> disco-state-message-preview-cache-limit 0)
@@ -661,6 +666,39 @@ Otherwise, replace threads only under the provided parent IDs."
           (setq updated (seq-take updated disco-state-message-preview-cache-limit)))
         (puthash normalized-channel-id updated disco-state--messages-by-channel)
         updated))))
+
+(defun disco-state-insert-pending-message (channel-id nonce content current-user-id
+                                                      &optional reply-to-message-id)
+  "Insert exact local pending message identified by NONCE into CHANNEL-ID."
+  (let ((message
+         `((id . ,(format "%s" nonce))
+           (nonce . ,(format "%s" nonce))
+           (channel_id . ,(format "%s" channel-id))
+           (content . ,(or content ""))
+           (timestamp . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
+           (pending . t)
+           (author (id . ,(format "%s" current-user-id))
+                   (username . "You"))
+           ,@(when reply-to-message-id
+               `((message_reference
+                  (message_id . ,(format "%s" reply-to-message-id))
+                  (channel_id . ,(format "%s" channel-id))))))))
+    (disco-state-upsert-message channel-id message)
+    message))
+
+(defun disco-state-remove-pending-message (channel-id nonce)
+  "Remove pending message identified by NONCE from CHANNEL-ID."
+  (let* ((normalized (disco-state--normalize-id nonce))
+         (messages (disco-state-messages channel-id))
+         (updated
+          (cl-remove-if
+           (lambda (message)
+             (and (alist-get 'pending message)
+                  (equal normalized
+                         (disco-state--normalize-id (alist-get 'nonce message)))))
+           messages)))
+    (disco-state-put-messages channel-id updated)
+    updated))
 
 (defun disco-state-apply-last-messages (messages)
   "Apply LAST_MESSAGES payload MESSAGES and return affected channel IDs."

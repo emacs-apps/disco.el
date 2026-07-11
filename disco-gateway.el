@@ -836,12 +836,18 @@ State is kept newest-first to match REST message list ordering."
                     (setf (alist-get (car pair) merged nil 'remove) (cdr pair)))
                   merged)))
     (let* ((message-id (alist-get 'id message))
+           (nonce (and (alist-get 'nonce message)
+                       (format "%s" (alist-get 'nonce message))))
            (old (or (disco-state-messages channel-id) '()))
            (found nil)
            (updated
             (mapcar
              (lambda (msg)
-               (if (and message-id (equal (alist-get 'id msg) message-id))
+               (if (or (and message-id (equal (alist-get 'id msg) message-id))
+                       (and nonce
+                            (equal (and (alist-get 'nonce msg)
+                                        (format "%s" (alist-get 'nonce msg)))
+                                   nonce)))
                    (progn (setq found t) (alist-merge msg message))
                  msg))
              old)))

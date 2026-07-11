@@ -743,12 +743,13 @@ REPLY-TO-MESSAGE-ID remains as backwards-compatible shorthand for replies."
         (user-error "disco: forward_only can only be used with FORWARD references"))
       (nreverse payload)))))
 
-(defun disco-api--message-send-payload (content reply-to-message-id message-reference attachments poll allowed-mentions)
+(defun disco-api--message-send-payload (content reply-to-message-id message-reference attachments poll allowed-mentions &optional nonce)
   "Build message create payload.
 
 CONTENT is optional message text. REPLY-TO-MESSAGE-ID and MESSAGE-REFERENCE
 select attribution metadata. ATTACHMENTS is normalized attachment plist list,
-POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing."
+POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing.
+NONCE is a client-generated id used for exact send reconciliation."
   (let* ((normalized-message-reference
           (disco-api--normalize-message-reference message-reference reply-to-message-id))
          (normalized-content
@@ -780,6 +781,9 @@ POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing."
       (push `(poll . ,poll) payload))
     (when normalized-allowed-mentions
       (push `(allowed_mentions . ,normalized-allowed-mentions) payload))
+    (when nonce
+      (push `(nonce . ,(format "%s" nonce)) payload)
+      (push '(enforce_nonce . t) payload))
     (nreverse payload)))
 
 (defun disco-api--normalize-non-negative-integer (value field-name)

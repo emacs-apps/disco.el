@@ -1162,7 +1162,7 @@ READ-STATE-TYPE and VERSION are optional request fields."
      :on-success on-success
      :on-error on-error)))
 
-(cl-defun disco-api-create-message (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll)
+(cl-defun disco-api-create-message (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll nonce)
   "Create one message in CHANNEL-ID.
 
 CONTENT is optional text content. REPLY-TO-MESSAGE-ID is a reply shorthand.
@@ -1179,7 +1179,8 @@ POLL is an optional poll create payload."
                    message-reference
                    normalized-attachments
                    normalized-poll
-                   allowed-mentions)))
+                   allowed-mentions
+                   nonce)))
     (unless (or (alist-get 'content payload)
                 (alist-get 'message_reference payload)
                 normalized-attachments
@@ -1205,7 +1206,7 @@ POLL is an optional poll create payload."
        nil
        nil))))
 
-(cl-defun disco-api-create-message-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll on-success on-error)
+(cl-defun disco-api-create-message-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll nonce on-success on-error)
   "Asynchronously create one message in CHANNEL-ID.
 
 Keyword arguments are the same as `disco-api-create-message'."
@@ -1218,7 +1219,8 @@ Keyword arguments are the same as `disco-api-create-message'."
                    message-reference
                    normalized-attachments
                    normalized-poll
-                   allowed-mentions)))
+                   allowed-mentions
+                   nonce)))
     (unless (or (alist-get 'content payload)
                 (alist-get 'message_reference payload)
                 normalized-attachments
@@ -1256,7 +1258,7 @@ optional :description/:filename/:content-type."
    :allowed-mentions allowed-mentions
    :attachments attachments))
 
-(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments on-success on-error)
+(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments nonce on-success on-error)
   "Asynchronously send message to CHANNEL-ID with ATTACHMENTS.
 
 ATTACHMENTS is a list of file path strings or plists containing :path and
@@ -1268,6 +1270,7 @@ optional :description/:filename/:content-type."
    :message-reference message-reference
    :allowed-mentions allowed-mentions
    :attachments attachments
+   :nonce nonce
    :on-success on-success
    :on-error on-error))
 
@@ -1360,6 +1363,7 @@ When ALLOWED-MENTIONS is non-nil, send explicit allowed_mentions payload."
                                                    message-reference
                                                    allowed-mentions
                                                    poll
+                                                   nonce
                                                    on-success on-error)
   "Send CONTENT into CHANNEL-ID asynchronously.
 
@@ -1372,6 +1376,7 @@ When POLL is non-nil, include poll create payload."
    :message-reference message-reference
    :allowed-mentions allowed-mentions
    :poll poll
+   :nonce nonce
    :on-success on-success
    :on-error on-error))
 

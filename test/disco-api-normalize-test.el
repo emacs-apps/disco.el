@@ -61,6 +61,12 @@
     (should (equal `((content . ,trimmed))
                    (disco-api--message-send-payload content nil nil nil nil nil)))))
 
+(ert-deftest disco-api-normalize-message-send-payload-enforces-nonce ()
+  (let ((payload (disco-api--message-send-payload
+                  "hello" nil nil nil nil nil "12345")))
+    (should (equal "12345" (alist-get 'nonce payload)))
+    (should (eq t (alist-get 'enforce_nonce payload)))))
+
 (ert-deftest disco-api-normalize-token-payload ()
   (should (eq :empty-object (disco-api--token-payload nil)))
   (should (equal '((token . "tok")) (disco-api--token-payload "tok")))

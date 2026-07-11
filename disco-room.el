@@ -60,6 +60,25 @@
 (defvar-local disco-room--refresh-in-flight nil)
 (defvar-local disco-room--older-in-flight nil)
 (defvar-local disco-room--send-in-flight nil)
+
+(defvar disco-room--send-nonce-counter 0
+  "Monotonic low bits for client-generated Discord message nonces.")
+
+(defun disco-room--next-send-nonce ()
+  "Return a unique snowflake-shaped nonce for exact send reconciliation."
+  (setq disco-room--send-nonce-counter
+        (logand (1+ disco-room--send-nonce-counter) (1- (ash 1 22))))
+  (number-to-string
+   (+ (ash (- (truncate (* 1000 (float-time)))
+              (* disco-state-discord-epoch-seconds 1000))
+           22)
+      disco-room--send-nonce-counter)))
+
+(defun disco-room--render-send-state-change ()
+  "Render an explicit local send-state mutation without fetching history."
+  (if (disco-room--at-message-bottom-p)
+      (disco-room-render)
+    (disco-room--render-preserving-point)))
 (defvar-local disco-room--last-search-query nil)
 (defvar-local disco-room--msg-filter nil)
 (defvar-local disco-room--filter-generation 0)
@@ -4691,7 +4710,10 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
            (insert-date (plist-get context :insert-date))
            (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
            (timestamp (disco-util-format-time (or (alist-get 'timestamp msg) "")))
-           (short-time (disco-util-format-time-short (or (alist-get 'timestamp msg) "")))
+           (short-time (if (alist-get 'pending msg)
+                           "sending…"
+                         (disco-util-format-time-short
+                          (or (alist-get 'timestamp msg) ""))))
            (author (disco-room--message-author msg))
            (author-face (disco-room--author-face msg))
            (content (disco-room--message-display-content msg))
@@ -6915,12 +6937,15 @@ When called with prefix argument, force draft edit in minibuffer first."
                    normalized
                    :allowed-mentions (disco-room--send-allowed-mentions)
                    :on-success
-                   (lambda (_response)
+                   (lambda (response)
                      (when (disco-room--channel-buffer-p room-buffer channel-id)
                        (with-current-buffer room-buffer
+                         (unless (and (listp response) (alist-get 'id response))
+                           (error "Discord edit-message returned no message"))
+                         (disco-state-upsert-message channel-id response)
                          (setq disco-room--send-in-flight nil)
                          (disco-room--composer-edit-clear t)
-                         (disco-room-refresh)
+                         (disco-room--render-send-state-change)
                          (message "disco: edited message %s" edit-message-id))))
                    :on-error
                    (lambda (err)
@@ -6950,26 +6975,60 @@ When called with prefix argument, force draft edit in minibuffer first."
                   ((room-active-p ()
                      (disco-room--channel-buffer-p room-buffer channel-id))
                    (send-one (text reply attachments-list on-success on-error)
-                     (if attachments-list
-                         (disco-api-send-message-with-attachments-async
-                          channel-id
-                          :content (and (stringp text) (not (string-empty-p text)) text)
-                          :reply-to-message-id reply
-                          :allowed-mentions (and (stringp text)
-                                                 (not (string-empty-p text))
-                                                 allowed-mentions)
-                          :attachments attachments-list
-                          :on-success on-success
-                          :on-error on-error)
-                       (disco-api-send-message-async
-                        channel-id
-                        text
-                        :reply-to-message-id reply
-                        :allowed-mentions (and (stringp text)
-                                               (not (string-empty-p text))
-                                               allowed-mentions)
-                        :on-success on-success
-                        :on-error on-error))))
+                     (let* ((nonce (disco-room--next-send-nonce))
+                            (pending-content
+                             (if (and attachments-list
+                                      (or (not (stringp text)) (string-empty-p text)))
+                                 (format "Uploading %d attachment%s…"
+                                         (length attachments-list)
+                                         (if (= (length attachments-list) 1) "" "s"))
+                               text)))
+                       (disco-state-insert-pending-message
+                        channel-id nonce pending-content
+                        (disco-gateway-current-user-id) reply)
+                       (disco-room--render-send-state-change)
+                       (let ((success
+                              (lambda (response)
+                                (if (and (listp response) (alist-get 'id response))
+                                    (progn
+                                      (disco-state-upsert-message channel-id response)
+                                      (when (room-active-p)
+                                        (with-current-buffer room-buffer
+                                          (disco-room--render-send-state-change)))
+                                      (funcall on-success response))
+                                  (disco-state-remove-pending-message channel-id nonce)
+                                  (funcall on-error
+                                           (list 'error
+                                                 "Discord create-message returned no message")))))
+                             (failure
+                              (lambda (err)
+                                (disco-state-remove-pending-message channel-id nonce)
+                                (when (room-active-p)
+                                  (with-current-buffer room-buffer
+                                    (disco-room--render-send-state-change)))
+                                (funcall on-error err))))
+                         (if attachments-list
+                             (disco-api-send-message-with-attachments-async
+                              channel-id
+                              :content (and (stringp text) (not (string-empty-p text)) text)
+                              :reply-to-message-id reply
+                              :allowed-mentions (and (stringp text)
+                                                     (not (string-empty-p text))
+                                                     allowed-mentions)
+                              :attachments attachments-list
+                              :nonce nonce
+                              :on-success success
+                              :on-error failure)
+                           (disco-api-send-message-async
+                            channel-id
+                            text
+                            :reply-to-message-id reply
+                            :allowed-mentions (and (stringp text)
+                                                   (not (string-empty-p text))
+                                                   allowed-mentions)
+                            :nonce nonce
+                            :on-success success
+                            :on-error failure))))))
                 (pcase long-message-action
                   ('split
                    (let* ((chunks (disco-room--split-message-content normalized))
@@ -6982,7 +7041,6 @@ When called with prefix argument, force draft edit in minibuffer first."
                                 (disco-room--set-composer-aux-state nil nil)
                                 (when has-attachments
                                   (disco-room--clear-pending-attachment-state))
-                                (disco-room-refresh)
                                 (message "disco: sent %d split messages" total))))
                           (finish-error (remaining sent-count err)
                             (when (room-active-p)
@@ -7034,7 +7092,6 @@ When called with prefix argument, force draft edit in minibuffer first."
                                 (disco-room--set-composer-aux-state nil nil)
                                 (when has-attachments
                                   (disco-room--clear-pending-attachment-state))
-                                (disco-room-refresh)
                                 (message "disco: long message sent as %s"
                                          disco-room-long-message-file-name))))
                           (lambda (err)
@@ -7059,7 +7116,6 @@ When called with prefix argument, force draft edit in minibuffer first."
                           (disco-room--set-composer-aux-state nil nil)
                           (when has-attachments
                             (disco-room--clear-pending-attachment-state))
-                          (disco-room-refresh)
                           (message (if has-attachments
                                        "disco: message with attachment(s) sent"
                                      "disco: message sent")))))
