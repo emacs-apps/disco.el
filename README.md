@@ -53,6 +53,9 @@ This repository currently contains an MVP scaffold designed with these reference
 - Root rendering uses EWOC plus debounced live-update aggregation; tree and activity layouts now patch rows incrementally, with activity row reordering to track sort changes without full buffer rebuilds.
 - Room timeline rendering now uses EWOC, with local message-row refresh on live create/update/delete events.
 - Request serialization and rate-limit-aware retries for Discord REST calls.
+- Optional telega-style global presentation modes: enable
+  `disco-client-mode-line-mode` for clickable unread/mention status and
+  `disco-notifications-mode` for delayed, visibility-aware desktop alerts.
 
 ## Dependencies
 
@@ -142,8 +145,7 @@ built-in tree/activity layouts, return an `items` view spec instead:
 ## Message Commands
 
 - Room buffer: `r` set reply target from message-at-point, `C-c C-k` clears pending reply.
-- Room buffer: `C-c m f` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`) chosen from source message entries. Legacy `C-c C-F` still works. In picker prompts, press `RET` on empty input to skip one side. Manual fallback is off by default (`disco-room-forward-only-manual-fallback`).
-- If API rejects forward comments in your session, `disco-room-forward-comment-rejection-action` controls fallback (`split` sends comment + forward as two messages).
+- Room buffer: `C-c m f` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`) chosen from source message entries. Legacy `C-c C-F` still works. In picker prompts, press `RET` on empty input to skip one side.
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
 - Room buffer: `M-<` loads older message page using `before` cursor pagination.
 - Room buffer draft: attachment objects can be removed at point with `C-c C-d`; `M-r` searches draft history; `M-RET` opens a parsed composer preview buffer.
