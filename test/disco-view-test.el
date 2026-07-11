@@ -9,6 +9,89 @@
 
 (require 'disco-view)
 
+(cl-defstruct (disco-view-test-entry
+               (:constructor disco-view-test-entry-create))
+  key
+  text)
+
+(defun disco-view-test--entry-keys (ewoc)
+  "Return entry keys from EWOC in display order."
+  (let ((node (ewoc-nth ewoc 0))
+        keys)
+    (while node
+      (push (disco-view-test-entry-key (ewoc-data node)) keys)
+      (setq node (ewoc-next ewoc node)))
+    (nreverse keys)))
+
+(ert-deftest disco-view-keyed-ewoc-reconciles-with-stable-nodes ()
+  (with-temp-buffer
+    (let* ((prints (make-hash-table :test #'equal))
+           (ewoc (ewoc-create
+                  (lambda (entry)
+                    (let ((key (disco-view-test-entry-key entry)))
+                      (puthash key (1+ (gethash key prints 0)) prints)
+                      (insert (disco-view-test-entry-text entry) "\n")))
+                  nil nil t))
+           (entry (lambda (key text)
+                    (disco-view-test-entry-create :key key :text text)))
+           (key-fn #'disco-view-test-entry-key)
+           nodes a-node b-node)
+      (setq nodes
+            (disco-view-reconcile-keyed-ewoc
+             ewoc (list (funcall entry 'a "A")
+                        (funcall entry 'b "B"))
+             key-fn)
+            a-node (gethash 'a nodes)
+            b-node (gethash 'b nodes))
+      (should (equal '(a b) (disco-view-test--entry-keys ewoc)))
+      (setq nodes
+            (disco-view-reconcile-keyed-ewoc
+             ewoc (list (funcall entry 'a "A")
+                        (funcall entry 'b "B2"))
+             key-fn))
+      (should (eq a-node (gethash 'a nodes)))
+      (should (eq b-node (gethash 'b nodes)))
+      (should (= 1 (gethash 'a prints)))
+      (should (= 2 (gethash 'b prints)))
+      (setq nodes
+            (disco-view-reconcile-keyed-ewoc
+             ewoc (list (funcall entry 'b "B2")
+                        (funcall entry 'c "C"))
+             key-fn))
+      (should (equal '(b c) (disco-view-test--entry-keys ewoc)))
+      (should-not (gethash 'a nodes))
+      (should (equal "B2\nC\n" (buffer-string))))))
+
+(ert-deftest disco-view-keyed-ewoc-supports-explicit-invalidation ()
+  (with-temp-buffer
+    (let* ((prints 0)
+           (ewoc (ewoc-create
+                  (lambda (entry)
+                    (cl-incf prints)
+                    (insert (disco-view-test-entry-text entry) "\n"))
+                  nil nil t))
+           (entry (disco-view-test-entry-create :key 'row :text "row"))
+           (nodes (disco-view-reconcile-keyed-ewoc
+                   ewoc (list entry) #'disco-view-test-entry-key)))
+      (should (= 1 prints))
+      (disco-view-reconcile-keyed-ewoc
+       ewoc (list entry) #'disco-view-test-entry-key)
+      (should (= 1 prints))
+      (should (disco-view-invalidate-keyed-ewoc-node ewoc nodes 'row))
+      (should (= 2 prints))
+      (should-not (disco-view-invalidate-keyed-ewoc-node ewoc nodes 'missing)))))
+
+(ert-deftest disco-view-keyed-ewoc-rejects-duplicate-keys ()
+  (with-temp-buffer
+    (let ((ewoc (ewoc-create #'ignore nil nil t))
+          (entry (lambda (text)
+                   (disco-view-test-entry-create :key 'same :text text))))
+      (should-error
+       (disco-view-reconcile-keyed-ewoc
+        ewoc (list (funcall entry "one") (funcall entry "two"))
+        #'disco-view-test-entry-key))
+      (should-not (ewoc-nth ewoc 0)))))
+
 (ert-deftest disco-view-render-list-spec-renders-items-and-footer ()
   (with-temp-buffer
     (disco-view-render-list-spec

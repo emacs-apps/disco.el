@@ -4,17 +4,101 @@
 
 ;;; Commentary:
 
-;; Shared utilities for preserving cursor/viewport state around full buffer
-;; rerenders, plus reusable one-line row rendering helpers used by root-style
-;; list views. This keeps passive timeline/root updates from unexpectedly
-;; snapping point to the input/footer while giving multiple views a shared
-;; layout component.
+;; Shared utilities for preserving cursor/viewport state, reconciling
+;; stable-keyed EWOC lists, and rendering one-line rows used by root-style
+;; views.  This keeps passive updates from snapping point or rebuilding
+;; unchanged rows while giving multiple clients a shared layout component.
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ewoc)
 (require 'subr-x)
 (require 'disco-ui)
+
+(defun disco-view--key-set (keys)
+  "Return an equal-tested set containing KEYS."
+  (let ((set (make-hash-table :test #'equal)))
+    (dolist (key keys set)
+      (puthash key t set))))
+
+(defun disco-view--keyed-ewoc-nodes (ewoc key-function)
+  "Return a stable-key to node table for EWOC using KEY-FUNCTION.
+
+Every entry must have a non-nil, unique key.  Violations are programming
+errors because incremental reconciliation cannot identify such rows."
+  (let ((nodes (make-hash-table :test #'equal))
+        (node (ewoc-nth ewoc 0)))
+    (while node
+      (let ((key (funcall key-function (ewoc-data node))))
+        (unless key
+          (error "Disco view: EWOC entry has no stable key"))
+        (when (gethash key nodes)
+          (error "Disco view: duplicate EWOC key %S" key))
+        (puthash key node nodes))
+      (setq node (ewoc-next ewoc node)))
+    nodes))
+
+(defun disco-view--validate-keyed-entries (entries key-function)
+  "Require every entry in ENTRIES to have one unique stable key."
+  (let ((seen (make-hash-table :test #'equal)))
+    (dolist (entry entries)
+      (let ((key (funcall key-function entry)))
+        (unless key
+          (error "Disco view: projected entry has no stable key"))
+        (when (gethash key seen)
+          (error "Disco view: duplicate projected key %S" key))
+        (puthash key t seen)))))
+
+(cl-defun disco-view-reconcile-keyed-ewoc
+    (ewoc entries key-function &key force-keys)
+  "Reconcile keyed EWOC with ENTRIES and return its new node table.
+
+KEY-FUNCTION returns a non-nil stable key for every entry.  Existing nodes in
+the right position retain their identity; changed data is invalidated in
+place, moved rows are reinserted at the requested position, vanished rows are
+deleted, and new rows are inserted.  FORCE-KEYS invalidates matching rows even
+when their entry data compares equal, for presentation-only changes such as a
+newly cached image."
+  (disco-view--validate-keyed-entries entries key-function)
+  (let ((available (disco-view--keyed-ewoc-nodes ewoc key-function))
+        (next-node (ewoc-nth ewoc 0))
+        (new-table (make-hash-table :test #'equal))
+        (forced (disco-view--key-set force-keys)))
+    (dolist (entry entries)
+      (let* ((key (funcall key-function entry))
+             (existing (and key (gethash key available)))
+             node)
+        (cond
+         ((and existing (eq existing next-node))
+          (setq node existing
+                next-node (ewoc-next ewoc next-node))
+          (when (or (gethash key forced)
+                    (not (equal (ewoc-data node) entry)))
+            (ewoc-set-data node entry)
+            (ewoc-invalidate ewoc node)))
+         (existing
+          (ewoc-delete ewoc existing)
+          (setq node (if next-node
+                         (ewoc-enter-before ewoc next-node entry)
+                       (ewoc-enter-last ewoc entry))))
+         (t
+          (setq node (if next-node
+                         (ewoc-enter-before ewoc next-node entry)
+                       (ewoc-enter-last ewoc entry)))))
+        (remhash key available)
+        (puthash key node new-table)))
+    (maphash (lambda (_key node) (ewoc-delete ewoc node)) available)
+    new-table))
+
+(defun disco-view-invalidate-keyed-ewoc-node (ewoc node-table key)
+  "Invalidate KEY in EWOC using NODE-TABLE.
+
+Return non-nil when the keyed node exists."
+  (when-let* ((node (and (hash-table-p node-table)
+                         (gethash key node-table))))
+    (ewoc-invalidate ewoc node)
+    t))
 
 (cl-defstruct (disco-view--snapshot
                (:constructor disco-view--snapshot-create))
