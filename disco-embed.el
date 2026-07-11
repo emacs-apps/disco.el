@@ -622,6 +622,40 @@ Keeps original line breaks and applies markdown renderer pipeline."
         (width . ,(and (listp image) (alist-get 'width image)))
         (height . ,(and (listp image) (alist-get 'height image)))))))
 
+(defun disco-embed-message-preview-cache-keys (msg)
+  "Return media preview cache keys rendered for embeds in MSG."
+  (let ((embed-index 0)
+        keys)
+    (dolist (embed (disco-embed--normalize-embeds (alist-get 'embeds msg)))
+      (setq embed-index (1+ embed-index))
+      (let ((images (disco-embed--embed-image-objects embed)))
+        (if (> (length images) 1)
+            (let ((image-index 0))
+              (dolist (image images)
+                (setq image-index (1+ image-index))
+                (let* ((image-url (disco-embed--image-object-url msg image))
+                       (source-url
+                        (disco-embed--image-object-source-url msg image))
+                       (attachment
+                        (and (disco-embed--url-present-p image-url)
+                             (disco-embed--image-preview-attachment
+                              msg embed-index image-index image image-url source-url))))
+                  (when-let* ((key
+                               (and attachment
+                                    (disco-media-attachment-preview-cache-key
+                                     attachment))))
+                    (push key keys)))))
+          (when-let* ((attachment
+                       (disco-embed--preview-attachment msg embed embed-index))
+                      (key
+                       (disco-media-attachment-preview-cache-key attachment)))
+            (push key keys))))
+      (when-let* ((attachment
+                   (disco-embed--author-icon-attachment msg embed embed-index))
+                  (key (disco-media-attachment-preview-cache-key attachment)))
+        (push key keys)))
+    (delete-dups (nreverse keys))))
+
 (defun disco-embed--description-line (embed)
   "Return embed description for EMBED, preserving original formatting."
   (let ((text (disco-embed--stringify

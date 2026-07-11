@@ -106,31 +106,21 @@ Return the inserted span as (START . END)."
              front-sticky (read-only)
              rear-nonsticky (read-only)))))
 
-(cl-defun disco-ins-insert-reference-line (body &key prefix face button-label
-                                                button-action button-face
-                                                properties)
-  "Insert one prefixed reference line with optional BODY and action button.
+(cl-defun disco-ins-insert-reference-line
+    (body &key prefix face action help-echo properties)
+  "Insert one prefixed reference line with optional whole-line ACTION.
 
 PREFIX is applied with `disco-ui-apply-line-prefix'.  FACE and PROPERTIES are
-applied to the inserted span.  When BUTTON-LABEL is non-nil, BUTTON-ACTION is
-inserted using `disco-ui-insert-action-button'.  Return the inserted span as
-(START . END)."
+applied to the inserted span.  ACTION makes the reference itself navigable,
+without adding a synthetic button label.  Return the inserted span as
+`(START . END)'."
   (let ((line-start (point))
         (text (and (stringp body) (not (string-empty-p body)) body)))
     (insert "↪")
-    (when (or text button-label)
+    (when text
       (insert " "))
     (when text
       (insert text))
-    (when button-label
-      (when text
-        (insert " "))
-      (if (functionp button-action)
-          (disco-ui-insert-action-button
-           button-label button-action :face button-face)
-        (insert (if button-face
-                    (propertize button-label 'face button-face)
-                  button-label))))
     (insert "\n")
     (disco-ui-apply-line-prefix line-start (point) (or prefix "    "))
     (when (or face properties)
@@ -138,6 +128,10 @@ inserted using `disco-ui-insert-action-button'.  Return the inserted span as
        line-start (point)
        (append properties
                (when face (list 'face face)))))
+    (when (functionp action)
+      (disco-media-add-action-properties
+       line-start (max line-start (1- (point))) action
+       (or help-echo "Open referenced message")))
     (cons line-start (point))))
 
 (cl-defun disco-ins-insert-reaction-line
@@ -789,25 +783,28 @@ be shown yet."
      (list disco-media-card-context-property context))
     (cons card-start (point))))
 
-(cl-defun disco-ins-insert-forward-card (&key source-text sent-at content
-                                              insert-source-icon title-label
-                                              jump-label jump-action
-                                              jump-face jump-help-echo
-                                              border-face title-face meta-face)
+(cl-defun disco-ins-insert-forward-card
+    (&key source-text sent-at content insert-source-icon title-label
+          open-action open-help-echo border-face title-face meta-face)
   "Insert one forwarded-message card.
 
 SOURCE-TEXT is the rendered source label line body.  SENT-AT and CONTENT are
 optional metadata/body strings.  INSERT-SOURCE-ICON, when non-nil, is called to
-insert an inline source icon before SOURCE-TEXT.  JUMP-LABEL and JUMP-ACTION
-configure an optional action button row.  BORDER-FACE, TITLE-FACE, and
-META-FACE control the card styling.  Return the inserted span as (START . END)."
+insert an inline source icon before SOURCE-TEXT.  OPEN-ACTION makes the title
+and source lines navigable without adding a separate button row.
+BORDER-FACE, TITLE-FACE, and META-FACE control the card styling.  Return the
+inserted span as `(START . END)'."
   (let ((card-start (point))
         (prefix-state (disco-ui-card-prefix-state :face border-face)))
     (let ((title-start (point)))
-      (insert (or title-label "[forwarded message]") "\n")
+      (insert (or title-label "Forwarded message") "\n")
       (disco-ui-apply-line-prefix title-start (point) prefix-state)
       (when title-face
-        (disco-ui-append-face title-start (point) title-face)))
+        (disco-ui-append-face title-start (point) title-face))
+      (when (functionp open-action)
+        (disco-media-add-action-properties
+         title-start (max title-start (1- (point)))
+         open-action (or open-help-echo "Open forwarded message"))))
     (let ((source-start (point)))
       (insert "source: ")
       (when (functionp insert-source-icon)
@@ -817,7 +814,11 @@ META-FACE control the card styling.  Return the inserted span as (START . END)."
       (insert "\n")
       (disco-ui-apply-line-prefix source-start (point) prefix-state)
       (when meta-face
-        (disco-ui-append-face source-start (point) meta-face)))
+        (disco-ui-append-face source-start (point) meta-face))
+      (when (functionp open-action)
+        (disco-media-add-action-properties
+         source-start (max source-start (1- (point)))
+         open-action (or open-help-echo "Open forwarded message"))))
     (when (and (stringp sent-at) (not (string-empty-p sent-at)))
       (let ((time-start (point)))
         (insert "sent: " sent-at "\n")
@@ -830,20 +831,6 @@ META-FACE control the card styling.  Return the inserted span as (START . END)."
         (unless (string-suffix-p "\n" content)
           (insert "\n"))
         (disco-ui-apply-line-prefix content-start (point) prefix-state)))
-    (when jump-label
-      (let ((action-start (point)))
-        (if (functionp jump-action)
-            (disco-ui-insert-action-button
-             jump-label jump-action
-             :face jump-face
-             :help-echo jump-help-echo)
-          (insert (if jump-face
-                      (propertize jump-label 'face jump-face)
-                    jump-label)))
-        (insert "\n")
-        (disco-ui-apply-line-prefix action-start (point) prefix-state)
-        (when meta-face
-          (disco-ui-append-face action-start (point) meta-face))))
     (cons card-start (point))))
 
 (provide 'disco-ins)

@@ -147,6 +147,22 @@
     (should (equal open-url "https://cdn.example.invalid/cat.png"))
     (should (equal open-key "embed-open-image:cat"))))
 
+(ert-deftest disco-embed-message-preview-cache-keys-cover-media-and-author-icon ()
+  (let* ((msg
+          '((id . "m1")
+            (embeds
+             . (((type . "rich")
+                 (image . ((url . "https://media.invalid/image.png")))
+                 (author
+                  . ((name . "author")
+                     (icon_url . "https://media.invalid/avatar.png"))))))))
+         (keys (disco-embed-message-preview-cache-keys msg)))
+    (should (= 2 (length keys)))
+    (should (seq-some (lambda (key) (string-match-p "embed:m1:1:image" key))
+                      keys))
+    (should (seq-some (lambda (key) (string-match-p "embed-author-icon:m1:1" key))
+                      keys))))
+
 (provide 'disco-embed-test)
 
 ;;; disco-embed-test.el ends here

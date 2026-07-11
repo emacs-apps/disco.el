@@ -585,7 +585,14 @@
       (should-not render-called)
       (should (eq ewoc (disco-chat-timeline-ewoc)))
       (should (eq node-m3 (disco-chat-timeline-node "m3")))
-      (should (string-match-p "↪ alice: source edited" (buffer-string))))))
+      (should (string-match-p "↪ alice: source edited" (buffer-string)))
+      (should-not (string-match-p (regexp-quote "[Jump]") (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "↪ alice: source edited")
+      (let ((position (match-beginning 0)))
+        (should (keymapp (get-text-property position 'keymap)))
+        (should (equal "Open replied-to message"
+                       (get-text-property position 'help-echo)))))))
 
 (ert-deftest disco-room-handle-gateway-message-delete-refreshes-thread-starter-preview ()
   (with-temp-buffer
@@ -1134,6 +1141,23 @@
     (should (string-match-p (regexp-quote "Channel: adult [18+]")
                             (buffer-string)))))
 
+(ert-deftest disco-room-header-omits-static-keybinding-cheat-sheet ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (should (string-match-p "Channel: chat" (buffer-string)))
+    (should-not (string-match-p "M-<: older/more" (buffer-string)))
+    (should-not (string-match-p "timeline c/l/n/p" (buffer-string)))
+    (should-not (string-match-p "type at >>>" (buffer-string)))))
+
 (ert-deftest disco-room-render-shows-reply-and-attachments-near-composer ()
   (with-temp-buffer
     (disco-room-mode)
@@ -1223,8 +1247,8 @@
                               (buffer-string)))
       (should (string-match-p "> old body"
                               (buffer-string)))
-      (should (string-match-p "RET/C-c C-c: save edit"
-                              (buffer-string))))))
+      (should (text-property-any
+               (point-min) (point-max) 'disco-room-input t)))))
 
 (ert-deftest disco-room-send-message-commits-composer-edit-and-restores-state ()
   (with-temp-buffer
@@ -1300,7 +1324,8 @@
     (disco-room-render)
     (should (text-property-any (point-min) (point-max) 'disco-room-input t))
     (should (markerp disco-chatbuf--input-marker))
-    (should (string-match-p "type at >>>" (buffer-string)))))
+    (should (string-match-p (regexp-quote ">>> hello")
+                            (buffer-string)))))
 
 (ert-deftest disco-room-set-draft-preserves-ewoc-and-input-markers ()
   (with-temp-buffer
@@ -1534,7 +1559,7 @@
           '((attachments . (((filename . "cat.png")
                              (url . "https://example.invalid/cat.png")))))))))))
 
-(ert-deftest disco-room-handle-media-rerender-invalidates-only-affected-audio-message ()
+(ert-deftest disco-room-handle-media-rerender-syncs-affected-audio-resource ()
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
@@ -1551,17 +1576,58 @@
         (channel_id . "chat")
         (attachments . (((id . "a1") (filename . "one.ogg")))))))
     (disco-room-render)
-    (let (invalidated rerendered)
-      (disco-media-record-notification 'audio "a2")
-      (cl-letf (((symbol-function 'disco-chat-timeline-invalidate)
-                 (lambda (message-ids)
-                   (setq invalidated message-ids)))
-                ((symbol-function 'disco-room--rerender-open-rooms)
-                 (lambda ()
-                   (setq rerendered t))))
-        (disco-room--handle-media-rerender)
-        (should (equal '("m2") invalidated))
-        (should-not rerendered)))))
+    (should (equal '("m2")
+                   (disco-chat-timeline-dependent-keys
+                    '((:attachment "a2")))))
+    (let (changed-resources refreshed)
+      (cl-letf (((symbol-function 'buffer-list)
+                 (lambda () (list (current-buffer))))
+                ((symbol-function 'disco-room--sync-timeline)
+                 (lambda (&rest arguments)
+                   (setq changed-resources
+                         (plist-get arguments :changed-resources))))
+                ((symbol-function 'disco-room--refresh-open-rooms)
+                 (lambda () (setq refreshed t))))
+        (disco-room--handle-media-rerender 'audio "a2")
+        (should (equal '((:attachment "a2")) changed-resources))
+        (should-not refreshed)))))
+
+(ert-deftest disco-room-preview-completion-syncs-dependent-message-resource ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat") (type . 0) (permissions . "2048")))
+    (let* ((attachment
+            '((id . "image-2")
+              (filename . "two.png")
+              (content_type . "image/png")
+              (url . "https://cdn.invalid/two.png")
+              (proxy_url . "https://media.invalid/two.png")))
+           (preview-key
+            (disco-media-attachment-preview-cache-key attachment)))
+      (disco-state-put-messages
+       "chat"
+       `(((id . "m2")
+          (channel_id . "chat")
+          (attachments . (,attachment)))
+         ((id . "m1") (channel_id . "chat"))))
+      (disco-room-render)
+      (should (equal '("m2")
+                     (disco-chat-timeline-dependent-keys
+                      (list (list :preview preview-key)))))
+      (let (changed-resources)
+        (cl-letf (((symbol-function 'buffer-list)
+                   (lambda () (list (current-buffer))))
+                  ((symbol-function 'disco-room--sync-timeline)
+                   (lambda (&rest arguments)
+                     (setq changed-resources
+                           (plist-get arguments :changed-resources)))))
+          (disco-room--handle-media-rerender 'preview preview-key)
+          (should (equal (list (list :preview preview-key))
+                         changed-resources)))))))
 
 (ert-deftest disco-room-insert-message-attachments-hides-spoiler-media-until-revealed ()
   (with-temp-buffer
@@ -2200,6 +2266,180 @@
     (should (equal "| "
                    (substring-no-properties
                     (get-text-property quote-pos 'line-prefix rendered))))))
+
+(ert-deftest disco-room-thread-entry-is-a-navigable-reference-not-a-button ()
+  (with-temp-buffer
+    (disco-state-reset)
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-upsert-channel
+     '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m1")
+        (channel_id . "chat")
+        (timestamp . "2026-03-08T00:00:00.000000+00:00")
+        (flags . 32)
+        (content . "starter")
+        (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-render)
+    (should (string-match-p (regexp-quote "↪ Thread: thread:m1")
+                            (buffer-string)))
+    (should-not (string-match-p (regexp-quote "[Open thread]")
+                                (buffer-string)))
+    (goto-char (point-min))
+    (search-forward "↪ Thread: thread:m1")
+    (should (keymapp (get-text-property (match-beginning 0) 'keymap)))))
+
+(ert-deftest disco-room-avatar-http-retry-policy-is-explicit ()
+  (dolist (status '(nil 0 408 425 429 500 502 503))
+    (should (disco-room--avatar-transient-http-status-p status)))
+  (dolist (status '(400 401 403 404))
+    (should-not (disco-room--avatar-transient-http-status-p status))))
+
+(ert-deftest disco-room-avatar-fetch-failure-enters-backoff-not-image-cache ()
+  (let ((disco-room--avatar-image-cache (make-hash-table :test #'equal))
+        (disco-room--avatar-fetching (make-hash-table :test #'equal))
+        (disco-room--avatar-failures (make-hash-table :test #'equal))
+        (disco-room--avatar-retry-timer nil)
+        (disco-room-avatar-retry-delays '(2))
+        scheduled-delay)
+    (puthash "avatar" t disco-room--avatar-fetching)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (delay _repeat function &rest args)
+                 (setq scheduled-delay delay)
+                 (list function args)))
+              ((symbol-function 'message) #'ignore))
+      (let ((failure
+             (disco-room--avatar-record-failure
+              "avatar" "https://cdn.invalid/avatar.png" "/tmp/avatar"
+              "temporary network error" t nil 503)))
+        (should (= 1 (plist-get failure :attempts)))
+        (should-not (plist-get failure :permanent))
+        (should (= 503 (plist-get failure :status)))
+        (should (> (plist-get failure :retry-at) (float-time)))
+        (should-not (gethash "avatar" disco-room--avatar-image-cache))
+        (should-not (gethash "avatar" disco-room--avatar-fetching))
+        (should (> scheduled-delay 1.5))))))
+
+(ert-deftest disco-room-avatar-fetch-http-error-preserves-retry-reason ()
+  (let ((disco-room--avatar-image-cache (make-hash-table :test #'equal))
+        (disco-room--avatar-fetching (make-hash-table :test #'equal))
+        (disco-room--avatar-failures (make-hash-table :test #'equal))
+        (disco-room--avatar-retry-timer nil)
+        (disco-room--avatar-fetch-generation 7)
+        else-callback)
+    (cl-letf (((symbol-function 'disco-room--avatar-ensure-queue)
+               (lambda () 'avatar-queue))
+              ((symbol-function 'plz-run) #'ignore)
+              ((symbol-function 'plz-queue)
+               (lambda (&rest arguments)
+                 (setq else-callback
+                       (plist-get (nthcdr 3 arguments) :else))))
+              ((symbol-function 'run-at-time)
+               (lambda (&rest arguments) arguments))
+              ((symbol-function 'message) #'ignore))
+      (disco-room--start-avatar-fetch
+       "avatar" "https://cdn.invalid/avatar.png" "/tmp/avatar")
+      (should (gethash "avatar" disco-room--avatar-fetching))
+      (funcall else-callback '(:status 429 :message "rate limited"))
+      (let ((failure (gethash "avatar" disco-room--avatar-failures)))
+        (should-not (gethash "avatar" disco-room--avatar-fetching))
+        (should (= 429 (plist-get failure :status)))
+        (should (equal "rate limited" (plist-get failure :reason)))
+        (should-not (plist-get failure :permanent))))))
+
+(ert-deftest disco-room-avatar-image-respects-backoff-and-retries-when-due ()
+  (let ((disco-room--avatar-image-cache (make-hash-table :test #'equal))
+        (disco-room--avatar-fetching (make-hash-table :test #'equal))
+        (disco-room--avatar-failures (make-hash-table :test #'equal))
+        started)
+    (puthash "avatar"
+             (list :retry-at (+ (float-time) 60) :permanent nil)
+             disco-room--avatar-failures)
+    (cl-letf (((symbol-function 'disco-room--image-rendering-available-p)
+               (lambda () t))
+              ((symbol-function 'disco-room--avatar-cache-key)
+               (lambda (_message) "avatar"))
+              ((symbol-function 'disco-room--avatar-url)
+               (lambda (_message) "https://cdn.invalid/avatar.png"))
+              ((symbol-function 'disco-room--avatar-cache-file-base)
+               (lambda (_key) "/tmp/avatar"))
+              ((symbol-function 'disco-room--avatar-cache-existing-file)
+               (lambda (_key) nil))
+              ((symbol-function 'disco-room--start-avatar-fetch)
+               (lambda (&rest arguments) (setq started arguments))))
+      (should-not (disco-room--avatar-image 'message))
+      (should-not started)
+      (puthash "avatar" '(:retry-at 0 :permanent nil)
+               disco-room--avatar-failures)
+      (should-not (disco-room--avatar-image 'message))
+      (should (equal started
+                     '("avatar" "https://cdn.invalid/avatar.png"
+                       "/tmp/avatar"))))))
+
+(ert-deftest disco-room-avatar-is-a-projected-message-dependency ()
+  (cl-letf (((symbol-function 'disco-room--avatar-cache-key)
+             (lambda (_message) "avatar-key")))
+    (should (member '(:avatar "avatar-key")
+                    (disco-room--message-dependency-keys
+                     '((id . "message")))))))
+
+(ert-deftest disco-room-attachment-previews-are-projected-message-dependencies ()
+  (let ((attachment '((id . "attachment") (filename . "image.png"))))
+    (cl-letf (((symbol-function 'disco-media-attachment-download-key)
+               (lambda (_attachment) "download-key"))
+              ((symbol-function 'disco-media-attachment-preview-cache-key)
+               (lambda (_attachment) "preview-key"))
+              ((symbol-function 'disco-embed-message-preview-cache-keys)
+               (lambda (_message) '("embed-preview-key"))))
+      (let ((dependencies
+             (disco-room--message-dependency-keys
+              `((id . "message") (attachments . (,attachment))))))
+        (should (member '(:attachment "download-key") dependencies))
+        (should (member '(:preview "preview-key") dependencies))
+        (should (member '(:preview "embed-preview-key") dependencies))))))
+
+(ert-deftest disco-room-avatar-invalidations-target-dependent-rows ()
+  (with-temp-buffer
+    (setq major-mode 'disco-room-mode)
+    (let ((disco-room--avatar-pending-invalidations
+           (make-hash-table :test #'equal))
+          (disco-room--avatar-invalidation-timer 'pending)
+          changed-resources)
+      (puthash "avatar-a" t disco-room--avatar-pending-invalidations)
+      (puthash "avatar-b" t disco-room--avatar-pending-invalidations)
+      (cl-letf (((symbol-function 'disco-room--sync-resource-changes-in-open-rooms)
+                 (lambda (resources)
+                   (setq changed-resources resources))))
+        (disco-room--avatar-flush-invalidations)
+        (should-not disco-room--avatar-invalidation-timer)
+        (should (= 0 (hash-table-count
+                      disco-room--avatar-pending-invalidations)))
+        (should (equal (sort changed-resources
+                             (lambda (left right)
+                               (string< (cadr left) (cadr right))))
+                       '((:avatar "avatar-a") (:avatar "avatar-b"))))))))
+
+(ert-deftest disco-room-avatar-success-clears-failure-and-invalidates-dependents ()
+  (let ((disco-room--avatar-image-cache (make-hash-table :test #'equal))
+        (disco-room--avatar-fetching (make-hash-table :test #'equal))
+        (disco-room--avatar-failures (make-hash-table :test #'equal))
+        retry-scheduled
+        invalidated-key)
+    (puthash "avatar" t disco-room--avatar-fetching)
+    (puthash "avatar" '(:attempts 2) disco-room--avatar-failures)
+    (cl-letf (((symbol-function 'disco-room--avatar-schedule-next-retry)
+              (lambda () (setq retry-scheduled t)))
+              ((symbol-function 'disco-room--avatar-schedule-invalidation)
+               (lambda (cache-key) (setq invalidated-key cache-key))))
+      (disco-room--avatar-complete-fetch "avatar" :image)
+      (should (eq :image (gethash "avatar" disco-room--avatar-image-cache)))
+      (should-not (gethash "avatar" disco-room--avatar-fetching))
+      (should-not (gethash "avatar" disco-room--avatar-failures))
+      (should retry-scheduled)
+      (should (equal "avatar" invalidated-key)))))
 
 (provide 'disco-room-test)
 

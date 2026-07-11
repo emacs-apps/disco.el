@@ -479,6 +479,13 @@
         (call-interactively command)
         (should called)))))
 
+(ert-deftest disco-media-state-notifications-pass-explicit-resource ()
+  (let (received)
+    (let ((disco-media-rerender-function
+           (lambda (kind key) (setq received (cons kind key)))))
+      (disco-media--notify-state-updated 'preview "preview-key")
+      (should (equal '(preview . "preview-key") received)))))
+
 (provide 'disco-media-test)
 
 ;;; disco-media-test.el ends here

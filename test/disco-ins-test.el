@@ -35,22 +35,21 @@
       (should (eq t (get-text-property (car span) 'read-only)))
       (should (equal 'unread (get-text-property (car span) 'section))))))
 
-(ert-deftest disco-ins-insert-reference-line-supports-body-and-button ()
+(ert-deftest disco-ins-insert-reference-line-makes-preview-navigable ()
   (with-temp-buffer
     (let (clicked)
       (disco-ins-insert-reference-line
        "preview"
        :prefix "    "
        :face 'shadow
-       :button-label "[Jump]"
-       :button-action (lambda ()
-                        (setq clicked t)))
+       :action (lambda () (setq clicked t))
+       :help-echo "Open reply")
       (goto-char (point-min))
-      (should (string-match-p (regexp-quote "↪ preview [Jump]")
-                              (buffer-string)))
+      (should (equal "↪ preview\n" (buffer-string)))
       (should (eq 'shadow (get-text-property (point) 'face)))
-      (search-forward "[Jump]")
-      (button-activate (button-at (match-beginning 0)))
+      (should (equal "Open reply" (get-text-property (point) 'help-echo)))
+      (call-interactively
+       (lookup-key (get-text-property (point) 'keymap) (kbd "RET")))
       (should clicked))))
 
 (ert-deftest disco-ins-insert-reaction-line-renders-selected-and-unselected-chips ()
@@ -124,7 +123,7 @@
       (should (equal (get-text-property (car span) 'display)
                      '(space :align-to 25))))))
 
-(ert-deftest disco-ins-insert-forward-card-renders-metadata-and-action ()
+(ert-deftest disco-ins-insert-forward-card-renders-navigable-metadata ()
   (with-temp-buffer
     (let (clicked)
       (disco-ins-insert-forward-card
@@ -132,21 +131,22 @@
        :sent-at "2026-03-09 10:00"
        :content "hello forward"
        :insert-source-icon (lambda () (insert "[icon]"))
-       :jump-label "[Jump to source]"
-       :jump-action (lambda () (setq clicked t))
-       :jump-face 'link
+       :open-action (lambda () (setq clicked t))
+       :open-help-echo "Open source"
        :border-face 'shadow
        :title-face 'bold
        :meta-face 'italic)
-      (should (string-match-p (regexp-quote "[forwarded message]") (buffer-string)))
+      (should (string-match-p (regexp-quote "Forwarded message") (buffer-string)))
       (should (string-match-p (regexp-quote "source: [icon] Guild / channel")
                               (buffer-string)))
       (should (string-match-p (regexp-quote "sent: 2026-03-09 10:00")
                               (buffer-string)))
       (should (string-match-p (regexp-quote "hello forward") (buffer-string)))
+      (should-not (string-match-p (regexp-quote "[Jump") (buffer-string)))
       (goto-char (point-min))
-      (search-forward "[Jump to source]")
-      (button-activate (button-at (match-beginning 0)))
+      (should (equal "Open source" (get-text-property (point) 'help-echo)))
+      (call-interactively
+       (lookup-key (get-text-property (point) 'keymap) (kbd "RET")))
       (should clicked))))
 
 (ert-deftest disco-ins-insert-attachment-lines-renders-summary-and-url ()
