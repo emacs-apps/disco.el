@@ -11,6 +11,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'cl-lib)
+(require 'image)
 (require 'image-mode)
 (require 'browse-url)
 (require 'url-handlers)
@@ -81,6 +82,26 @@ The default keeps media inside Emacs, matching telega's
   :type 'boolean
   :group 'disco-media)
 
+(defcustom disco-media-inline-animations t
+  "When non-nil, play short animated media inside chat previews."
+  :type 'boolean
+  :group 'disco-media)
+
+(defcustom disco-media-inline-animation-max-duration 10.0
+  "Maximum duration in seconds for automatic inline animation playback."
+  :type 'number
+  :group 'disco-media)
+
+(defcustom disco-media-inline-animation-max-file-size (* 8 1024 1024)
+  "Maximum source size in bytes eligible for inline animation playback."
+  :type 'integer
+  :group 'disco-media)
+
+(defcustom disco-media-inline-animation-frame-rate 8
+  "Frames per second used when converting short videos for inline playback."
+  :type 'integer
+  :group 'disco-media)
+
 (defcustom disco-media-audio-player-command
   (cond
    ((executable-find "ffplay") "ffplay -nodisp -autoexit")
@@ -123,6 +144,12 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-media--attachment-preview-fetching (make-hash-table :test #'equal)
   "Set of attachment preview cache keys currently being fetched.")
+
+(defvar disco-media--video-preview-processes (make-hash-table :test #'equal)
+  "Active video preview probe/transcode processes keyed by preview key.")
+
+(defvar-local disco-media--inline-animation-window-starts nil
+  "Last scanned window starts for inline animation discovery.")
 
 (defvar disco-media--attachment-preview-fetch-budget nil
   "Dynamic cap for number of preview fetches started during one render pass.")
@@ -274,6 +301,16 @@ which keeps multi-attachment messages segment-aware.")
 (defun disco-media-clear-preview-memory-cache ()
   "Clear in-memory preview image cache without touching disk files."
   (interactive)
+  (maphash
+   (lambda (_key image)
+     (when (consp image)
+       (disco-media-stop-inline-animation image)))
+   disco-media--attachment-preview-image-cache)
+  (let (video-preview-keys)
+    (maphash (lambda (key _process) (push key video-preview-keys))
+             disco-media--video-preview-processes)
+    (dolist (key video-preview-keys)
+      (disco-media-cancel-video-preview key)))
   (clrhash disco-media--attachment-preview-image-cache)
   (clrhash disco-media--attachment-preview-fetching)
   (clrhash disco-media--attachment-waveform-image-cache)
@@ -298,6 +335,145 @@ which keeps multi-attachment messages segment-aware.")
              (image-size image t)
              t)
          (error nil))))
+
+(defun disco-media--number (value)
+  "Return finite numeric VALUE, accepting decimal strings, or nil."
+  (cond
+   ((and (numberp value)
+         (not (and (floatp value) (isnan value))))
+    value)
+   ((and (stringp value)
+         (string-match-p
+          "\\`[[:space:]]*[0-9]+\\(?:\\.[0-9]+\\)?[[:space:]]*\\'"
+          value))
+    (string-to-number value))))
+
+(defun disco-media--file-size (file)
+  "Return FILE size in bytes, or nil when unavailable."
+  (when (disco-media-file-present-p file)
+    (file-attribute-size (file-attributes file))))
+
+(defun disco-media--inline-animation-frame-data (image)
+  "Return (FRAME-COUNT . DURATION) for multi-frame IMAGE, or nil."
+  (when-let* ((multi (ignore-errors (image-multi-frame-p image))))
+    (let* ((count (car multi))
+           (delay (or (and (numberp (cdr multi)) (cdr multi))
+                      image-default-frame-delay))
+           (duration (* count delay)))
+      (and (> count 1)
+           (> duration 0)
+           (cons count duration)))))
+
+(defun disco-media--mark-inline-animation-image (image file)
+  "Mark multi-frame IMAGE from FILE for bounded inline playback."
+  (when (and disco-media-inline-animations
+             (disco-media-image-object-valid-p image)
+             (let ((size (disco-media--file-size file)))
+               (and size
+                    (<= size disco-media-inline-animation-max-file-size))))
+    (when-let* ((frame-data (disco-media--inline-animation-frame-data image))
+                (duration (cdr frame-data))
+                ((<= duration disco-media-inline-animation-max-duration)))
+      (plist-put (cdr image) :disco-inline-animation t)
+      (plist-put (cdr image) :disco-inline-animation-duration duration)))
+  image)
+
+(defun disco-media-inline-animation-image-p (image)
+  "Return non-nil when IMAGE is marked for inline animation."
+  (and (eq (car-safe image) 'image)
+       (plist-get (cdr image) :disco-inline-animation)))
+
+(defun disco-media-stop-inline-animation (image)
+  "Stop bounded inline playback for IMAGE and reset it to frame zero."
+  (when (disco-media-inline-animation-image-p image)
+    (when-let* ((timer (image-animate-timer image)))
+      (cancel-timer timer))
+    (when-let* ((timer (plist-get (cdr image)
+                                  :disco-inline-animation-reset-timer)))
+      (when (timerp timer)
+        (cancel-timer timer)))
+    (ignore-errors (image-show-frame image 0 t))
+    (plist-put (cdr image) :disco-inline-animation-reset-timer nil)
+    (plist-put (cdr image) :disco-inline-animation-played nil)))
+
+(defun disco-media--finish-inline-animation (image)
+  "Finish one inline playback cycle for IMAGE."
+  (when (disco-media-inline-animation-image-p image)
+    (when-let* ((timer (image-animate-timer image)))
+      (cancel-timer timer))
+    (ignore-errors (image-show-frame image 0 t))
+    (plist-put (cdr image) :disco-inline-animation-reset-timer nil)
+    (plist-put (cdr image) :disco-inline-animation-played nil)))
+
+(defun disco-media-start-inline-animation (image)
+  "Play marked IMAGE once when its buffer is currently visible."
+  (when (and disco-media-inline-animations
+             (disco-media-inline-animation-image-p image)
+             (not (plist-get (cdr image) :disco-inline-animation-played))
+             (get-buffer-window (current-buffer) t))
+    (let ((duration (plist-get (cdr image) :disco-inline-animation-duration)))
+      (when (and (numberp duration) (> duration 0))
+        (plist-put (cdr image) :disco-inline-animation-played t)
+        (image-animate image 0 nil)
+        (plist-put
+         (cdr image)
+         :disco-inline-animation-reset-timer
+         (run-at-time (+ duration 0.4) nil
+                      #'disco-media--finish-inline-animation image))
+        t))))
+
+(defun disco-media--display-image-spec (display)
+  "Return image spec nested in DISPLAY, including sliced displays."
+  (cond
+   ((and (consp display) (eq (car display) 'image)) display)
+   ((and (consp display)
+         (consp (car display))
+         (eq (caar display) 'slice)
+         (consp (cadr display))
+         (eq (car (cadr display)) 'image))
+    (cadr display))))
+
+(defun disco-media--start-window-inline-animations (window &optional start end)
+  "Start marked animations visible in WINDOW between START and END."
+  (when (and (window-live-p window)
+             (eq (window-buffer window) (current-buffer)))
+    (let ((position (or start (window-start window)))
+          (end (or end (window-end window t) (point-max))))
+      (while (< position end)
+        (when-let* ((image (disco-media--display-image-spec
+                            (get-text-property position 'display))))
+          (disco-media-start-inline-animation image))
+        (setq position
+              (or (next-single-property-change position 'display nil end)
+                  end)))
+      (setf (alist-get window disco-media--inline-animation-window-starts
+                       nil nil #'eq)
+            (window-start window)))))
+
+(defun disco-media--start-window-inline-animations-after-scroll
+    (window display-start)
+  "Start animations after WINDOW has scrolled to DISPLAY-START."
+  (when (and (window-live-p window)
+             (eq (window-buffer window) (current-buffer)))
+    (let ((display-end
+           (save-excursion
+             (goto-char display-start)
+             (vertical-motion (1+ (window-body-height window)) window)
+             (point))))
+      (disco-media--start-window-inline-animations
+       window display-start display-end))))
+
+(defun disco-media--start-buffer-inline-animations-after-command ()
+  "Discover animations when a displayed window moved after a command."
+  (setq disco-media--inline-animation-window-starts
+        (seq-filter (lambda (entry) (window-live-p (car entry)))
+                    disco-media--inline-animation-window-starts))
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (unless (equal (alist-get window
+                              disco-media--inline-animation-window-starts
+                              nil nil #'eq)
+                   (window-start window))
+      (disco-media--start-window-inline-animations window))))
 
 (defun disco-media-url-present-p (url)
   "Return non-nil when URL is a non-empty string."
@@ -659,7 +835,16 @@ FALLBACK is protocol alt text, not a synthetic media-kind label."
                          slice-height-px)))
         (insert-image image label nil slice)
         (disco-media-add-action-properties
-         slice-start (point) action (or help-echo "Open media"))))))
+         slice-start (point) action (or help-echo "Open media"))))
+    (when (disco-media-inline-animation-image-p image)
+      (add-hook 'window-state-change-functions
+                #'disco-media--start-window-inline-animations nil t)
+      (add-hook 'window-scroll-functions
+                #'disco-media--start-window-inline-animations-after-scroll nil t)
+      (add-hook 'post-command-hook
+                #'disco-media--start-buffer-inline-animations-after-command nil t)
+      (dolist (window (get-buffer-window-list (current-buffer) nil t))
+        (disco-media--start-window-inline-animations window)))))
 
 (defun disco-media--char-pixel-width ()
   "Return default character width in pixels for current frame."
@@ -740,6 +925,16 @@ FALLBACK is protocol alt text, not a synthetic media-kind label."
      ((and (stringp url) (not (string-empty-p url))) url)
      (t nil))))
 
+(defun disco-media-video-preview-policy-key ()
+  "Return a cache key fragment for the current video preview policy."
+  (format "video-v1:%s:%s:%s:%s:%s:%s"
+          (if disco-media-inline-animations "animated" "static")
+          disco-media-inline-animation-max-duration
+          disco-media-inline-animation-max-file-size
+          disco-media-inline-animation-frame-rate
+          disco-media-preview-max-width
+          disco-media-preview-max-height))
+
 (defun disco-media-attachment-download-url (attachment)
   "Return canonical download URL for ATTACHMENT object."
   (let ((url (alist-get 'url attachment))
@@ -757,7 +952,7 @@ FALLBACK is protocol alt text, not a synthetic media-kind label."
          (seed (or (and attachment-id (format "%s" attachment-id))
                    (and url (md5 url))
                    name)))
-    (format "%s:%s:%s:%s"
+    (format "%s:%s:%s:%s%s"
             seed
             name
             (max 64
@@ -767,7 +962,10 @@ FALLBACK is protocol alt text, not a synthetic media-kind label."
             (max 64
                  (if (numberp disco-media-preview-max-height)
                      disco-media-preview-max-height
-                   360)))))
+                   360))
+            (if (eq (disco-media-attachment-kind attachment) 'video)
+                (concat ":" (disco-media-video-preview-policy-key))
+              ""))))
 
 (defun disco-media-attachment-preview-cache-state (cache-key)
   "Return preview cache state for CACHE-KEY.
@@ -852,7 +1050,7 @@ VALUE should be nil for uncapped mode or a non-negative integer."
                               :scale 1.0
                               :ascent 'center)))))
     (and (disco-media-image-object-valid-p image)
-         image)))
+         (disco-media--mark-inline-animation-image image file))))
 
 (defun disco-media--attachment-preview-image-from-file (file)
   "Create inline attachment preview image from FILE, or nil when unavailable."
@@ -1089,10 +1287,12 @@ This overlay only darkens slightly and optionally adds a video play marker."
 
 (defun disco-media-attachment-video-display-image (preview-image)
   "Return PREVIEW-IMAGE decorated with a play marker for normal video preview."
-  (disco-media--decorate-preview-image preview-image
-                                       :spoiler-filter-p nil
-                                       :video-p t
-                                       :dim-opacity 0.0))
+  (if (disco-media-inline-animation-image-p preview-image)
+      preview-image
+    (disco-media--decorate-preview-image preview-image
+                                         :spoiler-filter-p nil
+                                         :video-p t
+                                         :dim-opacity 0.0)))
 
 (defun disco-media--attachment-spoiler-preview-cache-key (cache-file preview-image)
   "Return cache key for spoiler preview built from CACHE-FILE and PREVIEW-IMAGE."
@@ -1713,8 +1913,179 @@ resource after a remote file becomes local.  CLIENT-LABEL prefixes messages."
     (or (string-prefix-p "video/" content-type)
         (string-match-p "\\.\\(?:mp4\\|mov\\|mkv\\|webm\\|avi\\|m4v\\)\\'" filename))))
 
-(defun disco-media--start-video-preview-fetch (cache-key url cache-base)
-  "Start asynchronous video preview extraction for CACHE-KEY from URL."
+(defun disco-media--video-preview-source-size (media source)
+  "Return MEDIA SOURCE size in bytes, or nil when unavailable."
+  (or (disco-media--number (alist-get 'size media))
+      (disco-media--number (alist-get 'file_size media))
+      (and (disco-media-file-present-p source)
+           (disco-media--file-size source))))
+
+(defun disco-media--video-preview-duration (media)
+  "Return MEDIA duration in seconds, or nil when unavailable."
+  (or (disco-media--number (alist-get 'duration_secs media))
+      (disco-media--number (alist-get 'duration media))))
+
+(defun disco-media--video-inline-animation-eligible-p (media source duration)
+  "Return non-nil when MEDIA SOURCE with DURATION may animate inline."
+  (let ((size (disco-media--video-preview-source-size media source)))
+    (and disco-media-inline-animations
+         (numberp size)
+         (> size 0)
+         (<= size disco-media-inline-animation-max-file-size)
+         (numberp duration)
+         (> duration 0)
+         (<= duration disco-media-inline-animation-max-duration))))
+
+(defun disco-media--video-animation-filter ()
+  "Return ffmpeg filter graph for bounded inline video previews."
+  (format
+   (concat "[0:v]fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease:"
+           "flags=lanczos,setsar=1,split[frames][palette-source];"
+           "[palette-source]palettegen=max_colors=128:stats_mode=diff[palette];"
+           "[frames][palette]paletteuse=dither=bayer:bayer_scale=5:"
+           "diff_mode=rectangle")
+   (max 1 disco-media-inline-animation-frame-rate)
+   (max 64 disco-media-preview-max-width)
+   (max 64 disco-media-preview-max-height)))
+
+(defun disco-media-cancel-video-preview (cache-key)
+  "Cancel the active video preview owned by CACHE-KEY, if any."
+  (when-let* ((process (gethash cache-key disco-media--video-preview-processes)))
+    (remhash cache-key disco-media--video-preview-processes)
+    (when (process-live-p process)
+      (delete-process process))
+    (when (buffer-live-p (process-buffer process))
+      (kill-buffer (process-buffer process)))
+    t))
+
+(cl-defun disco-media-start-video-preview
+    (cache-key source media cache-base callback)
+  "Create a static or animated preview for MEDIA SOURCE asynchronously.
+
+CACHE-KEY owns the active process, CACHE-BASE names output files, and CALLBACK
+is called with (IMAGE TARGET-FILE).  Short, small videos become bounded GIF
+animations; other videos retain the existing static thumbnail preview."
+  (let ((ffmpeg (executable-find "ffmpeg"))
+        (ffprobe (executable-find "ffprobe"))
+        (known-duration (disco-media--video-preview-duration media))
+        (source-size (disco-media--video-preview-source-size media source))
+        (static-source (or (and (disco-media-file-present-p
+                                 (alist-get 'preview_source media))
+                                (alist-get 'preview_source media))
+                           (and (disco-media-url-present-p
+                                 (alist-get 'preview_source media))
+                                (alist-get 'preview_source media))
+                           source)))
+    (cl-labels
+        ((current-process-p (process)
+           (eq process (gethash cache-key disco-media--video-preview-processes)))
+         (forget-process (process)
+           (when (current-process-p process)
+             (remhash cache-key disco-media--video-preview-processes)
+             t))
+         (finish (process target-file)
+           (let ((current-p (forget-process process)))
+             (unwind-protect
+                 (when current-p
+                   (if (and (= (process-exit-status process) 0)
+                            (file-exists-p target-file))
+                       (funcall callback
+                              (disco-media--attachment-preview-image-from-file
+                               target-file)
+                              target-file)
+                     (funcall callback nil nil)))
+               (when (buffer-live-p (process-buffer process))
+                 (kill-buffer (process-buffer process))))))
+         (launch (animated-p duration)
+           (let* ((extension (if animated-p "gif" "jpg"))
+                  (target-file (format "%s.%s" cache-base extension))
+                  (input-source (if animated-p source static-source))
+                  (command
+                   (if animated-p
+                       (list ffmpeg
+                             "-nostdin" "-y" "-loglevel" "error"
+                             "-i" input-source
+                             "-t" (format "%.3f" duration)
+                             "-filter_complex"
+                             (disco-media--video-animation-filter)
+                             "-an" "-loop" "0" target-file)
+                     (list ffmpeg
+                           "-nostdin" "-y" "-loglevel" "error"
+                           "-i" input-source
+                           "-vf"
+                           (concat "thumbnail=24,scale=960:-2:"
+                                   "force_original_aspect_ratio=decrease")
+                           "-frames:v" "1" target-file))))
+             (disco-media--attachment-preview-delete-stale-cache-files cache-base)
+             (make-directory (file-name-directory target-file) t)
+             (let ((process
+                    (make-process
+                     :name (format "disco-video-preview-%s"
+                                   (substring (md5 cache-key) 0 8))
+                     :buffer (generate-new-buffer " *disco-video-preview*")
+                     :command command
+                     :noquery t
+                     :sentinel
+                     (lambda (process _event)
+                       (when (memq (process-status process) '(exit signal))
+                         (finish process target-file))))))
+               (puthash cache-key process disco-media--video-preview-processes))))
+         (probe-duration ()
+           (let ((process
+                  (make-process
+                   :name (format "disco-video-probe-%s"
+                                 (substring (md5 cache-key) 0 8))
+                   :buffer (generate-new-buffer " *disco-video-probe*")
+                   :command (list ffprobe
+                                  "-v" "error"
+                                  "-show_entries" "format=duration"
+                                  "-of" "default=noprint_wrappers=1:nokey=1"
+                                  source)
+                   :noquery t
+                   :sentinel
+                   (lambda (process _event)
+                     (when (memq (process-status process) '(exit signal))
+                       (let* ((current-p (forget-process process))
+                              (buffer (process-buffer process))
+                              (output (and current-p
+                                           (buffer-live-p buffer)
+                                           (with-current-buffer buffer
+                                             (string-trim (buffer-string)))))
+                              (duration (and output
+                                             (disco-media--number output))))
+                         (when (buffer-live-p buffer)
+                           (kill-buffer buffer))
+                         (when current-p
+                           (launch
+                            (disco-media--video-inline-animation-eligible-p
+                             media source duration)
+                            duration))))))))
+             (puthash cache-key process disco-media--video-preview-processes))))
+      (cond
+       ((or (not ffmpeg)
+            (not (or (disco-media-file-present-p static-source)
+                     (disco-media-url-present-p static-source))))
+        (funcall callback nil nil))
+       ((not disco-media-inline-animations)
+        (launch nil nil))
+       ((not (or (disco-media-file-present-p source)
+                 (disco-media-url-present-p source)))
+        (launch nil nil))
+       ((not (and (numberp source-size)
+                  (> source-size 0)
+                  (<= source-size disco-media-inline-animation-max-file-size)))
+        (launch nil nil))
+       ((numberp known-duration)
+        (launch (disco-media--video-inline-animation-eligible-p
+                 media source known-duration)
+                known-duration))
+       (ffprobe
+       (probe-duration))
+       (t
+        (launch nil nil))))))
+
+(defun disco-media--start-video-preview-fetch (cache-key attachment cache-base)
+  "Start asynchronous video preview extraction for ATTACHMENT."
   (unless (or (gethash cache-key disco-media--attachment-preview-fetching)
               (gethash cache-key disco-media--attachment-preview-image-cache)
               (and (numberp disco-media--attachment-preview-fetch-budget)
@@ -1722,47 +2093,28 @@ resource after a remote file becomes local.  CLIENT-LABEL prefixes messages."
     (when (numberp disco-media--attachment-preview-fetch-budget)
       (cl-decf disco-media--attachment-preview-fetch-budget))
     (puthash cache-key t disco-media--attachment-preview-fetching)
-    (let ((ffmpeg (executable-find "ffmpeg")))
-      (if (not ffmpeg)
-          (disco-media--attachment-preview-complete-fetch cache-key nil)
-        (let ((target-file (format "%s.jpg" cache-base)))
-          (disco-media--attachment-preview-delete-stale-cache-files cache-base)
-          (make-directory (file-name-directory target-file) t)
-          (condition-case err
-              (make-process
-               :name (format "disco-video-preview-%s" (substring (md5 cache-key) 0 8))
-               :buffer (generate-new-buffer " *disco-video-preview*")
-               :command (list ffmpeg
-                              "-nostdin"
-                              "-y"
-                              "-loglevel"
-                              "error"
-                              "-i"
-                              url
-                              "-vf"
-                              "thumbnail=24,scale=960:-2:force_original_aspect_ratio=decrease"
-                              "-frames:v"
-                              "1"
-                              target-file)
-               :noquery t
-               :sentinel
-               (lambda (proc _event)
-                 (when (memq (process-status proc) '(exit signal))
-                   (unwind-protect
-                       (if (and (= (process-exit-status proc) 0)
-                                (file-exists-p target-file))
-                           (disco-media--attachment-preview-complete-fetch
-                            cache-key
-                            (disco-media--attachment-preview-image-from-file target-file)
-                            target-file)
-                         (disco-media--attachment-preview-complete-fetch cache-key nil target-file))
-                     (when (buffer-live-p (process-buffer proc))
-                       (kill-buffer (process-buffer proc)))))))
-            (error
-             (disco-media--attachment-preview-complete-fetch cache-key nil)
-             (message "disco: video preview enqueue failed for %s: %s"
-                      cache-key
-                      (error-message-string err)))))))))
+    (let* ((local-file (and (disco-media-file-present-p
+                             (alist-get 'file attachment))
+                            (alist-get 'file attachment)))
+           (preview-source (or local-file
+                               (disco-media-attachment-preview-url attachment)))
+           (source (or local-file
+                       (disco-media-attachment-download-url attachment)
+                       preview-source))
+           (media (if preview-source
+                      (cons (cons 'preview_source preview-source) attachment)
+                    attachment)))
+      (condition-case err
+          (disco-media-start-video-preview
+           cache-key source media cache-base
+           (lambda (image target-file)
+             (disco-media--attachment-preview-complete-fetch
+              cache-key image target-file)))
+        (error
+         (disco-media--attachment-preview-complete-fetch cache-key nil)
+         (message "disco: video preview enqueue failed for %s: %s"
+                  cache-key
+                  (error-message-string err)))))))
 
 (defun disco-media--start-attachment-preview-fetch (cache-key url cache-base)
   "Start asynchronous preview fetch for CACHE-KEY from URL into CACHE-BASE."
@@ -1844,7 +2196,8 @@ resource after a remote file becomes local.  CLIENT-LABEL prefixes messages."
           (if image-like
               (disco-media--start-attachment-preview-fetch cache-key url cache-base)
             (when video-like
-              (disco-media--start-video-preview-fetch cache-key url cache-base)))
+              (disco-media--start-video-preview-fetch
+               cache-key attachment cache-base)))
           nil)
          (t nil)))))))
 
