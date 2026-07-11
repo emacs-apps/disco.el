@@ -13,6 +13,7 @@
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-customize)
+(require 'disco-permission)
 (require 'disco-state)
 (require 'disco-thread)
 (require 'disco-util)
@@ -57,8 +58,31 @@ The result is `loading', `error', `loaded', or `unloaded'."
     (cond
      ((eq request-status 'loading) 'loading)
      ((disco-state-guild-channels-loaded-p guild-id) 'loaded)
+     ((eq request-status 'loaded) 'unloaded)
      (request-status request-status)
      (t 'unloaded))))
+
+(defun disco-directory--guild-channel-snapshot-resolved-p (channels)
+  "Return non-nil when every guild channel in CHANNELS has permissions."
+  (cl-every #'disco-permission-channel-known-p channels))
+
+(defun disco-directory--unresolved-channel-snapshot-error (guild-id channels)
+  "Return protocol error data for unresolved GUILD-ID CHANNELS."
+  (let ((unresolved
+         (delq nil
+               (mapcar
+                (lambda (channel)
+                  (unless (disco-permission-channel-known-p channel)
+                    (and (alist-get 'id channel)
+                         (format "%s" (alist-get 'id channel)))))
+                channels))))
+    (list :kind 'unresolved-channel-permissions
+          :guild-id guild-id
+          :channel-ids unresolved
+          :message
+          (format "Discord omitted computed permissions for %d channel%s"
+                  (length unresolved)
+                  (if (= (length unresolved) 1) "" "s")))))
 
 (defun disco-directory-parent-threads-state (parent-channel-id)
   "Return active-thread request state for PARENT-CHANNEL-ID.
@@ -400,11 +424,20 @@ for the same guild are coalesced."
            (when (and (= generation
                          (gethash guild-id disco-directory--guild-generation 0))
                       (disco-directory--guild-known-p guild-id))
-             (disco-state-put-channels guild-id channels)
-             (puthash guild-id 'loaded disco-directory--guild-status)
-             (disco-directory--emit
-              'guild-loaded :guild-id guild-id :generation generation)
-             (disco-directory--load-active-threads-async guild-id generation)))
+             (if (disco-directory--guild-channel-snapshot-resolved-p channels)
+                 (progn
+                   (disco-state-put-channels guild-id channels)
+                   (puthash guild-id 'loaded disco-directory--guild-status)
+                   (disco-directory--emit
+                    'guild-loaded :guild-id guild-id :generation generation)
+                   (disco-directory--load-active-threads-async guild-id generation))
+               (let ((error-value
+                      (disco-directory--unresolved-channel-snapshot-error
+                       guild-id channels)))
+                 (puthash guild-id 'error disco-directory--guild-status)
+                 (disco-directory--emit
+                  'guild-error :guild-id guild-id :generation generation
+                  :error error-value)))))
          :on-error
          (lambda (error-value)
            (when (= generation

@@ -673,12 +673,12 @@
       (should (equal '(read-state settings guilds private-channels subscribe backoff emit)
                      (nreverse order))))))
 
-(ert-deftest disco-gateway-ready-channel-snapshot-marks-guild-loaded ()
+(ert-deftest disco-gateway-ready-channel-snapshot-seeds-unresolved-guild ()
   (disco-state-reset)
   (disco-gateway--ingest-ready-guilds
    '(((id . "g1")
       (channels . (((id . "c1") (guild_id . "g1") (type . 0)))))))
-  (should (disco-state-guild-channels-loaded-p "g1"))
+  (should-not (disco-state-guild-channels-loaded-p "g1"))
   (should (equal "c1"
                  (alist-get 'id (car (disco-state-guild-channels "g1"))))))
 

@@ -976,7 +976,7 @@ Discord Ready may deliver some fields as versioned structures
                            (disco-gateway--versioned-entries
                             (alist-get 'threads guild)))))
         (when (and guild-id has-channels)
-          (disco-state-put-channels guild-id channels))
+          (disco-state-seed-guild-channels guild-id channels))
         (when has-threads
           (dolist (thread threads)
             (disco-state-upsert-channel thread)))))

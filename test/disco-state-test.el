@@ -634,6 +634,52 @@
         (should (member "thread" (disco-state-guild-thread-ids "g1"))))
     (disco-state-reset)))
 
+(ert-deftest disco-state-gateway-channel-seed-is-provisional ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-put-channels
+         "g1"
+         '(((id . "visible") (guild_id . "g1") (type . 0)
+            (permission_overwrites . nil) (permissions . "1024"))))
+        (disco-state-upsert-channel
+         '((id . "thread") (guild_id . "g1") (parent_id . "visible")
+           (type . 11)))
+        (disco-state-seed-guild-channels
+         "g1"
+         '(((id . "visible") (guild_id . "g1") (type . 0)
+            (permission_overwrites . nil))))
+        (should-not (disco-state-guild-channels-loaded-p "g1"))
+        (should (equal "1024"
+                       (alist-get 'permissions
+                                  (disco-state-channel "visible"))))
+        (should (disco-state-channel "thread")))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-channel-upsert-invalidates-changed-permission-context ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-put-channels
+         "g1"
+         '(((id . "c1") (guild_id . "g1") (type . 0)
+            (parent_id . "cat") (permission_overwrites . nil)
+            (permissions . "1024"))))
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)
+           (parent_id . "cat") (permission_overwrites . nil)
+           (name . "renamed")))
+        (should (disco-state-guild-channels-loaded-p "g1"))
+        (should (equal "1024"
+                       (alist-get 'permissions (disco-state-channel "c1"))))
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)
+           (parent_id . "cat")
+           (permission_overwrites . (((id . "g1") (deny . "1024"))))))
+        (should-not (disco-state-guild-channels-loaded-p "g1"))
+        (should-not (assq 'permissions (disco-state-channel "c1"))))
+    (disco-state-reset)))
+
 (ert-deftest disco-state-guild-snapshots-canonicalize-channel-ownership ()
   (disco-state-reset)
   (let ((channel '((id . "channel") (type . 0)))

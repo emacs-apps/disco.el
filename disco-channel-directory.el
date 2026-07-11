@@ -1022,6 +1022,12 @@ rows, so passive updates are coalesced until a real window is available."
 (defun disco-channel-directory--handle-gateway-event (event)
   "Reconcile current directory after a relevant gateway EVENT."
   (when (disco-channel-directory--event-relevant-p event)
+    (when (and (memq (plist-get event :type)
+                     '(guild-sync channel-create channel-update))
+               (not (disco-state-guild-channels-loaded-p
+                     disco-channel-directory--guild-id)))
+      (disco-directory-load-guild-async
+       disco-channel-directory--guild-id))
     (disco-channel-directory--request-reconcile
      (disco-gateway-event-channel-ids event))))
 

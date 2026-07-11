@@ -234,6 +234,60 @@
         (disco-channel-directory-refresh)
         (should (equal '("forum" :force t) request))))))
 
+(ert-deftest disco-channel-directory-waits-for-resolved-channel-permissions ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (disco-state-set-guilds '(((id . "g1") (name . "Guild One"))))
+  (disco-state-seed-guild-channels
+   "g1"
+   '(((id . "visible") (guild_id . "g1") (name . "visible") (type . 0))
+     ((id . "hidden") (guild_id . "g1") (name . "hidden") (type . 0))))
+  (unwind-protect
+      (with-temp-buffer
+        (disco-channel-directory-mode)
+        (setq disco-channel-directory--guild-id "g1")
+        (should
+         (equal '(note)
+                (disco-channel-directory-test--entry-types
+                 (disco-channel-directory--project-entries))))
+        (let ((resolved
+               '(((id . "visible") (guild_id . "g1") (name . "visible")
+                  (type . 0) (permissions . "1024"))
+                 ((id . "hidden") (guild_id . "g1") (name . "hidden")
+                  (type . 0) (permissions . "0")))))
+          (disco-state-put-channels "g1" resolved)
+          (let ((before
+                 (mapcar #'disco-channel-directory-test--entry-id
+                         (disco-channel-directory--project-loaded-entries))))
+            (should
+             (equal (list disco-channel-directory--uncategorized-group
+                          "visible")
+                    before))
+            (disco-state-put-channels "g1" (copy-tree resolved))
+            (should
+             (equal before
+                    (mapcar
+                     #'disco-channel-directory-test--entry-id
+                     (disco-channel-directory--project-loaded-entries)))))))
+    (disco-state-reset)
+    (disco-directory-reset)))
+
+(ert-deftest disco-channel-directory-rehydrates-provisional-gateway-sync ()
+  (disco-channel-directory-test--with-guild
+    (disco-state-seed-guild-channels
+     "g1" (disco-state-guild-channels "g1"))
+    (let (requested reconciled)
+      (cl-letf (((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (guild-id &rest args)
+                   (setq requested (cons guild-id args))))
+                ((symbol-function 'disco-channel-directory--request-reconcile)
+                 (lambda (&optional channel-ids)
+                   (setq reconciled channel-ids))))
+        (disco-channel-directory--handle-gateway-event
+         '(:type guild-sync :guild-ids ("g1")))
+        (should (equal '("g1") requested))
+        (should-not reconciled)))))
+
 (ert-deftest disco-channel-directory-hidden-updates-defer-until-displayed ()
   (disco-channel-directory-test--with-guild
     (let ((displayed nil)

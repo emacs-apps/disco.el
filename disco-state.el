@@ -21,7 +21,7 @@
   "Hash table guild-id -> list of channel objects.")
 
 (defvar disco-state--guild-channels-loaded (make-hash-table :test #'equal)
-  "Hash table of guild IDs with complete channel snapshots.")
+  "Hash table of guild IDs with permission-resolved channel snapshots.")
 
 (defvar disco-state--channels-by-id (make-hash-table :test #'equal)
   "Hash table channel-id -> channel object.")
@@ -448,16 +448,17 @@ MEMBER-COUNT is optional approximate thread member count."
   (remhash guild-id disco-state--thread-ids-by-guild))
 
 (defun disco-state-guild-channels-loaded-p (guild-id)
-  "Return non-nil when GUILD-ID has a complete channel snapshot."
+  "Return non-nil when GUILD-ID has a permission-resolved channel snapshot."
   (and (gethash (disco-state--normalize-id guild-id)
                 disco-state--guild-channels-loaded)
        t))
 
-(defun disco-state-put-channels (guild-id channels)
-  "Store complete non-thread CHANNELS snapshot for GUILD-ID.
+(defun disco-state--put-guild-channel-snapshot (guild-id channels resolved-p)
+  "Store non-thread CHANNELS snapshot for GUILD-ID.
 
 Active thread entities are an independent Gateway/API collection and remain
-indexed when the guild channel directory is refreshed."
+indexed when the guild channel directory is refreshed.  RESOLVED-P records
+whether every channel carries authoritative computed permissions."
   (setq guild-id (disco-state--normalize-id guild-id))
   (setq channels
         (delq nil
@@ -499,7 +500,49 @@ indexed when the guild channel directory is refreshed."
                   (disco-state-upsert-thread-member channel-id user-id))))
             (when (numberp thread-member-count)
               (disco-state-set-thread-member-count channel-id thread-member-count)))))))
-  (puthash guild-id t disco-state--guild-channels-loaded))
+  (if resolved-p
+      (puthash guild-id t disco-state--guild-channels-loaded)
+    (remhash guild-id disco-state--guild-channels-loaded))
+  channels)
+
+(defun disco-state-put-channels (guild-id channels)
+  "Store a permission-resolved non-thread CHANNELS snapshot for GUILD-ID.
+
+Use `disco-state-seed-guild-channels' for Gateway snapshots, whose channel
+objects do not contain computed permissions for the current user."
+  (disco-state--put-guild-channel-snapshot guild-id channels t))
+
+(defun disco-state--carry-channel-permissions (channel)
+  "Carry stable computed permissions from the cached copy of CHANNEL.
+
+Gateway channel objects omit the REST-only `permissions' field.  It remains
+valid across updates that leave the channel's permission context unchanged."
+  (let* ((channel-id (disco-state--normalize-id (alist-get 'id channel)))
+         (old (and channel-id (gethash channel-id disco-state--channels-by-id))))
+    (if (or (assq 'permissions channel)
+            (not (assq 'permissions old))
+            (not (equal (alist-get 'type old) (alist-get 'type channel)))
+            (not (equal (alist-get 'parent_id old)
+                        (alist-get 'parent_id channel)))
+            (not (equal (alist-get 'permission_overwrites old)
+                        (alist-get 'permission_overwrites channel))))
+        channel
+      (let ((merged (copy-tree channel)))
+        (setf (alist-get 'permissions merged)
+              (alist-get 'permissions old))
+        merged))))
+
+(defun disco-state-seed-guild-channels (guild-id channels)
+  "Seed GUILD-ID with provisional Gateway CHANNELS.
+
+Gateway snapshots are structurally complete but lack the current user's
+computed channel permissions.  Cache them for identity and ordering without
+claiming that the directory is ready to render.  Previously resolved
+permissions are carried only while their permission context is unchanged."
+  (disco-state--put-guild-channel-snapshot
+   guild-id
+   (mapcar #'disco-state--carry-channel-permissions channels)
+   nil))
 
 (defun disco-state-guild-channels (guild-id)
   "Return channels for GUILD-ID."
@@ -603,7 +646,8 @@ Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
 
 (defun disco-state-upsert-channel (channel)
   "Insert or update one CHANNEL object in all indexes."
-  (let* ((channel-id (alist-get 'id channel))
+  (let* ((channel (disco-state--carry-channel-permissions channel))
+         (channel-id (alist-get 'id channel))
          (guild-id (alist-get 'guild_id channel))
          (old (and channel-id (gethash channel-id disco-state--channels-by-id))))
     (when (and old
@@ -621,7 +665,11 @@ Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
       (let ((channels (or (gethash guild-id disco-state--channels-by-guild) '())))
         (puthash guild-id
                  (disco-state--replace-or-append-channel channels channel)
-                 disco-state--channels-by-guild)))
+                 disco-state--channels-by-guild))
+      (when (and (not (disco-state-channel-thread-p channel))
+                 (not (assq 'permissions channel)))
+        (remhash (disco-state--normalize-id guild-id)
+                 disco-state--guild-channels-loaded)))
     (when (disco-state-private-channel-p channel)
       (setq disco-state--private-channels
             (disco-state--replace-or-append-channel
