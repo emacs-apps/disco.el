@@ -1,87 +1,74 @@
 ;;; disco-markdown-test.el --- Tests for disco-markdown -*- lexical-binding: t; -*-
 
+(require 'cl-lib)
 (require 'ert)
-
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
-(let ((markdown-mode-dir "/home/_WD_/.config/emacs/.local/straight/repos/markdown-mode"))
-  (when (file-directory-p markdown-mode-dir)
-    (add-to-list 'load-path markdown-mode-dir)))
 
 (require 'disco-markdown)
 
 (ert-deftest disco-markdown-render-internal-inline-links-are-openable ()
-  (let ((disco-markdown-backend 'internal))
-    (let* ((rendered (disco-markdown-render
-                      "hello [link](https://example.com)"
-                      :context 'test-internal-link))
-           (pos (string-match "link" rendered)))
-      (should pos)
-      (should (equal "hello link" (substring-no-properties rendered)))
-      (should (equal "https://example.com"
-                     (get-text-property pos 'disco-markdown-url rendered)))
-      (should (disco-markdown--face-match-p
-               (get-text-property pos 'face rendered)
-               'disco-markdown-link-face))
-      (should (keymapp (get-text-property pos 'keymap rendered))))))
+  (let* ((rendered (disco-markdown-render
+                    "hello [link](https://example.com)"
+                    :context 'test-internal-link))
+         (pos (string-match "link" rendered)))
+    (should pos)
+    (should (equal "hello link" (substring-no-properties rendered)))
+    (should (equal "https://example.com"
+                   (get-text-property pos 'disco-markdown-url rendered)))
+    (should (disco-markdown--face-match-p
+             (get-text-property pos 'face rendered)
+             'disco-markdown-link-face))
+    (should (keymapp (get-text-property pos 'keymap rendered)))))
 
 (ert-deftest disco-markdown-render-internal-inline-links-support-escaped-delimiters ()
-  (let ((disco-markdown-backend 'internal))
-    (let* ((rendered (disco-markdown-render
-                      "[te\\]st](https://example.com/a\\)b)"
-                      :context 'test-internal-link-escapes))
-           (plain (substring-no-properties rendered))
-           (pos (string-match "te]st" plain)))
-      (should pos)
-      (should (equal "te]st" plain))
-      (should (equal "https://example.com/a)b"
-                     (get-text-property pos 'disco-markdown-url rendered)))
-      (should (keymapp (get-text-property pos 'keymap rendered))))))
+  (let* ((rendered (disco-markdown-render
+                    "[te\\]st](https://example.com/a\\)b)"
+                    :context 'test-internal-link-escapes))
+         (plain (substring-no-properties rendered))
+         (pos (string-match "te]st" plain)))
+    (should pos)
+    (should (equal "te]st" plain))
+    (should (equal "https://example.com/a)b"
+                   (get-text-property pos 'disco-markdown-url rendered)))
+    (should (keymapp (get-text-property pos 'keymap rendered)))))
 
 (ert-deftest disco-markdown-render-internal-escaped-links-stay-literal ()
-  (let ((disco-markdown-backend 'internal))
-    (dolist (entry '(("\\[link](https://example.com)" . "[link](https://example.com)")
-                     ("\\<https://example.com>" . "<https://example.com>")))
-      (let* ((rendered (disco-markdown-render (car entry)
-                                              :context 'test-internal-link-literal))
-             (plain (substring-no-properties rendered))
-             (url-pos (string-match "https://example.com" plain)))
-        (should (equal (cdr entry) plain))
-        (should url-pos)
-        (should-not (get-text-property url-pos 'disco-markdown-url rendered))))))
+  (dolist (entry '(("\\[link](https://example.com)" . "[link](https://example.com)")
+                   ("\\<https://example.com>" . "<https://example.com>")))
+    (let* ((rendered (disco-markdown-render (car entry)
+                                            :context 'test-internal-link-literal))
+           (plain (substring-no-properties rendered))
+           (url-pos (string-match "https://example.com" plain)))
+      (should (equal (cdr entry) plain))
+      (should url-pos)
+      (should-not (get-text-property url-pos 'disco-markdown-url rendered)))))
 
 (ert-deftest disco-markdown-render-internal-bare-links-are-openable ()
-  (let ((disco-markdown-backend 'internal))
-    (let* ((rendered (disco-markdown-render
-                      "hello https://example.com"
-                      :context 'test-internal-bare-link))
-           (pos (string-match "https://example.com" rendered)))
-      (should pos)
-      (should (equal "https://example.com"
-                     (get-text-property pos 'disco-markdown-url rendered)))
-      (should (disco-markdown--face-match-p
-               (get-text-property pos 'face rendered)
-               'disco-markdown-link-face))
-      (should (keymapp (get-text-property pos 'keymap rendered))))))
+  (let* ((rendered (disco-markdown-render
+                    "hello https://example.com"
+                    :context 'test-internal-bare-link))
+         (pos (string-match "https://example.com" rendered)))
+    (should pos)
+    (should (equal "https://example.com"
+                   (get-text-property pos 'disco-markdown-url rendered)))
+    (should (disco-markdown--face-match-p
+             (get-text-property pos 'face rendered)
+             'disco-markdown-link-face))
+    (should (keymapp (get-text-property pos 'keymap rendered)))))
 
 (ert-deftest disco-markdown-render-internal-angle-links-are-openable ()
-  (let ((disco-markdown-backend 'internal))
-    (let* ((rendered (disco-markdown-render
-                      "hello <https://example.com>"
-                      :context 'test-internal-angle-link))
-           (pos (string-match "https://example.com" rendered)))
-      (should pos)
-      (should (equal "hello https://example.com"
-                     (substring-no-properties rendered)))
-      (should (equal "https://example.com"
-                     (get-text-property pos 'disco-markdown-url rendered)))
-      (should (keymapp (get-text-property pos 'keymap rendered))))))
+  (let* ((rendered (disco-markdown-render
+                    "hello <https://example.com>"
+                    :context 'test-internal-angle-link))
+         (pos (string-match "https://example.com" rendered)))
+    (should pos)
+    (should (equal "hello https://example.com"
+                   (substring-no-properties rendered)))
+    (should (equal "https://example.com"
+                   (get-text-property pos 'disco-markdown-url rendered)))
+    (should (keymapp (get-text-property pos 'keymap rendered)))))
 
 (ert-deftest disco-markdown-render-internal-spoilers-mask-and-tag-message ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "Look ||spoiler|| now"
                     :context 'test-internal-spoiler
                     :spoiler-message-id "m1"))
@@ -96,8 +83,7 @@
     (should (keymapp (get-text-property pos 'keymap rendered)))))
 
 (ert-deftest disco-markdown-render-internal-spoilers-mask-edge-spaces ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "Look || spoiler || now"
                     :context 'test-internal-spoiler-spaces
                     :spoiler-message-id "m1"))
@@ -109,8 +95,7 @@
     (should (equal "█" (get-text-property (1- (match-end 0)) 'display rendered)))))
 
 (ert-deftest disco-markdown-render-internal-inline-code-has-stable-copy-property ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "Use `code` now"
                     :context 'test-internal-inline-code-property))
          (plain (substring-no-properties rendered))
@@ -121,8 +106,7 @@
                 (get-text-property pos 'disco-markdown-code-kind rendered)))))
 
 (ert-deftest disco-markdown-copy-export-materializes-blockquotes-and-reveals-spoilers ()
-  (let* ((disco-markdown-backend 'internal)
-         (exported (disco-markdown-copy-export
+  (let* ((exported (disco-markdown-copy-export
                     "> quote\nLook ||secret||"
                     :context 'test-copy-export
                     :spoiler-message-id "m1"
@@ -133,8 +117,7 @@
     (should-not (get-text-property 0 'keymap exported))))
 
 (ert-deftest disco-markdown-render-internal-subtitle-lines-strip-marker ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render "-# Small print"
+  (let* ((rendered (disco-markdown-render "-# Small print"
                                           :context 'test-internal-subtitle))
          (plain (substring-no-properties rendered)))
     (should (equal "Small print" plain))
@@ -143,22 +126,20 @@
              'disco-markdown-subtitle-face))))
 
 (ert-deftest disco-markdown-render-internal-headings-strip-markers-for-all-levels ()
-  (let ((disco-markdown-backend 'internal))
-    (dolist (entry '(("# One" . disco-markdown-heading-1-face)
-                     ("## Two" . disco-markdown-heading-2-face)
-                     ("### Three" . disco-markdown-heading-3-face)
-                     ("#### Four" . disco-markdown-heading-4-face)))
-      (let* ((rendered (disco-markdown-render (car entry)
-                                              :context 'test-internal-heading))
-             (plain (substring-no-properties rendered)))
-        (should-not (string-prefix-p "#" plain))
-        (should (disco-markdown--face-match-p
-                 (get-text-property 0 'face rendered)
-                 (cdr entry)))))))
+  (dolist (entry '(("# One" . disco-markdown-heading-1-face)
+                   ("## Two" . disco-markdown-heading-2-face)
+                   ("### Three" . disco-markdown-heading-3-face)
+                   ("#### Four" . disco-markdown-heading-4-face)))
+    (let* ((rendered (disco-markdown-render (car entry)
+                                            :context 'test-internal-heading))
+           (plain (substring-no-properties rendered)))
+      (should-not (string-prefix-p "#" plain))
+      (should (disco-markdown--face-match-p
+               (get-text-property 0 'face rendered)
+               (cdr entry))))))
 
 (ert-deftest disco-markdown-render-internal-emphasis-strips-markers ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "**bold** *italic* __under__ ~~strike~~"
                     :context 'test-internal-emphasis))
          (plain (substring-no-properties rendered))
@@ -181,8 +162,7 @@
              'disco-markdown-strikethrough-face))))
 
 (ert-deftest disco-markdown-render-internal-nested-emphasis-combines-faces ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "***both*** **bold *italic*** *italic **bold*** [***link***](https://example.com)"
                     :context 'test-internal-nested-emphasis))
          (plain (substring-no-properties rendered))
@@ -222,8 +202,7 @@
              'disco-markdown-emphasis-face))))
 
 (ert-deftest disco-markdown-render-internal-inline-code-protects-content ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "`https://example.com` `<@123>` `||spoiler||`"
                     :context 'test-internal-inline-code
                     :spoiler-message-id "m1"))
@@ -240,8 +219,7 @@
     (should-not (get-text-property spoiler-pos 'disco-markdown-spoiler-message-id rendered))))
 
 (ert-deftest disco-markdown-render-internal-fenced-code-protects-block-content ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "```elisp\n# Title\n-# subtitle\nhttps://example.com\n<@123>\n```"
                     :context 'test-internal-fence
                     :spoiler-message-id "m1"))
@@ -260,8 +238,7 @@
     (should-not (get-text-property mention-pos 'disco-markdown-spoiler-message-id rendered))))
 
 (ert-deftest disco-markdown-render-internal-fenced-code-uses-language-highlighting ()
-  (let* ((disco-markdown-backend 'internal)
-         (disco-markdown-fontify-code-blocks-natively t)
+  (let* ((disco-markdown-fontify-code-blocks-natively t)
          (rendered (disco-markdown-render
                     "```elisp\n(let ((x 1))\n  x)\n```"
                     :context 'test-internal-fence-highlight))
@@ -276,9 +253,54 @@
              (get-text-property let-pos 'face rendered)
              'font-lock-keyword-face))))
 
+(ert-deftest disco-markdown-render-cache-distinguishes-code-fontification-policy ()
+  (let ((disco-markdown-cache-enabled t)
+        (source "```elisp\n(let ((x 1)) x)\n```"))
+    (disco-markdown-clear-cache)
+    (unwind-protect
+        (let* ((disco-markdown-fontify-code-blocks-natively nil)
+               (plain-rendered
+                (disco-markdown-render source :context 'test-cache-policy))
+               (plain-pos (string-match "let" plain-rendered)))
+          (should plain-pos)
+          (should-not
+           (disco-markdown--face-match-p
+            (get-text-property plain-pos 'face plain-rendered)
+            'font-lock-keyword-face))
+          (let* ((disco-markdown-fontify-code-blocks-natively t)
+                 (highlighted
+                  (disco-markdown-render source :context 'test-cache-policy))
+                 (highlighted-pos (string-match "let" highlighted)))
+            (should highlighted-pos)
+            (should
+             (disco-markdown--face-match-p
+              (get-text-property highlighted-pos 'face highlighted)
+              'font-lock-keyword-face))))
+      (disco-markdown-clear-cache))))
+
+(ert-deftest disco-markdown-render-cache-tracks-state-channel-names ()
+  (let ((disco-markdown-cache-enabled t)
+        (channel-name "before"))
+    (disco-markdown-clear-cache)
+    (unwind-protect
+        (cl-letf (((symbol-function 'disco-state-channel)
+                   (lambda (channel-id)
+                     `((id . ,channel-id) (name . ,channel-name)))))
+          (should
+           (equal "#before"
+                  (substring-no-properties
+                   (disco-markdown-render
+                    "<#123>" :context 'test-cache-channel-name))))
+          (setq channel-name "after")
+          (should
+           (equal "#after"
+                  (substring-no-properties
+                   (disco-markdown-render
+                    "<#123>" :context 'test-cache-channel-name)))))
+      (disco-markdown-clear-cache))))
+
 (ert-deftest disco-markdown-render-internal-blockquotes-add-prefix-and-face ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render "> quoted"
+  (let* ((rendered (disco-markdown-render "> quoted"
                                           :context 'test-internal-blockquote))
          (plain (substring-no-properties rendered))
          (prefix (get-text-property 0 'line-prefix rendered)))
@@ -290,8 +312,7 @@
              'disco-markdown-blockquote-face))))
 
 (ert-deftest disco-markdown-render-internal-blockquote-rest-quotes-following-lines ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render ">>> first line\nsecond line"
+  (let* ((rendered (disco-markdown-render ">>> first line\nsecond line"
                                           :context 'test-internal-blockquote-rest))
          (plain (substring-no-properties rendered))
          (second-pos (string-match "second" plain)))
@@ -304,8 +325,7 @@
                     (get-text-property second-pos 'line-prefix rendered))))))
 
 (ert-deftest disco-markdown-render-internal-blockquote-allows-headings-inside ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render "> # Quoted Title"
+  (let* ((rendered (disco-markdown-render "> # Quoted Title"
                                           :context 'test-internal-blockquote-heading))
          (plain (substring-no-properties rendered)))
     (should (equal "Quoted Title" plain))
@@ -320,15 +340,13 @@
              'disco-markdown-blockquote-face))))
 
 (ert-deftest disco-markdown-render-internal-lists-stay-plain-text ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render "* one\n  + two\n- three\n1. four"
+  (let* ((rendered (disco-markdown-render "* one\n  + two\n- three\n1. four"
                                           :context 'test-internal-list))
          (plain (substring-no-properties rendered)))
     (should (equal "* one\n  + two\n- three\n1. four" plain))))
 
 (ert-deftest disco-markdown-render-internal-escapes-protect-inline-markup ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "\\*literal\\* \\||spoiler||"
                     :context 'test-internal-escapes-inline
                     :spoiler-message-id "m1"))
@@ -344,8 +362,7 @@
                                    rendered))))
 
 (ert-deftest disco-markdown-render-internal-escapes-protect-block-markup ()
-  (let* ((disco-markdown-backend 'internal)
-         (rendered (disco-markdown-render
+  (let* ((rendered (disco-markdown-render
                     "\\> not quote\n\\- not list\n\\# not heading\n\\-# not subtitle"
                     :context 'test-internal-escapes-block))
          (plain (substring-no-properties rendered))
@@ -361,129 +378,32 @@
                  (get-text-property subtitle-pos 'face rendered)
                  'disco-markdown-subtitle-face))))
 
-(ert-deftest disco-markdown-render-inline-links-are-openable ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let ((disco-markdown-backend 'markdown-mode))
-    (let* ((rendered (disco-markdown-render
-                      "hello [link](https://example.com)"
-                      :context 'test-link))
-           (pos (string-match "link" rendered)))
-      (should pos)
-      (should (equal "https://example.com"
-                     (get-text-property pos 'disco-markdown-url rendered)))
-      (should (keymapp (get-text-property pos 'keymap rendered))))))
-
-(ert-deftest disco-markdown-render-bare-links-are-openable ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let ((disco-markdown-backend 'markdown-mode))
-    (let* ((rendered (disco-markdown-render
-                      "hello https://example.com"
-                      :context 'test-bare-link))
-           (pos (string-match "https://example.com" rendered)))
-      (should pos)
-      (should (equal "https://example.com"
-                     (get-text-property pos 'disco-markdown-url rendered)))
-      (should (keymapp (get-text-property pos 'keymap rendered))))))
-
-(ert-deftest disco-markdown-render-spoilers-mask-and-tag-message ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let* ((disco-markdown-backend 'markdown-mode)
-         (rendered (disco-markdown-render
+(ert-deftest disco-markdown-render-internal-spoilers-can-be-revealed ()
+  (let* ((rendered (disco-markdown-render
                     "Look ||spoiler|| now"
-                    :context 'test-spoiler
-                    :spoiler-message-id "m1"))
-         (plain (substring-no-properties rendered))
-         (pos (string-match "spoiler" plain)))
-    (should pos)
-    (should (equal "Look spoiler now" plain))
-    (should (equal "m1"
-                   (get-text-property pos 'disco-markdown-spoiler-message-id rendered)))
-    (should (equal "█"
-                   (get-text-property pos 'display rendered)))
-    (should (keymapp (get-text-property pos 'keymap rendered)))))
-
-(ert-deftest disco-markdown-render-spoilers-can-be-revealed ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let* ((disco-markdown-backend 'markdown-mode)
-         (rendered (disco-markdown-render
-                    "Look ||spoiler|| now"
-                    :context 'test-spoiler-reveal
+                    :context 'test-internal-spoiler-reveal
                     :spoiler-message-id "m1"
                     :reveal-spoilers t))
          (plain (substring-no-properties rendered))
          (pos (string-match "spoiler" plain)))
     (should pos)
-    (should (string-match-p "spoiler" plain))
+    (should (equal "Look spoiler now" plain))
     (should (equal "m1"
-                   (get-text-property pos 'disco-markdown-spoiler-message-id rendered)))))
+                   (get-text-property
+                    pos 'disco-markdown-spoiler-message-id rendered)))
+    (should-not (get-text-property pos 'display rendered))))
 
-(ert-deftest disco-markdown-render-subtitle-lines-strip-marker ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let* ((disco-markdown-backend 'markdown-mode)
-         (rendered (disco-markdown-render "-# Small print"
-                                          :context 'test-subtitle))
-         (plain (substring-no-properties rendered)))
-    (should (equal "Small print" plain))
-    (should (disco-markdown--face-match-p
-             (get-text-property 0 'face rendered)
-             'disco-markdown-subtitle-face))))
-
-(ert-deftest disco-markdown-render-headings-strip-markers-for-all-levels ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let ((disco-markdown-backend 'markdown-mode))
-    (dolist (entry '(("# One" . disco-markdown-heading-1-face)
-                     ("## Two" . disco-markdown-heading-2-face)
-                     ("### Three" . disco-markdown-heading-3-face)
-                     ("#### Four" . disco-markdown-heading-4-face)))
-      (let* ((rendered (disco-markdown-render (car entry)
-                                              :context 'test-heading))
-             (plain (substring-no-properties rendered)))
-        (should-not (string-prefix-p "#" plain))
-        (should (disco-markdown--face-match-p
-                 (get-text-property 0 'face rendered)
-                 (cdr entry)))))))
-
-(ert-deftest disco-markdown-render-fenced-code-protects-block-content ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let* ((disco-markdown-backend 'markdown-mode)
-         (rendered (disco-markdown-render
-                    "```elisp\n# Title\n-# subtitle\nhttps://example.com\n<@123>\n```"
-                    :context 'test-fence-protect
-                    :spoiler-message-id "m1"))
-         (plain (substring-no-properties rendered))
-         (heading-pos (string-match "# Title" plain))
-         (subtitle-pos (string-match "-# subtitle" plain))
-         (url-pos (string-match "https://example.com" plain))
-         (mention-pos (string-match "<@123>" plain)))
-    (should (equal "# Title\n-# subtitle\nhttps://example.com\n<@123>\n" plain))
-    (dolist (pos (list heading-pos subtitle-pos url-pos mention-pos))
-      (should (disco-markdown--face-match-p
-               (get-text-property pos 'face rendered)
-               'markdown-code-face)))
-    (should-not (disco-markdown--face-match-p
-                 (get-text-property heading-pos 'face rendered)
-                 'disco-markdown-heading-1-face))
-    (should-not (get-text-property url-pos 'disco-markdown-url rendered))
-    (should-not (disco-markdown--face-match-p
-                 (get-text-property url-pos 'face rendered)
-                 'disco-markdown-link-face))
-    (should-not (disco-markdown--face-match-p
-                 (get-text-property mention-pos 'face rendered)
-                 'disco-markdown-mention-face))))
-
-(ert-deftest disco-markdown-render-fenced-code-keeps-indented-hash-lines-literal ()
-  (skip-unless (disco-markdown--markdown-mode-available-p))
-  (let* ((disco-markdown-backend 'markdown-mode)
-         (rendered (disco-markdown-render
+(ert-deftest disco-markdown-render-internal-fenced-code-keeps-indented-hash-lines-literal ()
+  (let* ((rendered (disco-markdown-render
                     "```nix\n      # Can use ssh instead of password on system\n```"
-                    :context 'test-fence-indented-hash))
+                    :context 'test-internal-fence-indented-hash))
          (plain (substring-no-properties rendered))
          (pos (string-match "# Can use ssh instead of password on system" plain)))
     (should (equal "      # Can use ssh instead of password on system\n" plain))
     (should pos)
     (should (disco-markdown--face-match-p
              (get-text-property pos 'face rendered)
-             'markdown-code-face))
+             'disco-markdown-code-face))
     (should-not (disco-markdown--face-match-p
                  (get-text-property pos 'face rendered)
                  'disco-markdown-heading-1-face))))

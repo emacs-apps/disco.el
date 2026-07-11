@@ -3,10 +3,6 @@
 (require 'ert)
 (require 'cl-lib)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-gateway)
 
 (ert-deftest disco-gateway-identify-payload-includes-passive-v2-capability-by-default ()

@@ -2,10 +2,6 @@
 
 (require 'ert)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-util)
 
 (ert-deftest disco-util-json-true-p-recognizes-json-truthy-values ()

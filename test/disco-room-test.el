@@ -3,10 +3,6 @@
 (require 'ert)
 (require 'cl-lib)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-room)
 (require 'disco-state)
 
@@ -111,31 +107,30 @@
     (should (equal "m1" (alist-get 'id (disco-msg-at (point)))))))
 
 (ert-deftest disco-room-message-command-map-does-not-clobber-link-keymaps ()
-  (let ((disco-markdown-backend 'internal))
-    (with-temp-buffer
-      (disco-state-reset)
-      (disco-room-mode)
-      (setq-local disco-room--channel-id "chat")
-      (setq-local disco-room--channel-name "chat")
-      (disco-state-upsert-channel
-       '((id . "chat")
-         (type . 0)
-         (guild_id . "g1")
-         (permissions . "2048")))
-      (disco-state-put-messages
-       "chat"
-       '(((id . "m1")
-          (channel_id . "chat")
-          (content . "see [link](https://example.com) now"))))
-      (disco-room-render)
-      (goto-char (point-min))
-      (search-forward "link")
-      (backward-char 2)
-      (should (equal "https://example.com"
-                     (get-text-property (point) 'disco-markdown-url)))
-      (should (keymapp (get-text-property (point) 'keymap)))
-      (should-not (eq disco-msg-command-map
-                      (get-text-property (point) 'keymap))))))
+  (with-temp-buffer
+    (disco-state-reset)
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m1")
+        (channel_id . "chat")
+        (content . "see [link](https://example.com) now"))))
+    (disco-room-render)
+    (goto-char (point-min))
+    (search-forward "link")
+    (backward-char 2)
+    (should (equal "https://example.com"
+                   (get-text-property (point) 'disco-markdown-url)))
+    (should (keymapp (get-text-property (point) 'keymap)))
+    (should-not (eq disco-msg-command-map
+                    (get-text-property (point) 'keymap)))))
 
 (ert-deftest disco-room-message-navigation-uses-msg-next-and-previous ()
   (with-temp-buffer
@@ -174,11 +169,9 @@
 (ert-deftest disco-room-draft-history-search-loads-match ()
   (with-temp-buffer
     (disco-room-mode)
-    (let ((ring (make-ring 5)))
-      (setq-local appkit-chatbuf--input-ring ring)
-      (ring-insert ring "deploy status")
-      (ring-insert ring "hello world")
-      (ring-insert ring "alpha beta"))
+    (appkit-chatbuf-input-history-push "deploy status")
+    (appkit-chatbuf-input-history-push "hello world")
+    (appkit-chatbuf-input-history-push "alpha beta")
     (cl-letf (((symbol-function 'message)
                (lambda (&rest _args) nil)))
       (disco-room-draft-history-search "hello"))
@@ -653,6 +646,26 @@
       (should (eq node-m2 (appkit-chat-timeline-node "m2")))
       (should (string-match-p "Sorry, we couldn't load the first message in this thread."
                               (buffer-string))))))
+
+(ert-deftest disco-room-thread-starter-spoiler-targets-container-message ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (let* ((msg '((id . "container")
+                  (type . 21)
+                  (referenced_message
+                   . ((id . "source") (content . "||secret||")))))
+           (hidden (disco-room--thread-starter-reference-content msg))
+           (hidden-pos (string-match "secret" hidden)))
+      (should hidden-pos)
+      (should (equal "container"
+                     (get-text-property
+                      hidden-pos 'disco-markdown-spoiler-message-id hidden)))
+      (should (equal "█" (get-text-property hidden-pos 'display hidden)))
+      (setq-local disco-room--revealed-spoiler-message-id "container")
+      (let* ((revealed (disco-room--thread-starter-reference-content msg))
+             (revealed-pos (string-match "secret" revealed)))
+        (should revealed-pos)
+        (should-not (get-text-property revealed-pos 'display revealed))))))
 
 (ert-deftest disco-room-handle-channel-update-refreshes-forward-source-label ()
   (with-temp-buffer
@@ -1138,7 +1151,7 @@
        (permissions . "0")))
     (disco-room-render)
     (should-not (text-property-any (point-min) (point-max) 'disco-room-input t))
-    (should-not (marker-buffer appkit-chatbuf--input-marker))
+    (should-not (appkit-chatbuf-input-start-position))
     (should (string-match-p "composer hidden: missing SEND_MESSAGES"
                             (buffer-string)))
     (should-not (string-match-p "type at >>>" (buffer-string)))))
@@ -1342,11 +1355,11 @@
        (permissions . "2048")))
     (disco-room-render)
     (should (text-property-any (point-min) (point-max) 'disco-room-input t))
-    (should (markerp appkit-chatbuf--input-marker))
+    (should (integerp (appkit-chatbuf-input-start-position)))
     (should (string-match-p (regexp-quote ">>> hello")
                             (buffer-string)))))
 
-(ert-deftest disco-room-set-draft-preserves-ewoc-and-input-markers ()
+(ert-deftest disco-room-set-draft-preserves-ewoc-and-composer-anchor ()
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
@@ -1360,16 +1373,16 @@
        (permissions . "2048")))
     (disco-room-render)
     (let ((ewoc (appkit-chat-timeline-ewoc))
-          (input-marker appkit-chatbuf--input-marker)
-          (prompt-marker appkit-chatbuf--prompt-marker)
+          (input-start (appkit-chatbuf-input-start-position))
+          (prompt-start (appkit-chatbuf-prompt-start-position))
           frame-update-called)
       (cl-letf (((symbol-function 'disco-room--update-frame)
                  (lambda (&rest _args)
                    (setq frame-update-called t))))
         (disco-room--set-draft "updated body"))
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
-      (should (eq input-marker appkit-chatbuf--input-marker))
-      (should (eq prompt-marker appkit-chatbuf--prompt-marker))
+      (should (= input-start (appkit-chatbuf-input-start-position)))
+      (should (= prompt-start (appkit-chatbuf-prompt-start-position)))
       (should-not frame-update-called)
       (should (string-match-p "> updated body" (buffer-string))))))
 
@@ -2272,8 +2285,7 @@
                        (alist-get 'id (car (disco-state-messages "target")))))))))
 
 (ert-deftest disco-room-forward-snapshot-content-uses-internal-markdown-renderer ()
-  (let* ((disco-markdown-backend 'internal)
-         (msg '((id . "m1")
+  (let* ((msg '((id . "m1")
                 (message_snapshots
                  . (((message
                       . ((content . "[link](https://example.com)\n> quote"))))))))
@@ -2461,6 +2473,98 @@
       (should-not (gethash "avatar" disco-room--avatar-failures))
       (should retry-scheduled)
       (should (equal "avatar" invalidated-key)))))
+
+(ert-deftest disco-room-avatar-svg-cache-key-tracks-derived-factor-geometry ()
+  (let ((disco-room-avatar-image-size 28)
+        (disco-room-avatar-round-size-factor 1.0)
+        (disco-room-avatar-round-inset-ratio 0.0)
+        (disco-room-avatar-extra-bottom-line t)
+        (disco-room-avatar-factors-alist '((2 . (0.8 . 0.1)))))
+    (cl-letf (((symbol-function 'appkit-chat-avatar-line-pixel-height)
+               (lambda () 21))
+              ((symbol-function 'appkit-chat-avatar-column-pixel-width)
+               (lambda () 9)))
+      (let* ((before (disco-room--avatar-svg-geometry 2))
+             (before-key
+              (disco-room--avatar-svg-cache-key "avatar.png" 'mtime 2 before)))
+        (setq disco-room-avatar-factors-alist '((2 . (0.82 . 0.08))))
+        (let* ((after (disco-room--avatar-svg-geometry 2))
+               (after-key
+                (disco-room--avatar-svg-cache-key "avatar.png" 'mtime 2 after)))
+          (should (= (plist-get before :char-columns)
+                     (plist-get after :char-columns)))
+          (should-not (= (plist-get before :circle-height)
+                         (plist-get after :circle-height)))
+          (should-not (equal before-key after-key)))))))
+
+(ert-deftest disco-room-text-scale-reprints-existing-avatar-slices ()
+  (with-temp-buffer
+    (disco-state-reset)
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-upsert-channel
+     '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
+    (disco-state-put-messages
+     "chat"
+     '(((id . "m1")
+        (channel_id . "chat")
+        (timestamp . "2026-07-11T12:00:00.000000+00:00")
+        (content . "hello")
+        (author . ((id . "u1") (username . "Alice"))))))
+    (let ((line-height 21)
+          (disco-room-avatar-round-images nil))
+      (cl-labels
+          ((avatar-slice-height
+            ()
+            (goto-char (point-min))
+            (search-forward "Alice")
+            (let* ((prefix
+                    (get-text-property (line-beginning-position) 'line-prefix))
+                   (display (and (stringp prefix)
+                                 (get-text-property 0 'display prefix))))
+              (nth 4 (car display)))))
+        (cl-letf (((symbol-function 'disco-room--avatar-image)
+                   (lambda (_message)
+                     '(image :type png :data "avatar" :width 16 :height 16)))
+                  ((symbol-function 'appkit-media-image-object-valid-p)
+                   (lambda (image) (and (consp image) (eq (car image) 'image))))
+                  ((symbol-function 'image-size)
+                   (lambda (image &rest _args)
+                     (cons (or (plist-get (cdr image) :width) 16)
+                           (or (plist-get (cdr image) :height) 16))))
+                  ((symbol-function 'appkit-chat-avatar-line-pixel-height)
+                   (lambda () line-height))
+                  ((symbol-function 'appkit-chat-avatar-column-pixel-width)
+                   (lambda () 9))
+                  ((symbol-function 'appkit-chat-avatar--graphical-display-p)
+                   (lambda () t))
+                  ((symbol-function 'disco-media-clear-preview-memory-cache)
+                   #'ignore))
+          (disco-room-render)
+          (let ((node (appkit-chat-timeline-node "m1")))
+            (should (= 21 (avatar-slice-height)))
+            (setq line-height 35)
+            (disco-room--on-text-scale-change)
+            (should (eq node (appkit-chat-timeline-node "m1")))
+            (should (= 35 (avatar-slice-height)))))))))
+
+(ert-deftest disco-room-window-resize-refreshes-presentation-geometry ()
+  (with-temp-buffer
+    (setq major-mode 'disco-room-mode)
+    (setq-local disco-room--chat-fill-column 70)
+    (let ((renders 0)
+          (layout-refreshes 0))
+      (cl-letf (((symbol-function 'disco-room--update-chat-fill-column)
+                 (lambda (&optional _window)
+                   (setq disco-room--chat-fill-column 90)))
+                ((symbol-function 'disco-room-render)
+                 (lambda () (cl-incf renders)))
+                ((symbol-function 'disco-room--refresh-timeline-layout)
+                 (lambda () (cl-incf layout-refreshes))))
+        (disco-room--on-window-size-change)
+        (should (= 1 renders))
+        (should (= 1 layout-refreshes))))))
 
 (provide 'disco-room-test)
 

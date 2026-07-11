@@ -2,38 +2,11 @@
 
 (require 'ert)
 (require 'cl-lib)
-
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
+(require 'appkit-media)
 
 (require 'disco-ins)
-(require 'disco-ui)
+(require 'appkit-ui)
 
-(ert-deftest disco-ins-prefix-string-handles-strings-and-prefix-state ()
-  (let ((state (disco-ui-make-prefix-state "a> " "b> ")))
-    (should (equal "raw> "
-                   (disco-ins-prefix-string "raw> " nil "fallback> ")))
-    (should (equal "a> "
-                   (disco-ins-prefix-string state t "fallback> ")))
-    (should (equal "b> "
-                   (disco-ins-prefix-string state nil "fallback> ")))))
-
-(ert-deftest disco-ins-insert-full-width-divider-applies-face-and-properties ()
-  (with-temp-buffer
-    (let ((span (disco-ins-insert-full-width-divider "Label" 'shadow 24 '(demo t))))
-      (should (string-match-p "( Label )" (buffer-string)))
-      (should (eq t (get-text-property (car span) 'demo)))
-      (let ((face (get-text-property (car span) 'face)))
-        (should (or (eq face 'shadow)
-                    (and (listp face) (memq 'shadow face))))))))
-
-(ert-deftest disco-ins-insert-divider-row-is-read-only ()
-  (with-temp-buffer
-    (let ((span (disco-ins-insert-divider-row "Unread" 'shadow 20 '(section unread))))
-      (should (string-match-p "Unread" (buffer-string)))
-      (should (eq t (get-text-property (car span) 'read-only)))
-      (should (equal 'unread (get-text-property (car span) 'section))))))
 
 (ert-deftest disco-ins-insert-reference-line-makes-preview-navigable ()
   (with-temp-buffer
@@ -78,50 +51,25 @@
         (should (or (eq face 'shadow)
                     (and (listp face) (memq 'shadow face))))))))
 
-(ert-deftest disco-ins-insert-reaction-line-supports-adapter-label-and-action ()
+(ert-deftest disco-ins-insert-reaction-line-supports-action-and-help ()
   (with-temp-buffer
-    (let ((reaction '((code . "178") (count . 3) (chosen-p . t)))
+    (let ((reaction '((emoji . ((name . ":wave:")))
+                      (count . 3)
+                      (me . true)))
           clicked)
       (disco-ins-insert-reaction-line
        (list reaction)
        :selected-face 'success
        :unselected-face 'shadow
-       :label-function
-       (lambda (item)
-         (format " face-%s %d "
-                 (alist-get 'code item) (alist-get 'count item)))
-       :selected-p-function (lambda (item) (alist-get 'chosen-p item))
        :action-function (lambda (item) (setq clicked item))
        :help-echo-function (lambda (_item) "Toggle reaction"))
       (goto-char (point-min))
-      (search-forward "face-178 3")
+      (search-forward "[:wave: 3]")
       (let ((button (button-at (match-beginning 0))))
         (should button)
         (should (equal (button-get button 'help-echo) "Toggle reaction"))
         (button-activate button)
         (should (equal clicked reaction))))))
-
-(ert-deftest disco-ins-insert-right-aligned-text-uses-target-width ()
-  (with-temp-buffer
-    (insert "Alice")
-    (let ((span (disco-ins-insert-right-aligned-text
-                 "12:34" 30 :face 'shadow)))
-      (should (equal (buffer-substring-no-properties
-                      (car span) (cdr span))
-                     " 12:34"))
-      (should (equal (get-text-property (car span) 'display)
-                     '(space :align-to 25)))
-      (should (eq (get-text-property (1- (point)) 'face) 'shadow)))))
-
-(ert-deftest disco-ins-insert-right-aligned-text-reserves-future-prefix ()
-  (with-temp-buffer
-    (insert (make-string 20 ?x))
-    (let ((span (disco-ins-insert-right-aligned-text
-                 "12:34" 30 :left-prefix-width 4)))
-      (should (= (car span) (line-beginning-position)))
-      (should (= (line-number-at-pos) 2))
-      (should (equal (get-text-property (car span) 'display)
-                     '(space :align-to 25))))))
 
 (ert-deftest disco-ins-insert-forward-card-renders-navigable-metadata ()
   (with-temp-buffer
@@ -192,10 +140,10 @@
       (cl-letf (((symbol-function 'disco-media-attachment-spoiler-preview-image)
                  (lambda (_attachment)
                    :spoiler-preview))
-                ((symbol-function 'disco-media-image-object-valid-p)
+                ((symbol-function 'appkit-media-image-object-valid-p)
                  (lambda (image)
                    (eq image :spoiler-preview)))
-                ((symbol-function 'disco-media-insert-image-slices)
+                ((symbol-function 'appkit-media-insert-image-slices)
                  (lambda (_image &rest _args)
                    (insert "[spoiler-preview]"))))
         (disco-ins-insert-attachment-spoiler-placeholder
@@ -241,13 +189,13 @@
           (should (equal "Open attachment"
                          (get-text-property pos 'help-echo)))
           (goto-char pos)
-          (should (disco-media-card-context-at-point)))
+          (should (appkit-media-card-context-at-point)))
         (should-not (string-match-p (regexp-quote "[Download]")
                                     (buffer-string)))
         (should-not (string-match-p (regexp-quote "[Save As]")
                                     (buffer-string)))
-        (disco-media-card-call-action 'download)
-        (disco-media-card-call-action 'save-as)
+        (appkit-media-card-call-action 'download)
+        (appkit-media-card-call-action 'save-as)
         (should downloaded)
         (should saved)))))
 
@@ -259,7 +207,7 @@
               ((symbol-function 'disco-media-attachment-preview-image)
                (lambda (_attachment)
                  :fake-preview))
-              ((symbol-function 'disco-media-insert-image-slices)
+              ((symbol-function 'appkit-media-insert-image-slices)
                (lambda (_image &rest _args)
                  (insert "[image-preview]"))))
       (disco-ins-insert-attachment-photo
@@ -300,14 +248,14 @@
                     ((symbol-function 'disco-media-attachment-preview-image)
                      (lambda (_attachment)
                        :fake-preview))
-                    ((symbol-function 'disco-media-image-object-valid-p)
+                    ((symbol-function 'appkit-media-image-object-valid-p)
                      (lambda (image)
                        (memq image '(:fake-preview :decorated-preview))))
-                    ((symbol-function 'disco-media-attachment-video-display-image)
-                     (lambda (image)
+                    ((symbol-function 'appkit-media-video-preview-display-image)
+                     (lambda (image &optional _namespace)
                        (setq decorated image)
                        :decorated-preview))
-                    ((symbol-function 'disco-media-insert-image-slices)
+                    ((symbol-function 'appkit-media-insert-image-slices)
                      (lambda (_image &optional action _prefix _fallback help)
                        (setq preview-action action
                              preview-help help)
@@ -330,7 +278,7 @@
             (should (string-match-p (regexp-quote "[video-preview]") (buffer-string)))
             (should-not (string-match-p (regexp-quote "[Play]") (buffer-string)))
             (goto-char (point-min))
-            (disco-media-card-call-action 'open)
+            (appkit-media-card-call-action 'open)
             (should played)
             (should (functionp preview-action))
             (should (string-match-p "Play video" preview-help))
@@ -348,9 +296,7 @@
          '((content_type . "audio/mpeg")
            (filename . "track.mp3")
            (url . "https://example.invalid/track.mp3"))
-         :prefix "    "
-         :action-face 'link
-         :kind 'audio)
+         :prefix "    ")
       (should (string-match-p "downloading" (buffer-string)))
       (should-not (string-match-p (regexp-quote "[Play]") (buffer-string)))
       (should-not (string-match-p (regexp-quote "[Cancel]") (buffer-string))))))
@@ -410,7 +356,7 @@
                (lambda () nil))
               ((symbol-function 'disco-media-attachment-waveform-image)
                (lambda (&rest _args) :waveform-image))
-              ((symbol-function 'disco-media-image-object-valid-p)
+              ((symbol-function 'appkit-media-image-object-valid-p)
                (lambda (image)
                  (eq image :waveform-image)))
               ((symbol-function 'insert-image)

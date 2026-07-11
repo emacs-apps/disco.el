@@ -2,10 +2,7 @@
 
 (require 'ert)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
+(require 'appkit-media)
 (require 'disco-media)
 
 (defvar disco-media-download-directory)
@@ -53,37 +50,6 @@
   (should (equal "attachment-42"
                  (disco-media-attachment-display-name
                   '((id . "42"))))))
-
-(ert-deftest disco-media-card-context-prefers-exact-card-before-fallback ()
-  "Shared actions stay attachment-specific inside multi-media messages."
-  (with-temp-buffer
-    (let* ((opened nil)
-           (exact (disco-media-card-context-create
-                   :payload 'exact
-                   :kind 'image
-                   :open-action (lambda () (setq opened 'exact))))
-           (fallback (disco-media-card-context-create
-                      :payload 'fallback
-                      :kind 'video
-                      :open-action (lambda () (setq opened 'fallback))))
-           (card-start (point)))
-      (insert "exact card\n")
-      (add-text-properties
-       card-start (point)
-       (list disco-media-card-context-property exact))
-      (insert "message text\n")
-      (setq-local disco-media-card-fallback-context-function
-                  (lambda () fallback))
-      (goto-char card-start)
-      (should (eq (plist-get (disco-media-card-context-at-point) :payload)
-                  'exact))
-      (disco-media-card-open)
-      (should (eq opened 'exact))
-      (forward-line 1)
-      (should (eq (plist-get (disco-media-card-context-at-point) :payload)
-                  'fallback))
-      (disco-media-card-open)
-      (should (eq opened 'fallback)))))
 
 (ert-deftest disco-media-attachment-spoiler-p-detects-common-discord-shapes ()
   (should (disco-media-attachment-spoiler-p
@@ -184,199 +150,34 @@
       (should (string-match-p "scale=\"30.0\"" xml))
       (should (string-match-p "width=\"150%\"" xml)))))
 
-(ert-deftest disco-media-start-video-preview-fetch-uses-thumbnail-filter-without-seek ()
-  (let ((disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
-        (disco-media--attachment-preview-fetching (make-hash-table :test #'equal))
-        (disco-media--video-preview-processes (make-hash-table :test #'equal))
+(ert-deftest disco-media-video-preview-adapter-passes-explicit-metadata ()
+  (let ((disco-media--attachment-preview-image-cache
+         (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-fetching
+         (make-hash-table :test #'equal))
         (disco-media--attachment-preview-fetch-budget nil)
-        command)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (prog)
-                 (and (equal prog "ffmpeg") "/usr/bin/ffmpeg")))
-              ((symbol-function 'make-process)
-               (lambda (&rest plist)
-                 (setq command (plist-get plist :command))
-                 'dummy-process))
-              ((symbol-function 'generate-new-buffer)
-               (lambda (&rest _args)
-                 (get-buffer-create " *disco-video-preview-test*")))
-              ((symbol-function 'message)
-               (lambda (&rest _args) nil)))
-      (let ((cache-dir (make-temp-file "disco-video-preview" t)))
-        (unwind-protect
-            (disco-media--start-video-preview-fetch
-             "cache-key"
-             '((url . "https://example.invalid/video.mp4")
-               (content_type . "video/mp4"))
-             (expand-file-name "preview" cache-dir))
-          (delete-directory cache-dir t)))
-      (should command)
-      (should-not (member "-ss" command))
-      (should (member "thumbnail=24,scale=960:-2:force_original_aspect_ratio=decrease"
-                      command)))))
-
-(ert-deftest disco-media-static-video-preview-prefers-poster-source ()
-  (let ((disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
-        (disco-media--attachment-preview-fetching (make-hash-table :test #'equal))
-        (disco-media--video-preview-processes (make-hash-table :test #'equal))
-        (disco-media--attachment-preview-fetch-budget nil)
-        command)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (program)
-                 (and (equal program "ffmpeg") "/usr/bin/ffmpeg")))
-              ((symbol-function 'make-process)
-               (lambda (&rest plist)
-                 (setq command (plist-get plist :command))
-                 'dummy-process))
-              ((symbol-function 'generate-new-buffer)
-               (lambda (&rest _args)
-                 (get-buffer-create " *disco-video-poster-test*"))))
-      (let ((cache-dir (make-temp-file "disco-video-poster" t)))
-        (unwind-protect
-            (disco-media--start-video-preview-fetch
-             "poster-key"
-             '((url . "https://cdn.example/video.mp4")
-               (proxy_url . "https://media.example/poster.jpg")
-               (content_type . "video/mp4")
-               (size . 99999999))
-             (expand-file-name "preview" cache-dir))
-          (delete-directory cache-dir t)))
-      (should (member "https://media.example/poster.jpg" command))
-      (should-not (member "https://cdn.example/video.mp4" command)))))
-
-(ert-deftest disco-media-short-small-video-preview-uses-animated-gif ()
-  (let ((disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
-        (disco-media--attachment-preview-fetching (make-hash-table :test #'equal))
-        (disco-media--video-preview-processes (make-hash-table :test #'equal))
-        (disco-media--attachment-preview-fetch-budget nil)
-        (disco-media-inline-animations t)
-        (disco-media-inline-animation-max-duration 10)
-        (disco-media-inline-animation-max-file-size 4096)
-        command)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (program)
-                 (pcase program
-                   ("ffmpeg" "/usr/bin/ffmpeg")
-                   ("ffprobe" "/usr/bin/ffprobe"))))
-              ((symbol-function 'make-process)
-               (lambda (&rest plist)
-                 (setq command (plist-get plist :command))
-                 'dummy-process))
-              ((symbol-function 'generate-new-buffer)
-               (lambda (&rest _args)
-                 (get-buffer-create " *disco-video-animation-test*"))))
-      (let ((cache-dir (make-temp-file "disco-video-animation" t)))
-        (unwind-protect
-            (disco-media--start-video-preview-fetch
-             "animation-key"
-             '((url . "https://example.invalid/short.mp4")
-               (content_type . "video/mp4")
-               (size . 2048)
-               (duration_secs . 2.5))
-             (expand-file-name "preview" cache-dir))
-          (delete-directory cache-dir t)))
-      (should command)
-      (should (member "-filter_complex" command))
-      (should (member "-loop" command))
-      (should (string-suffix-p ".gif" (car (last command))))
-      (should-not (seq-some (lambda (argument)
-                              (and (stringp argument)
-                                   (string-prefix-p "thumbnail=" argument)))
-                            command)))))
-
-(ert-deftest disco-media-video-preview-policy-separates-animation-caches ()
-  (let ((attachment '((id . "video")
-                      (filename . "clip.mp4")
-                      (content_type . "video/mp4")
-                      (url . "https://cdn.example/clip.mp4")))
-        animated-key static-key)
-    (let ((disco-media-inline-animations t))
-      (setq animated-key
-            (disco-media-attachment-preview-cache-key attachment)))
-    (let ((disco-media-inline-animations nil))
-      (setq static-key
-            (disco-media-attachment-preview-cache-key attachment)))
-    (should-not (equal animated-key static-key))))
-
-(ert-deftest disco-media-marks-only-bounded-multi-frame-previews ()
-  (let ((disco-media-inline-animations t)
-        (disco-media-inline-animation-max-duration 10)
-        (disco-media-inline-animation-max-file-size 4096)
-        (image '(image :type gif)))
-    (cl-letf (((symbol-function 'disco-media-image-object-valid-p)
-               (lambda (_image) t))
-              ((symbol-function 'disco-media--file-size)
-               (lambda (_file) 2048))
-              ((symbol-function 'disco-media--inline-animation-frame-data)
-               (lambda (_image) '(20 . 2.5))))
-      (should (eq image
-                  (disco-media--mark-inline-animation-image image "/tmp/a.gif")))
-      (should (disco-media-inline-animation-image-p image))
-      (should (= 2.5 (plist-get (cdr image)
-                                :disco-inline-animation-duration))))))
-
-(ert-deftest disco-media-start-inline-animation-is-one-bounded-cycle ()
-  (let ((disco-media-inline-animations t)
-        (image '(image :type gif
-                       :disco-inline-animation t
-                       :disco-inline-animation-duration 2.0))
-        animated reset-delay)
-    (with-temp-buffer
-      (cl-letf (((symbol-function 'get-buffer-window)
-                 (lambda (&rest _args) :window))
-                ((symbol-function 'image-animate)
-                 (lambda (candidate index limit &optional _position)
-                   (setq animated (list candidate index limit))))
-                ((symbol-function 'run-at-time)
-                 (lambda (delay _repeat function &rest args)
-                   (setq reset-delay delay)
-                   (list function args))))
-        (should (disco-media-start-inline-animation image))
-        (should (equal animated (list image 0 nil)))
-        (should (= 2.4 reset-delay))
-        (should (plist-get (cdr image) :disco-inline-animation-played))))))
-
-(ert-deftest disco-media-scroll-discovers-newly-visible-animation ()
-  (save-window-excursion
-    (with-temp-buffer
-      (let* ((window (selected-window))
-             (image '(image :type gif :disco-inline-animation t))
-             position started)
-        (dotimes (index 20)
-          (insert (format "line %s\n" index)))
-        (setq position (point))
-        (insert (propertize "x" 'display image))
-        (set-window-buffer window (current-buffer))
-        (set-window-start window position)
-        (cl-letf (((symbol-function 'disco-media-start-inline-animation)
-                   (lambda (candidate) (setq started candidate))))
-          (disco-media--start-window-inline-animations-after-scroll
-           window position))
-        (should (eq started image))))))
-
-(ert-deftest disco-media-stop-inline-animation-ignores-non-images ()
-  (should-not (disco-media-stop-inline-animation '(20)))
-  (should-not (disco-media-stop-inline-animation nil)))
-
-(ert-deftest disco-media-cancel-video-preview-detaches-before-killing ()
-  (let* ((disco-media--video-preview-processes
-          (make-hash-table :test #'equal))
-         (buffer (generate-new-buffer " *disco-cancel-video-test*"))
-         deleted)
-    (puthash "preview" 'process disco-media--video-preview-processes)
-    (cl-letf (((symbol-function 'process-live-p)
-               (lambda (_process) t))
-              ((symbol-function 'delete-process)
-               (lambda (process)
-                 (setq deleted process)
-                 (should-not
-                  (gethash "preview" disco-media--video-preview-processes))))
-              ((symbol-function 'process-buffer)
-               (lambda (_process) buffer)))
-      (should (disco-media-cancel-video-preview "preview"))
-      (should (eq deleted 'process))
-      (should-not (buffer-live-p buffer))
-      (should-not (gethash "preview" disco-media--video-preview-processes)))))
+        captured)
+    (cl-letf (((symbol-function 'appkit-media-start-video-preview)
+               (lambda (&rest arguments)
+                 (setq captured arguments))))
+      (disco-media--start-video-preview-fetch
+       "cache-key"
+       '((url . "https://cdn.example/video.mp4")
+         (proxy_url . "https://media.example/poster.jpg")
+         (content_type . "video/mp4")
+         (size . 2048)
+         (duration_secs . 2.5))
+       "/tmp/disco-preview"))
+    (should (equal "disco:cache-key" (plist-get captured :key)))
+    (should (equal "https://cdn.example/video.mp4"
+                   (plist-get captured :source)))
+    (should (equal "https://media.example/poster.jpg"
+                   (plist-get captured :preview-source)))
+    (should (= 2048 (plist-get captured :source-size)))
+    (should (= 2.5 (plist-get captured :duration)))
+    (should (equal "/tmp/disco-preview"
+                   (plist-get captured :cache-base)))
+    (should (functionp (plist-get captured :callback)))))
 
 (ert-deftest disco-media-attachment-preview-image-falls-back-to-placeholder ()
   (cl-letf (((symbol-function 'disco-media-attachment-preview-rendering-available-p)
@@ -415,24 +216,10 @@
                      (disco-media-attachment-spoiler-placeholder-image
                       '((filename . "SPOILER_cat.png") (placeholder . "abcd"))))))))
 
-(ert-deftest disco-media-attachment-video-display-image-adds-play-icon-decoration ()
-  (cl-letf (((symbol-function 'disco-media--decorate-preview-image)
-             (lambda (image &rest args)
-               (list image args))))
-    (should (equal '(:preview (:spoiler-filter-p nil :video-p t :dim-opacity 0.0))
-                   (disco-media-attachment-video-display-image :preview)))))
-
-(ert-deftest disco-media-animated-video-preview-keeps-multi-frame-image ()
-  (let ((image '(image :type gif :disco-inline-animation t)))
-    (cl-letf (((symbol-function 'disco-media--decorate-preview-image)
-               (lambda (&rest _args)
-                 (ert-fail "animated previews must not be flattened to SVG"))))
-      (should (eq image (disco-media-attachment-video-display-image image))))))
-
 (ert-deftest disco-media-decorate-preview-image-strips-source-props-from-output ()
   (let ((disco-media--attachment-decorated-preview-cache (make-hash-table :test #'equal))
         captured-props)
-    (cl-letf (((symbol-function 'disco-media-image-object-valid-p)
+    (cl-letf (((symbol-function 'appkit-media-image-object-valid-p)
                (lambda (image)
                  (memq image '(:decorated))
                  (or (eq image :decorated)
@@ -458,10 +245,10 @@
                   (disco-media--decorate-preview-image
                    '(image :type png :file "/tmp/demo.png"
                      :height (2 . ch)
-                     :disco-nslices 2)
+                     :appkit-media-nslices 2)
                    :video-p nil)))
       (should (plist-get captured-props :height))
-      (should (equal 2 (plist-get captured-props :disco-nslices)))
+      (should (equal 2 (plist-get captured-props :appkit-media-nslices)))
       (should-not (plist-get captured-props :file))
       (should-not (plist-get captured-props :data))
       (should-not (plist-get captured-props :type)))))
@@ -481,6 +268,97 @@
             (should (eq 'downloaded (plist-get state :status)))
             (should (equal path (plist-get state :path)))))
       (delete-directory tmpdir t))))
+
+(ert-deftest disco-media-attachment-preview-uses-shared-image-transfer ()
+  (let ((disco-media--attachment-preview-fetching
+         (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-image-cache
+         (make-hash-table :test #'equal))
+        captured-resource
+        captured-base)
+    (cl-letf (((symbol-function 'appkit-media-cache-image-resource-async)
+               (lambda (resource cache-base _success _error &rest _arguments)
+                 (setq captured-resource resource
+                       captured-base cache-base)
+                 :image-transfer)))
+      (disco-media--start-attachment-preview-fetch
+       "preview-key" "https://media.example.invalid/image" "/tmp/cache-base")
+      (should (equal '((url . "https://media.example.invalid/image"))
+                     captured-resource))
+      (should (equal "/tmp/cache-base" captured-base))
+      (should (eq :image-transfer
+                  (gethash "preview-key"
+                           disco-media--attachment-preview-fetching))))))
+
+(ert-deftest disco-media-attachment-download-uses-shared-transfer-runtime ()
+  (let ((tmpdir (make-temp-file "disco-media-transfer" t))
+        (disco-media--attachment-download-state-table
+         (make-hash-table :test #'equal))
+        captured-resource
+        captured-target)
+    (unwind-protect
+        (let* ((disco-media-download-directory tmpdir)
+               (attachment '((id . "42")
+                             (filename . "clip.mp4")
+                             (content_type . "video/mp4")
+                             (url . "https://cdn.example.invalid/clip.mp4"))))
+          (cl-letf (((symbol-function
+                      'appkit-media-copy-or-download-resource-async)
+                     (lambda (resource target _success _error)
+                       (setq captured-resource resource
+                             captured-target target)
+                       :opaque-transfer))
+                    ((symbol-function 'message) #'ignore))
+            (disco-media-start-attachment-download attachment)
+            (should
+             (equal '((url . "https://cdn.example.invalid/clip.mp4")
+                      (name . "clip.mp4")
+                      (mime-type . "video/mp4"))
+                    captured-resource))
+            (should (equal (disco-media-attachment-download-path attachment)
+                           captured-target))
+            (let ((state (disco-media-attachment-download-state attachment)))
+              (should (eq 'downloading (plist-get state :status)))
+              (should (eq :opaque-transfer (plist-get state :transfer))))))
+      (delete-directory tmpdir t))))
+
+(ert-deftest disco-media-attachment-download-preserves-shared-error-text ()
+  (let ((tmpdir (make-temp-file "disco-media-transfer-error" t))
+        (disco-media--attachment-download-state-table
+         (make-hash-table :test #'equal)))
+    (unwind-protect
+        (let* ((disco-media-download-directory tmpdir)
+               (attachment '((id . "42")
+                             (filename . "clip.mp4")
+                             (url . "https://cdn.example.invalid/clip.mp4"))))
+          (cl-letf (((symbol-function
+                      'appkit-media-copy-or-download-resource-async)
+                     (lambda (_resource _target _success error)
+                       (funcall error "connection reset")
+                       nil))
+                    ((symbol-function 'message) #'ignore))
+            (disco-media-start-attachment-download attachment)
+            (let ((state (disco-media-attachment-download-state attachment)))
+              (should (eq 'error (plist-get state :status)))
+              (should (equal "connection reset" (plist-get state :error))))))
+      (delete-directory tmpdir t))))
+
+(ert-deftest disco-media-attachment-download-cancel-uses-transfer-handle ()
+  (let* ((attachment '((id . "42") (filename . "clip.mp4")))
+         (key (disco-media-attachment-download-key attachment))
+         (disco-media--attachment-download-state-table
+          (make-hash-table :test #'equal))
+         canceled)
+    (puthash key '(:status downloading :transfer opaque)
+             disco-media--attachment-download-state-table)
+    (cl-letf (((symbol-function 'appkit-media-cancel-transfer)
+               (lambda (transfer) (setq canceled transfer) t))
+              ((symbol-function 'message) #'ignore))
+      (should (disco-media-cancel-attachment-download attachment))
+      (should (eq 'opaque canceled))
+      (should (plist-get
+               (gethash key disco-media--attachment-download-state-table)
+               :cancel-requested)))))
 
 (ert-deftest disco-media-play-attachment-audio-downloads-before-inline-playback ()
   (let ((disco-media--attachment-download-state-table (make-hash-table :test #'equal))
@@ -509,123 +387,13 @@
          (url . "https://example.invalid/voice.ogg")))
       (should (equal "/tmp/voice.ogg" started-source)))))
 
-(ert-deftest disco-media-open-remote-image-caches-and-opens-in-emacs ()
-  "Remote images are cached by their bytes and never sent to a browser."
-  (let* ((disco-media-preview-cache-directory
-          (make-temp-file "disco-media-open" t))
-         (disco-media-animate-gifs nil)
-         (resource '((url . "https://example.com/assets/no-extension")))
-         opened-file)
-    (unwind-protect
-        (cl-letf (((symbol-function 'url-copy-file)
-                   (lambda (_url target &optional _ok-if-already-exists)
-                     (with-temp-file target
-                       (set-buffer-multibyte nil)
-                       (insert "GIF89a-discovery"))))
-                  ((symbol-function 'browse-url)
-                   (lambda (&rest _args)
-                     (ert-fail "images must not open in a browser"))))
-          (let ((disco-media-open-file-function
-                 (lambda (file)
-                   (setq opened-file file))))
-            (disco-media-open-resource resource 'image "image:test"))
-          (should (disco-media-file-present-p opened-file))
-          (should (equal (file-name-extension opened-file) "gif"))
-          (should (file-in-directory-p
-                   opened-file disco-media-preview-cache-directory)))
-      (when (file-directory-p disco-media-preview-cache-directory)
-        (delete-directory disco-media-preview-cache-directory t)))))
-
-(ert-deftest disco-media-open-gif-starts-only-an-idle-animation ()
-  "Opening a GIF starts looping without toggling an active animation off."
-  (let ((disco-media-animate-gifs t)
-        (gif "/tmp/disco-animated.gif")
-        timer
-        (toggle-count 0))
-    (with-temp-buffer
-      (cl-letf (((symbol-function 'get-file-buffer)
-                 (lambda (_file) (current-buffer)))
-                ((symbol-function 'derived-mode-p)
-                 (lambda (&rest _modes) t))
-                ((symbol-function 'image-get-display-property)
-                 (lambda () '(image :type gif)))
-                ((symbol-function 'image-multi-frame-p)
-                 (lambda (_image) '(2 . 0.1)))
-                ((symbol-function 'image-animate-timer)
-                 (lambda (_image) timer))
-                ((symbol-function 'image-toggle-animation)
-                 (lambda () (cl-incf toggle-count))))
-        (disco-media--maybe-start-gif-animation gif)
-        (should (= toggle-count 1))
-        (should image-animate-loop)
-        (setq timer t)
-        (disco-media--maybe-start-gif-animation gif)
-        (should (= toggle-count 1))))))
-
-(ert-deftest disco-media-open-video-url-uses-configured-player ()
-  "Video URLs are passed to the configured player without a browser path."
-  (let ((disco-media-video-player-command "mpv --no-terminal")
-        command)
-    (cl-letf (((symbol-function 'disco-media--command-runnable-p)
-               (lambda (_configured-command) t))
-              ((symbol-function 'make-process)
-               (lambda (&rest properties)
-                 (setq command (plist-get properties :command))
-                 'disco-test-player))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "videos must not open in a browser"))))
-      (should
-       (eq (disco-media-open-resource
-            '((url . "https://example.com/movie.mp4")) 'video)
-           'disco-test-player))
-      (should (equal command
-                     '("mpv" "--no-terminal"
-                       "https://example.com/movie.mp4"))))))
-
-(ert-deftest disco-media-open-video-errors-when-player-is-unavailable ()
-  "Missing video players are explicit rather than browser fallbacks."
-  (let ((disco-media-video-player-command nil))
-    (cl-letf (((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "videos must not open in a browser"))))
-      (should-error
-       (disco-media-open-resource
-        '((url . "https://example.com/movie.mp4")) 'video)
-       :type 'user-error))))
-
-(ert-deftest disco-media-remote-file-download-streams-asynchronously-with-plz ()
-  (let ((disco-media--open-file-plz-queue nil)
-        queued-properties
-        success-value
-        failure)
-    (cl-letf (((symbol-function 'make-plz-queue) (lambda (&rest _) 'queue))
-              ((symbol-function 'plz-run) #'ignore)
-              ((symbol-function 'plz-queue)
-               (lambda (&rest arguments)
-                 (setq queued-properties (nthcdr 3 arguments))))
-              ((symbol-function 'url-copy-file)
-               (lambda (&rest _)
-                 (ert-fail "file downloads must not block on url-copy-file"))))
-      (disco-media-copy-or-download-resource-async
-       '((url . "https://example.com/report.pdf"))
-       "/tmp/disco-report.pdf"
-       (lambda (file) (setq success-value file))
-       (lambda (reason) (setq failure reason)))
-      (should-not success-value)
-      (should-not failure)
-      (should (equal (plist-get queued-properties :as)
-                     '(file "/tmp/disco-report.pdf")))
-      (funcall (plist-get queued-properties :then) "/tmp/disco-report.pdf")
-      (should (equal success-value "/tmp/disco-report.pdf")))))
-
 (ert-deftest disco-media-open-photo-attachment-uses-original-not-proxy-url ()
   "The CDN proxy remains preview-only when opening a Discord image."
   (let (opened-arguments)
     (cl-letf (((symbol-function 'disco-media-attachment-download-state)
                (lambda (_attachment)
                  '(:status not-downloaded :path "/missing/cat.png")))
-              ((symbol-function 'disco-media-open-resource)
+              ((symbol-function 'disco-media-open-discord-resource)
                (lambda (&rest arguments)
                  (setq opened-arguments arguments))))
       (disco-media-open-attachment
@@ -638,18 +406,6 @@
                (alist-get 'url (car opened-arguments))
                "https://cdn.example.invalid/cat.png"))
       (should (eq (nth 1 opened-arguments) 'image)))))
-
-(ert-deftest disco-media-action-properties-wrap-zero-argument-callbacks ()
-  (with-temp-buffer
-    (let ((called nil))
-      (insert "media")
-      (disco-media-add-action-properties
-       (point-min) (point-max) (lambda () (setq called t)) "Open media")
-      (let* ((map (get-text-property (point-min) 'keymap))
-             (command (lookup-key map (kbd "RET"))))
-        (should (commandp command))
-        (call-interactively command)
-        (should called)))))
 
 (ert-deftest disco-media-state-notifications-pass-explicit-resource ()
   (let (received)

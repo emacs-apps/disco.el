@@ -6,7 +6,7 @@
 
 ;; Root-specific view state, row models, inserters, EWOC rendering, and layout
 ;; builders. This keeps `disco-root.el' focused on controller, live-update,
-;; and buffer lifecycle logic while `disco-view.el' continues to provide
+;; and buffer lifecycle logic while `appkit-view.el' continues to provide
 ;; reusable generic UI primitives.
 
 ;;; Code:
@@ -24,7 +24,7 @@
 (require 'disco-preview)
 (require 'disco-room)
 (require 'disco-thread)
-(require 'disco-view)
+(require 'appkit-view)
 (require 'disco-state)
 (require 'disco-root-layout)
 
@@ -1170,7 +1170,7 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
          (time-text (if (memq scope '(parent-thread archived-thread))
                         (disco-root--thread-browser-time-label channel scope latest-message)
                       (disco-root--channel-last-activity-time-label channel latest-message))))
-    (disco-view-one-line-row-create
+    (appkit-view-one-line-row-create
      :icon-inserter (lambda ()
                       (disco-root--insert-activity-icon channel scope))
      :context (disco-root--activity-context-label channel scope)
@@ -1195,7 +1195,7 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
   "Insert one activity-style CHANNEL row with INDENT under SCOPE.
 
 WIDTH overrides the root buffer's responsive fill column."
-  (disco-view-insert-one-line-row
+  (appkit-view-insert-one-line-row
    (disco-root--channel-one-line-row channel scope)
    :indent indent
    :width (max 60 (or width
@@ -1241,7 +1241,7 @@ WIDTH overrides the root buffer's responsive fill column."
          (preview-text (or (disco-msg-preview-line message)
                            (disco-msg-preview-content message)
                            "(message)")))
-    (disco-view-one-line-row-create
+    (appkit-view-one-line-row-create
      :icon-inserter (lambda ()
                       (if channel
                           (disco-root--insert-activity-icon channel)
@@ -1268,7 +1268,7 @@ WIDTH overrides the root buffer's responsive fill column."
 
 (defun disco-root--insert-search-message-line (message indent &optional tab)
   "Insert one root search result MESSAGE row with INDENT for TAB."
-  (disco-view-insert-one-line-row
+  (appkit-view-insert-one-line-row
    (disco-root--search-message-one-line-row message tab)
    :indent indent
    :width (max 60 (or disco-root--fill-column
@@ -1583,7 +1583,7 @@ Higher score means channel should appear earlier in activity mode."
   "Return label row model for one root SECTION heading."
   (let* ((expanded (disco-root--section-expanded-p section))
          (indicator (if expanded "▾" "▸")))
-    (disco-view-label-row-create
+    (appkit-view-label-row-create
      :label (or title "Section")
      :prefix (format "%s " indicator)
      :suffix (if (numberp count) (format "  %d" count) "")
@@ -1597,7 +1597,7 @@ Higher score means channel should appear earlier in activity mode."
   "Return navigation row model for GUILD with UNREAD-COUNT."
   (let* ((guild-id (alist-get 'id guild))
          (label (disco-root--guild-label guild unread-count 'root)))
-    (disco-view-label-row-create
+    (appkit-view-label-row-create
      :label label
      :prefix "  "
      :suffix "  ›"
@@ -1618,21 +1618,21 @@ Higher score means channel should appear earlier in activity mode."
                   (format " (%d loaded, loading...)" loaded-count))
                  (t
                   (format " (%d)" loaded-count)))))
-    (disco-view-label-row-create
+    (appkit-view-label-row-create
      :label (format "%s%s" (or title "Results") suffix)
      :face 'font-lock-keyword-face
      :line-properties (list 'disco-root-row-type 'search-section))))
 
 (defun disco-root--search-note-label-row (text &optional face)
   "Return label row model for one search note TEXT."
-  (disco-view-label-row-create
+  (appkit-view-label-row-create
    :label (or text "")
    :face (or face 'shadow)
    :line-properties (list 'disco-root-row-type 'search-note)))
 
 (defun disco-root--search-action-label-row (label action tab)
   "Return label row model for one search action LABEL, ACTION, and TAB."
-  (disco-view-label-row-create
+  (appkit-view-label-row-create
    :label (or label "Action")
    :prefix "  ["
    :suffix "]"
@@ -1670,7 +1670,7 @@ Higher score means channel should appear earlier in activity mode."
 (defun disco-root--insert-layout-entry (entry)
   "Insert one root layout ENTRY into the current buffer."
   (if-let* ((row (disco-root--layout-entry-label-row entry)))
-      (disco-view-insert-label-row row)
+      (appkit-view-insert-label-row row)
     (pcase (disco-root-layout-entry-type entry)
       ('search-message
        (disco-root--insert-search-message-line
@@ -1948,7 +1948,7 @@ Return plist with keys :threads and :errors for this page only."
   (let* ((parent-channel disco-root--archived-parent-channel)
          (threads (or disco-root--archived-threads-cache '()))
          (errors (or disco-root--archived-last-errors '())))
-    (disco-view-list-spec-create
+    (appkit-view-list-spec-create
      :title (format "Archived Threads: %s"
                     (disco-root--channel-label parent-channel 'archived-parent))
      :summary (format "Loaded: %d   Sources: %s"
@@ -1969,7 +1969,7 @@ Return plist with keys :threads and :errors for this page only."
   "Render archived-thread buffer from local pagination/cache state."
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (disco-view-render-list-spec
+    (appkit-view-render-list-spec
      (disco-root--archived-threads-list-spec))
     (goto-char (point-min))))
 
@@ -2410,10 +2410,10 @@ If point is not on actionable row, jump to next channel row and open it."
   "Return list spec for the current root search layout."
   (if (not (and disco-root--search-domain
                 (disco-root--search-effective-spec-p disco-root--search-query-spec)))
-      (disco-view-list-spec-create
+      (appkit-view-list-spec-create
        :title "Search root with s"
        :empty-text "  (no active search)")
-    (disco-view-list-spec-create
+    (appkit-view-list-spec-create
      :title (format "Search results in %s"
                     (disco-root--search-domain-label disco-root--search-domain))
      :items (disco-root--search-layout-entries)

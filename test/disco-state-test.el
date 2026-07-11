@@ -3,10 +3,6 @@
 (require 'ert)
 (require 'cl-lib)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-state)
 
 (ert-deftest disco-state-private-channel-p-includes-ephemeral-dm ()

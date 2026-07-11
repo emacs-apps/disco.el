@@ -3,10 +3,6 @@
 (require 'ert)
 (require 'cl-lib)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-msg)
 (require 'disco-state)
 
@@ -142,8 +138,7 @@
         (should (equal "hello" copied))))))
 
 (ert-deftest disco-msg-copy-dwim-prefers-url-code-then-message-text ()
-  (let ((disco-markdown-backend 'internal)
-        copied)
+  (let (copied)
     (with-temp-buffer
       (let ((rendered (disco-markdown-render
                        "visit [site](https://example.com) and `(+ 1 2)`"

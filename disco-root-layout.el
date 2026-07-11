@@ -10,7 +10,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'disco-view)
+(require 'appkit-view)
 
 (defcustom disco-root-default-layout 'tree
   "Default root layout symbol used when opening the root buffer."
@@ -175,7 +175,7 @@ builder."
       (pcase (disco-root-layout-view-spec-kind view-spec)
         ('list-spec
          (when-let* ((list-spec (disco-root-layout-view-spec-list-spec view-spec)))
-           (disco-view-render-list-spec list-spec)))
+           (appkit-view-render-list-spec list-spec)))
         ('entries
          (when-let* ((entry-inserter
                       (disco-root-layout-view-spec-entry-inserter view-spec)))

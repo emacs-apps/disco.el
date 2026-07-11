@@ -212,7 +212,7 @@
           rendered)
       (cl-letf (((symbol-function 'disco-root--archived-threads-list-spec)
                  (lambda () 'spec))
-                ((symbol-function 'disco-view-render-list-spec-preserving-position)
+                ((symbol-function 'appkit-view-render-list-spec-preserving-position)
                  (lambda (_spec &rest _args)
                    (setq rendered t))))
         (disco-root--flush-live-updates (current-buffer))
@@ -344,9 +344,9 @@
                  (lambda (&optional _buffer) t))
                 ((symbol-function 'disco-root--selected-window-for-buffer)
                  (lambda (&optional _buffer) nil))
-                ((symbol-function 'disco-view-capture-position)
+                ((symbol-function 'appkit-position-capture)
                  (lambda (&rest _args) 'snapshot))
-                ((symbol-function 'disco-view-restore-position)
+                ((symbol-function 'appkit-position-restore)
                  (lambda (_snapshot)
                    (setq restored t)))
                 ((symbol-function 'disco-root--refresh-channel-node)
@@ -573,7 +573,7 @@
       (cl-letf (((symbol-function 'disco-root-render)
                  (lambda ()
                    (setq rendered t)))
-                ((symbol-function 'disco-view-render-preserving-position)
+                ((symbol-function 'appkit-position-render-preserving)
                  (lambda (fn &rest args)
                    (setq preserved (plist-get args :preserve-window-start))
                    (funcall fn)))
@@ -592,7 +592,7 @@
       (cl-letf (((symbol-function 'disco-root--reflow-layout)
                  (lambda ()
                    (setq reflowed t)))
-                ((symbol-function 'disco-view-render-preserving-position)
+                ((symbol-function 'appkit-position-render-preserving)
                  (lambda (fn &rest args)
                    (setq preserved (plist-get args :preserve-window-start))
                    (funcall fn)))
@@ -637,7 +637,7 @@
     (disco-root-mode)
     (let ((inhibit-read-only t)
           opened)
-      (disco-view-insert-label-row
+      (appkit-view-insert-label-row
        (disco-root--guild-label-row
         '((id . "g1") (name . "Guild")) 0))
       (should-not
@@ -714,14 +714,14 @@
       (cl-letf (((symbol-function 'disco-root-test--build-demo)
                  (lambda ()
                    (disco-root-layout-list-spec-view-spec-create
-                    (disco-view-list-spec-create
+                    (appkit-view-list-spec-create
                      :title "Builder Demo"
                      :empty-text "(empty)")))))
         (should (disco-root-layout-render 'demo))
         (should (string-match-p "Builder Demo" (buffer-string)))))))
 
 (ert-deftest disco-root-layout-list-spec-view-spec-create-wraps-list-spec ()
-  (let* ((list-spec (disco-view-list-spec-create :title "List" :empty-text "(empty)"))
+  (let* ((list-spec (appkit-view-list-spec-create :title "List" :empty-text "(empty)"))
          (view-spec (disco-root-layout-list-spec-view-spec-create list-spec)))
     (should (disco-root-layout-view-spec-p view-spec))
     (should (eq 'list-spec (disco-root-layout-view-spec-kind view-spec)))
@@ -808,10 +808,10 @@
                 ((symbol-function 'disco-root--archived-any-source-has-more-p)
                  (lambda () t)))
         (let* ((spec (disco-root--archived-threads-list-spec))
-               (entries (disco-view-list-spec-items spec))
+               (entries (appkit-view-list-spec-items spec))
                (first-entry (car entries)))
           (should (eq 'disco-root--insert-layout-entry
-                      (disco-view-list-spec-item-inserter spec)))
+                      (appkit-view-list-spec-item-inserter spec)))
           (should (eq 'channel (disco-root-layout-entry-type first-entry)))
           (should (eq 'archived-thread (disco-root-layout-entry-scope first-entry))))))))
 
@@ -1510,7 +1510,7 @@
                    (lambda (_channel) (setq queued t))))
           (should
            (equal "alice> starter preview"
-                  (disco-view-one-line-row-preview
+                  (appkit-view-one-line-row-preview
                    (disco-root--channel-one-line-row thread 'parent-thread))))
           (should-not queued)))
     (disco-state-reset)))

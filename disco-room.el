@@ -12,21 +12,19 @@
 (require 'time-date)
 (require 'seq)
 (require 'transient)
-(require 'ring)
 (require 'cl-lib)
 (require 'ewoc)
-(require 'button)
-(require 'browse-url)
-(require 'url-handlers)
 (require 'plz)
 (require 'svg nil t)
 (require 'appkit-core)
 (require 'appkit-invalidation)
-(require 'disco-chat-avatar)
+(require 'appkit-media)
+(require 'appkit-chat-avatar)
+(require 'appkit-chat-ins)
 (require 'appkit-chatbuf)
 (require 'appkit-chat-timeline)
 (require 'disco-ins)
-(require 'disco-ui)
+(require 'appkit-ui)
 (require 'disco-util)
 (require 'disco-msg)
 (require 'disco-thread)
@@ -34,7 +32,7 @@
 (require 'disco-markdown)
 (require 'disco-media)
 (require 'disco-embed)
-(require 'disco-view)
+(require 'appkit-view)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-gateway)
@@ -52,8 +50,6 @@
 (defvar-local disco-room--channel-name nil)
 (defvar-local disco-room--guild-id nil)
 (defvar-local disco-room--oldest-message-id nil)
-(defvar disco-ui-card-indent-prefix)
-(defvar disco-ui-card-indent-prefix-state)
 (defvar-local disco-room--newest-message-id nil)
 (defvar-local disco-room--history-exhausted nil)
 (defvar-local disco-room--pending-reply-to nil)
@@ -2426,7 +2422,7 @@ Returns nil when left blank."
   "Compute telega-like chat fill column for WIN.
 
 When WIN is nil, use best room window from `disco-room--render-window'."
-  (disco-view-window-fill-column
+  (appkit-view-window-fill-column
    (or win (disco-room--render-window))
    disco-room-auto-fill-margin-columns))
 
@@ -2444,7 +2440,8 @@ When WIN is nil, use best room window from `disco-room--render-window'."
           (next (disco-room--update-chat-fill-column)))
       (when (and (numberp next)
                  (not (equal old next)))
-        (disco-room-render)))))
+        (disco-room-render)
+        (disco-room--refresh-timeline-layout)))))
 
 (defun disco-room--line-fill-column ()
   "Return target fill column for current message line."
@@ -2467,7 +2464,7 @@ When WIN is nil, use best room window from `disco-room--render-window'."
 
 When FACE is non-nil, apply FACE to TEXT.  LEFT-PREFIX-WIDTH reserves
 additional columns at line start (for future `line-prefix' application)."
-  (disco-ins-insert-right-aligned-text
+  (appkit-chat-ins-insert-right-aligned-text
    text
    (disco-room--line-fill-column)
    :face face
@@ -2501,7 +2498,7 @@ additional columns at line start (for future `line-prefix' application)."
 
 (defun disco-room--insert-divider-row (text face)
   "Insert read-only divider row TEXT with FACE, spanning full window width."
-  (disco-ins-insert-divider-row
+  (appkit-chat-ins-insert-divider-row
    text face (disco-room--line-fill-column)))
 
 (defun disco-room--insert-date-separator-row (day-key)
@@ -2535,7 +2532,7 @@ avatar image is prepended when available."
       (disco-room--insert-date-separator-row insert-date))
     (when insert-unread
       (disco-room--insert-unread-divider-row))
-    (let ((span (disco-ins-insert-full-width-divider
+    (let ((span (appkit-chat-ins-insert-full-width-divider
                  label 'disco-room-system-divider
                  (disco-room--line-fill-column)
                  (list 'read-only t
@@ -2640,12 +2637,12 @@ source message, not the synthetic starter row itself."
 
 (defun disco-room--forward-guild-icon-image-valid-p (image)
   "Return non-nil when IMAGE object appears renderable."
-  (disco-media-image-object-valid-p image))
+  (appkit-media-image-object-valid-p image))
 
 (defun disco-room--forward-guild-icon-rendering-available-p ()
   "Return non-nil when forwarded-source guild icons can be rendered."
   (and disco-room-show-forward-guild-icons
-       (disco-media-inline-image-rendering-available-p)
+       (appkit-media-inline-image-rendering-available-p)
        (fboundp 'plz)))
 
 (defun disco-room--start-forward-guild-icon-fetch (cache-key guild-id url)
@@ -2708,7 +2705,7 @@ source message, not the synthetic starter row itself."
 (defun disco-room--image-rendering-available-p ()
   "Return non-nil when avatar images can be shown in current frame."
   (and disco-room-show-avatar-images
-       (disco-media-inline-image-rendering-available-p)))
+       (appkit-media-inline-image-rendering-available-p)))
 
 (defun disco-room--author-avatar-hash (msg)
   "Extract Discord avatar hash string from MSG author, or nil."
@@ -2911,7 +2908,7 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
                          :width disco-room-avatar-image-size
                          :height disco-room-avatar-image-size
                          :ascent 'center))))
-    (unless (disco-media-image-object-valid-p image)
+    (unless (appkit-media-image-object-valid-p image)
       (when (image-type-available-p 'imagemagick)
         (setq image
               (ignore-errors
@@ -2919,7 +2916,7 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
                               :width disco-room-avatar-image-size
                               :height disco-room-avatar-image-size
                               :ascent 'center)))))
-    (when (disco-media-image-object-valid-p image)
+    (when (appkit-media-image-object-valid-p image)
       image)))
 
 (defun disco-room--avatar-reset-fetch-state ()
@@ -2960,15 +2957,19 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
   (message "disco: avatar cache reset; refetching"))
 
 (defun disco-room--refresh-open-rooms ()
-  "Invalidate all open room timelines from current state."
+  "Rebuild presentation for all open room timelines from current state."
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (and (eq major-mode 'disco-room-mode)
                    (appkit-view-live-p (appkit-current-view)))
-          (let ((view (appkit-current-view)))
-            (appkit-invalidate view :structure t)
-            (appkit-schedule-sync view)))))))
+          (disco-room-render)
+          (disco-room--refresh-timeline-layout))))))
+
+(defun disco-room--refresh-timeline-layout ()
+  "Refresh every projected row after buffer display geometry changes."
+  (when (appkit-chat-timeline-live-p)
+    (appkit-chat-timeline-refresh)))
 
 (defun disco-room--sync-resource-changes-in-open-rooms (resources)
   "Synchronize open room rows depending on opaque RESOURCES."
@@ -3050,7 +3051,7 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
 
 (defun disco-room--start-avatar-fetch (cache-key url cache-base)
   "Start asynchronous avatar fetch for CACHE-KEY from URL using CACHE-BASE."
-  (unless (or (not (disco-media-url-present-p url))
+  (unless (or (not (appkit-media-url-present-p url))
               (not (stringp cache-base))
               (gethash cache-key disco-room--avatar-fetching)
               (gethash cache-key disco-room--avatar-image-cache)
@@ -3076,12 +3077,12 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
                 (when (= generation disco-room--avatar-fetch-generation)
                   (condition-case decode-error
                       (let* ((raw-bytes
-                              (disco-media-normalize-image-bytes
+                              (appkit-media-normalize-image-bytes
                                (if (multibyte-string-p data)
                                    (encode-coding-string data 'binary)
                                  data)))
                              (extension
-                              (disco-media-bytes->extension raw-bytes "img"))
+                              (appkit-media-bytes-to-extension raw-bytes "img"))
                              (target-file
                               (format "%s.%s" cache-base extension))
                              image)
@@ -3133,7 +3134,7 @@ If needed, schedule async fetch and fall back to text placeholder."
       (cond
        ((null cache-key)
         nil)
-       ((disco-media-image-object-valid-p cached)
+       ((appkit-media-image-object-valid-p cached)
         cached)
        (t
         (when cached
@@ -3156,7 +3157,7 @@ If needed, schedule async fetch and fall back to text placeholder."
            ((and (numberp (plist-get failure :retry-at))
                  (> (plist-get failure :retry-at) (float-time)))
             nil)
-           ((disco-media-url-present-p url)
+           ((appkit-media-url-present-p url)
             (when cache-file
               (ignore-errors (delete-file cache-file)))
             (disco-room--start-avatar-fetch cache-key url cache-base)
@@ -3168,7 +3169,7 @@ If needed, schedule async fetch and fall back to text placeholder."
 
 `disco-room-avatar-image-size' is interpreted as baseline size ratio where
 `28' maps to exactly two text lines at current scale."
-  (let* ((line-height (disco-chat-avatar-line-pixel-height))
+  (let* ((line-height (appkit-chat-avatar-line-pixel-height))
          (base-target (* 2 line-height))
          (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0)))
     (max 8 (round (* base-target size-factor)))))
@@ -3203,11 +3204,46 @@ render text correctly."
                     (buffer-string))))
     (apply #'create-image svg-data 'svg t props)))
 
-(defun disco-room--avatar--create-svg (file fallback cheight)
+(defun disco-room--avatar-svg-geometry (cheight)
+  "Return derived round-avatar geometry for CHEIGHT text lines."
+  (let* ((line-height (appkit-chat-avatar-line-pixel-height))
+         (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0))
+         (round-scale (max 0.1 disco-room-avatar-round-size-factor))
+         (factors (disco-room--avatar-factors cheight))
+         (cfactor (or (car factors) 0.8))
+         (mfactor (or (cdr factors) 0.1))
+         (xh (* cheight line-height size-factor round-scale))
+         (margin (* mfactor xh))
+         (inset-ratio (max 0.0 (min 0.45 disco-room-avatar-round-inset-ratio)))
+         (ch-raw (* cfactor xh))
+         (ch (max 1.0 (* ch-raw (- 1.0 (* 2 inset-ratio)))))
+         (cfull (floor (+ ch margin)))
+         (char-width (appkit-chat-avatar-column-pixel-width))
+         (aw-chars (max 1 (ceiling (/ ch (float char-width)))))
+         (svg-xw (* aw-chars char-width))
+         (svg-xh (cond ((= cheight 1) cfull)
+                       ((and (= cheight 2)
+                             disco-room-avatar-extra-bottom-line)
+                        (+ cfull line-height))
+                       (t xh))))
+    (list :line-height line-height
+          :margin margin
+          :circle-height ch
+          :full-circle-height cfull
+          :char-width char-width
+          :char-columns aw-chars
+          :svg-width svg-xw
+          :svg-height svg-xh)))
+
+(defun disco-room--avatar-svg-cache-key (file mtime cheight geometry)
+  "Return cache key for FILE, MTIME, CHEIGHT, and derived GEOMETRY."
+  (format "%S" (list file mtime cheight geometry)))
+
+(defun disco-room--avatar--create-svg (file cheight)
   "Create telega-style circular avatar SVG image.
 
-FILE is cached avatar image path, FALLBACK is placeholder text.
-CHEIGHT is avatar height in lines (chars), typically 2."
+FILE is cached avatar image path.  CHEIGHT is avatar height in text lines,
+typically 2."
   (when (and (stringp file)
              (file-readable-p file)
              (fboundp 'svg-create)
@@ -3219,33 +3255,16 @@ CHEIGHT is avatar height in lines (chars), typically 2."
              (> cheight 0))
     (let* ((attrs (file-attributes file))
            (mtime (and attrs (file-attribute-modification-time attrs)))
-           (line-height (disco-chat-avatar-line-pixel-height))
-           (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0))
-           (round-scale (max 0.1 disco-room-avatar-round-size-factor))
-           (factors (disco-room--avatar-factors cheight))
-           (cfactor (or (car factors) 0.8))
-           (mfactor (or (cdr factors) 0.1))
-           (xh (* cheight line-height size-factor round-scale))
-           (margin (* mfactor xh))
-           (inset-ratio (max 0.0 (min 0.45 disco-room-avatar-round-inset-ratio)))
-           (ch-raw (* cfactor xh))
-           (ch (max 1.0 (* ch-raw (- 1.0 (* 2 inset-ratio)))))
-           (cfull (floor (+ ch margin)))
-           (char-width (max 1 (frame-char-width)))
-           (aw-chars (max 1 (ceiling (/ ch (float char-width)))))
-           (svg-xw (* aw-chars char-width))
-           ;; Telega uses +1 line for cheight==2 as a gaps workaround.
-           (svg-xh (cond ((= cheight 1) cfull)
-                         ((and (= cheight 2) disco-room-avatar-extra-bottom-line)
-                          (+ cfull line-height))
-                         (t xh)))
-           (cache-key (format "%s:%s:%s:%s:%s:%s:%s:%s:%s:%s"
-                              file mtime cheight aw-chars line-height
-                              disco-room-avatar-image-size
-                              disco-room-avatar-round-size-factor
-                              disco-room-avatar-round-inset-ratio
-                              disco-room-avatar-extra-bottom-line
-                              fallback))
+           (geometry (disco-room--avatar-svg-geometry cheight))
+           (line-height (plist-get geometry :line-height))
+           (margin (plist-get geometry :margin))
+           (ch (plist-get geometry :circle-height))
+           (cfull (plist-get geometry :full-circle-height))
+           (aw-chars (plist-get geometry :char-columns))
+           (svg-xw (plist-get geometry :svg-width))
+           (svg-xh (plist-get geometry :svg-height))
+           (cache-key (disco-room--avatar-svg-cache-key
+                       file mtime cheight geometry))
            (cached (gethash cache-key disco-room--avatar-round-image-cache))
            (mime (disco-room--avatar-image-mime-type file))
            (svg (and mime (svg-create svg-xw svg-xh)))
@@ -3264,16 +3283,16 @@ CHEIGHT is avatar height in lines (chars), typically 2."
             (let ((image (disco-room--avatar-svg-image
                           svg
                           :scale 1.0
-                          :width (disco-chat-avatar-column-width aw-chars)
+                          :width svg-xw
                           :ascent 'center
                           :mask 'heuristic)))
               (when image
                 (let* ((type (car image))
                        (props (copy-sequence (cdr image))))
                   (setq props
-                        (plist-put props :disco-chat-avatar-char-width aw-chars))
+                        (plist-put props :appkit-chat-avatar-char-width aw-chars))
                   (setq props
-                        (plist-put props :disco-chat-avatar-slice-height
+                        (plist-put props :appkit-chat-avatar-slice-height
                                    line-height))
                   (setq image (cons type props))
                   (puthash cache-key image disco-room--avatar-round-image-cache)
@@ -3285,24 +3304,23 @@ CHEIGHT is avatar height in lines (chars), typically 2."
     (let* ((cache-key (disco-room--avatar-cache-key msg))
            (cache-file (and cache-key
                             (disco-room--avatar-cache-existing-file cache-key)))
-           (fallback (disco-room--avatar-placeholder msg))
            (svg-avatar (and disco-room-avatar-round-images
                             cache-file
                             (disco-room--avatar--create-svg
-                             cache-file fallback 1))))
-      (if (disco-media-image-object-valid-p svg-avatar)
+                             cache-file 1))))
+      (if (appkit-media-image-object-valid-p svg-avatar)
           svg-avatar
         (let ((raw-image (disco-room--avatar-image msg)))
-          (when (disco-media-image-object-valid-p raw-image)
-            (let ((line-height (disco-chat-avatar-line-pixel-height)))
-              (disco-chat-avatar-resize-image raw-image line-height))))))))
+          (when (appkit-media-image-object-valid-p raw-image)
+            (let ((line-height (appkit-chat-avatar-line-pixel-height)))
+              (appkit-chat-avatar-resize-image raw-image line-height))))))))
 
 (defun disco-room--avatar-one-line-string (msg)
   "Return propertized string showing one-line inline avatar for MSG.
 Returns empty string when no avatar is available."
   (let ((image (disco-room--avatar-one-line-image msg)))
-    (if (disco-media-image-object-valid-p image)
-        (let* ((char-width (disco-chat-avatar-image-char-width image))
+    (if (appkit-media-image-object-valid-p image)
+        (let* ((char-width (appkit-chat-avatar-image-char-width image))
                (text (make-string (max 1 char-width) ?\s)))
           (propertize text 'display image 'rear-nonsticky '(display)))
       "")))
@@ -3312,7 +3330,7 @@ Returns empty string when no avatar is available."
   (let* ((image (disco-room--avatar-image msg))
          (fallback (disco-room--avatar-placeholder msg))
          (base-size (disco-room--avatar-display-size)))
-    (if (disco-media-image-object-valid-p image)
+    (if (appkit-media-image-object-valid-p image)
         (let* ((pixel-size (if disco-room-avatar-round-images
                                (max 8 (round (* base-size
                                                 (max 0.1 disco-room-avatar-round-size-factor))))
@@ -3323,61 +3341,14 @@ Returns empty string when no avatar is available."
                (svg-avatar (and disco-room-avatar-round-images
                                 cache-file
                                 (disco-room--avatar--create-svg
-                                 cache-file
-                                 fallback
-                                 2))))
-          (disco-chat-avatar-prefixes
+                                 cache-file 2))))
+          (appkit-chat-avatar-prefixes
            (or svg-avatar image)
            fallback
            :pixel-size pixel-size
            :resize (null svg-avatar)))
-      (disco-chat-avatar-prefixes
+      (appkit-chat-avatar-prefixes
        nil fallback :pixel-size base-size))))
-
-(defun disco-room--attachment-meta-line (attachment)
-  "Return compact metadata line for ATTACHMENT object."
-  (disco-media-attachment-meta-line attachment t))
-
-(defun disco-room--attachment-default-save-name (attachment)
-  "Return default filename for saving ATTACHMENT locally."
-  (disco-media-attachment-default-save-name attachment))
-
-(defun disco-room--attachment-download-key (attachment)
-  "Return stable download state key for ATTACHMENT."
-  (disco-media-attachment-download-key attachment))
-
-(defun disco-room--attachment-download-path (attachment)
-  "Return default local download path for ATTACHMENT."
-  (disco-media-attachment-download-path attachment))
-
-(defun disco-room--attachment-download-state (attachment)
-  "Return normalized download state plist for ATTACHMENT."
-  (disco-media-attachment-download-state attachment))
-
-(defun disco-room--start-attachment-download (attachment &optional open-after)
-  "Start asynchronous default-location download for ATTACHMENT.
-
-When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion."
-  (disco-media-start-attachment-download attachment open-after))
-
-(defun disco-room--cancel-attachment-download (attachment)
-  "Cancel active asynchronous download for ATTACHMENT."
-  (disco-media-cancel-attachment-download attachment))
-
-(defun disco-room--open-downloaded-attachment (attachment)
-  "Open local downloaded file for ATTACHMENT."
-  (disco-media-open-downloaded-attachment attachment))
-
-(defun disco-room--play-attachment-video (attachment)
-  "Play ATTACHMENT video preferring local file when available."
-  (disco-media-play-attachment-video attachment))
-
-(defun disco-room-download-attachment (attachment &optional target-path)
-  "Download ATTACHMENT to TARGET-PATH.
-
-When TARGET-PATH is nil, prompt interactively for destination path."
-  (interactive)
-  (disco-media-download-attachment attachment target-path))
 
 (cl-defun disco-room--insert-attachment-card (attachment &key message-id spoiler-hidden)
   "Insert one typed rich attachment block for ATTACHMENT object."
@@ -3695,10 +3666,17 @@ messages; everything else is a system event shown as a centered divider."
 
 (defun disco-room--thread-starter-reference-content (msg)
   "Return referenced message content for thread starter MSG, or nil."
-  (let* ((resolved (disco-room--thread-starter-reference-message msg))
+  (let* ((message-id (alist-get 'id msg))
+         (resolved (disco-room--thread-starter-reference-message msg))
          (text (and (listp resolved) (alist-get 'content resolved)))
          (display (and (stringp text)
-                       (disco-markdown-unescape-punctuation text))))
+                       (disco-markdown-render
+                        text
+                        :context 'thread-starter-reference
+                        :message resolved
+                        :spoiler-message-id message-id
+                        :reveal-spoilers
+                        (disco-room--message-spoilers-revealed-p message-id)))))
     (when (and (stringp display) (not (string-empty-p (string-trim display))))
       (string-trim display))))
 
@@ -3736,8 +3714,15 @@ messages; everything else is a system event shown as a centered divider."
   "Return rendered system content for MSG type, or nil if not handled."
   (let* ((type (disco-msg-type msg))
          (author (disco-room--message-author msg))
-         (content (string-trim (disco-markdown-unescape-punctuation
-                                (or (alist-get 'content msg) ""))))
+         (message-id (alist-get 'id msg))
+         (content (string-trim
+                   (disco-markdown-render
+                    (or (alist-get 'content msg) "")
+                    :context 'system-message
+                    :message msg
+                    :spoiler-message-id message-id
+                    :reveal-spoilers
+                    (disco-room--message-spoilers-revealed-p message-id))))
          (boost-times (and (not (string-empty-p content)) content))
          (guild-name (or (disco-room--message-guild-name msg) "this server")))
     (pcase type
@@ -3966,14 +3951,6 @@ UI affordances such as timestamps, reaction rows and attachment cards."
            (not (string-empty-p (string-trim (substring-no-properties exported)))))
       exported)
      (t nil))))
-
-(defun disco-room--attachment-kind (attachment)
-  "Return short attachment kind string for ATTACHMENT object."
-  (pcase (disco-media-attachment-kind attachment)
-    ('photo "img")
-    ('video "video")
-    ('audio "audio")
-    (_ "file")))
 
 (defun disco-room--attachment-summary (attachment)
   "Return one-line attachment summary string for ATTACHMENT object."
@@ -4223,13 +4200,13 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
            (can-vote (and poll (disco-room--poll-can-vote-p msg)))
            (can-expire (and poll (disco-room--poll-can-expire-p msg))))
       (when poll
-        (let ((prefix-state (disco-ui-card-prefix-state :face 'disco-room-attachment-card-border)))
+        (let ((prefix-state (appkit-ui-card-prefix-state :face 'disco-room-attachment-card-border)))
           (let ((title-start (point)))
             (insert "[poll] " question "\n")
-            (disco-ui-apply-line-prefix title-start (point) prefix-state)
+            (appkit-ui-apply-line-prefix title-start (point) prefix-state)
             (add-text-properties title-start (point)
                                  `(disco-message-id ,message-id))
-            (disco-ui-append-face
+            (appkit-ui-append-face
              title-start (point) disco-room-poll-title-face))
           (let ((meta-start (point))
                 (parts (list (format "status=%s" state))))
@@ -4244,10 +4221,10 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (when expiry-label
               (setq parts (append parts (list (format "ends=%s" expiry-label)))))
             (insert (mapconcat #'identity parts "   ") "\n")
-            (disco-ui-apply-line-prefix meta-start (point) prefix-state)
+            (appkit-ui-apply-line-prefix meta-start (point) prefix-state)
             (add-text-properties meta-start (point)
                                  `(disco-message-id ,message-id))
-            (disco-ui-append-face
+            (appkit-ui-append-face
              meta-start (point) disco-room-poll-meta-face))
           (dolist (answer answers)
             (let* ((answer-id (disco-msg-poll-answer-id answer))
@@ -4259,7 +4236,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                    (label (disco-msg-poll-answer-text answer))
                    (line-start (point)))
               (if (and can-vote answer-id disco-room-poll-auto-toggle-vote)
-                  (disco-ui-insert-action-button
+                  (appkit-ui-insert-action-button
                    (format "%s %s%s"
                            (if selected "[x]" "[ ]")
                            (if emoji (concat emoji " ") "")
@@ -4282,14 +4259,14 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                 (insert (propertize (format "  (%d)" count)
                                     'face disco-room-poll-meta-face)))
               (insert "\n")
-              (disco-ui-apply-line-prefix line-start (point) prefix-state)
+              (appkit-ui-apply-line-prefix line-start (point) prefix-state)
               (add-text-properties line-start (point)
                                    `(disco-message-id ,message-id
                                      disco-poll-answer-id ,answer-id))))
           (let ((actions-start (point))
                 (inserted nil))
             (when (and can-vote draft-differs effective-selection)
-              (disco-ui-insert-action-button
+              (appkit-ui-insert-action-button
                "[Vote]"
                (lambda ()
                  (disco-room-submit-poll-vote message-id))
@@ -4301,7 +4278,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                        committed-selection
                        (or (not draft-differs)
                            (null effective-selection)))
-              (disco-ui-insert-action-button
+              (appkit-ui-insert-action-button
                "[Remove vote]"
                (lambda ()
                  (disco-room-clear-poll-votes message-id))
@@ -4310,7 +4287,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
               (insert " ")
               (setq inserted t))
             (when can-expire
-              (disco-ui-insert-action-button
+              (appkit-ui-insert-action-button
                "[End poll]"
                (lambda ()
                  (disco-room-expire-poll message-id))
@@ -4320,10 +4297,10 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
             (unless inserted
               (insert (propertize "[no poll actions available]" 'face 'shadow)))
             (insert "\n")
-            (disco-ui-apply-line-prefix actions-start (point) prefix-state)
+            (appkit-ui-apply-line-prefix actions-start (point) prefix-state)
             (add-text-properties actions-start (point)
                                  `(disco-message-id ,message-id))
-            (disco-ui-append-face
+            (appkit-ui-append-face
              actions-start (point) disco-room-poll-meta-face)))))))
 
 (defun disco-room--parse-reaction-input (emoji)
@@ -4581,7 +4558,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  (compact-prefix (or (plist-get avatar-prefixes :rest-body) "    "))
                  (compact-prefix-width (max 0 (string-width compact-prefix))))
             (setq section-prefix-state
-                  (disco-ui-make-prefix-state compact-prefix compact-prefix))
+                  (appkit-ui-make-prefix-state compact-prefix compact-prefix))
             (when reply
               (let ((ref-id (disco-room--reply-reference-id msg))
                     (ref-channel (disco-msg-reference-channel-id msg)))
@@ -4609,14 +4586,14 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  (cdr time-span)
                  (list 'help-echo timestamp)))
               (insert "\n")
-              (disco-ui-apply-line-prefix content-start (point) section-prefix-state)))
+              (appkit-ui-apply-line-prefix content-start (point) section-prefix-state)))
         (let* ((avatar-prefixes (disco-room--avatar-prefixes msg))
                (header-prefix (or (plist-get avatar-prefixes :header) ""))
                (header-prefix-width (max 0 (string-width header-prefix)))
                (body-first-prefix (or (plist-get avatar-prefixes :first-body) "    "))
                (body-rest-prefix (or (plist-get avatar-prefixes :rest-body) "    ")))
           (setq section-prefix-state
-                (disco-ui-make-prefix-state body-first-prefix body-rest-prefix))
+                (appkit-ui-make-prefix-state body-first-prefix body-rest-prefix))
           (let ((header-start (point)))
             (setq author-start (point))
             (insert author)
@@ -4632,9 +4609,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                  (cdr time-span)
                  (list 'help-echo timestamp))))
             (insert "\n")
-            (disco-ui-apply-line-prefix
+            (appkit-ui-apply-line-prefix
              header-start (point)
-             (disco-ui-make-prefix-state header-prefix body-rest-prefix)))
+             (appkit-ui-make-prefix-state header-prefix body-rest-prefix)))
           (when reply
             (let ((ref-id (disco-room--reply-reference-id msg))
                   (ref-channel (disco-msg-reference-channel-id msg)))
@@ -4648,10 +4625,10 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                               (disco-room-jump-to-message ref-id ref-channel)))
                :help-echo "Open replied-to message")))
           (unless (string-empty-p content)
-            (disco-ins-insert-prefixed-lines section-prefix-state content))))
-      (let ((disco-ui-card-indent-prefix-state section-prefix-state)
-            (disco-ui-card-indent-prefix
-             (disco-ins-prefix-string section-prefix-state nil "    ")))
+            (appkit-ui-insert-prefixed-lines section-prefix-state content))))
+      (let ((appkit-ui-card-indent-prefix-state section-prefix-state)
+            (appkit-ui-card-indent-prefix
+             (appkit-ui-prefix-string section-prefix-state nil "    ")))
         (disco-room--insert-forward-section msg section-prefix-state)
         (when (disco-room--message-has-thread-p msg)
           (let* ((message-id (alist-get 'id msg))
@@ -7195,16 +7172,16 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if #'disco-room-menu--reaction-inapt-reason)
     ("T" "Open thread" disco-msg-open-thread)]
    ["Media"
-    ("o" "Open / play" disco-media-card-open
-     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'open)))
-    ("D" "Download / retry" disco-media-card-download
-     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'download)))
-    ("C" "Cancel download" disco-media-card-cancel-download
-     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'cancel)))
-    ("s" "Save as" disco-media-card-save-as
-     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'save-as)))
-    ("y" "Copy media URL" disco-media-card-copy-url
-     :inapt-if (lambda () (disco-media-card-action-inapt-reason 'copy-url)))]])
+    ("o" "Open / play" appkit-media-card-open
+     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'open)))
+    ("D" "Download / retry" appkit-media-card-download
+     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'download)))
+    ("C" "Cancel download" appkit-media-card-cancel-download
+     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'cancel)))
+    ("s" "Save as" appkit-media-card-save-as
+     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'save-as)))
+    ("y" "Copy media URL" appkit-media-card-copy-url
+     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'copy-url)))]])
 
 (defun disco-room--operate-msg (_msg)
   "Open the message transient for the current room.
@@ -7451,7 +7428,7 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local disco-msg-add-reaction-function #'disco-room--add-reaction-to-msg)
   (setq-local disco-msg-remove-reaction-function #'disco-room--remove-reaction-from-msg)
   (setq-local disco-msg-redisplay-function #'disco-room--redisplay-msg)
-  (setq-local disco-media-card-fallback-context-function
+  (setq-local appkit-media-card-fallback-context-function
               #'disco-room--media-card-fallback-context)
   (setq-local disco-room--filter-generation 0)
   (setq-local disco-room--filter-in-flight nil)

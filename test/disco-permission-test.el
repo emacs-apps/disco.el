@@ -2,10 +2,6 @@
 
 (require 'ert)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-permission)
 
 (ert-deftest disco-permission-display-name-normalizes-designators ()

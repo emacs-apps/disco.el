@@ -24,7 +24,9 @@
 (require 'disco-root-view)
 (require 'disco-state)
 (require 'disco-thread)
-(require 'disco-view)
+(require 'appkit-view)
+(require 'appkit-ewoc)
+(require 'appkit-position)
 
 (autoload 'disco-root-open "disco-root" nil t)
 
@@ -577,7 +579,7 @@ extended reverse accumulator."
                    (delq nil
                          (mapcar
                           (lambda (window)
-                            (disco-view-window-fill-column
+                            (appkit-view-window-fill-column
                              window
                              disco-channel-directory-margin-columns))
                           (get-buffer-window-list
@@ -680,7 +682,7 @@ extended reverse accumulator."
 Existing keyed nodes are updated or moved in place.  Only disappeared nodes
 are deleted and only new nodes are inserted."
   (setq disco-channel-directory--node-table
-        (disco-view-reconcile-keyed-ewoc
+        (appkit-ewoc-reconcile
          disco-channel-directory--ewoc
          entries
          #'disco-channel-directory-entry-key
@@ -733,7 +735,7 @@ are deleted and only new nodes are inserted."
       (setq disco-channel-directory--render-pending t)
     (let ((disco-channel-directory--rendering t)
           (snapshot
-           (disco-view-capture-position
+           (appkit-position-capture
             :anchor-property 'disco-channel-directory-key
             :preserve-window-start t)))
       (unwind-protect
@@ -747,7 +749,7 @@ are deleted and only new nodes are inserted."
                  (disco-channel-directory--project-entries)
                  force-channel-ids)))
             (when snapshot
-              (disco-view-restore-position snapshot))
+              (appkit-position-restore snapshot))
             (when disco-channel-directory--pending-focus-channel-id
               (when-let* ((position
                            (disco-channel-directory--find-channel-position
@@ -1082,7 +1084,7 @@ rows, so passive updates are coalesced until a real window is available."
              (> width 0)
              (/= width (or disco-channel-directory--fill-column 0)))
     (let ((snapshot
-           (disco-view-capture-position
+           (appkit-position-capture
             :anchor-property 'disco-channel-directory-key
             :preserve-window-start t))
           (inhibit-read-only t)
@@ -1091,7 +1093,7 @@ rows, so passive updates are coalesced until a real window is available."
       (with-silent-modifications
         (ewoc-refresh disco-channel-directory--ewoc))
       (when snapshot
-        (disco-view-restore-position snapshot)))))
+        (appkit-position-restore snapshot)))))
 
 (defun disco-channel-directory--window-size-change (frame)
   "Reflow guild-directory buffers visible on FRAME."
@@ -1104,7 +1106,7 @@ rows, so passive updates are coalesced until a real window is available."
              (with-current-buffer buffer
                (when (eq major-mode 'disco-channel-directory-mode)
                  (let ((width
-                        (disco-view-window-fill-column
+                        (appkit-view-window-fill-column
                          window disco-channel-directory-margin-columns)))
                    (when width
                      (puthash buffer

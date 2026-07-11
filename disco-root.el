@@ -16,8 +16,8 @@
 (require 'transient)
 (require 'seq)
 (require 'subr-x)
-(require 'disco-ui)
-(require 'disco-view)
+(require 'appkit-view)
+(require 'appkit-position)
 (require 'disco-util)
 (require 'disco-api)
 (require 'disco-channel-type)
@@ -520,7 +520,7 @@ between current view mode and unread-only filter."
 
 (defun disco-root--render-preserving-position ()
   "Render root and keep point near the previous line and column."
-  (disco-view-render-preserving-position
+  (appkit-position-render-preserving
    #'disco-root-render
    :preserve-window-start t)
   (disco-root--update-window-points))
@@ -2396,7 +2396,7 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
 
 (defun disco-root--reflow-preserving-position ()
   "Reflow root layout and keep point near previous line/column."
-  (disco-view-render-preserving-position
+  (appkit-position-render-preserving
    #'disco-root--reflow-layout
    :preserve-window-start t)
   (disco-root--update-window-points))
@@ -2833,7 +2833,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
             (cond
              ((eq major-mode 'disco-root-archived-threads-mode)
               (when (or dirty-channel-ids needs-structural needs-header)
-                (disco-view-render-list-spec-preserving-position
+                (appkit-view-render-list-spec-preserving-position
                  (disco-root--archived-threads-list-spec)
                  :anchor-property 'disco-channel-id
                  :preserve-window-start t
@@ -2872,7 +2872,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                   (let ((inhibit-read-only t)
                         (buffer-undo-list t)
                         (position-snapshot
-                         (disco-view-capture-position
+                         (appkit-position-capture
                           :anchor-property 'disco-channel-id
                           :preserve-window-start t)))
                     (with-silent-modifications
@@ -2898,7 +2898,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                         (disco-root--maybe-refresh-activity-header-line)))
                       (when (and (not needs-structural)
                                  position-snapshot)
-                        (disco-view-restore-position position-snapshot)
+                        (appkit-position-restore position-snapshot)
                         (disco-root--update-window-points))))
                   (when needs-structural
                     (disco-root--debug-log "flush-live-updates -> structural-reconcile")

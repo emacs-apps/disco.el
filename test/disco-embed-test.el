@@ -3,15 +3,10 @@
 (require 'ert)
 (require 'cl-lib)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-embed)
 
 (ert-deftest disco-embed-stringify-uses-internal-markdown-renderer ()
-  (let* ((disco-markdown-backend 'internal)
-         (disco-embed--current-message '((id . "m1")))
+  (let* ((disco-embed--current-message '((id . "m1")))
          (disco-embed--current-spoiler-message-id "m1")
          (disco-embed--reveal-spoilers nil)
          (rendered (disco-embed--stringify "[link](https://example.com)\n> quote"))
@@ -26,8 +21,7 @@
                     (get-text-property quote-pos 'line-prefix rendered))))))
 
 (ert-deftest disco-embed-stringify-passes-spoiler-context-to-internal-renderer ()
-  (let* ((disco-markdown-backend 'internal)
-         (disco-embed--current-message '((id . "m1")))
+  (let* ((disco-embed--current-message '((id . "m1")))
          (disco-embed--current-spoiler-message-id "m1")
          (disco-embed--reveal-spoilers nil)
          (rendered (disco-embed--stringify "|| spoiler ||"))
@@ -79,7 +73,7 @@
                    (insert (format "[%s:%s]"
                                    image
                                    (if slice "slice" "plain")))))
-                ((symbol-function 'disco-media-image-slice-count)
+                ((symbol-function 'appkit-media-image-slice-count)
                  (lambda (image)
                    (pcase image
                      (:img-a 2)
@@ -137,15 +131,48 @@
                 ((symbol-function 'insert-image)
                  (lambda (_image fallback &optional _area _slice)
                    (insert fallback)))
-                ((symbol-function 'disco-media-add-open-image-properties)
-                 (lambda (_start _end url &optional cache-key)
-                   (setq open-url url
-                         open-key cache-key))))
+                ((symbol-function 'appkit-media-add-open-image-properties)
+                 (lambda (_start _end resource &rest options)
+                   (setq open-url (alist-get 'url resource)
+                         open-key (plist-get options :cache-key)))))
         (disco-embed--insert-preview-image-slice
          :image 0 "https://cdn.example.invalid/cat.png"
          "[image]" "embed-open-image:cat")))
     (should (equal open-url "https://cdn.example.invalid/cat.png"))
     (should (equal open-key "embed-open-image:cat"))))
+
+(ert-deftest disco-embed-direct-image-title-and-open-stay-in-emacs ()
+  (let* ((url "https://cdn.example.invalid/cat.png")
+         (msg '((id . "m1")))
+         (embed `((type . "image") (url . ,url) (title . "cat")))
+         title-resource
+         opened-resource)
+    (with-temp-buffer
+      (let ((disco-embed-show-image-previews nil)
+            (disco-embed-show-urls nil))
+        (cl-letf (((symbol-function 'appkit-media-add-open-image-properties)
+                   (lambda (_start _end resource &rest _options)
+                     (setq title-resource resource)))
+                  ((symbol-function 'appkit-media-add-open-url-properties)
+                   (lambda (&rest _arguments)
+                     (ert-fail "direct image must not use browser properties")))
+                  ((symbol-function 'disco-media-open-discord-resource)
+                   (lambda (resource kind &optional _cache-key)
+                     (should (eq kind 'image))
+                     (setq opened-resource resource)))
+                  ((symbol-function 'browse-url)
+                   (lambda (&rest _arguments)
+                     (ert-fail "direct image action must not use a browser"))))
+          (disco-embed-insert-card msg embed 1)
+          (should (equal url (alist-get 'url title-resource)))
+          (should-not (string-match-p (regexp-quote "[Media]")
+                                      (buffer-string)))
+          (goto-char (point-min))
+          (search-forward "[Open]")
+          (let ((button (button-at (match-beginning 0))))
+            (should button)
+            (button-activate button))
+          (should (equal url (alist-get 'url opened-resource))))))))
 
 (ert-deftest disco-embed-message-preview-cache-keys-cover-media-and-author-icon ()
   (let* ((msg

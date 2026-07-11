@@ -10,28 +10,8 @@
 
 (require 'browse-url)
 (require 'cl-lib)
-(require 'seq)
 (require 'subr-x)
 (require 'thingatpt)
-
-(declare-function markdown-link-url "markdown-mode" ())
-(defvar thing-at-point-url-regexp nil)
-
-(defcustom disco-markdown-backend 'auto
-  "Backend used for Markdown rendering in disco.
-
-`auto' prefers markdown-mode when available, then falls back to legacy
-punctuation unescaping.
-`legacy' always uses `disco-markdown-unescape-punctuation'.
-`internal' uses disco's built-in Discord-focused renderer.
-`markdown-mode' enforces markdown-mode backend when available; otherwise it
-falls back to `legacy'."
-  :type '(choice
-          (const :tag "Auto" auto)
-          (const :tag "Legacy punctuation unescape" legacy)
-          (const :tag "Internal Discord renderer" internal)
-          (const :tag "markdown-mode" markdown-mode))
-  :group 'disco)
 
 (defcustom disco-markdown-enable-discord-tokens t
   "When non-nil, render Discord-specific tokens after Markdown pass.
@@ -43,12 +23,12 @@ custom emoji markers, and Discord timestamps."
 
 (defcustom disco-markdown-enable-spoiler-render t
   "When non-nil, render Discord spoiler syntax (`||spoiler||`) in rich
-Markdown backends."
+Markdown text."
   :type 'boolean
   :group 'disco)
 
 (defcustom disco-markdown-cache-enabled t
-  "When non-nil, cache Markdown render results by backend/context/text."
+  "When non-nil, cache Markdown render results by context and text."
   :type 'boolean
   :group 'disco)
 
@@ -62,8 +42,7 @@ When exceeded, cache is cleared to keep runtime behavior simple and stable."
 (defcustom disco-markdown-fontify-code-blocks-natively t
   "When non-nil, fontify fenced code blocks using the hinted language mode.
 
-This mirrors Discord's language-tagged code block behavior without depending
-on `markdown-mode' at render time."
+This mirrors Discord's language-tagged code block behavior."
   :type 'boolean
   :group 'disco)
 
@@ -337,9 +316,17 @@ on `markdown-mode' at render time."
       (user-error "disco: spoiler is not interactive here"))
     (funcall 'disco-room-toggle-message-spoilers message-id)))
 
-(defun disco-markdown--cache-key (backend context text &optional message-context-key)
-  "Build cache key from BACKEND, CONTEXT, TEXT and MESSAGE-CONTEXT-KEY."
-  (list backend context message-context-key text))
+(defun disco-markdown--cache-key (context text &optional message-context-key)
+  "Build cache key from CONTEXT, TEXT, and MESSAGE-CONTEXT-KEY."
+  (list context message-context-key text))
+
+(defun disco-markdown--render-policy-key ()
+  "Return a stable cache key for settings that affect rendered output."
+  (md5
+   (prin1-to-string
+    (list disco-markdown-fontify-code-blocks-natively
+          disco-markdown-code-block-default-mode
+          disco-markdown-code-lang-modes))))
 
 (defun disco-markdown--cache-get (key)
   "Return cached render value for KEY.
@@ -360,30 +347,10 @@ VALUE is copied to isolate cache entries from caller mutation."
              (max 1 disco-markdown-cache-limit))
       (clrhash disco-markdown--cache))))
 
-(defun disco-markdown--markdown-mode-available-p ()
-  "Return non-nil when markdown-mode view backend is available."
-  (and (require 'markdown-mode nil t)
-       (or (fboundp 'gfm-view-mode)
-           (fboundp 'markdown-view-mode))))
-
-(defun disco-markdown--resolve-backend ()
-  "Return resolved backend symbol for current settings."
-  (pcase disco-markdown-backend
-    ('legacy 'legacy)
-    ('internal 'internal)
-    ('markdown-mode
-     (if (disco-markdown--markdown-mode-available-p)
-         'markdown-mode
-       'legacy))
-    (_
-     (if (disco-markdown--markdown-mode-available-p)
-         'markdown-mode
-       'legacy))))
-
 (defun disco-markdown--next-style-change (text pos len)
   "Return next position where display-relevant properties change.
 
-TEXT is source string, POS is current index and LEN is text length."
+TEXT is the source string, POS is the current index, and LEN is its length."
   (let ((next-face (or (next-single-char-property-change pos 'face text) len))
         (next-font-lock
          (or (next-single-char-property-change pos 'font-lock-face text) len))
@@ -392,11 +359,7 @@ TEXT is source string, POS is current index and LEN is text length."
     (min next-face next-font-lock next-help-echo)))
 
 (defun disco-markdown--sanitize-face-properties (text)
-  "Return TEXT stripped to display-relevant properties.
-
-This keeps stable presentation properties such as `face' and string-valued
-`help-echo', while dropping markdown-mode interaction state that should not
-leak into room buffers."
+  "Return TEXT stripped to stable display-relevant properties."
   (let* ((source (or text ""))
          (copy (substring-no-properties source))
          (len (length source))
@@ -406,9 +369,9 @@ leak into room buffers."
                        (get-text-property pos 'font-lock-face source)))
              (help-echo (get-text-property pos 'help-echo source))
              (next (disco-markdown--next-style-change source pos len))
-             (props nil))
+             props)
         (when face
-          (setq props (append props (list 'face face))))
+          (setq props (list 'face face)))
         (when (stringp help-echo)
           (setq props (append props (list 'help-echo help-echo))))
         (when props
@@ -432,31 +395,10 @@ leak into room buffers."
     (5 'disco-markdown-heading-5-face)
     (_ 'disco-markdown-heading-6-face)))
 
-(defun disco-markdown--heading-level-from-face (face)
-  "Return heading level encoded by FACE, or nil."
-  (cond
-   ((null face) nil)
-   ((listp face)
-    (seq-some #'disco-markdown--heading-level-from-face face))
-   ((eq face 'markdown-header-face-1) 1)
-   ((eq face 'markdown-header-face-2) 2)
-   ((eq face 'markdown-header-face-3) 3)
-   ((eq face 'markdown-header-face-4) 4)
-   ((eq face 'markdown-header-face-5) 5)
-   ((eq face 'markdown-header-face-6) 6)
-   (t nil)))
-
-(defun disco-markdown--markdown-link-face-p (face)
-  "Return non-nil when FACE denotes a rendered Markdown link span."
-  (or (disco-markdown--face-match-p face 'markdown-link-face)
-      (disco-markdown--face-match-p face 'markdown-url-face)
-      (disco-markdown--face-match-p face 'markdown-plain-url-face)))
-
 (defun disco-markdown--link-face-p (face)
   "Return non-nil when FACE already denotes a link-like span."
   (or (disco-markdown--face-match-p face 'disco-markdown-link-face)
-      (disco-markdown--face-match-p face 'link)
-      (disco-markdown--markdown-link-face-p face)))
+      (disco-markdown--face-match-p face 'link)))
 
 (defun disco-markdown--add-link-face (object start end)
   "Add `disco-markdown-link-face' to OBJECT between START and END."
@@ -534,54 +476,6 @@ return visible spoiler contents; otherwise return masked text."
                              payload)))
     payload))
 
-(defun disco-markdown--apply-markdown-mode-link-properties (text)
-  "Attach open actions to visible markdown-mode link spans in TEXT."
-  (let ((copy (copy-sequence text))
-        (len (length text))
-        (pos 0))
-    (while (< pos len)
-      (let* ((face (get-text-property pos 'face copy))
-             (help-echo (get-text-property pos 'help-echo copy))
-             (next (or (next-single-char-property-change pos 'face copy) len)))
-        (when (and (disco-markdown--markdown-link-face-p face)
-                   (stringp help-echo)
-                   (disco-markdown--string-present-p help-echo))
-          (disco-markdown--add-open-url-properties copy pos next help-echo))
-        (setq pos next)))
-    copy))
-
-(defun disco-markdown--code-kind-from-face (face)
-  "Return code region kind encoded by FACE, or nil."
-  (cond
-   ((null face) nil)
-   ((listp face)
-    (seq-some #'disco-markdown--code-kind-from-face face))
-   ((eq face 'markdown-inline-code-face) 'inline)
-   ((or (eq face 'markdown-code-face)
-        (eq face 'markdown-pre-face)
-        (and (symbolp face)
-             (string-match-p "\\`markdown-.*\\(code\\|pre\\)" (symbol-name face))))
-    'block)
-   (t nil)))
-
-(defun disco-markdown--apply-markdown-mode-code-properties (text)
-  "Attach stable code properties to markdown-mode rendered TEXT."
-  (let ((copy (copy-sequence text))
-        (len (length text))
-        (pos 0))
-    (while (< pos len)
-      (let* ((face (get-text-property pos 'face copy))
-             (kind (disco-markdown--code-kind-from-face face))
-             (next (or (next-single-char-property-change pos 'face copy) len)))
-        (when kind
-          (add-text-properties
-           pos next
-           (list 'disco-markdown-code t
-                 'disco-markdown-code-kind kind)
-           copy))
-        (setq pos next)))
-    copy))
-
 (defun disco-markdown--copy-materialize-line-prefixes (text)
   "Return TEXT with `line-prefix' regions turned into literal text."
   (let* ((source (or text ""))
@@ -645,10 +539,8 @@ interactive display properties that should not leak into the kill ring."
            (eq (aref text (1- start)) ?<)
            (eq (aref text end) ?>))))
 
-(defun disco-markdown--apply-visible-url-properties (text &optional backend)
-  "Attach open actions to visible URL substrings in TEXT.
-
-BACKEND controls whether URLs inside protected/code spans are skipped."
+(defun disco-markdown--apply-visible-url-properties (text)
+  "Attach open actions to visible URL substrings outside protected spans."
   (let ((copy (copy-sequence text)))
     (with-temp-buffer
       (insert copy)
@@ -663,7 +555,7 @@ BACKEND controls whether URLs inside protected/code spans are skipped."
                    (disco-markdown--string-present-p url))
               (progn
                 (unless (or (disco-markdown--position-protected-p
-                             backend (1- beg) copy)
+                             (1- beg) copy)
                             (get-text-property (1- beg)
                                                'disco-markdown-spoiler-message-id
                                                copy)
@@ -759,42 +651,6 @@ LINE-START and LINE-END delimit the line contents in the current buffer."
         (forward-line 1)))
     (buffer-string)))
 
-(defun disco-markdown--normalize-heading-lines (text)
-  "Normalize heading presentation in rendered TEXT.
-
-This remaps markdown-mode heading faces to disco-local ones and strips any
-visible ATX marker fallback so all heading levels render consistently outside
-code spans and fenced code blocks."
-  (with-temp-buffer
-    (insert text)
-    (goto-char (point-min))
-    (while (< (point) (point-max))
-      (let* ((line-start (line-beginning-position))
-             (line-end (line-end-position))
-             (protected-line-p
-              (disco-markdown--position-protected-p 'markdown-mode line-start))
-             (face (and (not protected-line-p)
-                        (get-text-property line-start 'face)))
-             (level (and (not protected-line-p)
-                         (disco-markdown--heading-level-from-face face))))
-        (goto-char line-start)
-        (when (and (not protected-line-p)
-                   (looking-at disco-markdown--regexp-heading-marker)
-                   (not (disco-markdown--position-protected-p
-                         'markdown-mode (match-beginning 2))))
-          (setq level (or level
-                          (min 6 (length (match-string-no-properties 2)))))
-          (delete-region (match-beginning 2) (match-end 0))
-          (setq line-start (line-beginning-position)
-                line-end (line-end-position)))
-        (when (and level (< line-start line-end))
-          (add-face-text-property
-           line-start line-end
-           (disco-markdown--heading-face-for-level level)
-           'append))
-        (forward-line 1)))
-    (buffer-string)))
-
 (defun disco-markdown--find-next-unprotected-char (char limit)
   "Return next unprotected CHAR before LIMIT in current buffer, or nil."
   (let ((found nil)
@@ -802,7 +658,7 @@ code spans and fenced code blocks."
     (while (and (not found)
                 (search-forward needle limit t))
       (let ((pos (1- (point))))
-        (unless (disco-markdown--position-protected-p 'internal pos)
+        (unless (disco-markdown--position-protected-p pos)
           (setq found pos))))
     found))
 
@@ -818,7 +674,7 @@ code spans and fenced code blocks."
          ((or (null char)
               (eq char ?\n))
           (setq close-pos :invalid))
-         ((disco-markdown--position-protected-p 'internal pos)
+         ((disco-markdown--position-protected-p pos)
           (forward-char 1))
          ((eq char ?\()
           (setq depth (1+ depth))
@@ -842,7 +698,7 @@ code spans and fenced code blocks."
       (let* ((open-start (1- (point)))
              (line-limit (min (1+ (line-end-position)) (point-max)))
              (continue-pos (point)))
-        (unless (disco-markdown--position-protected-p 'internal open-start)
+        (unless (disco-markdown--position-protected-p open-start)
           (let ((label-start (point))
                 (close-bracket nil)
                 (close-end nil)
@@ -854,8 +710,7 @@ code spans and fenced code blocks."
                 (goto-char (1+ close-bracket))
                 (when (and (< (point) line-limit)
                            (eq (char-after) ?\()
-                           (not (disco-markdown--position-protected-p
-                                 'internal (point))))
+                           (not (disco-markdown--position-protected-p (point))))
                   (forward-char 1)
                   (let* ((url-start (point))
                          (url-end (disco-markdown--find-inline-link-url-end line-limit)))
@@ -878,7 +733,7 @@ code spans and fenced code blocks."
 (defun disco-markdown--apply-angle-autolink-replacements (text)
   "Render angle-bracket autolinks in plain TEXT."
   (disco-markdown--apply-regexp-replacements
-   text 'internal
+   text
    (list
     (cons disco-markdown--regexp-angle-autolink
           (lambda ()
@@ -900,95 +755,7 @@ code spans and fenced code blocks."
     (setq rendered (disco-markdown--apply-internal-link-replacements rendered))
     (setq rendered (disco-markdown--apply-inline-emphasis rendered))
     (setq rendered (disco-markdown--apply-heading-lines rendered))
-    (disco-markdown--apply-visible-url-properties rendered 'internal)))
-
-(defun disco-markdown--render-with-markdown-mode (text)
-  "Render TEXT through markdown-mode and return visible propertized string."
-  (with-temp-buffer
-    (insert (or text ""))
-    ;; Use markdown view mode so hidden-markup copy path strips formatting tokens.
-    (funcall (if (fboundp 'gfm-view-mode)
-                 'gfm-view-mode
-               'markdown-view-mode))
-    (when (fboundp 'font-lock-ensure)
-      (font-lock-ensure (point-min) (point-max)))
-    (disco-markdown--apply-visible-url-properties
-     (disco-markdown--normalize-heading-lines
-      (disco-markdown--apply-markdown-mode-code-properties
-       (disco-markdown--apply-markdown-mode-link-properties
-        (disco-markdown--sanitize-face-properties
-         (filter-buffer-substring (point-min) (point-max) nil)))))
-     'markdown-mode)))
-
-(defun disco-markdown--char-run-length (text start char)
-  "Return contiguous CHAR run length in TEXT from START."
-  (let ((len (length text))
-        (pos start))
-    (while (and (< pos len)
-                (eq (aref text pos) char))
-      (setq pos (1+ pos)))
-    (- pos start)))
-
-(defun disco-markdown--punctuation-char-p (char)
-  "Return non-nil when CHAR is a Markdown-escapable punctuation char."
-  (and (characterp char)
-       (string-match-p "[[:punct:]]" (char-to-string char))))
-
-(defun disco-markdown-unescape-punctuation (text)
-  "Return TEXT with Markdown punctuation escapes removed.
-
-This follows a markdown-aware strategy: escapes are unwrapped only outside
-inline/code-fence spans, so code blocks preserve literal backslashes."
-  (if (not (stringp text))
-      text
-    (let ((len (length text))
-          (idx 0)
-          (parts nil)
-          (in-inline nil)
-          (inline-ticks 0)
-          (in-fence nil)
-          (fence-ticks 0))
-      (while (< idx len)
-        (let ((char (aref text idx)))
-          (if (eq char ?`)
-              (let* ((ticks (disco-markdown--char-run-length text idx ?`))
-                     (line-start (or (= idx 0)
-                                     (memq (aref text (1- idx)) '(?\n ?\r)))))
-                (cond
-                 (in-fence
-                  (when (and line-start (>= ticks fence-ticks))
-                    (setq in-fence nil)
-                    (setq fence-ticks 0)))
-                 (in-inline
-                  (when (= ticks inline-ticks)
-                    (setq in-inline nil)
-                    (setq inline-ticks 0)))
-                 ((and line-start (>= ticks 3))
-                  (setq in-fence t)
-                  (setq fence-ticks ticks))
-                 (t
-                  (setq in-inline t)
-                  (setq inline-ticks ticks)))
-                (push (substring text idx (+ idx ticks)) parts)
-                (setq idx (+ idx ticks)))
-            (if (and (not in-inline)
-                     (not in-fence)
-                     (eq char ?\\)
-                     (< (1+ idx) len)
-                     (disco-markdown--punctuation-char-p
-                      (aref text (1+ idx))))
-                (progn
-                  (push (string (aref text (1+ idx))) parts)
-                  (setq idx (+ idx 2)))
-              (push (string char) parts)
-              (setq idx (1+ idx))))))
-      (apply #'concat (nreverse parts)))))
-
-(defun disco-markdown--render-legacy (text)
-  "Render TEXT with legacy markdown punctuation unescape behavior."
-  (if (stringp text)
-      (disco-markdown-unescape-punctuation text)
-    ""))
+    (disco-markdown--apply-visible-url-properties rendered)))
 
 (defun disco-markdown--sequence-list (value)
   "Return VALUE converted to a list sequence."
@@ -1078,6 +845,27 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
           (disco-markdown--hash-put-id-name table id name))))
     table))
 
+(defun disco-markdown--channel-context-key (text message)
+  "Return channel labels from external state that can affect rendering TEXT.
+
+MESSAGE-provided channel names take precedence, matching the token renderer."
+  (when (and disco-markdown-enable-discord-tokens
+             (disco-markdown--string-present-p text))
+    (let ((message-names (disco-markdown--build-channel-name-map message))
+          (seen (make-hash-table :test #'equal))
+          (start 0)
+          labels)
+      (while (string-match disco-markdown--regexp-channel-mention text start)
+        (let* ((id (match-string-no-properties 1 text))
+               (name (or (gethash id message-names)
+                         (disco-markdown--state-channel-name id)
+                         (format "channel:%s" id))))
+          (unless (gethash id seen)
+            (puthash id t seen)
+            (push (cons id name) labels)))
+        (setq start (match-end 0)))
+      (nreverse labels))))
+
 (defun disco-markdown--build-role-name-map (message)
   "Return hash map of role-id -> role name from MESSAGE."
   (let ((table (make-hash-table :test #'equal))
@@ -1155,34 +943,11 @@ ENTRY may be either an object alist or a map pair of (ID . OBJECT)."
   (and (stringp text)
        (string-match-p "<t:[0-9]+:R>" text)))
 
-(defun disco-markdown--code-face-p (face)
-  "Return non-nil when FACE denotes markdown code/preformatted text."
-  (when face
-    (or (eq face 'markdown-inline-code-face)
-        (eq face 'markdown-code-face)
-        (eq face 'markdown-pre-face)
-        (and (symbolp face)
-             (string-match-p "\\`markdown-.*\\(code\\|pre\\)" (symbol-name face))))))
+(defun disco-markdown--position-protected-p (position &optional object)
+  "Return non-nil when POSITION in OBJECT belongs to protected Markdown text.
 
-(defun disco-markdown--position-in-code-face-p (position &optional object)
-  "Return non-nil when POSITION in OBJECT belongs to a code face.
-
-OBJECT defaults to the current buffer when nil and may also be a string."
-  (let ((face (get-text-property position 'face object)))
-    (if (listp face)
-        (seq-some #'disco-markdown--code-face-p face)
-      (disco-markdown--code-face-p face))))
-
-(defun disco-markdown--position-protected-p (backend position &optional object)
-  "Return non-nil when POSITION in OBJECT should be skipped for BACKEND transforms.
-
-OBJECT defaults to the current buffer when nil and may also be a string."
-  (pcase backend
-    ('markdown-mode
-     (disco-markdown--position-in-code-face-p position object))
-    ('internal
-     (get-text-property position 'disco-markdown-protected object))
-    (_ nil)))
+OBJECT defaults to the current buffer and may also be a string."
+  (get-text-property position 'disco-markdown-protected object))
 
 (defun disco-markdown--word-constituent-char-p (char)
   "Return non-nil when CHAR behaves like a word constituent."
@@ -1275,12 +1040,11 @@ KIND is an optional symbol describing the code span, typically `inline' or
     (goto-char (point-min))
     (while (search-forward "\\" nil t)
       (let ((slash-pos (1- (point))))
-        (unless (disco-markdown--position-protected-p 'internal slash-pos)
+        (unless (disco-markdown--position-protected-p slash-pos)
           (let ((next-char (char-after)))
             (when (and next-char
                        (disco-markdown--markdown-escapable-char-p next-char)
-                       (not (disco-markdown--position-protected-p 'internal
-                                                                  (point))))
+                       (not (disco-markdown--position-protected-p (point))))
               (delete-region slash-pos (point))
               (add-text-properties slash-pos (1+ slash-pos)
                                    '(disco-markdown-protected t)
@@ -1312,14 +1076,14 @@ and CLOSE-END and must return non-nil for the span to be transformed."
                (open-end (point))
                (line-limit (line-end-position))
                (close-start nil))
-          (unless (disco-markdown--position-protected-p 'internal open-start)
+          (unless (disco-markdown--position-protected-p open-start)
             (save-excursion
               (while (and (not close-start)
                           (search-forward delimiter line-limit t))
                 (let ((candidate-start (- (point) delimiter-len))
                       (candidate-end (point)))
                   (when (and (not (disco-markdown--position-protected-p
-                                   'internal candidate-start))
+                                   candidate-start))
                              (disco-markdown--inline-delimiter-content-valid-p
                               open-end candidate-start)
                              (or (null predicate)
@@ -1367,7 +1131,7 @@ and CLOSE-END and must return non-nil for the span to be transformed."
 (defun disco-markdown--apply-inline-code-spans (text)
   "Strip inline code span markers from TEXT and protect the contents."
   (disco-markdown--apply-regexp-replacements
-   text 'internal
+   text
    (list
     (cons disco-markdown--regexp-inline-code
           (lambda ()
@@ -1403,10 +1167,8 @@ and CLOSE-END and must return non-nil for the span to be transformed."
             (not (disco-markdown--word-constituent-char-p
                   (char-after close-end))))))))
 
-(defun disco-markdown--apply-regexp-replacements (text backend replacements)
-  "Apply REPLACEMENTS over TEXT and return transformed string.
-
-BACKEND controls whether protected regions are skipped." 
+(defun disco-markdown--apply-regexp-replacements (text replacements)
+  "Apply REPLACEMENTS over TEXT, skipping protected regions."
   (with-temp-buffer
     (insert text)
     (dolist (entry replacements)
@@ -1415,23 +1177,21 @@ BACKEND controls whether protected regions are skipped."
             (replacer (cdr entry)))
         (while (re-search-forward regexp nil t)
           (let ((beg (match-beginning 0)))
-            (unless (disco-markdown--position-protected-p backend beg)
+            (unless (disco-markdown--position-protected-p beg)
               (let ((replacement (funcall replacer)))
                 (when (stringp replacement)
                   (replace-match replacement t t))))))))
     (buffer-string)))
 
-(defun disco-markdown--apply-subtitle-lines (text backend)
-  "Render Discord `-#` subtitle lines in TEXT.
-
-BACKEND controls whether protected regions are skipped." 
+(defun disco-markdown--apply-subtitle-lines (text)
+  "Render Discord `-#` subtitle lines in unprotected regions of TEXT."
   (with-temp-buffer
     (insert text)
     (goto-char (point-min))
     (while (re-search-forward disco-markdown--regexp-subtitle-line nil t)
       (let ((marker-start (match-end 1))
             (marker-end (match-end 0)))
-        (unless (disco-markdown--position-protected-p backend marker-start)
+        (unless (disco-markdown--position-protected-p marker-start)
           (delete-region marker-start marker-end)
           (let ((line-end (line-end-position)))
             (when (< (point) line-end)
@@ -1439,15 +1199,14 @@ BACKEND controls whether protected regions are skipped."
                (point) line-end 'disco-markdown-subtitle-face 'append))))))
     (buffer-string)))
 
-(defun disco-markdown--render-discord-tokens (text backend message
-                                                   spoiler-message-id reveal-spoilers)
+(defun disco-markdown--render-discord-tokens (text message spoiler-message-id
+                                                   reveal-spoilers)
   "Render Discord-specific token syntax in TEXT.
 
-BACKEND controls code-region behavior. MESSAGE carries mention/channel context.
-SPOILER-MESSAGE-ID identifies the message used for spoiler interaction.
+MESSAGE carries mention/channel context.  SPOILER-MESSAGE-ID identifies the
+message used for spoiler interaction.
 REVEAL-SPOILERS controls whether spoiler contents are visible."
-  (if (not (and (memq backend '(markdown-mode internal))
-                (disco-markdown--string-present-p text)))
+  (if (not (disco-markdown--string-present-p text))
       text
     (let* ((user-map (disco-markdown--build-user-name-map message))
            (channel-map (disco-markdown--build-channel-name-map message))
@@ -1531,9 +1290,9 @@ REVEAL-SPOILERS controls whether spoiler contents are visible."
                          reveal-spoilers)))))))
       (let ((rendered (if replacements
                           (disco-markdown--apply-regexp-replacements
-                           text backend replacements)
+                           text replacements)
                         text)))
-        (disco-markdown--apply-subtitle-lines rendered backend)))))
+        (disco-markdown--apply-subtitle-lines rendered)))))
 
 (cl-defun disco-markdown-render (text &key context message spoiler-message-id
                                       reveal-spoilers)
@@ -1544,33 +1303,24 @@ MESSAGE is optional message data used to resolve mention-like tokens.
 SPOILER-MESSAGE-ID enables spoiler toggling inside room buffers.
 When REVEAL-SPOILERS is non-nil, spoiler contents are shown instead of masked."
   (let* ((source (if (stringp text) text ""))
-         (backend (disco-markdown--resolve-backend))
          (message-context-key (disco-markdown--message-context-key message))
          (cache-context (list context
                               disco-markdown-enable-discord-tokens
                               disco-markdown-enable-spoiler-render
+                              (disco-markdown--render-policy-key)
+                              (disco-markdown--channel-context-key source message)
                               spoiler-message-id
                               (and reveal-spoilers t)))
          (cacheable-p (and disco-markdown-cache-enabled
                            (not (disco-markdown--contains-relative-timestamp-p source))))
          (cache-key (and cacheable-p
-                         (disco-markdown--cache-key backend cache-context
-                                                    source message-context-key)))
+                         (disco-markdown--cache-key cache-context source
+                                                    message-context-key)))
          (cached (disco-markdown--cache-get cache-key)))
     (or cached
-        (let* ((markdown-rendered
-                (condition-case _
-                    (pcase backend
-                      ('markdown-mode
-                       (disco-markdown--render-with-markdown-mode source))
-                      ('internal
-                       (disco-markdown--render-internal source))
-                      (_
-                       (disco-markdown--render-legacy source)))
-                  (error
-                   (disco-markdown--render-legacy source))))
+        (let* ((markdown-rendered (disco-markdown--render-internal source))
                (rendered (disco-markdown--render-discord-tokens
-                          markdown-rendered backend message
+                          markdown-rendered message
                           spoiler-message-id reveal-spoilers)))
           (disco-markdown--cache-put cache-key rendered)
           rendered))))

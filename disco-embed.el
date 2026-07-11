@@ -12,7 +12,8 @@
 (require 'seq)
 (require 'browse-url)
 (require 'color)
-(require 'disco-ui)
+(require 'appkit-media)
+(require 'appkit-ui)
 (require 'disco-util)
 (require 'disco-markdown)
 (require 'disco-media)
@@ -61,17 +62,9 @@ Set to 0 to disable embed description rendering, or nil for no limit."
   :type 'boolean
   :group 'disco-embed)
 
-(defvar disco-media-preview-max-width)
-(defvar disco-media-preview-max-height)
-(defvar disco-ui-card-indent-prefix)
-(defvar disco-ui-card-indent-prefix-state)
 (defvar disco-embed--current-message nil)
 (defvar disco-embed--current-spoiler-message-id nil)
 (defvar disco-embed--reveal-spoilers nil)
-
-(defun disco-embed--url-present-p (url)
-  "Return non-nil when URL is a non-empty string."
-  (and (stringp url) (not (string-empty-p url))))
 
 (defun disco-embed--stringify (value)
   "Return VALUE as display string, or nil when VALUE is nil.
@@ -176,7 +169,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--line-prefix (embed)
   "Return colored visual line prefix state for EMBED card rows."
-  (disco-ui-card-prefix-state :face (disco-embed--accent-face embed)))
+  (appkit-ui-card-prefix-state :face (disco-embed--accent-face embed)))
 
 (defun disco-embed--meta-line (embed)
   "Return compact metadata line for EMBED object."
@@ -234,7 +227,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
 (defun disco-embed--resolve-attachment-source-url (msg url)
   "Resolve attachment:// URL in URL to the original attachment source."
   (cond
-   ((not (disco-embed--url-present-p url)) nil)
+   ((not (appkit-media-url-present-p url)) nil)
    ((string-match "\\`attachment://\\(.+\\)\\'" url)
     (let* ((filename (match-string 1 url))
            (attachment
@@ -294,7 +287,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
                     (if (numberp disco-embed-author-icon-size)
                         disco-embed-author-icon-size
                       18))))
-    (when (disco-embed--url-present-p icon-url)
+    (when (appkit-media-url-present-p icon-url)
       `((id . ,(format "embed-author-icon:%s:%s:%s:%s"
                        message-id
                        embed-index
@@ -310,7 +303,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
 (defun disco-embed--author-icon-image (msg embed embed-index)
   "Return inline author icon image for EMBED in MSG, or nil while loading."
   (when (and disco-embed-show-author-icons
-             (disco-media-inline-image-rendering-available-p))
+             (appkit-media-inline-image-rendering-available-p))
     (let* ((size (max 8
                       (if (numberp disco-embed-author-icon-size)
                           disco-embed-author-icon-size
@@ -330,7 +323,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
                                   :width size
                                   :height size
                                   :ascent 'center)))
-            (unless (disco-media-image-object-valid-p image)
+            (unless (appkit-media-image-object-valid-p image)
               (when (image-type-available-p 'imagemagick)
                 (setq image
                       (ignore-errors
@@ -338,7 +331,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
                                       :width size
                                       :height size
                                       :ascent 'center)))))
-            (when (disco-media-image-object-valid-p image)
+            (when (appkit-media-image-object-valid-p image)
               image)))))))
 
 (defun disco-embed--main-url (msg embed)
@@ -354,7 +347,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
   "Return normalized URL key for EMBED dedup/grouping logic."
   (let ((raw-url (or (alist-get 'url embed)
                      (alist-get 'canonical_url embed))))
-    (and (disco-embed--url-present-p raw-url)
+    (and (appkit-media-url-present-p raw-url)
          (string-trim raw-url))))
 
 (defun disco-embed--image-object-key (image)
@@ -362,7 +355,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
   (let ((raw-url (or (alist-get 'proxy_url image)
                      (alist-get 'url image)
                      (alist-get 'canonical_url image))))
-    (or (and (disco-embed--url-present-p raw-url)
+    (or (and (appkit-media-url-present-p raw-url)
              (string-trim raw-url))
         (format "raw:%s" (sxhash image)))))
 
@@ -396,9 +389,9 @@ Keeps original line breaks and applies markdown renderer pipeline."
                          (alist-get 'canonical_url image)))
          (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
          (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url)))
-    (or (and (disco-embed--url-present-p resolved-proxy)
+    (or (and (appkit-media-url-present-p resolved-proxy)
              resolved-proxy)
-        (and (disco-embed--url-present-p resolved-source)
+        (and (appkit-media-url-present-p resolved-source)
              resolved-source))))
 
 (defun disco-embed--image-object-source-url (msg image)
@@ -410,8 +403,8 @@ Keeps original line breaks and applies markdown renderer pipeline."
           (disco-embed--resolve-attachment-source-url msg source-url))
          (resolved-proxy
           (disco-embed--resolve-attachment-source-url msg proxy-url)))
-    (or (and (disco-embed--url-present-p resolved-source) resolved-source)
-        (and (disco-embed--url-present-p resolved-proxy) resolved-proxy))))
+    (or (and (appkit-media-url-present-p resolved-source) resolved-source)
+        (and (appkit-media-url-present-p resolved-proxy) resolved-proxy))))
 
 (defun disco-embed--embed-with-images (embed images)
   "Return EMBED cloned with normalized IMAGES list."
@@ -444,7 +437,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
                          (string-empty-p description)))))
          (fields (alist-get 'fields embed))
          (images (disco-embed--embed-image-objects embed)))
-    (and (disco-embed--url-present-p url-key)
+    (and (appkit-media-url-present-p url-key)
          (equal (disco-embed--embed-url-key embed) url-key)
          (null (alist-get 'timestamp embed))
          (null (alist-get 'author embed))
@@ -472,7 +465,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
              (merged-images base-images)
              (next-index (1+ index))
              (merged nil))
-        (when (and (disco-embed--url-present-p base-url)
+        (when (and (appkit-media-url-present-p base-url)
                    (not (null base-images)))
           ;; Discord splits multi-image rich embeds into same-URL trailing image embeds.
           (while (and (< next-index count)
@@ -522,12 +515,12 @@ Keeps original line breaks and applies markdown renderer pipeline."
          (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
          (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url))
          (main-url (disco-embed--main-url msg embed)))
-    (or (and (disco-embed--url-present-p resolved-proxy)
+    (or (and (appkit-media-url-present-p resolved-proxy)
              resolved-proxy)
-        (and (disco-embed--url-present-p resolved-source)
+        (and (appkit-media-url-present-p resolved-source)
              resolved-source)
         (and (equal (disco-embed--type embed) "image")
-             (disco-embed--url-present-p main-url)
+             (appkit-media-url-present-p main-url)
              main-url))))
 
 (defun disco-embed--media-source-url (msg embed)
@@ -543,10 +536,10 @@ Keeps original line breaks and applies markdown renderer pipeline."
          (resolved-proxy
           (disco-embed--resolve-attachment-source-url msg proxy-url))
          (main-url (disco-embed--main-url msg embed)))
-    (or (and (disco-embed--url-present-p resolved-source) resolved-source)
-        (and (disco-embed--url-present-p resolved-proxy) resolved-proxy)
+    (or (and (appkit-media-url-present-p resolved-source) resolved-source)
+        (and (appkit-media-url-present-p resolved-proxy) resolved-proxy)
         (and (equal (disco-embed--type embed) "image")
-             (disco-embed--url-present-p main-url)
+             (appkit-media-url-present-p main-url)
              main-url))))
 
 (defun disco-embed--video-url (msg embed)
@@ -559,9 +552,9 @@ Keeps original line breaks and applies markdown renderer pipeline."
                               (alist-get 'canonical_url video))))
          (resolved-proxy (disco-embed--resolve-attachment-scheme-url msg proxy-url))
          (resolved-source (disco-embed--resolve-attachment-scheme-url msg source-url)))
-    (or (and (disco-embed--url-present-p resolved-proxy)
+    (or (and (appkit-media-url-present-p resolved-proxy)
              resolved-proxy)
-        (and (disco-embed--url-present-p resolved-source)
+        (and (appkit-media-url-present-p resolved-source)
              resolved-source))))
 
 (defun disco-embed--video-source-url (msg embed)
@@ -575,8 +568,8 @@ Keeps original line breaks and applies markdown renderer pipeline."
           (disco-embed--resolve-attachment-source-url msg source-url))
          (resolved-proxy
           (disco-embed--resolve-attachment-source-url msg proxy-url)))
-    (or (and (disco-embed--url-present-p resolved-source) resolved-source)
-        (and (disco-embed--url-present-p resolved-proxy) resolved-proxy))))
+    (or (and (appkit-media-url-present-p resolved-source) resolved-source)
+        (and (appkit-media-url-present-p resolved-proxy) resolved-proxy))))
 
 (defun disco-embed--preview-attachment (msg embed embed-index)
   "Build pseudo attachment object used to render EMBED preview from MSG."
@@ -609,7 +602,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
   "Build pseudo attachment object used to render one embed IMAGE preview."
   (let* ((message-id (format "%s" (or (alist-get 'id msg) "unknown")))
          (cache-suffix (md5 (or image-url ""))))
-    (when (disco-embed--url-present-p image-url)
+    (when (appkit-media-url-present-p image-url)
       `((id . ,(format "embed:%s:%s:image:%s:%s"
                        message-id
                        embed-index
@@ -637,7 +630,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
                        (source-url
                         (disco-embed--image-object-source-url msg image))
                        (attachment
-                        (and (disco-embed--url-present-p image-url)
+                        (and (appkit-media-url-present-p image-url)
                              (disco-embed--image-preview-attachment
                               msg embed-index image-index image image-url source-url))))
                   (when-let* ((key
@@ -664,7 +657,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--insert-action-button (label callback help-echo)
   "Insert one compact action button."
-  (disco-ui-insert-action-button
+  (appkit-ui-insert-action-button
    label
    callback
    :face 'disco-room-embed-card-action
@@ -686,26 +679,26 @@ Keeps original line breaks and applies markdown renderer pipeline."
           (insert ": ")
           (insert value))
         (insert "\n")
-        (disco-ui-apply-line-prefix content-start (point) prefix-str)
-        (disco-ui-append-face
+        (appkit-ui-apply-line-prefix content-start (point) prefix-str)
+        (appkit-ui-append-face
          content-start
          (point)
-         (disco-ui-combine-faces
+         (appkit-ui-combine-faces
           (disco-embed--background-face embed)
           'disco-room-embed-card-meta))))))
 
 (defun disco-embed--preview-max-width ()
   "Return max inline preview width in pixels."
   (max 64
-       (if (numberp disco-media-preview-max-width)
-           disco-media-preview-max-width
+       (if (numberp appkit-media-preview-max-width)
+           appkit-media-preview-max-width
          460)))
 
 (defun disco-embed--preview-max-height ()
   "Return max inline preview height in pixels."
   (max 64
-       (if (numberp disco-media-preview-max-height)
-           disco-media-preview-max-height
+       (if (numberp appkit-media-preview-max-height)
+           appkit-media-preview-max-height
          360)))
 
 (defun disco-embed--preview-grid-max-width ()
@@ -715,7 +708,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
 
 (defun disco-embed--preview-image-from-file (file max-width)
   "Create inline preview image from FILE constrained by MAX-WIDTH."
-  (disco-media-preview-image-from-file
+  (appkit-media-preview-image-from-file
    file
    max-width
    (disco-embed--preview-max-height)))
@@ -761,8 +754,11 @@ image alt text."
                       1.0
                       slice-height-px)))
     (insert-image image (or fallback "[image]") nil slice)
-    (disco-media-add-open-image-properties
-     slice-start (point) url cache-key)))
+    (appkit-media-add-open-image-properties
+     slice-start (point) `((url . ,url))
+     :cache-key cache-key
+     :cache-directory disco-media-preview-cache-directory
+     :client-label "disco")))
 
 (defun disco-embed--grid-item-label (item)
   "Return fallback text label for preview grid ITEM."
@@ -774,7 +770,7 @@ image alt text."
     (cond
      (image
       (max 1
-           (or (ignore-errors (disco-media-image-slice-count image))
+           (or (ignore-errors (appkit-media-image-slice-count image))
                1)))
      ((disco-embed--grid-item-label item) 1)
      (t 0))))
@@ -834,7 +830,7 @@ Return non-nil when anything was inserted."
              (row-lines (max 1 left-lines (or right-lines 0))))
         (dotimes (line-index row-lines)
           (unless first-line
-            (disco-media-insert-slice-newline))
+            (appkit-media-insert-slice-newline))
           (setq first-line nil)
           (let ((left-inserted (disco-embed--insert-grid-item-line left line-index)))
             (when (and right
@@ -844,11 +840,11 @@ Return non-nil when anything was inserted."
               (insert " ")
               (disco-embed--insert-grid-item-line right line-index))))))
     (insert "\n")
-    (disco-ui-apply-line-prefix content-start (point) prefix-str)
-    (disco-ui-append-face
+    (appkit-ui-apply-line-prefix content-start (point) prefix-str)
+    (appkit-ui-append-face
      content-start
      (point)
-     (disco-ui-combine-faces
+     (appkit-ui-combine-faces
       (disco-embed--background-face embed)
       'disco-room-embed-card-meta))))
 
@@ -858,7 +854,7 @@ Return non-nil when anything was inserted."
   "Insert media preview row for EMBED in MSG."
   (let* ((preview-rendering-available
           (and disco-embed-show-image-previews
-               (disco-media-inline-image-rendering-available-p)))
+               (appkit-media-inline-image-rendering-available-p)))
          (embed-images (disco-embed--embed-image-objects embed)))
     (if (> (length embed-images) 1)
         (let ((items '())
@@ -875,7 +871,7 @@ Return non-nil when anything was inserted."
                    (open-cache-key
                     (and open-url
                          (format "embed-open-image:%s" open-url)))
-                   (attachment (and (disco-embed--url-present-p image-url)
+                   (attachment (and (appkit-media-url-present-p image-url)
                                     (disco-embed--image-preview-attachment
                                      msg
                                      embed-index
@@ -886,7 +882,7 @@ Return non-nil when anything was inserted."
               (cond
                ((not preview-rendering-available)
                 (setq status 'disabled))
-               ((not (disco-embed--url-present-p image-url))
+               ((not (appkit-media-url-present-p image-url))
                 (setq status 'no-url))
                ((not attachment)
                 (setq status 'no-url))
@@ -923,7 +919,7 @@ Return non-nil when anything was inserted."
                                         preview-cache-key)))
              (content-start (point))
              (video-preview-p (or (eq media-kind 'video)
-                                  (disco-embed--url-present-p video-url)))
+                                  (appkit-media-url-present-p video-url)))
              (open-image-url (or media-source-url media-url))
              (play-video-url (or video-source-url
                                  video-url
@@ -936,12 +932,12 @@ Return non-nil when anything was inserted."
               (condition-case _
                   (let ((slice-start (point)))
                     (setq apply-meta-face nil)
-                    (disco-media-insert-image-slices
+                    (appkit-media-insert-image-slices
                      preview
                      (and (not video-preview-p)
-                          (disco-embed--url-present-p open-image-url)
+                          (appkit-media-url-present-p open-image-url)
                           (lambda ()
-                            (disco-media-open-resource
+                            (disco-media-open-discord-resource
                              `((url . ,open-image-url)) 'image)))
                      nil
                      (if video-preview-p "[video]" "[image]")
@@ -949,11 +945,12 @@ Return non-nil when anything was inserted."
                          "Play embed video"
                        "Open embed image in Emacs"))
                     (when (and video-preview-p
-                               (disco-embed--url-present-p play-video-url))
-                      (disco-media-add-play-video-properties
+                               (appkit-media-url-present-p play-video-url))
+                      (appkit-media-add-play-video-properties
                        slice-start
                        (point)
-                       play-video-url)))
+                       play-video-url
+                       "disco")))
                 (error
                  (insert (if video-preview-p
                              "[video preview unavailable]"
@@ -961,7 +958,7 @@ Return non-nil when anything was inserted."
             (cond
              ((not preview-rendering-available)
               (insert "[preview disabled]"))
-             ((not (disco-embed--url-present-p media-url))
+             ((not (appkit-media-url-present-p media-url))
               (insert "[no preview URL]"))
              ((eq preview-cache-state :missing)
               (insert (if video-preview-p
@@ -972,64 +969,104 @@ Return non-nil when anything was inserted."
          (t
           (insert "[no preview]")))
         (insert "\n")
-        (disco-ui-apply-line-prefix content-start (point) prefix-str)
-        (disco-ui-append-face
+        (appkit-ui-apply-line-prefix content-start (point) prefix-str)
+        (appkit-ui-append-face
          content-start
          (point)
          (if apply-meta-face
-             (disco-ui-combine-faces
+             (appkit-ui-combine-faces
               (disco-embed--background-face embed)
               'disco-room-embed-card-meta)
            (disco-embed--background-face embed)))))))
 
-(defun disco-embed--insert-action-row (main-url media-url video-url author-url provider-url
-                                                author-icon-url embed prefix-str)
+(defun disco-embed--main-url-kind
+    (main-url media-kind media-source-url media-url video-source-url video-url)
+  "Classify MAIN-URL as an image, video, or page link.
+
+MEDIA-KIND describes the embed media entry.  Source and proxy URL pairs are
+both considered so direct CDN and Discord proxy links receive the same
+in-Emacs media behavior."
+  (cond
+   ((member main-url (delq nil (list video-source-url video-url))) 'video)
+   ((and (memq media-kind '(image thumbnail))
+         (member main-url (delq nil (list media-source-url media-url))))
+    'image)
+   (t 'page)))
+
+(defun disco-embed--add-url-properties (start end url kind)
+  "Make URL between START and END interactive according to KIND."
+  (pcase kind
+    ('video
+     (appkit-media-add-play-video-properties start end url "disco"))
+    ('image
+     (appkit-media-add-open-image-properties
+      start end `((url . ,url))
+      :cache-directory disco-media-preview-cache-directory
+      :client-label "disco"))
+    (_
+     (appkit-media-add-open-url-properties start end url))))
+
+(defun disco-embed--url-action (url kind)
+  "Return callback and help text for opening URL according to KIND."
+  (pcase kind
+    ('video
+     (list (lambda () (appkit-media-play-video-url url "disco"))
+           "Play embed video"))
+    ('image
+     (list (lambda ()
+             (disco-media-open-discord-resource `((url . ,url)) 'image))
+           "Open embed image in Emacs"))
+    (_
+     (list (lambda () (browse-url url t)) "Open embed URL"))))
+
+(defun disco-embed--insert-action-row
+    (main-url main-url-kind media-url video-url author-url provider-url
+              author-icon-url embed prefix-str)
   "Insert compact action buttons row for one embed."
   (let ((actions '())
         (media-kind (car (disco-embed--media-entry embed))))
-    (when (disco-embed--url-present-p main-url)
-      (push (list "[Open]"
-                  (lambda () (browse-url main-url t))
-                  "Open embed URL")
-            actions)
+    (when (appkit-media-url-present-p main-url)
+      (let ((main-action (disco-embed--url-action main-url main-url-kind)))
+        (push (list "[Open]" (car main-action) (cadr main-action)) actions))
       (push (list "[Copy]"
                   (lambda ()
                     (kill-new main-url)
                     (message "disco: copied embed URL"))
                   "Copy embed URL")
             actions))
-    (when (disco-embed--url-present-p video-url)
+    (when (and (appkit-media-url-present-p video-url)
+               (not (equal video-url main-url)))
       (push (list "[Play]"
-                  (lambda () (disco-media-play-video-url video-url))
+                  (lambda () (appkit-media-play-video-url video-url "disco"))
                   "Play embed video")
             actions))
     (when (and (memq media-kind '(image thumbnail))
-               (disco-embed--url-present-p media-url)
+               (appkit-media-url-present-p media-url)
                (not (equal media-url main-url)))
       (push (list "[Media]"
                   (lambda ()
-                    (disco-media-open-resource
+                    (disco-media-open-discord-resource
                      `((url . ,media-url)) 'image))
                   "Open embed image in Emacs")
             actions))
-    (when (and (disco-embed--url-present-p author-url)
+    (when (and (appkit-media-url-present-p author-url)
                (not (equal author-url main-url)))
       (push (list "[Author]"
                   (lambda () (browse-url author-url t))
                   "Open embed author URL")
             actions))
-    (when (and (disco-embed--url-present-p provider-url)
+    (when (and (appkit-media-url-present-p provider-url)
                (not (equal provider-url main-url))
                (not (equal provider-url author-url)))
       (push (list "[Provider]"
                   (lambda () (browse-url provider-url t))
                   "Open embed provider URL")
             actions))
-    (when (and (disco-embed--url-present-p author-icon-url)
+    (when (and (appkit-media-url-present-p author-icon-url)
                (not (equal author-icon-url main-url)))
       (push (list "[Icon]"
                   (lambda ()
-                    (disco-media-open-resource
+                    (disco-media-open-discord-resource
                      `((url . ,author-icon-url)) 'image))
                   "Open embed author icon in Emacs")
             actions))
@@ -1045,8 +1082,8 @@ Return non-nil when anything was inserted."
            (nth 1 action)
            (nth 2 action)))
         (insert "\n")
-        (disco-ui-apply-line-prefix content-start (point) prefix-str)
-        (disco-ui-append-face
+        (appkit-ui-apply-line-prefix content-start (point) prefix-str)
+        (appkit-ui-append-face
          content-start
          (point)
          (disco-embed--background-face embed))))))
@@ -1089,6 +1126,10 @@ Return non-nil when anything was inserted."
          (media-source-url (disco-embed--media-source-url msg embed))
          (video-url (disco-embed--video-url msg embed))
          (video-source-url (disco-embed--video-source-url msg embed))
+         (main-url-kind
+          (disco-embed--main-url-kind
+           main-url media-kind media-source-url media-url
+           video-source-url video-url))
          (media-width (and (listp media) (alist-get 'width media)))
          (media-height (and (listp media) (alist-get 'height media)))
          (media-dims (when (and (numberp media-width) (numberp media-height))
@@ -1102,21 +1143,22 @@ Return non-nil when anything was inserted."
          (prefix-str (disco-embed--line-prefix embed))
          (accent-color (disco-embed--color-hex embed))
          (card-bg-face (disco-embed--background-face embed))
-         (title-face (disco-ui-combine-faces
+         (title-face (appkit-ui-combine-faces
                       card-bg-face
                       (and accent-color `(:foreground ,accent-color))
                       'disco-room-embed-card-title))
-         (meta-face (disco-ui-combine-faces
+         (meta-face (appkit-ui-combine-faces
                      card-bg-face
                      'disco-room-embed-card-meta))
-         (shadow-face (disco-ui-combine-faces card-bg-face 'shadow)))
+         (shadow-face (appkit-ui-combine-faces card-bg-face 'shadow)))
     (let ((title-start (point)))
       (insert summary)
-      (when (disco-embed--url-present-p main-url)
-        (disco-media-add-open-url-properties title-start (point) main-url))
+      (when (appkit-media-url-present-p main-url)
+        (disco-embed--add-url-properties
+         title-start (point) main-url main-url-kind))
       (insert "\n")
-      (disco-ui-apply-line-prefix title-start (point) prefix-str)
-      (disco-ui-append-face title-start (point) title-face))
+      (appkit-ui-apply-line-prefix title-start (point) prefix-str)
+      (appkit-ui-append-face title-start (point) title-face))
     (let ((meta-start (point)))
       (when author-icon-image
         (condition-case _
@@ -1130,13 +1172,13 @@ Return non-nil when anything was inserted."
       (when media-dims
         (insert "  [" media-dims "]"))
       (insert "\n")
-      (disco-ui-apply-line-prefix meta-start (point) prefix-str)
-      (disco-ui-append-face meta-start (point) meta-face))
+      (appkit-ui-apply-line-prefix meta-start (point) prefix-str)
+      (appkit-ui-append-face meta-start (point) meta-face))
     (when description
       (let ((desc-start (point)))
         (insert description "\n")
-        (disco-ui-apply-line-prefix desc-start (point) prefix-str)
-        (disco-ui-append-face desc-start (point) meta-face)))
+        (appkit-ui-apply-line-prefix desc-start (point) prefix-str)
+        (appkit-ui-append-face desc-start (point) meta-face)))
     (when media-entry
       (disco-embed--insert-preview-row
        msg embed embed-index media-kind media-url media-source-url
@@ -1146,10 +1188,11 @@ Return non-nil when anything was inserted."
     (when footer-line
       (let ((footer-start (point)))
         (insert footer-line "\n")
-        (disco-ui-apply-line-prefix footer-start (point) prefix-str)
-        (disco-ui-append-face footer-start (point) meta-face)))
+        (appkit-ui-apply-line-prefix footer-start (point) prefix-str)
+        (appkit-ui-append-face footer-start (point) meta-face)))
     (disco-embed--insert-action-row
      main-url
+     main-url-kind
      (or media-source-url media-url)
      (or video-source-url video-url)
      author-url
@@ -1170,23 +1213,22 @@ Return non-nil when anything was inserted."
                               author-url
                               provider-url
                               raw-icon-url))))
-        (when (disco-embed--url-present-p raw-url)
+        (when (appkit-media-url-present-p raw-url)
           (let ((url-start (point)))
             (insert raw-url "\n")
-            (cond
-             ((equal raw-url raw-video-url)
-              (disco-media-add-play-video-properties
-               url-start (1- (point)) raw-url))
-             ((or (and (memq media-kind '(image thumbnail))
-                       (equal raw-url raw-media-url))
-                  (equal raw-url raw-icon-url))
-              (disco-media-add-open-image-properties
-               url-start (1- (point)) raw-url))
-             (t
-              (disco-media-add-open-url-properties
-               url-start (1- (point)) raw-url)))
-            (disco-ui-apply-line-prefix url-start (point) prefix-str)
-            (disco-ui-append-face url-start (point) shadow-face))))))))
+            (disco-embed--add-url-properties
+             url-start
+             (1- (point))
+             raw-url
+             (cond
+              ((equal raw-url raw-video-url) 'video)
+              ((or (and (memq media-kind '(image thumbnail))
+                        (equal raw-url raw-media-url))
+                   (equal raw-url raw-icon-url))
+               'image)
+              (t 'page)))
+            (appkit-ui-apply-line-prefix url-start (point) prefix-str)
+            (appkit-ui-append-face url-start (point) shadow-face))))))))
 
 (defun disco-embed-insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
@@ -1203,18 +1245,18 @@ Return non-nil when anything was inserted."
                              (alist-get 'id msg)))))
           (if disco-embed-use-rich-cards
               (disco-embed-insert-card msg embed embed-index)
-            (let* ((prefix-source (or disco-ui-card-indent-prefix-state
-                                      (or disco-ui-card-indent-prefix "    ")))
+            (let* ((prefix-source (or appkit-ui-card-indent-prefix-state
+                                      (or appkit-ui-card-indent-prefix "    ")))
                    (line-start (point))
                    (url (disco-embed--main-url msg embed)))
               (insert (disco-embed--summary embed) "\n")
-              (disco-ui-apply-line-prefix line-start (point) prefix-source)
+              (appkit-ui-apply-line-prefix line-start (point) prefix-source)
               (add-text-properties line-start (point) '(face disco-room-message-meta))
               (when (and disco-embed-show-urls
-                         (disco-embed--url-present-p url))
+                         (appkit-media-url-present-p url))
                 (let ((url-start (point)))
                   (insert "  " url "\n")
-                  (disco-ui-apply-line-prefix url-start (point) prefix-source)
+                  (appkit-ui-apply-line-prefix url-start (point) prefix-source)
                   (add-text-properties url-start (point) '(face shadow)))))))))))
 
 (provide 'disco-embed)

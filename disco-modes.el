@@ -9,7 +9,7 @@
 (require 'cl-lib)
 (require 'disco-customize)
 (require 'disco-gateway)
-(require 'disco-mode-line)
+(require 'appkit-mode-line)
 (require 'disco-root)
 (require 'disco-state)
 
@@ -79,7 +79,7 @@ therefore remains visible for muted channels."
 
 (defun disco-client-mode-line-icon ()
   "Return clickable Discord label for the mode line."
-  (disco-mode-line-indicator
+  (appkit-mode-line-indicator
    "Discord" :face 'mode-line-emphasis
    :command #'disco-client-mode-line-open-root :help-echo "Open disco"))
 
@@ -87,7 +87,7 @@ therefore remains visible for muted channels."
   "Return indicator for locally known unmuted unread Discord messages."
   (let ((count (car disco-client-mode-line--cached-counts)))
     (unless (zerop count)
-      (disco-mode-line-indicator
+      (appkit-mode-line-indicator
        (number-to-string count) :prefix " " :face 'disco-mode-line-unread
        :command #'disco-client-mode-line-open-unread
        :help-echo "Open unread Discord channels (count is locally known messages)"))))
@@ -96,7 +96,7 @@ therefore remains visible for muted channels."
   "Return indicator for unread Discord mentions."
   (let ((count (cdr disco-client-mode-line--cached-counts)))
     (unless (zerop count)
-      (disco-mode-line-indicator
+      (appkit-mode-line-indicator
        (format "@%d" count) :prefix " " :face 'disco-mode-line-mention
        :command #'disco-client-mode-line-open-mentions
        :help-echo "Open Discord channels with unread mentions"))))
@@ -109,7 +109,7 @@ therefore remains visible for muted channels."
                        disco-client-mode-line--count-event-types)))
     (setq disco-client-mode-line--cached-counts
           (disco-client-mode-line--counts))
-    (disco-mode-line-update-cache
+    (appkit-mode-line-update-cache
      'disco-client-mode-line-string disco-mode-line-string-format)))
 
 ;;;###autoload
@@ -120,10 +120,10 @@ therefore remains visible for muted channels."
   :group 'disco-modes
   (if disco-client-mode-line-mode
       (progn
-        (disco-mode-line-install 'disco-client-mode-line-format)
+        (appkit-mode-line-install 'disco-client-mode-line-format)
         (add-hook 'disco-gateway-event-hook #'disco-client-mode-line-update)
         (disco-client-mode-line-update))
-    (disco-mode-line-uninstall 'disco-client-mode-line-format)
+    (appkit-mode-line-uninstall 'disco-client-mode-line-format)
     (setq disco-client-mode-line-string ""
           disco-client-mode-line--cached-counts '(0 . 0))
     (remove-hook 'disco-gateway-event-hook #'disco-client-mode-line-update)

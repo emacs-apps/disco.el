@@ -77,14 +77,14 @@ This repository currently contains an MVP scaffold designed with these reference
 - Emacs 27.1+
 - `plz` (required): HTTP transport backend
 - `websocket` (required): Discord Gateway websocket transport
+- `appkit` (required): shared view, chat, presentation, and media runtime
 
 ## File Layout
 
 - `disco.el`: package entrypoint.
 - `disco-customize.el`: user options and token command.
-- `disco-ui.el`: shared UI rendering primitives (buttons, styled lines, list sections).
-- `disco-ins.el`: shared compact media-card and chat insertion primitives.
-- `disco-media.el`: media preview/transfer owners plus the backend-neutral card action-context protocol consumed by disco and emacs-qq.
+- `disco-ins.el`: Discord attachment and message insertion adapter over appkit.
+- `disco-media.el`: Discord attachment, spoiler, waveform, and audio adapter.
 - `disco-api.el`: REST requests (sync + async callback paths).
 - `disco-http.el`: HTTP wrapper on `plz` (sync + async queue-backed paths).
 - `disco-permission.el`: shared Discord permission bitfield constants/parsing/check helpers.
@@ -94,7 +94,6 @@ This repository currently contains an MVP scaffold designed with these reference
   latest-message preview hydration.
 - `disco-gateway.el`: Discord Gateway websocket transport and dispatch hook.
 - `disco-root-layout.el`: root layout registry, entry/view-spec structs, and layout composition helpers.
-- `disco-view.el`: shared cursor preservation helpers plus reusable one-line/list-view rendering helpers.
 - `disco-root-view.el`: root-specific view state, row-model helpers, inserters,
   EWOC/list renderers, and archived-thread/root layout builders; controller
   callbacks are injected from `disco-root.el`.
@@ -113,7 +112,7 @@ with `:update-mode full` and return a `list-spec`:
 (defun my-disco-root-build-dm-focus ()
   (let ((channels (disco-root--visible-private-channels)))
     (disco-root-layout-list-spec-view-spec-create
-     (disco-view-list-spec-create
+     (appkit-view-list-spec-create
       :title "DM Focus"
       :summary (format "Visible DMs: %d" (length channels))
       :items channels

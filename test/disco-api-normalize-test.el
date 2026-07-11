@@ -2,10 +2,6 @@
 
 (require 'ert)
 
-(add-to-list 'load-path
-             (expand-file-name ".."
-                               (file-name-directory (or load-file-name buffer-file-name))))
-
 (require 'disco-api-normalize)
 
 (ert-deftest disco-api-normalize-ack-message-payload-empty ()
