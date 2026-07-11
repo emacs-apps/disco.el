@@ -651,6 +651,8 @@
                (lambda (_value) (push 'read-state order)))
               ((symbol-function 'disco-gateway--ingest-ready-guilds)
                (lambda (_value) (push 'guilds order)))
+              ((symbol-function 'disco-gateway--ingest-ready-user-guild-settings)
+               (lambda (_value) (push 'settings order)))
               ((symbol-function 'disco-gateway--ingest-ready-private-channels)
                (lambda (_value) (push 'private-channels order)))
               ((symbol-function 'disco-gateway--subscribe-watched-guild-channels)
@@ -664,11 +666,25 @@
       (disco-gateway--dispatch-ready
        '((user (id . "me"))
          (read_state . nil)
+         (user_guild_settings . nil)
          (guilds . nil)
          (private_channels . nil)))
       (should (equal '(:type ready :user-id "me") emitted))
-      (should (equal '(read-state guilds private-channels subscribe backoff emit)
+      (should (equal '(read-state settings guilds private-channels subscribe backoff emit)
                      (nreverse order))))))
+
+(ert-deftest disco-gateway-dispatch-user-guild-settings-update-applies-and-emits ()
+  (let (applied emitted)
+    (cl-letf (((symbol-function 'disco-state-apply-user-guild-setting)
+               (lambda (setting) (setq applied setting)))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event) (setq emitted event))))
+      (let ((setting '((guild_id . "g") (muted . t))))
+        (disco-gateway--dispatch-user-guild-settings-update setting)
+        (should (equal setting applied))
+        (should (equal `(:type user-guild-settings-update
+                         :guild-id "g" :setting ,setting)
+                       emitted))))))
 
 (provide 'disco-gateway-test)
 

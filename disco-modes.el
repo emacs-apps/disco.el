@@ -20,7 +20,7 @@
   "Cached (KNOWN-UNREAD-MESSAGES . MENTIONS) modeline counts.")
 
 (defconst disco-client-mode-line--count-event-types
-  '(ready guild-sync guild-create guild-delete
+  '(ready guild-sync guild-create guild-delete user-guild-settings-update
     channel-create channel-update channel-delete channel-update-partial
     channel-unread-update passive-update-v1 passive-update-v2
     channel-pins-update channel-pins-ack last-messages

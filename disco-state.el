@@ -38,6 +38,12 @@
 (defvar disco-state--read-states (make-hash-table :test #'equal)
   "Hash table (READ-STATE-TYPE . RESOURCE-ID) -> read-state object.")
 
+(defvar disco-state--user-guild-settings (make-hash-table :test #'equal)
+  "Hash table guild-id -> current user's notification settings.")
+
+(defvar disco-state--channel-notification-overrides (make-hash-table :test #'equal)
+  "Hash table channel-id -> current user's channel notification override.")
+
 (defvar disco-state--ack-token-by-read-state (make-hash-table :test #'equal)
   "Hash table (READ-STATE-TYPE . RESOURCE-ID) -> last read-state ack token.")
 
@@ -158,6 +164,8 @@
   (clrhash disco-state--thread-ids-by-guild)
   (clrhash disco-state--messages-by-channel)
   (clrhash disco-state--read-states)
+  (clrhash disco-state--user-guild-settings)
+  (clrhash disco-state--channel-notification-overrides)
   (clrhash disco-state--ack-token-by-read-state)
   (clrhash disco-state--thread-member-ids-by-thread)
   (clrhash disco-state--thread-member-count-by-thread)
@@ -445,6 +453,50 @@ MEMBER-COUNT is optional approximate thread member count."
 (defun disco-state-channel (channel-id)
   "Return channel object for CHANNEL-ID."
   (gethash channel-id disco-state--channels-by-id))
+
+(defun disco-state--settings-guild-key (guild-id)
+  "Return stable settings key for possibly nil GUILD-ID."
+  (if guild-id (disco-state--normalize-id guild-id) :private))
+
+(defun disco-state-user-guild-setting (guild-id)
+  "Return current user's notification setting for GUILD-ID.
+
+Nil GUILD-ID addresses the private-channel settings entry."
+  (copy-tree
+   (gethash (disco-state--settings-guild-key guild-id)
+            disco-state--user-guild-settings)))
+
+(defun disco-state-channel-notification-override (channel-id)
+  "Return current user's notification override for CHANNEL-ID."
+  (copy-tree
+   (gethash (disco-state--normalize-id channel-id)
+            disco-state--channel-notification-overrides)))
+
+(defun disco-state-apply-user-guild-setting (setting)
+  "Store one user guild SETTING and replace its channel override index."
+  (when (listp setting)
+    (let* ((guild-id (alist-get 'guild_id setting))
+           (key (disco-state--settings-guild-key guild-id))
+           (old (gethash key disco-state--user-guild-settings)))
+      (dolist (override (or (alist-get 'channel_overrides old) '()))
+        (when-let* ((channel-id (alist-get 'channel_id override)))
+          (remhash (disco-state--normalize-id channel-id)
+                   disco-state--channel-notification-overrides)))
+      (puthash key (copy-tree setting) disco-state--user-guild-settings)
+      (dolist (override (or (alist-get 'channel_overrides setting) '()))
+        (when-let* ((channel-id (alist-get 'channel_id override)))
+          (puthash (disco-state--normalize-id channel-id)
+                   (copy-tree override)
+                   disco-state--channel-notification-overrides)))
+      setting)))
+
+(defun disco-state-set-user-guild-settings (settings)
+  "Replace current user's notification SETTINGS and override indexes."
+  (clrhash disco-state--user-guild-settings)
+  (clrhash disco-state--channel-notification-overrides)
+  (dolist (setting (or settings '()))
+    (disco-state-apply-user-guild-setting setting))
+  settings)
 
 (defun disco-state-channels ()
   "Return all indexed channels without duplicates."
@@ -1381,9 +1433,42 @@ counter is reset to zero. VERSION is stored when provided."
            mention-roles)))
     (or direct-mention mention-everyone role-mention)))
 
-(defun disco-state--channel-muted-p (channel)
-  "Return non-nil when CHANNEL is muted."
-  (eq t (alist-get 'muted channel)))
+(defun disco-state--mute-active-p (object)
+  "Return non-nil when OBJECT describes an active mute."
+  (when (and (listp object)
+             (disco-util-json-true-p (alist-get 'muted object)))
+    (let* ((config (alist-get 'mute_config object))
+           (window (and (listp config) (alist-get 'selected_time_window config)))
+           (end-time (and (listp config) (alist-get 'end_time config))))
+      (or (not (listp config))
+          (equal window -1)
+          (not (stringp end-time))
+          (condition-case nil
+              (time-less-p (current-time) (date-to-time end-time))
+            (error t))))))
+
+(defun disco-state--channel-muted-p (channel &optional seen)
+  "Return non-nil when CHANNEL is effectively muted.
+
+Honor direct channel overrides, parent/category inheritance, guild or private
+settings, and temporary mute expiration.  SEEN prevents malformed parent
+cycles."
+  (let* ((channel-id (disco-state--normalize-id (alist-get 'id channel)))
+         (guild-id (alist-get 'guild_id channel))
+         (parent-id (disco-state--normalize-id (alist-get 'parent_id channel)))
+         (override (and channel-id
+                        (gethash channel-id
+                                 disco-state--channel-notification-overrides)))
+         (settings (gethash (disco-state--settings-guild-key guild-id)
+                            disco-state--user-guild-settings)))
+    (and (not (member channel-id seen))
+         (or (disco-state--mute-active-p override)
+             (disco-state--mute-active-p channel)
+             (disco-state--mute-active-p settings)
+             (when (and parent-id (not (member parent-id seen)))
+               (when-let* ((parent (disco-state-channel parent-id)))
+                 (disco-state--channel-muted-p
+                  parent (cons channel-id seen))))))))
 
 (defun disco-state-channel-muted-p (channel)
   "Return non-nil when CHANNEL is muted for the current user."

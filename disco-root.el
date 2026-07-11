@@ -446,6 +446,7 @@ Values are image objects or the symbol `:missing'.")
           presence-update sessions-replace
           voice-state-update voice-channel-status-update voice-channel-start-time-update
           guild-create guild-update guild-delete guild-sync
+          user-guild-settings-update
           guild-feature-ack user-non-channel-ack notification-center-items-ack
           thread-create thread-update thread-delete thread-list-sync)))
 
@@ -454,6 +455,7 @@ Values are image objects or the symbol `:missing'.")
   (memq event-type
         '(channel-create channel-update channel-delete
           guild-create guild-update guild-delete guild-sync
+          user-guild-settings-update
           thread-create thread-update thread-delete thread-list-sync)))
 
 (defun disco-root--live-event-header-p (event-type)

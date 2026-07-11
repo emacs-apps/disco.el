@@ -573,6 +573,39 @@
   (should (= 0 (disco-state-channel-unread-mention-count "low")))
   (should (= 2 (disco-state-channel-unread-mention-count "ping"))))
 
+(ert-deftest disco-state-effective-mute-honors-guild-parent-and-expiration ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "cat") (guild_id . "g") (type . 4)))
+  (disco-state-upsert-channel
+   '((id . "child") (guild_id . "g") (parent_id . "cat") (type . 0)))
+  (disco-state-set-user-guild-settings
+   '(((guild_id . "g") (muted . t) (mute_config . nil))))
+  (should (disco-state-channel-muted-p (disco-state-channel "child")))
+  (disco-state-set-user-guild-settings
+   '(((guild_id . "g") (muted . nil)
+      (channel_overrides
+       . (((channel_id . "cat") (muted . t) (mute_config . nil)))))))
+  (should (disco-state-channel-muted-p (disco-state-channel "child")))
+  (disco-state-set-user-guild-settings
+   '(((guild_id . "g") (muted . nil)
+      (channel_overrides
+       . (((channel_id . "cat") (muted . t)
+           (mute_config (selected_time_window . 60)
+                        (end_time . "2000-01-01T00:00:00+00:00"))))))))
+  (should-not (disco-state-channel-muted-p (disco-state-channel "child"))))
+
+(ert-deftest disco-state-user-guild-setting-update-removes-stale-overrides ()
+  (disco-state-reset)
+  (disco-state-apply-user-guild-setting
+   '((guild_id . "g")
+     (channel_overrides . (((channel_id . "old") (muted . t))))))
+  (should (disco-state-channel-notification-override "old"))
+  (disco-state-apply-user-guild-setting
+   '((guild_id . "g")
+     (channel_overrides . (((channel_id . "new") (muted . t))))))
+  (should-not (disco-state-channel-notification-override "old"))
+  (should (disco-state-channel-notification-override "new")))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

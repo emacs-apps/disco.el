@@ -875,6 +875,11 @@ Discord Ready may deliver some fields as versioned structures
   (dolist (entry (disco-gateway--versioned-entries read-state))
     (disco-state-apply-ready-read-state-entry entry)))
 
+(defun disco-gateway--ingest-ready-user-guild-settings (settings)
+  "Ingest Ready user guild SETTINGS into notification state."
+  (disco-state-set-user-guild-settings
+   (disco-gateway--versioned-entries settings)))
+
 (defun disco-gateway--ingest-ready-private-channels (private-channels)
   "Ingest Ready PRIVATE-CHANNELS payload into local state."
   (disco-state-set-private-channels
@@ -974,6 +979,8 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
           (and (listp ready-user)
                (alist-get 'id ready-user))))
   (disco-gateway--ingest-ready-read-states (alist-get 'read_state payload))
+  (disco-gateway--ingest-ready-user-guild-settings
+   (alist-get 'user_guild_settings payload))
   (when (assq 'guilds payload)
     (disco-gateway--ingest-ready-guilds
      (alist-get 'guilds payload)))
@@ -1009,6 +1016,14 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     (when guild-id
       (disco-state-delete-guild guild-id))
     (disco-gateway--emit-guild-event 'guild-delete payload)))
+
+(defun disco-gateway--dispatch-user-guild-settings-update (payload)
+  "Apply USER_GUILD_SETTINGS_UPDATE PAYLOAD and notify consumers."
+  (disco-state-apply-user-guild-setting payload)
+  (disco-gateway--emit
+   (list :type 'user-guild-settings-update
+         :guild-id (alist-get 'guild_id payload)
+         :setting payload)))
 
 (defun disco-gateway--dispatch-channel-create (payload)
   "Handle CHANNEL_CREATE dispatch PAYLOAD."
@@ -1525,6 +1540,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("GUILD_CREATE" . disco-gateway--dispatch-guild-create)
     ("GUILD_UPDATE" . disco-gateway--dispatch-guild-update)
     ("GUILD_DELETE" . disco-gateway--dispatch-guild-delete)
+    ("USER_GUILD_SETTINGS_UPDATE" . disco-gateway--dispatch-user-guild-settings-update)
     ("CHANNEL_CREATE" . disco-gateway--dispatch-channel-create)
     ("CHANNEL_UPDATE" . disco-gateway--dispatch-channel-update)
     ("CHANNEL_DELETE" . disco-gateway--dispatch-channel-delete)
