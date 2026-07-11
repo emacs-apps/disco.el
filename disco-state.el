@@ -1120,6 +1120,21 @@ Returns updated summaries list."
         (max 0 mention-count)
       0)))
 
+(defun disco-state-channel-unread-mention-count (channel-id)
+  "Return high-importance unread mention count for CHANNEL-ID.
+
+Discord may use `mention_count' for ordinary ALL_MESSAGES notifications.  A
+read state whose `is-mention-low-importance' flag is set contains no actual
+ping and therefore contributes zero here."
+  (let* ((state (disco-state-read-state disco-read-state-type-channel channel-id))
+         (flags (and (listp state) (alist-get 'flags state)))
+         (count (disco-state-channel-unread-count channel-id)))
+    (if (and (numberp flags)
+             (/= 0 (logand flags
+                           disco-read-state-flag-is-mention-low-importance)))
+        0
+      count)))
+
 (defun disco-state-channel-own-unread-count (channel)
   "Return unread count tracked directly on CHANNEL."
   (disco-state-channel-unread-count (alist-get 'id channel)))
@@ -1413,7 +1428,27 @@ WATCHED means a room buffer currently tracks this channel."
               (disco-state-apply-message-ack channel-id message-id 0))
           (when (disco-state--message-create-should-increment-unread-p
                  channel message current-user-id)
-            (disco-state-increment-channel-unread channel-id 1)))))))
+            (let* ((state (disco-state-read-state
+                           disco-read-state-type-channel channel-id))
+                   (old-count (disco-state-channel-unread-count channel-id))
+                   (old-flags (or (and state (alist-get 'flags state))
+                                  (disco-state-channel-read-state-flags channel-id)))
+                   (ping-p (disco-state--message-mentions-user-p
+                            message current-user-id))
+                   (flags
+                    (if ping-p
+                        (logand old-flags
+                                (lognot disco-read-state-flag-is-mention-low-importance))
+                      (if (or (= old-count 0)
+                              (/= 0 (logand old-flags
+                                            disco-read-state-flag-is-mention-low-importance)))
+                          (logior old-flags
+                                  disco-read-state-flag-is-mention-low-importance)
+                        old-flags))))
+              (disco-state--upsert-read-state
+               disco-read-state-type-channel channel-id
+               `((mention_count . ,(1+ old-count))
+                 (flags . ,flags))))))))))
 
 (defun disco-state-apply-thread-create (thread current-user-id)
   "Apply THREAD_CREATE read-state effects from THREAD for CURRENT-USER-ID."

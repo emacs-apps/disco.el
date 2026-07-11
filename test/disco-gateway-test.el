@@ -645,6 +645,31 @@
                        :channel-ids ("c1" "c2"))
                      emitted)))))
 
+(ert-deftest disco-gateway-dispatch-ready-emits-after-state-ingestion ()
+  (let (order emitted)
+    (cl-letf (((symbol-function 'disco-gateway--ingest-ready-read-states)
+               (lambda (_value) (push 'read-state order)))
+              ((symbol-function 'disco-gateway--ingest-ready-guilds)
+               (lambda (_value) (push 'guilds order)))
+              ((symbol-function 'disco-gateway--ingest-ready-private-channels)
+               (lambda (_value) (push 'private-channels order)))
+              ((symbol-function 'disco-gateway--subscribe-watched-guild-channels)
+               (lambda (&rest _) (push 'subscribe order)))
+              ((symbol-function 'disco-gateway--reset-reconnect-backoff)
+               (lambda () (push 'backoff order)))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event)
+                 (push 'emit order))))
+      (disco-gateway--dispatch-ready
+       '((user (id . "me"))
+         (read_state . nil)
+         (guilds . nil)
+         (private_channels . nil)))
+      (should (equal '(:type ready :user-id "me") emitted))
+      (should (equal '(read-state guilds private-channels subscribe backoff emit)
+                     (nreverse order))))))
+
 (provide 'disco-gateway-test)
 
 ;;; disco-gateway-test.el ends here

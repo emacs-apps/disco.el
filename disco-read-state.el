@@ -88,6 +88,10 @@
   (alist-get 'is-thread disco-read-state-flag-alist)
   "Flag bit for thread channel read-state.")
 
+(defconst disco-read-state-flag-is-mention-low-importance
+  (alist-get 'is-mention-low-importance disco-read-state-flag-alist)
+  "Flag bit indicating that all counted mentions are non-ping notifications.")
+
 (provide 'disco-read-state)
 
 ;;; disco-read-state.el ends here

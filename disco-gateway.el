@@ -982,6 +982,9 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
      (alist-get 'private_channels payload)))
   (disco-gateway--subscribe-watched-guild-channels t)
   (disco-gateway--reset-reconnect-backoff)
+  (disco-gateway--emit
+   (list :type 'ready
+         :user-id disco-gateway--current-user-id))
   (message "disco: gateway READY"))
 
 (defun disco-gateway--dispatch-resumed (_payload)

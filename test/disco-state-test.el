@@ -561,6 +561,18 @@
     (disco-state-set-channel-last-read-message-id "c3" "30")
     (should (= 0 (disco-state-channel-known-unread-message-count channel)))))
 
+(ert-deftest disco-state-unread-mention-count-excludes-low-importance ()
+  (disco-state-reset)
+  (disco-state--upsert-read-state
+   disco-read-state-type-channel "low"
+   `((mention_count . 4)
+     (flags . ,disco-read-state-flag-is-mention-low-importance)))
+  (disco-state--upsert-read-state
+   disco-read-state-type-channel "ping"
+   '((mention_count . 2) (flags . 0)))
+  (should (= 0 (disco-state-channel-unread-mention-count "low")))
+  (should (= 2 (disco-state-channel-unread-mention-count "ping"))))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

@@ -16,6 +16,18 @@
 (defvar disco-client-mode-line-string ""
   "Cached Discord mode-line string.")
 
+(defvar disco-client-mode-line--cached-counts '(0 . 0)
+  "Cached (KNOWN-UNREAD-MESSAGES . MENTIONS) modeline counts.")
+
+(defconst disco-client-mode-line--count-event-types
+  '(ready guild-sync guild-create guild-delete
+    channel-create channel-update channel-delete channel-update-partial
+    channel-unread-update passive-update-v1 passive-update-v2
+    channel-pins-update channel-pins-ack last-messages
+    message-create message-delete message-ack
+    thread-create thread-update thread-delete thread-list-sync)
+  "Gateway event types which can change Discord mode-line counts.")
+
 (defcustom disco-client-mode-line-format
   '(disco-client-mode-line-mode ("" disco-client-mode-line-string))
   "Mode-line provider installed in `mode-line-misc-info'."
@@ -32,7 +44,8 @@ therefore remains visible for muted channels."
   (let ((unread-messages 0)
         (mentions 0))
     (dolist (channel (disco-state-channels))
-      (let ((mention-count (disco-state-channel-own-unread-count channel)))
+      (let ((mention-count
+             (disco-state-channel-unread-mention-count (alist-get 'id channel))))
         (cl-incf mentions mention-count)
         (unless (disco-state-channel-muted-p channel)
           (cl-incf unread-messages
@@ -72,7 +85,7 @@ therefore remains visible for muted channels."
 
 (defun disco-client-mode-line-unread ()
   "Return indicator for locally known unmuted unread Discord messages."
-  (let ((count (car (disco-client-mode-line--counts))))
+  (let ((count (car disco-client-mode-line--cached-counts)))
     (unless (zerop count)
       (disco-mode-line-indicator
        (number-to-string count) :prefix " " :face 'disco-mode-line-unread
@@ -81,16 +94,21 @@ therefore remains visible for muted channels."
 
 (defun disco-client-mode-line-mentions ()
   "Return indicator for unread Discord mentions."
-  (let ((count (cdr (disco-client-mode-line--counts))))
+  (let ((count (cdr disco-client-mode-line--cached-counts)))
     (unless (zerop count)
       (disco-mode-line-indicator
        (format "@%d" count) :prefix " " :face 'disco-mode-line-mention
        :command #'disco-client-mode-line-open-mentions
        :help-echo "Open Discord channels with unread mentions"))))
 
-(defun disco-client-mode-line-update (&rest _ignored)
-  "Refresh cached Discord mode-line state."
-  (when disco-client-mode-line-mode
+(defun disco-client-mode-line-update (&optional event)
+  "Refresh cached Discord mode-line state after optional gateway EVENT."
+  (when (and disco-client-mode-line-mode
+             (or (null event)
+                 (memq (plist-get event :type)
+                       disco-client-mode-line--count-event-types)))
+    (setq disco-client-mode-line--cached-counts
+          (disco-client-mode-line--counts))
     (disco-mode-line-update-cache
      'disco-client-mode-line-string disco-mode-line-string-format)))
 
@@ -106,7 +124,8 @@ therefore remains visible for muted channels."
         (add-hook 'disco-gateway-event-hook #'disco-client-mode-line-update)
         (disco-client-mode-line-update))
     (disco-mode-line-uninstall 'disco-client-mode-line-format)
-    (setq disco-client-mode-line-string "")
+    (setq disco-client-mode-line-string ""
+          disco-client-mode-line--cached-counts '(0 . 0))
     (remove-hook 'disco-gateway-event-hook #'disco-client-mode-line-update)
     (force-mode-line-update t)))
 
