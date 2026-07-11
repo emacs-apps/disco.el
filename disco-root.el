@@ -2728,7 +2728,7 @@ Return `missing-visible' when a visible channel has no EWOC node."
   "Reorder activity rows to match current sort/filter state.
 
 When CHANNEL-IDS is non-nil, only reposition those rows and return non-nil
-if structural fallback is required."
+if structural reconciliation is required."
   (when (and disco-root--ewoc
              (eq (disco-root--ensure-layout) 'activity))
     (if channel-ids

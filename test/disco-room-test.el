@@ -599,7 +599,7 @@
       (should (eq node-m3 (gethash "m3" disco-room--message-node-table)))
       (should (string-match-p "↪ alice: source edited" (buffer-string))))))
 
-(ert-deftest disco-room-handle-gateway-message-delete-refreshes-thread-starter-fallback ()
+(ert-deftest disco-room-handle-gateway-message-delete-refreshes-thread-starter-preview ()
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "chat")
@@ -1552,22 +1552,16 @@
         (should (string-match-p (regexp-quote "[audio-block]") (buffer-string)))
         (should (string-match-p (regexp-quote "[document-block]") (buffer-string)))))))
 
-(ert-deftest disco-room-insert-message-attachments-rich-path-falls-back-on-render-error ()
+(ert-deftest disco-room-insert-message-attachments-surfaces-render-error ()
   (with-temp-buffer
-    (let ((disco-room-use-rich-attachment-cards t)
-          logged)
+    (let ((disco-room-use-rich-attachment-cards t))
       (cl-letf (((symbol-function 'disco-ins-insert-attachment-photo)
                  (lambda (&rest _args)
-                   (error "boom")))
-                ((symbol-function 'message)
-                 (lambda (fmt &rest args)
-                   (setq logged (apply #'format fmt args)))))
-        (disco-room--insert-message-attachments
-         '((attachments . (((filename . "cat.png")
-                            (url . "https://example.invalid/cat.png"))))) )
-        (should (string-match-p (regexp-quote "[img] cat.png [render fallback]")
-                                (buffer-string)))
-        (should (string-match-p (regexp-quote "attachment render failed") logged))))))
+                   (error "boom"))))
+        (should-error
+         (disco-room--insert-message-attachments
+          '((attachments . (((filename . "cat.png")
+                             (url . "https://example.invalid/cat.png")))))))))))
 
 (ert-deftest disco-room-handle-media-rerender-invalidates-only-affected-audio-message ()
   (with-temp-buffer
@@ -2022,7 +2016,7 @@
         (disco-room--inplace-search-dispatch '(:query "match") nil "m9")
         (should (equal '("m5" "chan") jumped))))))
 
-(ert-deftest disco-room-inplace-search-unsupported-channel-skips-remote-fallback ()
+(ert-deftest disco-room-inplace-search-unsupported-channel-skips-remote-search ()
   (with-temp-buffer
     (disco-room-mode)
     (setq-local disco-room--channel-id "voice")

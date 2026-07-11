@@ -38,26 +38,19 @@
              (lambda (&rest _args) "private")))
     (should (= 12 (disco-thread-read-detached-type)))))
 
-(ert-deftest disco-thread-apply-updates-and-resolve-update-use-fallbacks ()
+(ert-deftest disco-thread-resolve-update-requires-complete-response ()
   (disco-state-reset)
-  (let* ((channel '((id . "t1")
-                    (name . "old")
-                    (thread_metadata . ((archived . :false)))))
-         (fallback (disco-thread-apply-updates
-                    channel
-                    (list (list :kind 'field :key 'name :value "new" :present t)
-                          (list :kind 'meta :key 'archived :value t :present t))))
-         callback-value)
-    (should (equal "new" (alist-get 'name fallback)))
-    (should (equal t (alist-get 'archived (disco-thread-metadata fallback))))
-    (should (equal fallback
+  (let ((updated '((id . "t1") (name . "new")))
+        callback-value)
+    (should (equal updated
                    (disco-thread-resolve-update
-                    nil fallback
-                    (lambda (updated)
-                      (setq callback-value updated)))))
-    (should (equal fallback callback-value))
+                    updated
+                    (lambda (value)
+                      (setq callback-value value)))))
+    (should (equal updated callback-value))
     (should (equal "new"
-                   (alist-get 'name (disco-state-channel "t1"))))))
+                   (alist-get 'name (disco-state-channel "t1"))))
+    (should-error (disco-thread-resolve-update nil))))
 
 (provide 'disco-thread-test)
 

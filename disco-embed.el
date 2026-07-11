@@ -1026,29 +1026,21 @@ Return non-nil when anything was inserted."
                (and (fboundp 'disco-room--message-spoilers-revealed-p)
                     (funcall 'disco-room--message-spoilers-revealed-p
                              (alist-get 'id msg)))))
-          (condition-case _
-              (if disco-embed-use-rich-cards
-                  (disco-embed-insert-card msg embed embed-index)
-                (let* ((prefix-source (or disco-ui-card-indent-prefix-state
-                                          (or disco-ui-card-indent-prefix "    ")))
-                       (line-start (point))
-                       (url (disco-embed--main-url msg embed)))
-                  (insert (disco-embed--summary embed) "\n")
-                  (disco-ui-apply-line-prefix line-start (point) prefix-source)
-                  (add-text-properties line-start (point) '(face disco-room-message-meta))
-                  (when (and disco-embed-show-urls
-                             (disco-embed--url-present-p url))
-                    (let ((url-start (point)))
-                      (insert "  " url "\n")
-                      (disco-ui-apply-line-prefix url-start (point) prefix-source)
-                      (add-text-properties url-start (point) '(face shadow))))))
-            (error
-             (let* ((prefix-source (or disco-ui-card-indent-prefix-state
-                                       (or disco-ui-card-indent-prefix "    ")))
-                    (line-start (point)))
-               (insert "[embed] [render fallback]\n")
-               (disco-ui-apply-line-prefix line-start (point) prefix-source)
-               (add-text-properties line-start (point) '(face shadow))))))))))
+          (if disco-embed-use-rich-cards
+              (disco-embed-insert-card msg embed embed-index)
+            (let* ((prefix-source (or disco-ui-card-indent-prefix-state
+                                      (or disco-ui-card-indent-prefix "    ")))
+                   (line-start (point))
+                   (url (disco-embed--main-url msg embed)))
+              (insert (disco-embed--summary embed) "\n")
+              (disco-ui-apply-line-prefix line-start (point) prefix-source)
+              (add-text-properties line-start (point) '(face disco-room-message-meta))
+              (when (and disco-embed-show-urls
+                         (disco-embed--url-present-p url))
+                (let ((url-start (point)))
+                  (insert "  " url "\n")
+                  (disco-ui-apply-line-prefix url-start (point) prefix-source)
+                  (add-text-properties url-start (point) '(face shadow)))))))))))
 
 (provide 'disco-embed)
 

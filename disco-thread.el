@@ -140,55 +140,16 @@ Return symbol `keep', t, or :false."
                  nil t nil nil "")))
     (alist-get choice disco-thread--detached-type-choice-alist nil nil #'string=)))
 
-(defun disco-thread-with-meta-field (channel key value)
-  "Return CHANNEL with thread metadata KEY set to VALUE."
-  (let* ((updated (copy-tree channel))
-         (meta (copy-tree (disco-thread-metadata updated))))
-    (setf (alist-get key meta nil 'remove) value)
-    (setf (alist-get 'thread_metadata updated nil 'remove) meta)
-    updated))
+(defun disco-thread-resolve-update (updated &optional on-update)
+  "Store complete UPDATED thread response and call ON-UPDATE.
 
-(defun disco-thread-with-field (channel key value)
-  "Return CHANNEL with top-level KEY set to VALUE."
-  (let ((updated (copy-tree channel)))
-    (setf (alist-get key updated nil 'remove) value)
-    updated))
-
-(defun disco-thread-apply-updates (channel updates)
-  "Return CHANNEL with declarative UPDATES applied.
-
-UPDATES is a list of plists with keys:
-- `:kind' one of `field' or `meta'
-- `:key' symbol key to update
-- `:value' value to set
-- `:present' non-nil when update should be applied"
-  (let ((updated (copy-tree channel)))
-    (dolist (update updates)
-      (when (plist-get update :present)
-        (let ((key (plist-get update :key))
-              (value (plist-get update :value)))
-          (setq updated
-                (pcase (plist-get update :kind)
-                  ('meta
-                   (disco-thread-with-meta-field updated key value))
-                  ('field
-                   (disco-thread-with-field updated key value))
-                  (_ updated))))))
-    updated))
-
-(defun disco-thread-resolve-update (updated fallback &optional on-update)
-  "Resolve UPDATED thread response with FALLBACK object.
-
-When UPDATED does not contain a full channel object, FALLBACK is used.
-ON-UPDATE, when non-nil, is called with the resolved channel object."
-  (let ((next (if (and (listp updated) (alist-get 'id updated))
-                  updated
-                fallback)))
-    (when next
-      (disco-state-upsert-channel next)
-      (when (functionp on-update)
-        (funcall on-update next)))
-    next))
+Signal an error when the API response is not a channel object."
+  (unless (and (listp updated) (alist-get 'id updated))
+    (error "disco: thread update returned no channel object"))
+  (disco-state-upsert-channel updated)
+  (when (functionp on-update)
+    (funcall on-update updated))
+  updated)
 
 (provide 'disco-thread)
 

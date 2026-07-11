@@ -223,11 +223,6 @@ forwarded as raw `allowed_mentions' object."
           (const :tag "Show API error" error))
   :group 'disco)
 
-(defcustom disco-room-forward-only-manual-fallback nil
-  "When non-nil, allow manual forward_only entry if source fetch fails."
-  :type 'boolean
-  :group 'disco)
-
 (defcustom disco-room-show-avatar-images t
   "When non-nil, render author avatars as inline images when possible.
 
@@ -2461,13 +2456,10 @@ Returns nil when left blank."
           (user-error "disco: value must be >= 0"))
         n))))
 
-(defun disco-room--resolve-thread-update (updated fallback)
-  "Resolve UPDATED thread channel response with FALLBACK object.
-
-When UPDATED does not contain a full channel object, FALLBACK is used."
+(defun disco-room--resolve-thread-update (updated)
+  "Store complete UPDATED thread channel response."
   (disco-thread-resolve-update
    updated
-   fallback
    (lambda (channel)
      (when (alist-get 'name channel)
        (setq disco-room--channel-name (alist-get 'name channel))))))
@@ -4110,38 +4102,28 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
         (let ((spoiler-hidden (and (stringp message-id)
                                    (disco-media-attachment-spoiler-p attachment)
                                    (not reveal-spoilers))))
-          (condition-case err
-              (if disco-room-use-rich-attachment-cards
-                  (disco-room--insert-attachment-card
-                   attachment
-                   :message-id message-id
-                   :spoiler-hidden spoiler-hidden)
-                (if spoiler-hidden
-                    (disco-ins-insert-attachment-spoiler-placeholder
-                     attachment
-                     :prefix prefix
-                     :line-face 'disco-room-message-meta
-                     :button-face 'disco-room-message-meta
-                     :toggle-action (lambda ()
-                                      (disco-room-toggle-message-spoilers message-id))
-                     :toggle-help-echo "Reveal spoiler attachment")
-                  (disco-ins-insert-attachment-lines
-                   (disco-room--attachment-summary attachment)
-                   :prefix prefix
-                   :url (and disco-room-show-attachment-urls
-                             (or (alist-get 'url attachment)
-                                 (alist-get 'proxy_url attachment)))
-                   :summary-face 'disco-room-message-meta
-                   :url-face 'shadow)))
-            (error
-             (message "disco: attachment render failed for %s: %s"
-                      (disco-media-attachment-display-name attachment)
-                      (error-message-string err))
-             (disco-ins-insert-attachment-lines
-              (format "%s [render fallback]"
-                      (disco-room--attachment-summary attachment))
-              :prefix prefix
-              :summary-face 'shadow))))))))
+          (if disco-room-use-rich-attachment-cards
+              (disco-room--insert-attachment-card
+               attachment
+               :message-id message-id
+               :spoiler-hidden spoiler-hidden)
+            (if spoiler-hidden
+                (disco-ins-insert-attachment-spoiler-placeholder
+                 attachment
+                 :prefix prefix
+                 :line-face 'disco-room-message-meta
+                 :button-face 'disco-room-message-meta
+                 :toggle-action (lambda ()
+                                  (disco-room-toggle-message-spoilers message-id))
+                 :toggle-help-echo "Reveal spoiler attachment")
+              (disco-ins-insert-attachment-lines
+               (disco-room--attachment-summary attachment)
+               :prefix prefix
+               :url (and disco-room-show-attachment-urls
+                         (or (alist-get 'url attachment)
+                             (alist-get 'proxy_url attachment)))
+               :summary-face 'disco-room-message-meta
+               :url-face 'shadow))))))))
 
 (defun disco-room--insert-message-embeds (msg)
   "Insert embed detail lines for MSG."
@@ -5571,14 +5553,19 @@ Return non-nil when handled without full room rerender."
          (event-message (plist-get event :message))
          (message-id (or (and (listp event-message) (alist-get 'id event-message))
                          (plist-get event :message-id))))
-    (when (and message-id
-               (not (disco-room--msg-filter-active-p))
-               (memq event-type '(message-create message-update message-delete)))
-      ;; Mirror telega's approach: keep one persistent EWOC and patch only the
-      ;; changed message neighborhood when surrounding order remains compatible.
-      (disco-room--apply-single-message-change-partially
+    (cond
+     ((disco-room--msg-filter-active-p)
+      'filtered)
+     ((not (memq event-type '(message-create message-update message-delete)))
+      (error "disco: unsupported live message event: %S" event-type))
+     ((not message-id)
+      (error "disco: live message event has no message id: %S" event))
+     ((disco-room--apply-single-message-change-partially
        message-id
-       (reverse (or (disco-state-messages disco-room--channel-id) '()))))))
+       (reverse (or (disco-state-messages disco-room--channel-id) '())))
+      'updated)
+     (t
+      (error "disco: room timeline cannot reconcile message %s" message-id)))))
 
 (defun disco-room-render ()
   "Render timeline for current room buffer."
@@ -5708,18 +5695,11 @@ REASON is shown in the minibuffer."
              (author (and (listp message) (alist-get 'author message)))
              (author-id (and (listp author) (alist-get 'id author)))
              (message-id (or (and (listp message) (alist-get 'id message))
-                             (plist-get event :message-id)))
-             (handled nil))
+                             (plist-get event :message-id))))
         (when author-id
           ;; Message arrival implicitly ends visible typing state for sender.
           (disco-room--typing-stop-user author-id t))
-        ;; Keep behavior telega-like: patch the persistent EWOC when local
-        ;; order stays compatible, fall back to full rerender otherwise.
-        (setq handled (disco-room--apply-live-message-event-partially event))
-        (unless handled
-          (if (disco-room--at-message-bottom-p)
-              (disco-room-render)
-            (disco-room--render-preserving-point)))
+        (disco-room--apply-live-message-event-partially event)
         (when (and (eq event-type 'message-create)
                    (stringp message-id))
           (disco-room--mark-read message-id))))
@@ -5728,13 +5708,11 @@ REASON is shown in the minibuffer."
                               message-reaction-remove
                               message-reaction-remove-all
                               message-reaction-remove-emoji)))
-      (unless (disco-room--apply-live-reaction-event-partially event)
-        (disco-room-refresh)))
+      (disco-room--apply-live-reaction-event-partially event))
      ((and (equal event-channel-id disco-room--channel-id)
            (memq event-type '(message-poll-vote-add
                               message-poll-vote-remove)))
-      (unless (disco-room--apply-live-poll-vote-event-partially event)
-        (disco-room-refresh))))))
+      (disco-room--apply-live-poll-vote-event-partially event)))))
 
 (defun disco-room--attach-live-updates ()
   "Attach this room buffer to live update event stream."
@@ -6327,30 +6305,6 @@ send votes to Discord."
            (message "disco: end poll failed: %s"
                     (disco-room--async-error-message err))))))))
 
-(defun disco-room--split-csv-values (raw)
-  "Split comma-separated RAW string into trimmed non-empty values."
-  (let ((trimmed (string-trim (or raw ""))))
-    (unless (string-empty-p trimmed)
-      (mapcar #'string-trim
-              (split-string trimmed "," t "[[:space:]]*")))))
-
-(defun disco-room--parse-forward-embed-indices (raw)
-  "Parse RAW comma-separated embed indices into a vector or nil."
-  (let ((tokens (disco-room--split-csv-values raw))
-        values)
-    (dolist (token tokens)
-      (unless (string-match-p "\\`[0-9]+\\'" token)
-        (user-error "disco: forward embed indices must be non-negative integers"))
-      (push (string-to-number token) values))
-    (when values
-      (vconcat (nreverse values)))))
-
-(defun disco-room--parse-forward-attachment-ids (raw)
-  "Parse RAW comma-separated attachment ids into a vector or nil."
-  (let ((tokens (disco-room--split-csv-values raw)))
-    (when tokens
-      (vconcat tokens))))
-
 (defun disco-room--forward-source-message (source-channel-id message-id)
   "Resolve SOURCE-CHANNEL-ID/MESSAGE-ID to a message object, or nil."
   (let ((channel-id (disco-msg-normalize-id source-channel-id))
@@ -6360,9 +6314,7 @@ send votes to Discord."
                       (equal (disco-msg-normalize-id (alist-get 'id msg))
                              target-id))
                     (or (disco-state-messages channel-id) '()))
-          (condition-case _
-              (disco-api-channel-message channel-id target-id)
-            (error nil))))))
+          (disco-api-channel-message channel-id target-id)))))
 
 (defun disco-room--forward-only-select-values (prompt choices)
   "Read one or more values from CHOICES with PROMPT.
@@ -6393,24 +6345,6 @@ CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
             (user-error "disco: invalid forward-only selection `%s'" label))
           (push (cdr entry) values)))
       (delete-dups (nreverse values)))))
-
-(defun disco-room--read-forward-only-manual ()
-  "Read `forward_only' payload by manual embed-index/attachment-id input."
-  (let* ((embed-input
-          (read-string "Embed indices (comma-separated, empty for none): "))
-         (attachment-input
-          (read-string "Attachment IDs (comma-separated, empty for none): "))
-         (embed-indices (disco-room--parse-forward-embed-indices embed-input))
-         (attachment-ids (disco-room--parse-forward-attachment-ids
-                          attachment-input))
-         payload)
-    (when embed-indices
-      (push `(embed_indices . ,embed-indices) payload))
-    (when attachment-ids
-      (push `(attachment_ids . ,attachment-ids) payload))
-    (unless payload
-      (user-error "disco: forward-only selection requires embed indices or attachment ids"))
-    (nreverse payload)))
 
 (defun disco-room--read-forward-only-from-message (source-message)
   "Read `forward_only' payload by selecting embeds/attachments from SOURCE-MESSAGE."
@@ -6462,22 +6396,9 @@ CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
     (let ((source-message (disco-room--forward-source-message
                            source-channel-id
                            message-id)))
-      (if source-message
-          (condition-case err
-              (disco-room--read-forward-only-from-message source-message)
-            (error
-             (if disco-room-forward-only-manual-fallback
-                 (progn
-                   (message "disco: source-based forward-only failed (%s); using manual entry"
-                            (error-message-string err))
-                   (disco-room--read-forward-only-manual))
-               (user-error "disco: source-based forward-only failed: %s"
-                           (error-message-string err)))))
-        (if disco-room-forward-only-manual-fallback
-            (progn
-              (message "disco: source message unavailable; using manual forward-only entry")
-              (disco-room--read-forward-only-manual))
-          (user-error "disco: source message unavailable for forward-only"))))))
+      (unless source-message
+        (user-error "disco: source message unavailable for forward-only"))
+      (disco-room--read-forward-only-from-message source-message))))
 
 (defun disco-room--send-allowed-mentions (&optional replying-p)
   "Return normalized allowed_mentions payload for outgoing message send/edit.
@@ -7542,15 +7463,9 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
          (next-archived (not (disco-thread-archived-p channel)))
-         (updated (disco-api-set-thread-archived disco-room--channel-id next-archived nil))
-         (fallback (disco-thread-apply-updates
-                    channel
-                    (list
-                     (list :kind 'meta
-                           :key 'archived
-                           :value (if next-archived t :false)
-                           :present t)))))
-    (disco-room--resolve-thread-update updated fallback)
+         (updated (disco-api-set-thread-archived
+                   disco-room--channel-id next-archived nil)))
+    (disco-room--resolve-thread-update updated)
     (disco-room--render-preserving-point)
     (message "disco: thread %s" (if next-archived "archived" "unarchived"))))
 
@@ -7573,14 +7488,10 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (disco-room--ensure-thread-channel)
   (when (string-empty-p name)
     (user-error "disco: thread name cannot be empty"))
-  (let* ((channel (or (disco-room--channel-object)
-                      (user-error "disco: unknown thread in state")))
-         (updated (disco-api-update-thread disco-room--channel-id :name name))
-         (fallback (disco-thread-apply-updates
-                    channel
-                    (list
-                     (list :kind 'field :key 'name :value name :present t)))))
-    (disco-room--resolve-thread-update updated fallback)
+  (unless (disco-room--channel-object)
+    (user-error "disco: unknown thread in state"))
+  (let ((updated (disco-api-update-thread disco-room--channel-id :name name)))
+    (disco-room--resolve-thread-update updated)
     (disco-room--render-preserving-point)
     (message "disco: thread renamed to %s" name)))
 
@@ -7594,15 +7505,9 @@ RATE-LIMIT-PER-USER is optional slowmode seconds."
   (let* ((channel (or (disco-room--channel-object)
                       (user-error "disco: unknown thread in state")))
          (next-locked (not (disco-thread-locked-p channel)))
-         (updated (disco-api-update-thread disco-room--channel-id :locked next-locked))
-         (fallback (disco-thread-apply-updates
-                    channel
-                    (list
-                     (list :kind 'meta
-                           :key 'locked
-                           :value (if next-locked t :false)
-                           :present t)))))
-    (disco-room--resolve-thread-update updated fallback)
+         (updated (disco-api-update-thread
+                   disco-room--channel-id :locked next-locked)))
+    (disco-room--resolve-thread-update updated)
     (disco-room--render-preserving-point)
     (message "disco: thread %s" (if next-locked "locked" "unlocked"))))
 
@@ -7622,19 +7527,12 @@ When called interactively, empty input clears slowmode (sets to 0)."
    (disco-room--thread-update-unavailable-reason)
    "set thread slowmode")
   (disco-room--ensure-thread-channel)
-  (let* ((channel (or (disco-room--channel-object)
-                      (user-error "disco: unknown thread in state")))
-         (updated (disco-api-update-thread
-                   disco-room--channel-id
-                   :rate-limit-per-user seconds))
-         (fallback (disco-thread-apply-updates
-                    channel
-                    (list
-                     (list :kind 'field
-                           :key 'rate_limit_per_user
-                           :value seconds
-                           :present t)))))
-    (disco-room--resolve-thread-update updated fallback)
+  (unless (disco-room--channel-object)
+    (user-error "disco: unknown thread in state"))
+  (let ((updated (disco-api-update-thread
+                  disco-room--channel-id
+                  :rate-limit-per-user seconds)))
+    (disco-room--resolve-thread-update updated)
     (disco-room--render-preserving-point)
     (message "disco: thread slowmode -> %ss" seconds)))
 
@@ -7655,19 +7553,12 @@ When called interactively, empty input clears slowmode (sets to 0)."
    (disco-room--thread-update-unavailable-reason)
    "set thread auto archive duration")
   (disco-room--ensure-thread-channel)
-  (let* ((channel (or (disco-room--channel-object)
-                      (user-error "disco: unknown thread in state")))
-         (updated (disco-api-update-thread
-                   disco-room--channel-id
-                   :auto-archive-duration minutes))
-         (fallback (disco-thread-apply-updates
-                    channel
-                    (list
-                     (list :kind 'meta
-                           :key 'auto_archive_duration
-                           :value minutes
-                           :present t)))))
-    (disco-room--resolve-thread-update updated fallback)
+  (unless (disco-room--channel-object)
+    (user-error "disco: unknown thread in state"))
+  (let ((updated (disco-api-update-thread
+                  disco-room--channel-id
+                  :auto-archive-duration minutes)))
+    (disco-room--resolve-thread-update updated)
     (disco-room--render-preserving-point)
     (message "disco: auto archive -> %s minutes" minutes)))
 
@@ -7736,38 +7627,15 @@ When called interactively, empty input clears slowmode (sets to 0)."
                          (not (eq locked-choice 'keep)))))
     (unless has-change
       (user-error "disco: no thread setting changes provided"))
-    (let* ((updated
-            (disco-api-update-thread
-             disco-room--channel-id
-             :name name
-             :auto-archive-duration auto-archive-duration
-             :rate-limit-per-user rate-limit-per-user
-             :archived archived
-             :locked locked))
-           (fallback-updates
-            (list
-             (list :kind 'field
-                   :key 'name
-                   :value name
-                   :present (not (null name)))
-             (list :kind 'meta
-                   :key 'auto_archive_duration
-                   :value auto-archive-duration
-                   :present (not (null auto-archive-duration)))
-             (list :kind 'field
-                   :key 'rate_limit_per_user
-                   :value rate-limit-per-user
-                   :present (not (null rate-limit-per-user)))
-             (list :kind 'meta
-                   :key 'archived
-                   :value archived
-                   :present (not (eq archived-choice 'keep)))
-             (list :kind 'meta
-                   :key 'locked
-                   :value locked
-                   :present (not (eq locked-choice 'keep)))))
-           (fallback (disco-thread-apply-updates channel fallback-updates)))
-      (disco-room--resolve-thread-update updated fallback)
+    (let ((updated
+           (disco-api-update-thread
+            disco-room--channel-id
+            :name name
+            :auto-archive-duration auto-archive-duration
+            :rate-limit-per-user rate-limit-per-user
+            :archived archived
+            :locked locked)))
+      (disco-room--resolve-thread-update updated)
       (disco-room--render-preserving-point)
       (message "disco: updated thread settings"))))
 

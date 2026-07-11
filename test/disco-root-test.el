@@ -287,7 +287,7 @@
         (should (equal '("c1" "c2")
                        (sort (copy-sequence reordered-ids) #'string-lessp)))))))
 
-(ert-deftest disco-root-activity-reorder-visible-nodes-signals-structural-fallback ()
+(ert-deftest disco-root-activity-reorder-visible-nodes-signals-structural-reconcile ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--layout 'activity)
