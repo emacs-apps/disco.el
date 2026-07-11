@@ -137,12 +137,6 @@ Supported values: `all', `unread', and `dms'.")
 
 Each entry is (SECTION-SYMBOL . BOOLEAN).")
 
-(defvar-local disco-root--header-marker nil
-  "Marker pointing at the start of the root header block.")
-
-(defvar-local disco-root--ewoc-marker nil
-  "Marker pointing at the start of root EWOC content.")
-
 (defvar-local disco-root--debug-log-enabled nil
   "Non-nil when root debug logging is enabled in this buffer.")
 
@@ -272,6 +266,11 @@ Same semantics as `telega-chat-button-width':
 - Float means percentage of activity content width.
 - List (VALUE MIN MAX) constrains computed width (MAX is optional)."
   :type '(choice number (list number))
+  :group 'disco)
+
+(defcustom disco-root-activity-context-separator "  "
+  "Separator between server, category, and channel in activity rows."
+  :type 'string
   :group 'disco)
 
 (defcustom disco-root-activity-include-threads nil
@@ -2244,39 +2243,6 @@ buffer without CHANNEL, use the channel at point."
       (with-current-buffer buf
         (disco-root-search-transient)))))
 
-(defun disco-root--ensure-markers ()
-  "Ensure header and ewoc markers exist for the current buffer."
-  (unless (markerp disco-root--header-marker)
-    (setq-local disco-root--header-marker (copy-marker (point-min))))
-  (unless (markerp disco-root--ewoc-marker)
-    (setq-local disco-root--ewoc-marker (copy-marker (point-min))))
-  (set-marker-insertion-type disco-root--header-marker nil)
-  (set-marker-insertion-type disco-root--ewoc-marker nil))
-
-(defun disco-root--header-start ()
-  "Return buffer position of the root header start."
-  (or (and (markerp disco-root--header-marker)
-           (marker-position disco-root--header-marker))
-      (point-min)))
-
-(defun disco-root--ewoc-start ()
-  "Return buffer position of root EWOC content start."
-  (or (and (markerp disco-root--ewoc-marker)
-           (marker-position disco-root--ewoc-marker))
-      (and disco-root--ewoc
-           (ewoc-nth disco-root--ewoc 0)
-           (ewoc-location (ewoc-nth disco-root--ewoc 0)))
-      (save-excursion
-        (goto-char (disco-root--header-start))
-        (forward-line (1+ (length (disco-root--header-lines))))
-        (point))))
-
-(defun disco-root--header-region ()
-  "Return cons of header region start/end positions."
-  (let ((start (disco-root--header-start))
-        (end (disco-root--ewoc-start)))
-    (cons start (max start end))))
-
 (defun disco-root--debug-log-enabled-p ()
   "Return non-nil when root debug logging is enabled."
   (or disco-root--debug-log-enabled
@@ -2386,24 +2352,12 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
       (erase-buffer)))
   (message "disco: root debug log cleared"))
 
-(defun disco-root--refresh-mode-divider-line ()
-  "Refresh only the mode-divider header line used for width framing."
-  (let ((inhibit-read-only t)
-        (buffer-undo-list t))
-    (save-excursion
-      (goto-char (disco-root--header-start))
-      (forward-line 2)
-      (delete-region (line-beginning-position) (line-end-position))
-      (insert (disco-root--mode-divider-line)))))
-
 (defun disco-root--reflow-layout ()
   "Reflow currently rendered root layout without rebuilding model lists."
   (let ((inhibit-read-only t))
     (if (and (eq major-mode 'disco-root-mode)
              disco-root--ewoc)
-        (progn
-          (disco-root--refresh-mode-divider-line)
-          (ewoc-refresh disco-root--ewoc))
+        (ewoc-refresh disco-root--ewoc)
       (disco-root-render))))
 
 (defun disco-root--reflow-preserving-position ()
@@ -2471,7 +2425,10 @@ With FORCE non-nil, rerender even if width has not changed."
   "Ensure expansion defaults for root SECTIONS."
   (dolist (section (or sections disco-root--section-order))
     (unless (assq section disco-root--section-expanded)
-      (push (cons section t) disco-root--section-expanded)))
+      (push (cons section
+                  (and (memq section disco-root-tree-default-expanded-sections)
+                       t))
+            disco-root--section-expanded)))
   (setq disco-root--section-expanded
         (nreverse (seq-uniq (nreverse disco-root--section-expanded)
                             (lambda (left right)
@@ -2481,7 +2438,7 @@ With FORCE non-nil, rerender even if width has not changed."
   "Return non-nil when root SECTION is expanded."
   (if-let* ((entry (assq section disco-root--section-expanded)))
       (and (cdr entry) t)
-    t))
+    (and (memq section disco-root-tree-default-expanded-sections) t)))
 
 (defun disco-root--set-section-expanded (section expanded)
   "Set root SECTION expansion to EXPANDED."
@@ -3051,9 +3008,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
         (when (numberp read-state-type)
           (let ((count (disco-state-read-state-counter-total read-state-type)))
             (when (> count 0)
-              (push (format "%s:%d" label count) parts))))))
+              (push (format "%d %s" count label) parts))))))
     (when parts
-      (format "badges[%s]" (string-join (nreverse parts) "  ")))))
+      (string-join (nreverse parts) " · "))))
 
 (defun disco-root--gateway-status-label ()
   "Return short gateway/root status label for header display."
@@ -3089,15 +3046,17 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                          session-count)))
     (when (> session-count 0)
       (if overall-status
-          (format "sessions[%s/%d]" overall-status device-count)
-        (format "sessions[%d]" device-count)))))
+          (format "%s · %d device%s"
+                  overall-status device-count (if (= device-count 1) "" "s"))
+        (format "%d device%s" device-count (if (= device-count 1) "" "s"))))))
 
 (defun disco-root--voice-summary-label ()
   "Return compact tracked voice summary for root header, or nil."
   (let ((channel-count (disco-state-voice-active-channel-count))
         (user-count (disco-state-voice-active-user-count)))
     (when (> (+ channel-count user-count) 0)
-      (format "voice[%dc %du]" channel-count user-count))))
+      (format "voice %d · %d room%s"
+              user-count channel-count (if (= channel-count 1) "" "s")))))
 
 (defun disco-root--activity-metrics-by-view ()
   "Return alist MODE -> plist metrics for activity header chips."
@@ -3125,19 +3084,15 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
   "Return one filter chip string for MODE and LABEL from METRICS."
   (let* ((stats (alist-get mode metrics))
          (count (or (plist-get stats :count) 0))
-         (unread (or (plist-get stats :unread) 0))
          (active (eq disco-root--view-mode mode)))
-    (format "[%d:%s%s %s]"
-            count
-            (if active "·" "")
-            label
-            (disco-root--human-count unread))))
+    (propertize (format "%s %d" label count)
+                'face (if active 'disco-root-active-lens 'shadow))))
 
 (defun disco-root--search-summary-line ()
   "Return summary line for active root search session."
   (if (not (and disco-root--search-domain
                 (disco-root--search-effective-spec-p disco-root--search-query-spec)))
-      "[search inactive]"
+      "Search inactive"
     (string-join
      (append (disco-root--search-summary-chips)
              (mapcar #'disco-root--search-tab-summary-chip disco-root--search-tab-order))
@@ -3148,75 +3103,55 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
   (if (eq (disco-root--ensure-layout) 'search)
       (disco-root--search-summary-line)
     (let* ((layout-label
-            (downcase (disco-root-layout-label (disco-root--ensure-layout))))
+            (disco-root-layout-label (disco-root--ensure-layout)))
+           (sort-label
+            (pcase disco-root--sort-mode
+              ('activity "Recent")
+              ('name "Name")
+              (_ (capitalize (symbol-name disco-root--sort-mode)))))
            (metrics (disco-root--activity-metrics-by-view)))
       (string-join
        (list (disco-root--filter-chip 'all "Main" metrics)
              (disco-root--filter-chip 'unread "Important" metrics)
              (disco-root--filter-chip 'dms "DMs" metrics)
-             (format "[%s sort:%s]" layout-label disco-root--sort-mode))
-       "  "))))
+             (propertize (format "%s · %s" layout-label sort-label)
+                         'face 'shadow))
+       "    "))))
 
-(defun disco-root--mode-divider-line ()
-  "Return divider line with active mode marker like telega root."
-  (let* ((label (format "(%s/%s)"
-                        (downcase (symbol-name (disco-root--ensure-layout)))
-                        (symbol-name disco-root--view-mode)))
-         (base-width (or disco-root--fill-column
-                         (disco-root--compute-fill-column)))
-         (width (max base-width (+ 8 (string-width label))))
-         (filler (max 0 (- width (string-width label) 2)))
-         (left (/ filler 2))
-         (right (- filler left)))
-    (concat "_/"
-            (make-string left ?-)
-            label
-            (make-string right ?-))))
+(defun disco-root--gateway-status-face (status)
+  "Return face used for root gateway STATUS."
+  (pcase status
+    ("Ready" 'success)
+    ((or "Refreshing" "Connecting") 'warning)
+    ("Offline" 'error)
+    (_ 'shadow)))
 
-(defun disco-root--header-lines ()
-  "Return fixed three-line root header block."
-  (list
-   (string-join
-    (delq nil
-          (list (format "Status: %s" (disco-root--gateway-status-label))
-                (let ((sessions (disco-root--sessions-summary-label)))
-                  (and sessions (format "  %s" sessions)))
-                (let ((voice (disco-root--voice-summary-label)))
-                  (and voice (format "  %s" voice)))
-                (let ((badge (disco-root--feature-badge-summary)))
-                  (and badge (format "  %s" badge)))
-                (format "  keys[g index, C-u g full, G gw-sync, l/L layout, U unread-lens, ? menu]")))
-    "")
-   (disco-root--filters-line)
-   (disco-root--mode-divider-line)))
+(defun disco-root--header-line ()
+  "Return the compact, persistent root header-line."
+  (let* ((status (disco-root--gateway-status-label))
+         (metadata
+          (delq nil
+                (list (disco-root--sessions-summary-label)
+                      (disco-root--voice-summary-label)
+                      (disco-root--feature-badge-summary))))
+         (identity
+          (concat
+           " "
+           (propertize "Disco" 'face '(:weight bold :height 1.08))
+           "  "
+           (propertize (format "● %s" status)
+                       'face (disco-root--gateway-status-face status))
+           (when metadata
+             (concat "  ·  "
+                     (propertize (string-join metadata "  ·  ")
+                                 'face 'shadow))))))
+    (concat identity "      " (disco-root--filters-line) " ")))
 
 (defun disco-root--refresh-header-line ()
-  "Refresh root header block in place."
+  "Refresh the persistent root header-line."
   (disco-root--debug-log "refresh-header-line")
-  (let ((inhibit-read-only t)
-        (buffer-undo-list t)
-        (lines (disco-root--header-lines)))
-    (disco-root--ensure-markers)
-    (save-excursion
-      (let ((start (disco-root--header-start))
-            (end-marker disco-root--ewoc-marker))
-        (goto-char start)
-        (dolist (line lines)
-          (insert line "\n"))
-        (insert "\n")
-        (when (and (markerp end-marker)
-                   (> (marker-position end-marker) (point)))
-          (delete-region (point) end-marker))
-        (set-marker disco-root--header-marker start)
-        (set-marker disco-root--ewoc-marker (point))
-        (set-marker-insertion-type disco-root--header-marker nil)
-        (set-marker-insertion-type disco-root--ewoc-marker nil)
-        (when (and disco-root--ewoc
-                   (fboundp 'ewoc--header)
-                   (fboundp 'ewoc--node-start-marker))
-          (set-marker (ewoc--node-start-marker (ewoc--header disco-root--ewoc))
-                      (marker-position disco-root--ewoc-marker)))))
-    (setq disco-root--last-header-refresh-at (float-time))))
+  (setq disco-root--last-header-refresh-at (float-time))
+  (force-mode-line-update t))
 
 (defun disco-root--maybe-refresh-activity-header-line ()
   "Refresh activity header line when throttle interval has elapsed."
@@ -3244,18 +3179,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
              disco-root--view-mode
              disco-root--fill-column)
             (erase-buffer)
-            (disco-root--ensure-markers)
-            (set-marker disco-root--header-marker (point-min))
-            (set-marker-insertion-type disco-root--header-marker nil)
-            (goto-char (point-min))
-            (dolist (line (disco-root--header-lines))
-              (insert line "\n"))
             (setq-local disco-root--last-header-refresh-at (float-time))
-            (insert "\n")
-            (set-marker disco-root--ewoc-marker (point))
-            (set-marker-insertion-type disco-root--ewoc-marker nil)
             (disco-root--clear-ewoc-state)
             (disco-root-layout-render layout)
+            (force-mode-line-update t)
             (goto-char (point-min)))
         (when disco-root--render-pending
           (setq disco-root--render-pending nil)
@@ -3355,6 +3282,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   "Major mode for disco.el root buffer."
   (setq buffer-read-only t)
   (setq truncate-lines t)
+  (setq-local header-line-format '(:eval (disco-root--header-line)))
   (setq-local switch-to-buffer-preserve-window-point nil)
   (setq-local disco-root--debug-log-enabled disco-root-debug-log-enabled)
   (setq-local disco-root--debug-log-changes disco-root-debug-log-changes)
@@ -3386,8 +3314,6 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (setq-local disco-root--dirty-header-p nil)
   (setq-local disco-root--last-header-refresh-at nil)
   (setq-local disco-root--fill-column nil)
-  (setq-local disco-root--header-marker nil)
-  (setq-local disco-root--ewoc-marker nil)
   (setq-local disco-root--search-query nil)
   (setq-local disco-root--search-domain nil)
   (setq-local disco-root--search-query-spec nil)

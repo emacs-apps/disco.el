@@ -345,14 +345,13 @@ ACTION is optional text describing the attempted search action."
            (parts (list (format "Filter: %s"
                                 (disco-room--msg-filter-title filter))
                         (if (numberp total)
-                            (format "[%d/%d]" loaded total)
-                          (format "[%d]" loaded)))))
+                            (format "%d/%d" loaded total)
+                          (format "%d loaded" loaded)))))
       (when disco-room--filter-in-flight
-        (setq parts (append parts '("[searching...]"))))
+        (setq parts (append parts '("Searching…"))))
       (when (disco-room--msg-filter-has-more-p)
-        (setq parts (append parts '("[M-< more]"))))
-      (setq parts (append parts '("[C-c C-/ cancel]")))
-      (string-join parts "  "))))
+        (setq parts (append parts '("More results available"))))
+      (string-join parts "  ·  "))))
 
 (defun disco-room-search--filter-callback-active-p (room-buffer channel-id generation)
   "Return non-nil when filter callback still matches ROOM-BUFFER state."

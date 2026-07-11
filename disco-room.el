@@ -1207,7 +1207,7 @@ state that was present before edit mode was entered."
             (format "%s: %s" action message-id))))
     (concat
      headline
-     " (C-c C-k to cancel)\n"
+     "\n"
      (if (and (stringp preview) (not (string-empty-p preview)))
          (format "> %s\n" preview)
        ""))))

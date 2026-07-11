@@ -1021,6 +1021,16 @@
                        (mapcar (lambda (msg) (alist-get 'id msg))
                                (plist-get disco-room--msg-filter :items))))))))
 
+(ert-deftest disco-room-filter-status-is-state-only-not-a-key-cheat-sheet ()
+  (let ((disco-room--msg-filter
+         '(:active t :query "hello" :items (((id . "m1"))) :total-count 3))
+        (disco-room--filter-in-flight nil))
+    (let ((status (disco-room--msg-filter-status-line)))
+      (should (string-match-p "1/3" status))
+      (should (string-match-p "More results available" status))
+      (should-not (string-match-p "M-<" status))
+      (should-not (string-match-p "C-c" status)))))
+
 (ert-deftest disco-room-filter-search-rejects-unsupported-channel-types ()
   (with-temp-buffer
     (disco-room-mode)
@@ -1184,6 +1194,7 @@
     (should (text-property-any (point-min) (point-max) 'disco-room-input t))
     (should (string-match-p "Replying to alice \\[m42\\]"
                             (buffer-string)))
+    (should-not (string-match-p "C-c C-k" (buffer-string)))
     (should (string-match-p "> hello reply"
                             (buffer-string)))
     (should (string-match-p "Queued attachments: \\\[file:1\\\] a.txt, \\\[file:2\\\] b.png - preview"

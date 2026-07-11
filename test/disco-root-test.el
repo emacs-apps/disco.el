@@ -6,6 +6,39 @@
 
 (require 'disco-root)
 
+(ert-deftest disco-root-mode-uses-persistent-header-without-key-cheat-sheet ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (should (equal '(:eval (disco-root--header-line)) header-line-format))
+    (let ((disco-root--layout 'tree)
+          (disco-root--view-mode 'all)
+          (disco-root--sort-mode 'activity))
+      (cl-letf (((symbol-function 'disco-root--gateway-status-label)
+                 (lambda () "Ready"))
+                ((symbol-function 'disco-root--sessions-summary-label) #'ignore)
+                ((symbol-function 'disco-root--voice-summary-label) #'ignore)
+                ((symbol-function 'disco-root--feature-badge-summary) #'ignore)
+                ((symbol-function 'disco-root--activity-metrics-by-view)
+                 (lambda ()
+                   '((all :count 12 :unread 7)
+                     (unread :count 3 :unread 7)
+                     (dms :count 4 :unread 2)))))
+        (let ((header (substring-no-properties (disco-root--header-line))))
+          (should (string-match-p "Disco" header))
+          (should (string-match-p "Ready" header))
+          (should (string-match-p "Main 12" header))
+          (should (string-match-p "Home · Recent" header))
+          (should-not (string-match-p "keys\\[" header))
+          (should-not (string-match-p "Status:" header)))))))
+
+(ert-deftest disco-root-tree-default-collapses-server-directory ()
+  (let ((disco-root-tree-default-expanded-sections '(unread private))
+        (disco-root--section-expanded nil))
+    (disco-root--ensure-section-state '(unread private guilds))
+    (should (disco-root--section-expanded-p 'unread))
+    (should (disco-root--section-expanded-p 'private))
+    (should-not (disco-root--section-expanded-p 'guilds))))
+
 (ert-deftest disco-gateway-event-channel-ids-aggregates-and-dedupes ()
   (should
    (equal
@@ -389,8 +422,6 @@
           queued)
       (cl-letf (((symbol-function 'disco-root--render-fill-column)
                  (lambda (&optional _buffer) 80))
-                ((symbol-function 'disco-root--header-lines)
-                 (lambda () '("header")))
                 ((symbol-function 'disco-root-layout-render)
                  (lambda (_layout)
                    (setq render-count (1+ render-count))
@@ -404,7 +435,7 @@
         (should (equal queued '(nil t nil)))
         (should-not disco-root--rendering)
         (should-not disco-root--render-pending)
-        (should (equal (buffer-string) "header\n\n"))))))
+        (should (string-empty-p (buffer-string)))))))
 
 (ert-deftest disco-root-channel-row-keeps-help-without-blanket-hover ()
   (with-temp-buffer
@@ -534,6 +565,7 @@
      '(((id . "cat") (guild_id . "g1") (name . "Category") (type . 4))
        ((id . "c1") (guild_id . "g1") (parent_id . "cat")
         (name . "general") (type . 0))))
+    (disco-root--set-section-expanded 'guilds t)
     (let* ((disco-root--tree-show-unread-section nil)
            (entries (disco-root--tree-layout-entries))
            (guild-entries
@@ -651,9 +683,14 @@
           (should (eq 'entries (disco-root-layout-view-spec-kind view-spec)))
           (should (eq 'section (disco-root-layout-entry-type (car entries))))
           (should (equal 'unread (disco-root-layout-entry-section (car entries))))
-          (should (seq-some (lambda (entry)
-                              (eq 'channel (disco-root-layout-entry-type entry)))
-                            entries)))))))
+          (let ((channel-entry
+                 (seq-find (lambda (entry)
+                             (eq 'channel
+                                 (disco-root-layout-entry-type entry)))
+                           entries)))
+            (should channel-entry)
+            (should (eq 'activity
+                        (disco-root-layout-entry-scope channel-entry)))))))))
 
 (ert-deftest disco-root-layout-render-view-spec-renders-ewoc-entries ()
   (with-temp-buffer
@@ -1065,7 +1102,7 @@
     (should-error (disco-root-toggle-section-at-point)
                   :type 'user-error)))
 
-(ert-deftest disco-root-activity-primary-label-includes-channel-category-guild ()
+(ert-deftest disco-root-activity-primary-label-uses-guild-category-channel-order ()
   (disco-state-reset)
   (let* ((guild-id "g1")
          (category '((id . "cat1")
@@ -1082,8 +1119,13 @@
           (disco-state-set-guilds (list `((id . ,guild-id)
                                           (name . "Emacs CN"))))
           (disco-state-put-channels guild-id (list category channel))
-          (should (equal "emacs | General | Emacs CN"
-                         (disco-root--activity-primary-label channel))))
+          (let* ((label (disco-root--activity-primary-label channel))
+                 (separator-position (string-match-p "" label)))
+            (should (equal "Emacs CN  General  emacs"
+                           (substring-no-properties label)))
+            (should separator-position)
+            (should (eq 'disco-root-context-separator
+                        (get-text-property separator-position 'face label)))))
       (disco-state-reset))))
 
 (ert-deftest disco-root-thread-browser-context-label-includes-applied-tags ()
@@ -1373,7 +1415,7 @@
         (disco-root--insert-activity-icon
          '((id . "th1") (guild_id . "g1") (type . 11))
          'parent-thread)
-        (should (equal "[T]" (buffer-string))))
+        (should (equal "↳" (substring-no-properties (buffer-string)))))
     (disco-state-reset)))
 
 (ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
@@ -1459,20 +1501,15 @@
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--ewoc 'dummy-ewoc)
-          divider-refreshed
           ewoc-refreshed
           full-rendered)
-      (cl-letf (((symbol-function 'disco-root--refresh-mode-divider-line)
-                 (lambda ()
-                   (setq divider-refreshed t)))
-                ((symbol-function 'ewoc-refresh)
+      (cl-letf (((symbol-function 'ewoc-refresh)
                  (lambda (_ewoc)
                    (setq ewoc-refreshed t)))
                 ((symbol-function 'disco-root-render)
                  (lambda ()
                    (setq full-rendered t))))
         (disco-root--reflow-layout)
-        (should divider-refreshed)
         (should ewoc-refreshed)
         (should-not full-rendered)))))
 
@@ -1605,8 +1642,8 @@
               ((symbol-function 'disco-root--channel-has-unread-p)
                (lambda (_channel) t)))
       (let ((label (disco-root--channel-label channel)))
-        (should (string-match-p "\\[@3\\]" label))
-        (should-not (string-match-p "\\[unread\\]" label))
+        (should (string-match-p "@3" label))
+        (should-not (string-match-p "•" label))
         (should-not (string-match-p "\\[read\\]" label))))))
 
 (ert-deftest disco-root-channel-label-shows-unread-when-no-mention-badge ()
@@ -1618,8 +1655,8 @@
               ((symbol-function 'disco-root--channel-has-unread-p)
                (lambda (_channel) t)))
       (let ((label (disco-root--channel-label channel)))
-        (should (string-match-p "\\[unread\\]" label))
-        (should-not (string-match-p "\\[@[0-9]+\\]" label))))))
+        (should (string-match-p "•" label))
+        (should-not (string-match-p "@[0-9]+" label))))))
 
 (ert-deftest disco-root-channel-label-shows-age-restricted-tag ()
   (let ((channel '((id . "c6")

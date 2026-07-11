@@ -397,7 +397,7 @@ extended reverse accumulator."
              (push
               (disco-channel-directory--note-entry
                (list 'parent-threads parent-id)
-               "Active posts are not loaded. Press g to load them."
+               "Active posts are not loaded."
                'shadow post-indent)
               entries))
             ('loading
@@ -421,7 +421,7 @@ extended reverse accumulator."
              (push
               (disco-channel-directory--note-entry
                (list 'parent-threads parent-id)
-               (format "Active post loading failed: %s. Press g to retry."
+               (format "Active post loading failed: %s"
                        (disco-root--async-error-message
                         (plist-get state :error)))
                'error post-indent)
@@ -431,7 +431,7 @@ extended reverse accumulator."
                (push
                 (disco-channel-directory--note-entry
                  (list 'parent-threads parent-id)
-                 "No active posts. Press A to browse archived posts."
+                 "No active posts."
                  'shadow post-indent)
                 entries))))
           (dolist (thread threads)
@@ -560,11 +560,11 @@ extended reverse accumulator."
              'loading "Loading channels…")))
      ((eq status 'error)
       (list (disco-channel-directory--note-entry
-             'load-error "Channel loading failed. Press g to retry." 'error)))
+             'load-error "Channel loading failed." 'error)))
      ((not (disco-state-guild-channels-loaded-p
             disco-channel-directory--guild-id))
       (list (disco-channel-directory--note-entry
-             'unloaded "Channels have not been loaded. Press g to load them.")))
+             'unloaded "Channels have not been loaded.")))
      (t
       (disco-channel-directory--project-loaded-entries)))))
 
@@ -722,8 +722,7 @@ are deleted and only new nodes are inserted."
          (format "  %d channels · %d unread" (length channels) unread)
        (format "  %s" (disco-directory-guild-status
                         disco-channel-directory--guild-id)))
-     (if (string-empty-p lens) "" (concat "  [" lens "]"))
-     "    / filter  U unread  g refresh  A archived  q back")))
+     (if (string-empty-p lens) "" (concat "  [" lens "]")))))
 
 (defun disco-channel-directory--reconcile (&optional force-channel-ids)
   "Reconcile the current EWOC, forcing rows in FORCE-CHANNEL-IDS."

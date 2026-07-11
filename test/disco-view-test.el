@@ -114,7 +114,6 @@
     (disco-view-render-list-spec
      (disco-view-list-spec-create
       :title "Threads"
-      :key-hints "g: refresh"
       :summary "2 items"
       :items '("one" "two")
       :item-inserter (lambda (item)

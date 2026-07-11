@@ -254,7 +254,6 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
 (cl-defstruct (disco-view-list-spec
                (:constructor disco-view-list-spec-create))
   title
-  key-hints
   summary
   loading-note
   items
@@ -266,7 +265,6 @@ AFTER-RESTORE, when non-nil, is called after point/window restoration."
   "Render list SPEC in current buffer using `disco-ui-render-list-view'."
   (disco-ui-render-list-view
    :title (disco-view-list-spec-title spec)
-   :key-hints (disco-view-list-spec-key-hints spec)
    :summary (disco-view-list-spec-summary spec)
    :loading-note (disco-view-list-spec-loading-note spec)
    :items (disco-view-list-spec-items spec)

@@ -259,19 +259,17 @@ per inserted line so copied text stays clean."
   (when (and face (< start end))
     (add-face-text-property start end face 'append)))
 
-(cl-defun disco-ui-render-list-view (&key title key-hints summary loading-note
+(cl-defun disco-ui-render-list-view (&key title summary loading-note
                                           items item-inserter empty-text
                                           footer-lines)
   "Render a simple list view block in current buffer.
 
-TITLE, KEY-HINTS, SUMMARY and LOADING-NOTE are optional header lines.
+TITLE, SUMMARY and LOADING-NOTE are optional header lines.
 ITEMS are rendered by ITEM-INSERTER when present; otherwise EMPTY-TEXT is
 inserted (defaults to `(empty)`). FOOTER-LINES is an optional list of lines
 printed after the list with an extra separating blank line."
   (when title
     (insert title "\n"))
-  (when key-hints
-    (insert key-hints "\n"))
   (when summary
     (insert summary "\n"))
   (when loading-note

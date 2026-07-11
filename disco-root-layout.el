@@ -30,6 +30,11 @@ When nil, show all unread rows without truncation."
           (integer :tag "Limit"))
   :group 'disco)
 
+(defcustom disco-root-tree-default-expanded-sections '(unread private)
+  "Root tree sections expanded when a root buffer is first created."
+  :type '(set (const unread) (const private) (const guilds))
+  :group 'disco)
+
 (defcustom disco-root-custom-layouts nil
   "User-defined root layout specs.
 
@@ -38,7 +43,6 @@ Each element is (NAME . PLIST), where NAME is a symbol and PLIST accepts:
 - `:build' function symbol returning a `disco-root-layout-view-spec'.
 - `:update-mode' symbol `incremental' or `full'.
 - `:unread-mode' symbol such as `section', `summary', or `filter'.
-- `:toggle-hint' short help text shown in root header for TAB/t behavior.
 - `:refresh-headings' function called in incremental update mode.
 
 Custom entries can override built-in layouts when NAME matches."
@@ -81,20 +85,17 @@ Custom entries can override built-in layouts when NAME matches."
      :build disco-root--build-tree-layout-view-spec
      :update-mode incremental
      :unread-mode section
-     :toggle-hint "toggle section, enter guild, or next channel"
      :refresh-headings disco-root--refresh-heading-nodes)
     (activity
      :label "Activity"
      :build disco-root--build-activity-layout-view-spec
      :update-mode incremental
-     :unread-mode filter
-     :toggle-hint "next channel")
+     :unread-mode filter)
     (search
      :label "Search"
      :build disco-root--build-search-layout-view-spec
      :update-mode full
-     :unread-mode summary
-     :toggle-hint "next result or load more"))
+     :unread-mode summary))
   "Built-in root layout specs.")
 
 (defun disco-root-layout-specs ()
@@ -208,11 +209,6 @@ builder."
   "Return unread lens mode for LAYOUT (or active layout)."
   (or (plist-get (disco-root-layout-spec layout) :unread-mode)
       'summary))
-
-(defun disco-root-layout-toggle-hint (&optional layout)
-  "Return TAB/t behavior hint for LAYOUT (or active layout)."
-  (or (plist-get (disco-root-layout-spec layout) :toggle-hint)
-      "toggle row or move to next channel"))
 
 (defun disco-root-layout-refresh-headings-function (&optional layout)
   "Return optional heading refresher for LAYOUT (or active layout)."
