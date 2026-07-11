@@ -7,7 +7,7 @@
 ;; Keywords: comm
 ;; URL: https://github.com/0WD0/disco.el
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.5.0"))
+;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.5.0") (appkit "0.1"))
 
 ;;; Commentary:
 
@@ -20,6 +20,7 @@
 
 (require 'subr-x)
 (require 'disco-customize)
+(require 'disco-runtime)
 (require 'disco-state)
 (require 'disco-directory)
 (require 'disco-api)
@@ -39,6 +40,7 @@ If neither session token nor `DISCO_TOKEN' is available, prompt once."
   (interactive)
   (unless (disco-current-token)
     (call-interactively #'disco-set-token))
+  (disco-runtime-app)
   (when disco-enable-live-updates
     (disco-gateway-start))
   (disco-root-open)
@@ -48,7 +50,7 @@ If neither session token nor `DISCO_TOKEN' is available, prompt once."
 (defun disco-reset-session-state ()
   "Clear all in-memory caches used by disco.el."
   (interactive)
-  (disco-gateway-stop)
+  (disco-runtime-stop)
   (disco-preview-reset)
   (disco-directory-reset)
   (disco-state-reset)

@@ -90,7 +90,7 @@ The long-term target is not "many `disco-room-*` files".
 The long-term target is:
 
 - `disco-room.el` becomes a thin room facade
-- shared chatbuf behavior grows under `disco-chatbuf`
+- shared chatbuf behavior grows under `appkit-chatbuf`
 - shared message/domain helpers grow under `disco-msg`
 - shared thread helpers grow under `disco-thread`
 - media/embed rendering lives with `disco-media` and `disco-embed` when it is
@@ -111,7 +111,7 @@ order.
 
 If it is about editable tail input, prompt markers, draft history, aux state,
 input options, structured input objects, or chatbuf-local point discipline, it
-belongs under `disco-chatbuf`.
+belongs under `appkit-chatbuf`.
 
 Examples:
 
@@ -222,7 +222,7 @@ of origin.
 
 Examples of the desired direction:
 
-- `disco-chatbuf-*` for shared input mechanics
+- `appkit-chatbuf-*` for shared input mechanics
 - `disco-msg-*` for shared message/domain helpers
 - `disco-thread-*` for shared thread helpers
 - `disco-ins-*` for shared insert/render leaf helpers
@@ -239,7 +239,7 @@ Start by expanding existing owners.
 
 ### Existing owners to grow first
 
-#### `disco-chatbuf.el`
+#### `appkit-chatbuf.el`
 
 This is the first place to put shared chat-buffer behavior.
 
@@ -252,7 +252,7 @@ Grow it with:
 - structured input object primitives
 - prompt/footer update primitives that are generic enough to reuse
 
-If this file becomes too large, a sibling such as `disco-chatbuf-input.el` is a
+If this file becomes too large, a sibling such as `appkit-chatbuf-input.el` is a
 better direction than defaulting to `disco-room-compose.el`.
 
 #### `disco-msg.el`
@@ -388,9 +388,9 @@ This is the practical answer to "where should the code go?"
 
 | Current responsibility in `disco-room.el` | Real owner | Preferred destination |
 | --- | --- | --- |
-| input markers, prompt/input region rules, history mechanics | shared chatbuf | `disco-chatbuf.el` |
-| aux state and input-options lifecycle | shared chatbuf | `disco-chatbuf.el` |
-| structured input object storage conventions | shared chatbuf | `disco-chatbuf.el` |
+| input markers, prompt/input region rules, history mechanics | shared chatbuf | `appkit-chatbuf.el` |
+| aux state and input-options lifecycle | shared chatbuf | `appkit-chatbuf.el` |
+| structured input object storage conventions | shared chatbuf | `appkit-chatbuf.el` |
 | Discord payload shaping for send/edit/attach | room facade plus shared helpers | keep facade wrappers, push reusable parts down |
 | message identity/reference/preview helpers | shared message domain | `disco-msg.el` |
 | thread status, prompt parsing, update shaping | shared thread domain | `disco-thread.el` |
@@ -437,7 +437,7 @@ Acceptance:
 - behavior stays stable
 - extraction lowers coupling even if the file name is temporary
 
-### Milestone 2 - grow `disco-chatbuf.el` aggressively
+### Milestone 2 - grow `appkit-chatbuf.el` aggressively
 
 Move or factor shared chatbuf behavior out of `disco-room.el`:
 
@@ -547,7 +547,7 @@ Use these rules for new internals.
 
 - keep `disco-room-*` only for public room commands, room mode, room facade
   helpers, and truly room-specific owners
-- prefer `disco-chatbuf-*` for shared chatbuf mechanics
+- prefer `appkit-chatbuf-*` for shared chatbuf mechanics
 - prefer `disco-msg-*` for shared message/domain helpers
 - prefer `disco-thread-*` for shared thread helpers
 - prefer `disco-ins-*` for shared insert/render leaf helpers
@@ -587,7 +587,7 @@ That means the target test layout is not automatically a mirror of
 
 Preferred direction:
 
-- expand `test/disco-chatbuf-test.el` for shared chatbuf mechanics
+- expand `test/appkit-chatbuf-test.el` for shared chatbuf mechanics
 - add or expand `test/disco-msg-test.el` when message-domain helpers grow enough
 - add or expand `test/disco-thread-test.el` when thread helper coverage grows
 - keep room integration tests in `test/disco-room-test.el`
@@ -617,7 +617,7 @@ Mitigation:
 Risk:
 
 - in reaction to the old problem, we move too much imperative UI glue into
-  `disco-chatbuf.el`, `disco-msg.el`, or `disco-thread.el`
+  `appkit-chatbuf.el`, `disco-msg.el`, or `disco-thread.el`
 
 Mitigation:
 
@@ -678,7 +678,7 @@ For the next round of work, the right question is not:
 
 The right questions are:
 
-- what in `disco-room.el` is really `disco-chatbuf`?
+- what in `disco-room.el` is really `appkit-chatbuf`?
 - what in `disco-room.el` is really `disco-msg`?
 - what in `disco-room.el` is really `disco-thread`?
 - what remains room-specific after those moves?
@@ -690,7 +690,7 @@ Only the remainder deserves new room-owned files.
 This plan is complete when all of the following are true:
 
 - `disco-room.el` is primarily facade and public room API
-- shared chatbuf behavior has an obvious home under `disco-chatbuf`
+- shared chatbuf behavior has an obvious home under `appkit-chatbuf`
 - shared message semantics have an obvious home under `disco-msg`
 - shared thread semantics have an obvious home under `disco-thread`
 - room-prefixed files exist only where the code is truly room-specific

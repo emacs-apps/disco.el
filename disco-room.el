@@ -20,9 +20,11 @@
 (require 'url-handlers)
 (require 'plz)
 (require 'svg nil t)
+(require 'appkit-core)
+(require 'appkit-invalidation)
 (require 'disco-chat-avatar)
-(require 'disco-chatbuf)
-(require 'disco-chat-timeline)
+(require 'appkit-chatbuf)
+(require 'appkit-chat-timeline)
 (require 'disco-ins)
 (require 'disco-ui)
 (require 'disco-util)
@@ -40,6 +42,7 @@
 (require 'disco-permission)
 (require 'disco-company)
 (require 'disco-room-search)
+(require 'disco-runtime)
 
 (declare-function disco-api--validate-message-content-length "disco-api-normalize"
                   (content field-name))
@@ -832,25 +835,25 @@ EXTRA-PERMISSIONS augments the base send permission set for this room."
 
 (defun disco-room--composer-reply-message-id ()
   "Return target message id for active composer reply, or nil."
-  (when (eq (plist-get (disco-chatbuf-aux-state) :aux-type) 'reply)
-    (plist-get (disco-chatbuf-aux-state) :message-id)))
+  (when (eq (plist-get (appkit-chatbuf-aux-state) :aux-type) 'reply)
+    (plist-get (appkit-chatbuf-aux-state) :message-id)))
 
 (defun disco-room--composer-edit-active-p ()
   "Return non-nil when room composer is editing an existing message."
-  (eq (plist-get (disco-chatbuf-aux-state) :aux-type) 'edit))
+  (eq (plist-get (appkit-chatbuf-aux-state) :aux-type) 'edit))
 
 (defun disco-room--composer-edit-message-id ()
   "Return target message id for active composer edit, or nil."
   (and (disco-room--composer-edit-active-p)
-       (plist-get (disco-chatbuf-aux-state) :message-id)))
+       (plist-get (appkit-chatbuf-aux-state) :message-id)))
 
 (defun disco-room--composer-aux-active-p ()
   "Return non-nil when room composer currently has reply/edit context."
-  (not (null (disco-chatbuf-aux-state))))
+  (not (null (appkit-chatbuf-aux-state))))
 
 (defun disco-room--composer-aux-context-name ()
   "Return human-readable name for active composer aux context, or nil."
-  (pcase (plist-get (disco-chatbuf-aux-state) :aux-type)
+  (pcase (plist-get (appkit-chatbuf-aux-state) :aux-type)
     ('edit "editing a message")
     ('reply "replying to a message")
     (_ nil)))
@@ -1165,14 +1168,14 @@ creation permission."
 
 (defun disco-room--composer-edit-saved-state ()
   "Capture composer state to be restored after edit cancel/success."
-  (list :draft (disco-chatbuf-copy-string (disco-room--current-draft))
+  (list :draft (appkit-chatbuf-copy-string (disco-room--current-draft))
         :reply-to (disco-room--composer-reply-message-id)
         :attachment-token-seq disco-room--attachment-token-seq
         :attachment-token-entries (disco-room--copy-attachment-token-table)))
 
 (defun disco-room--composer-edit-restore-state (state)
   "Restore composer STATE captured by `disco-room--composer-edit-saved-state'."
-  (let ((draft (disco-chatbuf-copy-string (plist-get state :draft))))
+  (let ((draft (appkit-chatbuf-copy-string (plist-get state :draft))))
     (disco-room--set-composer-aux-state nil (plist-get state :reply-to))
     (setq disco-room--attachment-token-seq
           (or (plist-get state :attachment-token-seq) 0))
@@ -1360,7 +1363,7 @@ If current user identity is unknown, return UNKNOWN-VALUE."
     (with-current-buffer buffer
       (setq disco-room--typing-expire-timer nil)
       (when (disco-room--typing-prune-expired)
-        (unless (disco-chatbuf-rendering-p)
+        (unless (appkit-chatbuf-rendering-p)
           (disco-room--update-frame)))
       (disco-room--typing-reschedule-expire-timer))))
 
@@ -1408,7 +1411,7 @@ If current user identity is unknown, return UNKNOWN-VALUE."
                        disco-room--typing-users)
               (disco-room--typing-reschedule-expire-timer)
               (when changed
-                (unless (disco-chatbuf-rendering-p)
+                (unless (appkit-chatbuf-rendering-p)
                   (disco-room--update-frame))))))))))
 
 (defun disco-room--typing-stop-user (user-id &optional no-rerender)
@@ -1421,7 +1424,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
                (gethash normalized-id disco-room--typing-users))
       (remhash normalized-id disco-room--typing-users)
       (disco-room--typing-reschedule-expire-timer)
-      (unless (or no-rerender (disco-chatbuf-rendering-p))
+      (unless (or no-rerender (appkit-chatbuf-rendering-p))
         (disco-room--update-frame)))))
 
 (defun disco-room--latest-message-id ()
@@ -1490,7 +1493,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--current-draft ()
   "Return current room draft string, preserving text properties."
-  (disco-chatbuf-input-state))
+  (appkit-chatbuf-input-state))
 
 (defun disco-room--attachment-input-object-p (object)
   "Return non-nil when OBJECT is a queued attachment input object."
@@ -1525,32 +1528,32 @@ When NO-RERENDER is non-nil, update local state without rendering."
          (len (length text)))
     (add-text-properties
      0 len
-     (list disco-chatbuf-input-object-property object
-           'face 'disco-chatbuf-input-object)
+     (list appkit-chatbuf-input-object-property object
+           'face 'appkit-chatbuf-input-object)
      text)
     (when (> len 0)
       (add-text-properties 0 1
-                           (list disco-chatbuf-input-object-start-property t)
+                           (list appkit-chatbuf-input-object-start-property t)
                            text)
       (add-text-properties (1- len) len
-                           (list disco-chatbuf-input-object-end-property t)
+                           (list appkit-chatbuf-input-object-end-property t)
                            text))
     text))
 
 (defun disco-room--insert-attachment-input-object (attachment)
   "Insert ATTACHMENT as one structured composer object at point."
   (let ((object (copy-tree attachment)))
-    (when (and (disco-chatbuf-point-in-input-p)
-               (> (point) (or (disco-chatbuf-input-start-position) (point-min)))
+    (when (and (appkit-chatbuf-point-in-input-p)
+               (> (point) (or (appkit-chatbuf-input-start-position) (point-min)))
                (let ((before (char-before)))
                  (and before (not (memq before '(?\s ?\t ?\n))))))
-      (disco-chatbuf-input-insert " "))
-    (disco-chatbuf-input-insert
+      (appkit-chatbuf-input-insert " "))
+    (appkit-chatbuf-input-insert
      (disco-room--attachment-input-object-display-text object)
      :object object)
     (when (let ((after (char-after)))
             (and after (not (memq after '(?\s ?\t ?\n)))))
-      (disco-chatbuf-input-insert " "))
+      (appkit-chatbuf-input-insert " "))
     object))
 
 (defun disco-room--attachment-input-object-to-attachment (object)
@@ -1597,10 +1600,10 @@ When NO-RERENDER is non-nil, update local state without rendering."
          (pos 0)
          (refs '()))
     (while (< pos len)
-      (let ((object (get-text-property pos disco-chatbuf-input-object-property text)))
+      (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
         (if (disco-room--attachment-input-object-p object)
             (let* ((end (or (next-single-property-change
-                             pos disco-chatbuf-input-object-property text len)
+                             pos appkit-chatbuf-input-object-property text len)
                             len))
                    (object-copy (copy-tree object))
                    (attachment (disco-room--attachment-input-object-to-attachment object-copy)))
@@ -1613,7 +1616,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
                     refs)
               (setq pos end))
           (let* ((next-object (or (next-single-property-change
-                                   pos disco-chatbuf-input-object-property text len)
+                                   pos appkit-chatbuf-input-object-property text len)
                                   len))
                  (chunk (substring-no-properties text pos next-object))
                  (chunk-pos 0))
@@ -1667,15 +1670,15 @@ When NO-RERENDER is non-nil, update local state without rendering."
          (pos 0)
          (objects '()))
     (while (< pos len)
-      (let ((object (get-text-property pos disco-chatbuf-input-object-property text)))
+      (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
         (if object
             (let ((end (or (next-single-property-change
-                            pos disco-chatbuf-input-object-property text len)
+                            pos appkit-chatbuf-input-object-property text len)
                            len)))
               (push (copy-tree object) objects)
               (setq pos end))
           (setq pos (or (next-single-property-change
-                         pos disco-chatbuf-input-object-property text len)
+                         pos appkit-chatbuf-input-object-property text len)
                         len)))))
     (nreverse objects)))
 
@@ -1719,10 +1722,10 @@ When NO-RERENDER is non-nil, update local state without rendering."
          (token-ids '())
          (seen-token-ids (make-hash-table :test #'equal)))
     (while (< pos len)
-      (let ((object (get-text-property pos disco-chatbuf-input-object-property text)))
+      (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
         (if object
             (let* ((end (or (next-single-property-change
-                             pos disco-chatbuf-input-object-property text len)
+                             pos appkit-chatbuf-input-object-property text len)
                             len))
                    (object-copy (copy-tree object)))
               (push object-copy objects)
@@ -1731,7 +1734,7 @@ When NO-RERENDER is non-nil, update local state without rendering."
                 (push attachment attachments))
               (setq pos end))
           (let* ((end (or (next-single-property-change
-                           pos disco-chatbuf-input-object-property text len)
+                           pos appkit-chatbuf-input-object-property text len)
                           len))
                  (chunk (substring-no-properties text pos end))
                  (content-chunk
@@ -1776,8 +1779,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--apply-input-text-properties ()
   "Normalize current draft text properties after redraws and edits."
-  (disco-chatbuf-input-apply-text-properties)
-  (when-let* ((bounds (disco-chatbuf-input-region-bounds)))
+  (appkit-chatbuf-input-apply-text-properties)
+  (when-let* ((bounds (appkit-chatbuf-input-region-bounds)))
     (with-silent-modifications
       (add-text-properties
        (car bounds) (cdr bounds)
@@ -1785,14 +1788,14 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--update-context-mode ()
   "Enable timeline bindings only when point is outside the room draft."
-  (let ((timeline-p (not (disco-chatbuf-point-in-input-p))))
+  (let ((timeline-p (not (appkit-chatbuf-point-in-input-p))))
     (unless (eq disco-room-timeline-mode timeline-p)
       (disco-room-timeline-mode (if timeline-p 1 -1)))))
 
 (defun disco-room--post-command ()
   "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
-  (unless (disco-chatbuf-rendering-p)
-    (disco-chatbuf-post-command-clamp-point)
+  (unless (appkit-chatbuf-rendering-p)
+    (appkit-chatbuf-post-command-clamp-point)
     (let ((current-message-id (or (get-text-property (point) 'disco-message-id)
                                   (get-text-property (line-beginning-position)
                                                      'disco-message-id))))
@@ -1806,16 +1809,16 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--sync-draft-from-buffer ()
   "Sync shared chatbuf draft cache from editable input region."
-  (let ((text (plist-get (disco-chatbuf-input-state-sync)
+  (let ((text (plist-get (appkit-chatbuf-input-state-sync)
                          :value)))
     (disco-room--prune-unused-attachment-tokens text)
     (disco-room--sync-pending-attachments-from-draft text)))
 
 (defun disco-room--after-change (beg end _old-len)
   "Keep draft state synced after editable-region changes from BEG to END."
-  (disco-chatbuf-after-change
+  (appkit-chatbuf-after-change
    beg end
-   :rendering-p (disco-chatbuf-rendering-p)
+   :rendering-p (appkit-chatbuf-rendering-p)
    :prune-broken-objects t
    :sync-function #'disco-room--sync-draft-from-buffer))
 
@@ -1827,10 +1830,10 @@ unchanged, update the live input directly in telega-like fashion.  Otherwise,
 callers can use the returned metadata to decide whether a frame refresh is
 needed."
   (let ((old-attachments (copy-tree disco-room--pending-attachments))
-        (live-input-p (and (not (disco-chatbuf-rendering-p))
-                           (disco-chatbuf-input-start-position))))
+        (live-input-p (and (not (appkit-chatbuf-rendering-p))
+                           (appkit-chatbuf-input-start-position))))
     (let ((draft
-           (disco-chatbuf-input-state-set
+           (appkit-chatbuf-input-state-set
             text
             :reset-history-p reset-history-p)))
       (disco-room--prune-unused-attachment-tokens draft)
@@ -1838,10 +1841,10 @@ needed."
       (let ((attachments-changed-p
              (not (equal old-attachments disco-room--pending-attachments))))
         (when (and live-input-p (not attachments-changed-p))
-          (disco-chatbuf-with-structural-update
-            (disco-chatbuf-input-replace draft)
+          (appkit-chatbuf-with-generated-update
+            (appkit-chatbuf-input-replace draft)
             (disco-room--apply-input-text-properties)))
-        (list :draft (disco-chatbuf-copy-string draft)
+        (list :draft (appkit-chatbuf-copy-string draft)
               :attachments-changed-p attachments-changed-p
               :live-input-updated-p (and live-input-p
                                          (not attachments-changed-p)))))))
@@ -1861,7 +1864,7 @@ needed."
 (defun disco-room-draft-prev (&optional n)
   "Replace draft with N previous entries from draft history."
   (interactive "p")
-  (let ((result (disco-chatbuf-input-history-prev-value
+  (let ((result (appkit-chatbuf-input-history-prev-value
                  (disco-room--current-draft)
                  n)))
     (pcase (plist-get result :status)
@@ -1873,7 +1876,7 @@ needed."
 (defun disco-room-draft-next (&optional n)
   "Replace draft with N newer entries from draft history."
   (interactive "p")
-  (let ((result (disco-chatbuf-input-history-next-value n)))
+  (let ((result (appkit-chatbuf-input-history-next-value n)))
     (pcase (plist-get result :status)
       ('ok
        (disco-room--set-draft (plist-get result :value)))
@@ -1883,12 +1886,12 @@ needed."
 (defun disco-room-edit-draft ()
   "Edit current room draft in minibuffer and re-render room."
   (interactive)
-  (when (disco-chatbuf-string-has-objects-p (disco-room--current-draft))
+  (when (appkit-chatbuf-string-has-objects-p (disco-room--current-draft))
     (user-error "disco: minibuffer draft editing is unavailable for structured input objects"))
   (let ((updated (read-from-minibuffer
                   "Draft: "
-                  (disco-chatbuf-string-plain-text (disco-room--current-draft)))))
-    (disco-chatbuf-input-history-reset)
+                  (appkit-chatbuf-string-plain-text (disco-room--current-draft)))))
+    (appkit-chatbuf-input-history-reset)
     (disco-room--set-draft updated)))
 
 (defun disco-room--read-state-snapshot-fields (state)
@@ -2063,9 +2066,9 @@ Message lines carry the `disco-message-id' text property."
 (defun disco-room--invalidate-message-node (message-id)
   "Invalidate the rendered node for MESSAGE-ID when present."
   (when (and message-id
-             (disco-chat-timeline-live-p)
-             (disco-chat-timeline-node message-id))
-    (disco-chat-timeline-invalidate (list message-id))))
+             (appkit-chat-timeline-live-p)
+             (appkit-chat-timeline-node message-id))
+    (appkit-chat-timeline-invalidate (list message-id))))
 
 (defun disco-room--redisplay-msg (msg)
   "Force MSG to be rerendered in the current room."
@@ -2128,8 +2131,8 @@ Message lines carry the `disco-message-id' text property."
   "Return buffer position for MESSAGE-ID in current room render, or nil."
   (when (and (stringp message-id)
              (not (string-empty-p message-id))
-             (disco-chat-timeline-live-p))
-    (disco-chat-timeline-key-position message-id)))
+             (appkit-chat-timeline-live-p))
+    (appkit-chat-timeline-key-position message-id)))
 
 (defcustom disco-room-jump-context-limit 50
   "Number of messages to request around a jump target.
@@ -2957,14 +2960,15 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
   (message "disco: avatar cache reset; refetching"))
 
 (defun disco-room--refresh-open-rooms ()
-  "Synchronize and redraw all open room timelines from current state."
+  "Invalidate all open room timelines from current state."
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (when (eq major-mode 'disco-room-mode)
-          (disco-room-render)
-          (when (disco-chat-timeline-live-p)
-            (disco-chat-timeline-refresh)))))))
+        (when (and (eq major-mode 'disco-room-mode)
+                   (appkit-view-live-p (appkit-current-view)))
+          (let ((view (appkit-current-view)))
+            (appkit-invalidate view :structure t)
+            (appkit-schedule-sync view)))))))
 
 (defun disco-room--sync-resource-changes-in-open-rooms (resources)
   "Synchronize open room rows depending on opaque RESOURCES."
@@ -2974,8 +2978,10 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
         (when (buffer-live-p buf)
           (with-current-buffer buf
             (when (and (eq major-mode 'disco-room-mode)
-                       (disco-chat-timeline-live-p))
-              (disco-room--sync-timeline :changed-resources resources))))))))
+                       (appkit-view-live-p (appkit-current-view)))
+              (let ((view (appkit-current-view)))
+                (appkit-invalidate view :resources resources)
+                (appkit-schedule-sync view)))))))))
 
 (defun disco-room--handle-media-rerender (kind key)
   "Apply media state change KIND for KEY to dependent timeline rows."
@@ -4697,12 +4703,12 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--ewoc-printer (row)
   "EWOC pretty-printer for one projected room ROW."
   (disco-room--insert-message
-   (disco-chat-timeline-row-payload row)
-   (or (disco-chat-timeline-row-context row) '())))
+   (appkit-chat-timeline-row-payload row)
+   (or (appkit-chat-timeline-row-context row) '())))
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
-  (let* ((aux-state (disco-chatbuf-aux-state))
+  (let* ((aux-state (appkit-chatbuf-aux-state))
          (aux-type (plist-get aux-state :aux-type))
          (message-id (plist-get aux-state :message-id)))
     (concat
@@ -4751,8 +4757,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 (defun disco-room--sync-shared-aux-state ()
   "Mirror room reply/edit context into shared chatbuf aux state."
   (if-let* ((aux-state (disco-room--current-composer-aux-state)))
-      (disco-chatbuf-aux-set aux-state)
-    (disco-chatbuf-aux-reset)))
+      (appkit-chatbuf-aux-set aux-state)
+    (appkit-chatbuf-aux-reset)))
 
 (defun disco-room--set-composer-aux-state (pending-edit pending-reply-to)
   "Set room composer PENDING-EDIT and PENDING-REPLY-TO, then sync aux state."
@@ -4769,7 +4775,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--input-options-state ()
   "Return composer input-options plist from shared chatbuf state, or nil."
-  (disco-chatbuf-input-options-state))
+  (appkit-chatbuf-input-options-state))
 
 (defun disco-room--input-option-send-on-return ()
   "Return effective send-on-return option from shared chatbuf state."
@@ -4792,7 +4798,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--sync-shared-input-options-state ()
   "Mirror room-local input option state into shared chatbuf state."
-  (disco-chatbuf-input-options-set
+  (appkit-chatbuf-input-options-set
    (disco-room--current-input-options-state)))
 
 (defun disco-room--set-input-options-state (options)
@@ -4831,10 +4837,10 @@ current effective input-options state.  Return the normalized state plist."
 
 (defun disco-room--bind-input-region-from-footer ()
   "Ensure the persistent tail input region exists and matches current draft."
-  (disco-chatbuf-init-state disco-room-input-history-size)
+  (appkit-chatbuf-init-state disco-room-input-history-size)
   (disco-room--sync-shared-aux-state)
   (disco-room--sync-shared-input-options-state)
-  (disco-chatbuf-bind-input-region
+  (appkit-chatbuf-bind-input-region
    :visible-p (disco-room--composer-visible-p)
    :prompt (disco-room--prompt-text)
    :input-text (disco-room--current-draft)
@@ -4885,17 +4891,71 @@ current effective input-options state.  Return the normalized state plist."
 
 (defun disco-room--ensure-timeline (&optional channel draft)
   "Ensure current room buffer owns one shared projected timeline."
-  (disco-chat-timeline-ensure
+  (disco-room--ensure-view)
+  (appkit-chat-timeline-ensure
    :printer #'disco-room--ewoc-printer
    :anchor-property 'disco-message-id
    :header (disco-room--header-text channel)
    :footer (disco-room--footer-text draft)
    :after-mutation-function #'disco-room--update-context-mode))
 
+(defun disco-room--view-id ()
+  "Return the opaque appkit view id for the current room."
+  (unless disco-room--channel-id
+    (error "disco: room buffer has no channel id"))
+  (list 'room disco-room--channel-id))
+
+(defun disco-room--sync-invalidations (view invalidations)
+  "Synchronize current room from coalesced appkit INVALIDATIONS."
+  (let ((events (appkit-view-pending-events-snapshot view))
+        (resources (appkit-invalidations-resource-keys invalidations))
+        (entries (appkit-invalidations-entry-keys invalidations)))
+    (dolist (event events)
+      (when (appkit-view-live-p view)
+        (disco-room--apply-gateway-event event)))
+    (when (appkit-view-live-p view)
+      (appkit-view-acknowledge-events view (length events)))
+    (when (appkit-view-live-p view)
+      (cond
+       ((and (null events)
+             (or (appkit-invalidations-structure-p invalidations)
+                 (appkit-invalidations-parts invalidations)
+                 (appkit-invalidations-position-p invalidations)))
+        (disco-room-render))
+       ((or resources entries)
+        (disco-room--update-frame)
+        (disco-room--sync-timeline
+         :force-keys entries
+         :changed-resources resources))))))
+
+(defun disco-room--ensure-view ()
+  "Return the live appkit view owning the current room buffer."
+  (let* ((app (disco-runtime-app))
+         (id (disco-room--view-id))
+         (current (appkit-current-view)))
+    (cond
+     ((and (appkit-view-live-p current)
+           (eq app (appkit-view-app current))
+           (equal id (appkit-view-id current)))
+      (setf (appkit-view-state current) disco-room--channel-id
+            (appkit-view-sync-function current)
+            #'disco-room--sync-invalidations)
+      current)
+     ((appkit-view-live-p current)
+      (error "disco: room buffer belongs to a different appkit view"))
+     (t
+      (appkit-attach-view
+       :app app
+       :id id
+       :state disco-room--channel-id
+       :mode 'disco-room-mode
+       :sync-function #'disco-room--sync-invalidations
+       :parts '(frame timeline composer))))))
+
 (defun disco-room--update-frame (&optional channel draft)
   "Update current room header, footer, and composer in place."
   (disco-room--ensure-timeline channel draft)
-  (disco-chat-timeline-set-frame
+  (appkit-chat-timeline-set-frame
    (disco-room--header-text channel)
    (disco-room--footer-text draft)
    :bind-input-function #'disco-room--bind-input-region-from-footer))
@@ -4980,7 +5040,7 @@ current effective input-options state.  Return the normalized state plist."
   "Project ORDERED-MESSAGES into shared timeline rows."
   (let ((first-unread-id
          (disco-room--first-unread-message-id ordered-messages)))
-    (disco-chat-timeline-project
+    (appkit-chat-timeline-project
      ordered-messages
      (lambda (message) (alist-get 'id message))
      :context-function
@@ -4995,7 +5055,7 @@ current effective input-options state.  Return the normalized state plist."
   (disco-room--ensure-timeline)
   (let ((messages (or ordered-messages
                       (reverse (or (disco-room--display-messages) '())))))
-    (disco-chat-timeline-sync
+    (appkit-chat-timeline-sync
      (disco-room--project-timeline messages)
      :force-keys force-keys
      :changed-resources changed-resources
@@ -5003,7 +5063,7 @@ current effective input-options state.  Return the normalized state plist."
 
 (defun disco-room--apply-read-state-change ()
   "Synchronize projected unread-divider context after read-state changes."
-  (when (and (disco-chat-timeline-live-p)
+  (when (and (appkit-chat-timeline-live-p)
              (not (disco-room--msg-filter-active-p)))
     (disco-room--sync-timeline)
     t))
@@ -5011,7 +5071,7 @@ current effective input-options state.  Return the normalized state plist."
 (defun disco-room--apply-forward-source-change (&optional source-channel-id
                                                           source-guild-id)
   "Synchronize rows depending on SOURCE-CHANNEL-ID or SOURCE-GUILD-ID."
-  (when (and (disco-chat-timeline-live-p)
+  (when (and (appkit-chat-timeline-live-p)
              (not (disco-room--msg-filter-active-p)))
     (let ((resources
            (delq nil
@@ -5038,7 +5098,7 @@ current effective input-options state.  Return the normalized state plist."
          (rekeys
           (and nonce message-id
                (not (equal nonce message-id))
-               (disco-chat-timeline-node nonce)
+               (appkit-chat-timeline-node nonce)
                (list (cons nonce message-id)))))
     (cond
      ((disco-room--msg-filter-active-p)
@@ -5059,10 +5119,11 @@ current effective input-options state.  Return the normalized state plist."
 
 (defun disco-room-render ()
   "Synchronize the room frame and projected timeline from local state."
+  (disco-room--ensure-view)
   (let* ((channel (disco-room--channel-object))
          (messages (disco-room--display-messages))
          (draft (disco-room--current-draft))
-         (initial-p (not (disco-chat-timeline-live-p)))
+         (initial-p (not (appkit-chat-timeline-live-p)))
          (disco-room--avatar-fetch-budget
           (when (numberp disco-room-avatar-max-fetches-per-render)
             (max 0 disco-room-avatar-max-fetches-per-render)))
@@ -5075,8 +5136,8 @@ current effective input-options state.  Return the normalized state plist."
           (disco-room--update-frame channel draft)
           ;; API returns newest-first by default; reverse for chat-like display.
           (disco-room--sync-timeline :ordered-messages (reverse messages))
-          (when (and initial-p (disco-chatbuf-input-start-position))
-            (let ((logical-end (disco-chatbuf-input-logical-end-position)))
+          (when (and initial-p (appkit-chatbuf-input-start-position))
+            (let ((logical-end (appkit-chatbuf-input-logical-end-position)))
               (when logical-end
                 (goto-char logical-end)))))
       (disco-media-set-preview-fetch-budget nil)
@@ -5127,7 +5188,7 @@ REASON is shown in the minibuffer."
     (kill-buffer buf)
     (message "%s" reason)))
 
-(defun disco-room--handle-gateway-event (event)
+(defun disco-room--apply-gateway-event (event)
   "Handle one EVENT plist from `disco-gateway-event-hook'."
   (let ((event-type (plist-get event :type))
         (event-channel-id (plist-get event :channel-id))
@@ -5207,12 +5268,13 @@ REASON is shown in the minibuffer."
     (remove-hook 'disco-gateway-event-hook disco-room--gateway-handler)
     (when disco-room--channel-id
       (disco-gateway-unwatch-channel disco-room--channel-id)))
-  (let ((room-buffer (current-buffer)))
+  (let ((view (disco-room--ensure-view)))
     (setq disco-room--gateway-handler
           (lambda (event)
-            (when (buffer-live-p room-buffer)
-              (with-current-buffer room-buffer
-                (disco-room--handle-gateway-event event))))))
+            (when (appkit-view-live-p view)
+              (appkit-view-enqueue-event view event)
+              (appkit-invalidate view :part 'timeline)
+              (appkit-schedule-sync view)))))
   (add-hook 'disco-gateway-event-hook disco-room--gateway-handler)
   (disco-gateway-watch-channel disco-room--channel-id)
   (add-hook 'kill-buffer-hook #'disco-room--detach-live-updates nil t))
@@ -5273,10 +5335,10 @@ REASON is shown in the minibuffer."
 
 (defun disco-room--attachment-token-bounds-at-point ()
   "Return bounds of attachment token around point in input region, or nil."
-  (let ((bounds (disco-chatbuf-input-region-bounds))
+  (let ((bounds (appkit-chatbuf-input-region-bounds))
         (pos (point))
         found)
-    (when (and bounds (disco-chatbuf-point-in-input-p pos))
+    (when (and bounds (appkit-chatbuf-point-in-input-p pos))
       (save-excursion
         (goto-char (car bounds))
         (while (and (not found)
@@ -5288,9 +5350,9 @@ REASON is shown in the minibuffer."
 
 (defun disco-room--attachment-object-bounds-at-point ()
   "Return bounds of attachment input object around point, or nil."
-  (let ((object (disco-chatbuf-input-object-at-point)))
+  (let ((object (appkit-chatbuf-input-object-at-point)))
     (when (disco-room--attachment-input-object-p object)
-      (disco-chatbuf-input-object-bounds-at-point))))
+      (appkit-chatbuf-input-object-bounds-at-point))))
 
 (defun disco-room--rewrite-draft-attachment-order (ordered-refs)
   "Rewrite current draft so ORDERED-REFS becomes the attachment sequence."
@@ -5920,7 +5982,7 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
                       nil
                       'disco-room-draft-history-search-history)))
   (let* ((entries (cl-delete-duplicates
-                   (disco-chatbuf-input-history-elements)
+                   (appkit-chatbuf-input-history-elements)
                    :test #'equal))
          (matches (seq-filter (lambda (entry)
                                 (and (stringp entry)
@@ -5934,7 +5996,7 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
                         (car matches)
                       (completing-read "Matching draft: " matches nil t nil nil
                                        (car matches)))))
-        (disco-chatbuf-input-history-reset)
+        (appkit-chatbuf-input-history-reset)
         (disco-room--set-draft picked)
         (message "disco: loaded draft history match"))))))
 
@@ -5946,7 +6008,7 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
          (content (string-trim-right (or (plist-get parsed :content) "")))
          (attachments (or (plist-get parsed :attachments) '()))
          (buf (get-buffer-create "*disco-room-preview*"))
-         (mode-label (pcase (plist-get (disco-chatbuf-aux-state) :aux-type)
+         (mode-label (pcase (plist-get (appkit-chatbuf-aux-state) :aux-type)
                        ('edit "edit")
                        ('reply "reply")
                        (_ "message"))))
@@ -6159,16 +6221,16 @@ DESCRIPTION is optional per-file description."
   (let ((attachment (disco-room--make-attachment-input-object
                      path
                      :description description)))
-    (if (disco-chatbuf-input-start-position)
+    (if (appkit-chatbuf-input-start-position)
         (progn
-          (unless (disco-chatbuf-point-in-input-p)
-            (goto-char (or (disco-chatbuf-input-logical-end-position) (point-max))))
+          (unless (appkit-chatbuf-point-in-input-p)
+            (goto-char (or (appkit-chatbuf-input-logical-end-position) (point-max))))
           (disco-room--insert-attachment-input-object attachment)
           (disco-room--sync-draft-from-buffer))
       (let* ((draft (disco-room--current-draft))
-             (separator (if (or (string-empty-p (disco-chatbuf-string-plain-text draft))
+             (separator (if (or (string-empty-p (appkit-chatbuf-string-plain-text draft))
                                 (string-match-p "[ \t\n]\\'"
-                                                (disco-chatbuf-string-plain-text draft)))
+                                                (appkit-chatbuf-string-plain-text draft)))
                             ""
                           " ")))
         (disco-room--set-draft
@@ -6268,7 +6330,7 @@ When called with prefix argument, force draft edit in minibuffer first."
     (message "disco: send already in progress"))
    (t
     (let* ((current-draft (disco-room--current-draft))
-           (current-draft-text (disco-chatbuf-string-plain-text current-draft))
+           (current-draft-text (appkit-chatbuf-string-plain-text current-draft))
            (initial-has-attachments
             (not (null (disco-room--attachments-from-draft current-draft))))
            (prompt-edit-p
@@ -6276,7 +6338,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                 (and (string-empty-p (string-trim-right current-draft-text))
                      (not initial-has-attachments)))))
       (when (and current-prefix-arg
-                 (disco-chatbuf-string-has-objects-p current-draft))
+                 (appkit-chatbuf-string-has-objects-p current-draft))
         (user-error "disco: minibuffer send-edit is unavailable for structured input objects"))
       (let* ((content (if prompt-edit-p
                           (read-from-minibuffer "Message: " current-draft-text)
@@ -6359,7 +6421,7 @@ When called with prefix argument, force draft edit in minibuffer first."
                required-permissions
                :action "sending messages")
               (unless (string-empty-p normalized)
-                (disco-chatbuf-input-history-push normalized))
+                (appkit-chatbuf-input-history-push normalized))
               (disco-room--clear-draft)
               (setq disco-room--send-in-flight t)
               (disco-room--update-frame)
@@ -7361,7 +7423,7 @@ _MSG is ignored because the transient resolves availability from point."
 
 (define-derived-mode disco-room-mode nil "Disco-Room"
   "Major mode for disco.el room buffers."
-  (disco-chatbuf-mode-setup)
+  (appkit-chatbuf-mode-setup)
   (disco-room--apply-breakline-settings)
   ;; Avoid visible seams between vertically sliced inline images.
   (setq-local line-spacing 0)
@@ -7369,7 +7431,7 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local filter-buffer-substring-function
               #'disco-room--buffer-substring-filter)
   (disco-room--typing-cancel-expire-timer)
-  (disco-chatbuf-reset-state disco-room-input-history-size)
+  (appkit-chatbuf-reset-state disco-room-input-history-size)
   (disco-room--set-composer-aux-state nil nil)
   (disco-room--sync-shared-input-options-state)
   (setq-local disco-room--send-in-flight nil)
@@ -7395,7 +7457,6 @@ _MSG is ignored because the transient resolves availability from point."
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)
   (setq-local disco-room--inplace-search-generation 0)
-  (disco-chat-timeline-reset)
   (setq-local disco-room--chat-fill-column nil)
   (setq-local disco-room--pending-attachments nil)
   (setq-local disco-room--attachment-token-table (make-hash-table :test #'equal))
@@ -7416,9 +7477,17 @@ _MSG is ignored because the transient resolves availability from point."
 
 (defun disco-room-open (channel-id channel-name)
   "Open room for CHANNEL-ID with CHANNEL-NAME."
-  (let ((buf (get-buffer-create (disco-room--buffer-name channel-name channel-id))))
+  (let* ((view
+          (appkit-open-view
+           :app (disco-runtime-app)
+           :id (list 'room channel-id)
+           :mode 'disco-room-mode
+           :buffer-name (disco-room--buffer-name channel-name channel-id)
+           :state channel-id
+           :sync-function #'disco-room--sync-invalidations
+           :parts '(frame timeline composer)))
+         (buf (appkit-view-buffer view)))
     (with-current-buffer buf
-      (disco-room-mode)
       (setq disco-room--channel-id channel-id)
       (setq disco-room--channel-name channel-name)
       (let ((channel (disco-state-channel channel-id)))

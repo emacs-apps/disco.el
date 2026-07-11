@@ -90,7 +90,7 @@ That means:
 
 - `disco-room` is a facade and public UI surface
 - `disco-room` is not the default namespace for new internals
-- shared chatbuf mechanics should move into `disco-chatbuf.el`
+- shared chatbuf mechanics should move into `appkit-chatbuf.el`
 - shared message/domain helpers should move into `disco-msg.el`
 - shared thread helpers should move into `disco-thread.el`
 - media/embed logic should move into `disco-media.el` or `disco-embed.el` when
@@ -194,7 +194,7 @@ Current high-value follow-ups:
 - partial patching for ordinary message changes
 - point-preserving frame and timeline updates
 - local invalidation for several media and message dependency cases
-- initial shared chatbuf skeleton in `disco-chatbuf.el`
+- initial shared chatbuf skeleton in `appkit-chatbuf.el`
 - structured attachment input objects in the composer path
 - parsed send pipeline for content plus attachments
 
@@ -207,7 +207,7 @@ The remaining misalignment is concentrated in ownership and chatbuf structure:
 - reply/edit state still has room-local duplication instead of clean shared aux
   ownership
 - some input behavior still lives in `disco-room.el` even when it really wants
-  to be `disco-chatbuf` behavior
+  to be `appkit-chatbuf` behavior
 - pure message and thread helpers are still mixed into room code too often
 - render and event ownership are still too concentrated in one large file
 - clipboard attach and explicit formatting are still placeholders
@@ -222,7 +222,7 @@ The default destination for newly isolated behavior is not a new room module.
 The default destinations are existing owners, plus one telega-like insert owner
 when needed:
 
-- `disco-chatbuf.el` for shared chat-buffer mechanics
+- `appkit-chatbuf.el` for shared chat-buffer mechanics
 - `disco-msg.el` for shared message/domain helpers
 - `disco-thread.el` for shared thread helpers
 - `disco-ins.el` for shared insert/render leaf helpers
@@ -312,8 +312,8 @@ Deliverables:
 
 Deliverables:
 
-- move more input-region ownership into `disco-chatbuf.el`
-- move more history/aux/input-option mechanics into `disco-chatbuf.el`
+- move more input-region ownership into `appkit-chatbuf.el`
+- move more history/aux/input-option mechanics into `appkit-chatbuf.el`
 - shrink room-owned input plumbing where the behavior is not actually room-
   specific
 - keep the API shape compatible enough for `qq-chat` and `disco-room`
@@ -415,7 +415,7 @@ Expected win:
 
 ## Immediate implementation order
 
-1. keep growing and testing `disco-chatbuf.el`
+1. keep growing and testing `appkit-chatbuf.el`
 2. move more pure helpers out of `disco-room.el` into `disco-msg.el` and
    `disco-thread.el`
 3. finish migrating `disco-room` from footer-composed input to true tail input
@@ -460,7 +460,7 @@ We can consider this plan successful when all are true:
 - structured input objects are the canonical compose model
 - room send logic is driven by parsed chatbuf contents rather than draft text
   cleanup
-- shared chatbuf behavior has an obvious home under `disco-chatbuf.el`
+- shared chatbuf behavior has an obvious home under `appkit-chatbuf.el`
 - shared message semantics have an obvious home under `disco-msg.el`
 - shared thread semantics have an obvious home under `disco-thread.el`
 - room-prefixed files exist only where the code is truly room-specific

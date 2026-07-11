@@ -11,7 +11,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(require 'disco-chatbuf)
+(require 'appkit-chatbuf)
 (require 'disco-msg)
 (require 'disco-state)
 (require 'disco-thread)
@@ -113,7 +113,7 @@ completion row height stays stable across CAPF/Corfu and company popups."
 
 Returned plist contains :start, :end, :trigger, :raw and :query.
 Supported trigger characters are `@' and `#'."
-  (when (disco-chatbuf-point-in-input-p)
+  (when (appkit-chatbuf-point-in-input-p)
     (save-excursion
       (let ((end (point)))
         (skip-chars-backward "A-Za-z0-9._-")
@@ -725,7 +725,7 @@ This function is suitable for `completion-at-point-functions'."
        (funcall 'company-begin-backend 'disco-room-company-completion)))
     ('prefix
      (when (and (derived-mode-p 'disco-room-mode)
-                (disco-chatbuf-point-in-input-p))
+                (appkit-chatbuf-point-in-input-p))
        (disco-company--company-prefix)))
     ('sorted t)
     ('require-match 'never)
