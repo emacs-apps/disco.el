@@ -178,6 +178,7 @@
                    (disco-chatbuf-input-history-elements)))
     (disco-chatbuf-input-set-text "pending")
     (disco-chatbuf-input-history-prev)
+    (should (disco-chatbuf-input-history-active-p))
     (should (equal "second" (disco-chatbuf-input-string)))
     (disco-chatbuf-input-history-prev)
     (should (equal "first" (disco-chatbuf-input-string)))
@@ -185,8 +186,7 @@
     (should (equal "second" (disco-chatbuf-input-string)))
     (disco-chatbuf-input-history-next)
     (should (equal "pending" (disco-chatbuf-input-string)))
-    (should-not disco-chatbuf--input-idx)
-    (should-not disco-chatbuf--input-pending)))
+    (should-not (disco-chatbuf-input-history-active-p))))
 
 (ert-deftest disco-chatbuf-input-history-value-navigation-restores-structured-pending-input ()
   (with-temp-buffer

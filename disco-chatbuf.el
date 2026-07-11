@@ -694,6 +694,11 @@ When INDEX is nil, restore pending input remembered before history navigation."
   (setq disco-chatbuf--input-idx nil)
   (setq disco-chatbuf--input-pending nil))
 
+(defun disco-chatbuf-input-history-active-p ()
+  "Return non-nil while the composer is navigating input history."
+  (or (integerp disco-chatbuf--input-idx)
+      (not (null disco-chatbuf--input-pending))))
+
 (defun disco-chatbuf-input-history-prev-value (current-input &optional n)
   "Return N older history entries for cached CURRENT-INPUT.
 
