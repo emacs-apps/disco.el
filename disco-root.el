@@ -333,6 +333,12 @@ The default fits the longest built-in date format plus its status symbol."
   :type 'number
   :group 'disco)
 
+(defcustom disco-root-permission-hydration-concurrency 4
+  "Maximum concurrent guild permission-snapshot requests from root."
+  :type 'integer
+  :safe (lambda (value) (and (integerp value) (> value 0)))
+  :group 'disco)
+
 (defcustom disco-root-activity-header-refresh-interval 0.2
   "Minimum seconds between activity header refreshes from live row updates.
 
@@ -397,6 +403,30 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-root--window-size-hook-installed nil
   "Non-nil once root auto-fill window-size hook has been installed.")
+
+(defun disco-root--ensure-guild-channel-permissions ()
+  "Start permission resolution for every unresolved available guild.
+
+Root rows are projected only from permission-resolved channel snapshots, so
+the controller hydrates unresolved guilds before their channels can appear."
+  (let ((started 0)
+        (loading 0)
+        pending)
+    (dolist (guild (or (disco-state-guilds) '()))
+      (let ((guild-id (alist-get 'id guild)))
+        (when (and guild-id
+                   (not (eq t (alist-get 'unavailable guild))))
+          (pcase (disco-directory-guild-status guild-id)
+            ('loading
+             (setq loading (1+ loading)))
+            ('unloaded
+             (push guild-id pending))))))
+    (dolist (guild-id (nreverse pending))
+      (when (< loading disco-root-permission-hydration-concurrency)
+        (disco-directory-load-guild-async guild-id)
+        (setq loading (1+ loading))
+        (setq started (1+ started))))
+    started))
 
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root updates."
@@ -2675,7 +2705,6 @@ if structural reconciliation is required."
            (let ((channel-id (alist-get 'id channel)))
              (when (and channel-id
                         (not (gethash channel-id seen))
-                        (disco-root--displayable-channel-p channel)
                         (disco-root--channel-visible-in-view-p channel)
                         (disco-root--channel-has-unread-p channel))
                (puthash channel-id t seen)
@@ -2878,6 +2907,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
   (let ((event-type (plist-get event :type)))
+    (when (memq event-type
+                '(guild-create guild-update guild-sync
+                  channel-create channel-update channel-update-partial))
+      (disco-root--ensure-guild-channel-permissions))
     (when (eq event-type 'guild-members-chunk)
       (disco-root--search-refresh-active-completions (plist-get event :guild-id)))
     (when (disco-root--live-event-p event-type)
@@ -2900,6 +2933,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
      (disco-root--queue-live-update nil nil t))
     ('index-loaded
      (setq disco-root--refresh-in-flight nil)
+     (disco-root--ensure-guild-channel-permissions)
      (disco-root--queue-live-update nil t t)
      (when-let* ((errors (plist-get event :errors)))
        (message "disco: directory index errors: %s"
@@ -2909,8 +2943,10 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                            (disco-root--async-error-message (cdr entry))))
                  errors "; "))))
     ('guild-loaded
+     (disco-root--ensure-guild-channel-permissions)
      (disco-root--queue-live-update nil t nil))
     ('guild-error
+     (disco-root--ensure-guild-channel-permissions)
      (message "disco: failed to load guild %s channels: %s"
               (plist-get event :guild-id)
               (disco-root--async-error-message (plist-get event :error))))
@@ -3358,6 +3394,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
     (pop-to-buffer buf)
     (with-current-buffer buf
       (disco-root--attach-live-updates)
+      (disco-root--ensure-guild-channel-permissions)
       (disco-root-render))
     buf))
 

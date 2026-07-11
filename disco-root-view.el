@@ -521,7 +521,7 @@ This prevents noisy permission errors for sources that require elevated access."
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
   (and (disco-channel-root-visible-p channel)
-       (disco-permission-channel-viewable-p channel t)))
+       (disco-permission-channel-viewable-p channel nil)))
 
 (defun disco-root--openable-channel-p (channel)
   "Return non-nil when CHANNEL has a supported open action."
@@ -1385,7 +1385,8 @@ SCOPE is a symbol describing where the row is rendered."
 
 (defun disco-root--channel-visible-in-view-p (channel)
   "Return non-nil when CHANNEL should appear under current view mode."
-  (disco-root--channel-visible-in-mode-p channel disco-root--view-mode))
+  (and (disco-root--displayable-channel-p channel)
+       (disco-root--channel-visible-in-mode-p channel disco-root--view-mode)))
 
 (defun disco-root--activity-channel-base-eligible-p (channel)
   "Return non-nil when CHANNEL is eligible for activity regardless of filter."
@@ -1395,7 +1396,8 @@ SCOPE is a symbol describing where the row is rendered."
 
 (defun disco-root--activity-channel-eligible-p (channel)
   "Return non-nil when CHANNEL should appear in activity layout."
-  (and (disco-root--activity-channel-base-eligible-p channel)
+  (and (or disco-root-activity-include-threads
+           (not (disco-state-channel-thread-p channel)))
        (disco-root--channel-visible-in-view-p channel)))
 
 (defun disco-root--private-channels-sorted ()
@@ -1429,7 +1431,6 @@ current sort mode."
            (let ((channel-id (alist-get 'id channel)))
              (when (and channel-id
                         (not (gethash channel-id seen))
-                        (disco-root--displayable-channel-p channel)
                         (disco-root--channel-visible-in-view-p channel)
                         (disco-root--channel-has-unread-p channel))
                (puthash channel-id t seen)
