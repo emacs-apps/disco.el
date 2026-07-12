@@ -7161,15 +7161,15 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("f" "Forward" disco-msg-forward
      :inapt-if disco-room--forward-unavailable-reason)
     ("e" "Edit" disco-msg-edit
-     :inapt-if #'disco-room-menu--edit-inapt-reason)
+     :inapt-if disco-room-menu--edit-inapt-reason)
     ("d" "Delete" disco-msg-delete
-     :inapt-if #'disco-room-menu--delete-inapt-reason)
+     :inapt-if disco-room-menu--delete-inapt-reason)
     ("!" "Add reaction" disco-msg-add-reaction
-     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+     :inapt-if disco-room-menu--reaction-inapt-reason)
     ("+" "Toggle reaction" disco-msg-toggle-reaction
-     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+     :inapt-if disco-room-menu--reaction-inapt-reason)
     ("-" "Remove reaction" disco-msg-remove-reaction
-     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+     :inapt-if disco-room-menu--reaction-inapt-reason)
     ("T" "Open thread" disco-msg-open-thread)]
    ["Media"
     ("o" "Open / play" appkit-media-card-open
