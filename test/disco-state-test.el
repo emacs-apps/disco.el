@@ -540,6 +540,81 @@
                             (alist-get 'user
                                        (disco-state-guild-member "g1" "u1"))))))
 
+(ert-deftest disco-state-delete-guild-member-removes-index-and-presence ()
+  (disco-state-reset)
+  (disco-state-apply-guild-members-chunk
+   "g1"
+   '(((user (id . "u1") (username . "alice")))
+     ((user (id . "u2") (username . "bob"))))
+   '(((user (id . "u1")) (status . "online"))))
+  (should (disco-state-delete-guild-member "g1" "u1"))
+  (should-not (disco-state-guild-member "g1" "u1"))
+  (should-not (disco-state-presence "u1" "g1"))
+  (should (equal '("u2")
+                 (mapcar #'disco-state--guild-member-user-id
+                         (disco-state-guild-members "g1"))))
+  (should-not (disco-state-delete-guild-member "g1" "missing")))
+
+(ert-deftest disco-state-guild-emojis-distinguish-unloaded-from-empty ()
+  (disco-state-reset)
+  (should-not (disco-state-guild-emojis-loaded-p "g1"))
+  (should-not (disco-state-guild-emojis "g1"))
+  (disco-state-set-guild-emojis
+   "g1"
+   [((id . "e1") (name . "wave"))])
+  (should (disco-state-guild-emojis-loaded-p "g1"))
+  (let ((snapshot (disco-state-guild-emojis "g1")))
+    (setf (alist-get 'name (car snapshot)) "mutated"))
+  (should (equal "wave"
+                 (alist-get 'name (car (disco-state-guild-emojis "g1")))))
+  (disco-state-set-guild-emojis "g1" [])
+  (should (disco-state-guild-emojis-loaded-p "g1"))
+  (should-not (disco-state-guild-emojis "g1")))
+
+(ert-deftest disco-state-guild-emojis-survive-partial-guild-refresh-and-delete ()
+  (disco-state-reset)
+  (disco-state-set-guilds '(((id . "g1") (name . "Full"))))
+  (disco-state-set-guild-emojis
+   "g1" '(((id . "e1") (name . "wave"))))
+  (disco-state-apply-guild-members-chunk
+   "g1" '(((user (id . "u1") (username . "alice")))))
+  ;; A retained guild's compact directory object must not erase independent
+  ;; member or emoji snapshots.
+  (disco-state-set-guilds '(((id . "g1") (name . "Compact"))))
+  (should (equal "wave"
+                 (alist-get 'name (car (disco-state-guild-emojis "g1")))))
+  (should (disco-state-guild-member "g1" "u1"))
+  (disco-state-delete-guild "g1")
+  (should-not (disco-state-guild-emojis-loaded-p "g1"))
+  (should-not (disco-state-guild-emojis "g1"))
+  (should-not (disco-state-guild-member "g1" "u1")))
+
+(ert-deftest disco-state-guild-roles-are-independent-and-copy-safe ()
+  (unwind-protect
+      (progn
+        (disco-state-reset)
+        (should-not (disco-state-guild-roles-loaded-p "g1"))
+        (disco-state-set-guilds '(((id . "g1") (name . "Full"))))
+        (disco-state-set-guild-roles
+         "g1" [((id . "r1") (name . "Admin"))])
+        (should (disco-state-guild-roles-loaded-p "g1"))
+        (let ((copy (disco-state-guild-roles "g1")))
+          (setf (alist-get 'name (car copy)) "Mutated"))
+        (disco-state-set-guilds '(((id . "g1") (name . "Compact"))))
+        (should (equal "Admin"
+                       (alist-get 'name
+                                  (car (disco-state-guild-roles "g1")))))
+        (disco-state-upsert-guild-role
+         "g1" '((id . "r1") (name . "Moderator")))
+        (should (equal "Moderator"
+                       (alist-get 'name
+                                  (car (disco-state-guild-roles "g1")))))
+        (should (disco-state-delete-guild-role "g1" "r1"))
+        (should-not (disco-state-guild-roles "g1"))
+        (disco-state-delete-guild "g1")
+        (should-not (disco-state-guild-roles-loaded-p "g1")))
+    (disco-state-reset)))
+
 (ert-deftest disco-state-known-unread-message-count-uses-cache-and-fallback ()
   (disco-state-reset)
   (let ((channel '((id . "c1") (type . 0) (last_message_id . "13"))))

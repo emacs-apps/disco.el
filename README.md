@@ -37,7 +37,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
 - Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
 - Room can render inline Discord avatar images (async, cached) with automatic placeholder fallback.
-- Draft input supports dynamic `TAB` completion for `@`/`#` tokens (users, roles, `@everyone`/`@here`, and guild channels) and inserts Discord mention syntax; company/Corfu rows can show username/id/avatar metadata.
+- Draft input supports dynamic `TAB` completion for `@`/`#`/`:` tokens (remote guild-member prefix search, roles, `@everyone`/`@here`, guild channels, standard Unicode emoji, and guild custom emoji) and inserts native Discord mention/emoji syntax; company/Corfu rows can show nickname/global-name/username/id/avatar metadata.
 - Room provides `C-c M-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.
 - In parent channel rooms: create thread from message (`C-c C-t m`) or detached thread (`C-c C-t c`).
 - In thread rooms: join (`C-c C-j`), leave (`C-c C-l`), toggle archived (`C-c C-t a`), rename/lock/slowmode/auto-archive/settings (`C-c C-t ...`), and set current-user mute (`C-c C-t u`).
@@ -100,7 +100,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - `disco-root.el`: root dashboard controllers, live updates, search commands, and buffer orchestration.
 - `disco-channel-directory.el`: lazy per-guild category/channel/thread browser.
 - `disco-room.el`: room buffer render/send flow with async refresh/pagination.
-- `disco-company.el`: composer completion engine (`@`/`#`, CAPF, optional company backend).
+- `disco-company.el`: composer completion engine (`@`/`#`/`:`, CAPF, optional company backend).
 
 ## Custom Layout Example
 
@@ -238,7 +238,7 @@ built-in home/activity layouts, return an `items` view spec instead:
 - Shared view primitives are reused by room cards, guild directories, and
   archived-thread lists to keep UI interactions and list layout consistent.
 - Avatar fetch/render pipeline is asynchronous and rerenders room buffers when images become available.
-- Composer completion is token-boundary aware for `@`/`#`, with dynamic candidate lists and optional company backend integration (`disco-room-company-completion`).
+- Composer completion is token-boundary aware for `@`/`#`/`:`, with dynamic candidate lists and optional company backend integration (`disco-room-company-completion`). Guild custom emoji and role snapshots are kept independently from compact guild directory objects and updated by Gateway events.
 - Gateway `READY` read-state payload and `MESSAGE_ACK` dispatch update local read cursors/unread mentions.
 - Gateway transport supports optional `compress=zlib-stream` and decodes binary payloads with a per-connection shared stream context.
 - Thread channels are indexed by parent channel, rendered hierarchically in

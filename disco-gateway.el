@@ -45,7 +45,9 @@ Event schema:
   `message-reaction-add' `message-reaction-remove'
   `message-reaction-remove-all' `message-reaction-remove-emoji'
   `message-poll-vote-add' `message-poll-vote-remove'
-  `guild-members-chunk'
+  `guild-members-chunk' `guild-member-add' `guild-member-update'
+  `guild-member-remove' `guild-emojis-update'
+  `guild-role-create' `guild-role-update' `guild-role-delete'
   `channel-create' `channel-update' `channel-delete'
   `channel-update-partial' `channel-unread-update'
   `channel-pins-update' `channel-pins-ack'
@@ -73,7 +75,11 @@ Event schema:
 - :timestamp integer for typing-start when present
 - :member guild member object for typing-start in guild channels
 - :members array of guild member objects for `guild-members-chunk'
+- :member guild member object for member lifecycle events
 - :nonce string for `guild-members-chunk' when present
+- :emojis list of guild custom emoji objects for `guild-emojis-update'
+- :role guild role object for role create/update events
+- :role-id string for role delete events
 - :emoji reaction emoji object/string for reaction events when present
 - :answer-id integer for poll vote events when present
 - :watched non-nil for message-create when channel has active room watcher
@@ -939,6 +945,7 @@ Discord Ready may deliver some fields as versioned structures
 `((entries . [...]) (partial . ...) (version . ...))'."
   (cond
    ((null value) '())
+   ((vectorp value) (append value nil))
    ((and (listp value) (assq 'entries value))
     (or (alist-get 'entries value) '()))
    ((listp value)
@@ -969,12 +976,30 @@ Discord Ready may deliver some fields as versioned structures
       (let* ((guild-id (alist-get 'id guild))
              (has-channels (assq 'channels guild))
              (has-threads (assq 'threads guild))
+             (has-emojis (assq 'emojis guild))
+             (has-roles (assq 'roles guild))
+             (has-members (assq 'members guild))
              (channels (and has-channels
                             (disco-gateway--versioned-entries
                              (alist-get 'channels guild))))
              (threads (and has-threads
                            (disco-gateway--versioned-entries
-                            (alist-get 'threads guild)))))
+                            (alist-get 'threads guild))))
+             (emojis (and has-emojis (alist-get 'emojis guild)))
+             (roles (and has-roles (alist-get 'roles guild)))
+             (members (and has-members
+                           (disco-gateway--versioned-entries
+                            (alist-get 'members guild))))
+             (presences (and (assq 'presences guild)
+                             (disco-gateway--versioned-entries
+                              (alist-get 'presences guild)))))
+        (when (and guild-id has-emojis)
+          (disco-state-set-guild-emojis guild-id emojis))
+        (when (and guild-id has-roles)
+          (disco-state-set-guild-roles guild-id roles))
+        (when (and guild-id has-members)
+          (disco-state-apply-guild-members-chunk
+           guild-id members presences))
         (when (and guild-id has-channels)
           (disco-state-seed-guild-channels guild-id channels))
         (when has-threads
@@ -1078,12 +1103,101 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
 (defun disco-gateway--dispatch-guild-create (payload)
   "Handle GUILD_CREATE dispatch PAYLOAD."
   (disco-state-upsert-guild payload)
+  (let ((guild-id (alist-get 'id payload)))
+    (when (and guild-id (assq 'emojis payload))
+      (disco-state-set-guild-emojis guild-id (alist-get 'emojis payload)))
+    (when (and guild-id (assq 'roles payload))
+      (disco-state-set-guild-roles guild-id (alist-get 'roles payload)))
+    (when (and guild-id (assq 'members payload))
+      (disco-state-apply-guild-members-chunk
+       guild-id
+       (disco-gateway--versioned-entries (alist-get 'members payload))
+       (disco-gateway--versioned-entries (alist-get 'presences payload)))))
   (disco-gateway--emit-guild-event 'guild-create payload))
 
 (defun disco-gateway--dispatch-guild-update (payload)
   "Handle GUILD_UPDATE dispatch PAYLOAD."
   (disco-state-upsert-guild payload)
+  (let ((guild-id (alist-get 'id payload)))
+    (when (and guild-id (assq 'emojis payload))
+      (disco-state-set-guild-emojis guild-id (alist-get 'emojis payload)))
+    (when (and guild-id (assq 'roles payload))
+      (disco-state-set-guild-roles guild-id (alist-get 'roles payload))))
   (disco-gateway--emit-guild-event 'guild-update payload))
+
+(defun disco-gateway--dispatch-guild-emojis-update (payload)
+  "Handle GUILD_EMOJIS_UPDATE dispatch PAYLOAD as a complete snapshot."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (emojis (or (alist-get 'emojis payload) '())))
+    (when guild-id
+      (disco-state-set-guild-emojis guild-id emojis))
+    (disco-gateway--emit
+     (list :type 'guild-emojis-update
+           :guild-id guild-id
+           :emojis emojis))))
+
+(defun disco-gateway--dispatch-guild-role-upsert (event-type payload)
+  "Apply guild role PAYLOAD and emit EVENT-TYPE."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (role (alist-get 'role payload)))
+    (when (and guild-id (listp role))
+      (disco-state-upsert-guild-role guild-id role))
+    (disco-gateway--emit
+     (list :type event-type
+           :guild-id guild-id
+           :role role))))
+
+(defun disco-gateway--dispatch-guild-role-create (payload)
+  "Handle GUILD_ROLE_CREATE dispatch PAYLOAD."
+  (disco-gateway--dispatch-guild-role-upsert 'guild-role-create payload))
+
+(defun disco-gateway--dispatch-guild-role-update (payload)
+  "Handle GUILD_ROLE_UPDATE dispatch PAYLOAD."
+  (disco-gateway--dispatch-guild-role-upsert 'guild-role-update payload))
+
+(defun disco-gateway--dispatch-guild-role-delete (payload)
+  "Handle GUILD_ROLE_DELETE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (role-id (alist-get 'role_id payload)))
+    (when (and guild-id role-id)
+      (disco-state-delete-guild-role guild-id role-id))
+    (disco-gateway--emit
+     (list :type 'guild-role-delete
+           :guild-id guild-id
+           :role-id role-id))))
+
+(defun disco-gateway--dispatch-guild-member-add (payload)
+  "Handle GUILD_MEMBER_ADD dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload)))
+    (when guild-id
+      (disco-state-upsert-guild-member guild-id payload))
+    (disco-gateway--emit
+     (list :type 'guild-member-add
+           :guild-id guild-id
+           :member payload))))
+
+(defun disco-gateway--dispatch-guild-member-update (payload)
+  "Handle GUILD_MEMBER_UPDATE dispatch PAYLOAD."
+  (let ((guild-id (alist-get 'guild_id payload)))
+    (when guild-id
+      (disco-state-upsert-guild-member guild-id payload))
+    (disco-gateway--emit
+     (list :type 'guild-member-update
+           :guild-id guild-id
+           :member payload))))
+
+(defun disco-gateway--dispatch-guild-member-remove (payload)
+  "Handle GUILD_MEMBER_REMOVE dispatch PAYLOAD."
+  (let* ((guild-id (alist-get 'guild_id payload))
+         (user (alist-get 'user payload))
+         (user-id (and (listp user) (alist-get 'id user))))
+    (when (and guild-id user-id)
+      (disco-state-delete-guild-member guild-id user-id))
+    (disco-gateway--emit
+     (list :type 'guild-member-remove
+           :guild-id guild-id
+           :user-id user-id
+           :member payload))))
 
 (defun disco-gateway--dispatch-guild-delete (payload)
   "Handle GUILD_DELETE dispatch PAYLOAD."
@@ -1614,6 +1728,13 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("GUILD_MEMBERS_CHUNK" . disco-gateway--dispatch-guild-members-chunk)
     ("GUILD_CREATE" . disco-gateway--dispatch-guild-create)
     ("GUILD_UPDATE" . disco-gateway--dispatch-guild-update)
+    ("GUILD_EMOJIS_UPDATE" . disco-gateway--dispatch-guild-emojis-update)
+    ("GUILD_ROLE_CREATE" . disco-gateway--dispatch-guild-role-create)
+    ("GUILD_ROLE_UPDATE" . disco-gateway--dispatch-guild-role-update)
+    ("GUILD_ROLE_DELETE" . disco-gateway--dispatch-guild-role-delete)
+    ("GUILD_MEMBER_ADD" . disco-gateway--dispatch-guild-member-add)
+    ("GUILD_MEMBER_UPDATE" . disco-gateway--dispatch-guild-member-update)
+    ("GUILD_MEMBER_REMOVE" . disco-gateway--dispatch-guild-member-remove)
     ("GUILD_DELETE" . disco-gateway--dispatch-guild-delete)
     ("USER_GUILD_SETTINGS_UPDATE" . disco-gateway--dispatch-user-guild-settings-update)
     ("CHANNEL_CREATE" . disco-gateway--dispatch-channel-create)

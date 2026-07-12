@@ -446,6 +446,79 @@
                        :nonce "n1")
                      emitted)))))
 
+(ert-deftest disco-gateway-dispatch-guild-emojis-update-replaces-and-emits ()
+  (let (captured emitted)
+    (cl-letf (((symbol-function 'disco-state-set-guild-emojis)
+               (lambda (guild-id emojis)
+                 (setq captured (list guild-id emojis))))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-guild-emojis-update
+       '((guild_id . "g1")
+         (emojis . [((id . "e1") (name . "wave"))])))
+      (should (equal '("g1" [((id . "e1") (name . "wave"))])
+                     captured))
+      (should (equal '(:type guild-emojis-update
+                       :guild-id "g1"
+                       :emojis [((id . "e1") (name . "wave"))])
+                     emitted)))))
+
+(ert-deftest disco-gateway-guild-role-lifecycle-updates-state ()
+  (disco-state-reset)
+  (let (events)
+    (cl-letf (((symbol-function 'disco-gateway--emit)
+               (lambda (event) (push event events))))
+      (disco-state-set-guild-roles "g1" [])
+      (disco-gateway--dispatch-guild-role-create
+       '((guild_id . "g1") (role . ((id . "r1") (name . "Admin")))))
+      (should (equal "Admin"
+                     (alist-get 'name
+                                (car (disco-state-guild-roles "g1")))))
+      (disco-gateway--dispatch-guild-role-update
+       '((guild_id . "g1") (role . ((id . "r1") (name . "Moderator")))))
+      (should (equal "Moderator"
+                     (alist-get 'name
+                                (car (disco-state-guild-roles "g1")))))
+      (disco-gateway--dispatch-guild-role-delete
+       '((guild_id . "g1") (role_id . "r1")))
+      (should-not (disco-state-guild-roles "g1"))
+      (should (equal '(guild-role-delete
+                       guild-role-update
+                       guild-role-create)
+                     (mapcar (lambda (event) (plist-get event :type))
+                             events)))))
+  (disco-state-reset))
+
+(ert-deftest disco-gateway-guild-member-lifecycle-updates-state ()
+  (disco-state-reset)
+  (let (events)
+    (cl-letf (((symbol-function 'disco-gateway--emit)
+               (lambda (event) (push event events))))
+      (disco-gateway--dispatch-guild-member-add
+       '((guild_id . "g1")
+         (nick . "Old")
+         (user (id . "u1") (username . "alice"))))
+      (should (equal "Old"
+                     (alist-get 'nick
+                                (disco-state-guild-member "g1" "u1"))))
+      (disco-gateway--dispatch-guild-member-update
+       '((guild_id . "g1")
+         (nick . "New")
+         (user (id . "u1") (username . "alice"))))
+      (should (equal "New"
+                     (alist-get 'nick
+                                (disco-state-guild-member "g1" "u1"))))
+      (disco-gateway--dispatch-guild-member-remove
+       '((guild_id . "g1")
+         (user (id . "u1") (username . "alice"))))
+      (should-not (disco-state-guild-member "g1" "u1"))
+      (should (equal '(guild-member-remove
+                       guild-member-update
+                       guild-member-add)
+                     (mapcar (lambda (event) (plist-get event :type))
+                             events))))))
+
 (ert-deftest disco-gateway-send-op-now-handles-write-errors ()
   (let ((disco-gateway--ws 'ws)
         (disco-gateway--stopping nil)
@@ -677,6 +750,59 @@
   (should-not (disco-state-guild-channels-loaded-p "g1"))
   (should (equal "c1"
                  (alist-get 'id (car (disco-state-guild-channels "g1"))))))
+
+(ert-deftest disco-gateway-guild-emoji-snapshots-only-change-when-explicit ()
+  (disco-state-reset)
+  (disco-gateway--ingest-ready-guilds
+   '(((id . "g1")
+      (emojis . [((id . "e1") (name . "wave"))]))))
+  (should (equal "wave"
+                 (alist-get 'name (car (disco-state-guild-emojis "g1")))))
+  ;; Compact guild payloads omit `emojis'; omission is not an empty snapshot.
+  (disco-gateway--dispatch-guild-update
+   '((id . "g1") (name . "Compact")))
+  (should (equal "wave"
+                 (alist-get 'name (car (disco-state-guild-emojis "g1")))))
+  (disco-gateway--dispatch-guild-update
+   '((id . "g1") (emojis . [])))
+  (should (disco-state-guild-emojis-loaded-p "g1"))
+  (should-not (disco-state-guild-emojis "g1")))
+
+(ert-deftest disco-gateway-guild-role-snapshots-only-change-when-explicit ()
+  (disco-state-reset)
+  (disco-gateway--ingest-ready-guilds
+   '(((id . "g1")
+      (roles . [((id . "r1") (name . "Admin"))]))))
+  (disco-gateway--dispatch-guild-update
+   '((id . "g1") (name . "Compact")))
+  (should (equal "Admin"
+                 (alist-get 'name (car (disco-state-guild-roles "g1")))))
+  (disco-gateway--dispatch-guild-update
+   '((id . "g1") (roles . [])))
+  (should (disco-state-guild-roles-loaded-p "g1"))
+  (should-not (disco-state-guild-roles "g1")))
+
+(ert-deftest disco-gateway-ready-and-create-seed-explicit-guild-members ()
+  (disco-state-reset)
+  (disco-gateway--ingest-ready-guilds
+   '(((id . "g1")
+      (members . [((nick . "Ready")
+                    (user (id . "u1") (username . "alice")))])
+      (presences . [((user (id . "u1")) (status . "online"))]))))
+  (should (equal "Ready"
+                 (alist-get 'nick
+                            (disco-state-guild-member "g1" "u1"))))
+  (should (equal "online"
+                 (alist-get 'status (disco-state-presence "u1" "g1"))))
+  (cl-letf (((symbol-function 'disco-gateway--emit-guild-event)
+             (lambda (&rest _args) nil)))
+    (disco-gateway--dispatch-guild-create
+     '((id . "g2")
+       (members . [((nick . "Create")
+                     (user (id . "u2") (username . "bob")))]))))
+  (should (equal "Create"
+                 (alist-get 'nick
+                            (disco-state-guild-member "g2" "u2")))))
 
 (ert-deftest disco-gateway-dispatch-user-guild-settings-update-applies-and-emits ()
   (let (applied emitted)

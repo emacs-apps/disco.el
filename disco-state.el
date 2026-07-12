@@ -74,6 +74,18 @@
 (defvar disco-state--guild-member-ids-by-guild (make-hash-table :test #'equal)
   "Hash table guild-id -> list of cached guild member user IDs.")
 
+(defvar disco-state--emojis-by-guild (make-hash-table :test #'equal)
+  "Hash table guild-id -> latest complete custom emoji list.")
+
+(defvar disco-state--guild-emojis-loaded (make-hash-table :test #'equal)
+  "Hash table of guild IDs with an authoritative custom emoji snapshot.")
+
+(defvar disco-state--roles-by-guild (make-hash-table :test #'equal)
+  "Hash table guild-id -> latest complete guild role list.")
+
+(defvar disco-state--guild-roles-loaded (make-hash-table :test #'equal)
+  "Hash table of guild IDs with an authoritative role snapshot.")
+
 (defvar disco-state--sessions nil
   "List of gateway session objects from SESSIONS_REPLACE.")
 
@@ -192,6 +204,10 @@
   (clrhash disco-state--presences-by-guild-user)
   (clrhash disco-state--guild-members-by-guild-user)
   (clrhash disco-state--guild-member-ids-by-guild)
+  (clrhash disco-state--emojis-by-guild)
+  (clrhash disco-state--guild-emojis-loaded)
+  (clrhash disco-state--roles-by-guild)
+  (clrhash disco-state--guild-roles-loaded)
   (clrhash disco-state--voice-states-by-key)
   (clrhash disco-state--voice-state-keys-by-channel)
   (clrhash disco-state--channel-member-counts-by-channel)
@@ -445,7 +461,24 @@ MEMBER-COUNT is optional approximate thread member count."
   (disco-state-remove-voice-states-for-guild guild-id)
   (remhash guild-id disco-state--channels-by-guild)
   (remhash guild-id disco-state--guild-channels-loaded)
-  (remhash guild-id disco-state--thread-ids-by-guild))
+  (remhash guild-id disco-state--thread-ids-by-guild)
+  (dolist (user-id (or (gethash guild-id
+                                disco-state--guild-member-ids-by-guild)
+                       '()))
+    (disco-state-delete-guild-member guild-id user-id))
+  (let (presence-keys)
+    (maphash
+     (lambda (key _presence)
+       (when (and (consp key) (equal (car key) guild-id))
+         (push key presence-keys)))
+     disco-state--presences-by-guild-user)
+    (dolist (key presence-keys)
+      (remhash key disco-state--presences-by-guild-user)))
+  (remhash guild-id disco-state--guild-member-ids-by-guild)
+  (remhash guild-id disco-state--emojis-by-guild)
+  (remhash guild-id disco-state--guild-emojis-loaded)
+  (remhash guild-id disco-state--roles-by-guild)
+  (remhash guild-id disco-state--guild-roles-loaded))
 
 (defun disco-state-guild-channels-loaded-p (guild-id)
   "Return non-nil when GUILD-ID has a permission-resolved channel snapshot."
@@ -954,6 +987,113 @@ including deletions.  Return the resulting newest-first message list."
           (push member result))))
     (nreverse result)))
 
+(defun disco-state-set-guild-emojis (guild-id emojis)
+  "Replace GUILD-ID's authoritative custom EMOJIS snapshot.
+
+EMOJIS may be a list or vector.  Recording an empty snapshot still marks the
+guild as loaded, which is distinct from not having received emoji data yet."
+  (when-let* ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (let* ((items (cond
+                   ((vectorp emojis) (append emojis nil))
+                   ((listp emojis) emojis)
+                   (t nil)))
+           (snapshot (cl-remove-if-not #'listp items)))
+      (puthash normalized-guild-id
+               (copy-tree snapshot)
+               disco-state--emojis-by-guild)
+      (puthash normalized-guild-id t disco-state--guild-emojis-loaded)
+      (copy-tree snapshot))))
+
+(defun disco-state-guild-emojis (guild-id)
+  "Return a copy of cached custom emojis for GUILD-ID."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (when normalized-guild-id
+      (copy-tree (gethash normalized-guild-id disco-state--emojis-by-guild)))))
+
+(defun disco-state-guild-emojis-loaded-p (guild-id)
+  "Return non-nil when GUILD-ID has an authoritative emoji snapshot."
+  (and (gethash (disco-state--normalize-id guild-id)
+                disco-state--guild-emojis-loaded)
+       t))
+
+(defun disco-state-set-guild-roles (guild-id roles)
+  "Replace GUILD-ID's authoritative ROLES snapshot.
+
+ROLES may be a list or vector.  Recording an empty snapshot still marks the
+guild as loaded, which is distinct from not having received role data yet."
+  (when-let* ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (let* ((items (cond
+                   ((vectorp roles) (append roles nil))
+                   ((listp roles) roles)
+                   (t nil)))
+           (snapshot (cl-remove-if-not #'listp items)))
+      (puthash normalized-guild-id
+               (copy-tree snapshot)
+               disco-state--roles-by-guild)
+      (puthash normalized-guild-id t disco-state--guild-roles-loaded)
+      (copy-tree snapshot))))
+
+(defun disco-state-guild-roles (guild-id)
+  "Return a copy of cached roles for GUILD-ID."
+  (let ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (when normalized-guild-id
+      (copy-tree (gethash normalized-guild-id disco-state--roles-by-guild)))))
+
+(defun disco-state-guild-roles-loaded-p (guild-id)
+  "Return non-nil when GUILD-ID has an authoritative role snapshot."
+  (and (gethash (disco-state--normalize-id guild-id)
+                disco-state--guild-roles-loaded)
+       t))
+
+(defun disco-state-upsert-guild-role (guild-id role)
+  "Insert or replace ROLE in GUILD-ID's independent role snapshot."
+  (let* ((normalized-guild-id (disco-state--normalize-id guild-id))
+         (role-id (and (listp role)
+                       (disco-state--normalize-id (alist-get 'id role)))))
+    (when (and normalized-guild-id role-id)
+      (let ((roles (or (disco-state-guild-roles normalized-guild-id) '()))
+            found
+            updated)
+        (setq updated
+              (mapcar
+               (lambda (existing)
+                 (if (equal role-id
+                            (disco-state--normalize-id
+                             (alist-get 'id existing)))
+                     (progn
+                       (setq found t)
+                       (copy-tree role))
+                   existing))
+               roles))
+        (unless found
+          (setq updated (append updated (list (copy-tree role)))))
+        (puthash normalized-guild-id updated disco-state--roles-by-guild)
+        (copy-tree role)))))
+
+(defun disco-state-delete-guild-role (guild-id role-id)
+  "Remove ROLE-ID from GUILD-ID's independent role snapshot."
+  (let* ((normalized-guild-id (disco-state--normalize-id guild-id))
+         (normalized-role-id (disco-state--normalize-id role-id))
+         (roles (and normalized-guild-id
+                     (disco-state-guild-roles normalized-guild-id)))
+         (present
+          (and normalized-role-id
+               (seq-find
+                (lambda (role)
+                  (equal normalized-role-id
+                         (disco-state--normalize-id (alist-get 'id role))))
+                roles))))
+    (when (and normalized-guild-id normalized-role-id)
+      (puthash
+       normalized-guild-id
+       (cl-remove-if
+        (lambda (role)
+          (equal normalized-role-id
+                 (disco-state--normalize-id (alist-get 'id role))))
+        roles)
+       disco-state--roles-by-guild))
+    (and present t)))
+
 (defun disco-state-upsert-guild-member (guild-id member)
   "Cache guild MEMBER object for GUILD-ID and return copied member."
   (let* ((normalized-guild-id (disco-state--normalize-id guild-id))
@@ -970,6 +1110,34 @@ including deletions.  Return the resulting newest-first message list."
                    (append existing (list user-id))
                    disco-state--guild-member-ids-by-guild)))
       (copy-tree member))))
+
+(defun disco-state-delete-guild-member (guild-id user-id)
+  "Remove cached USER-ID member data scoped to GUILD-ID."
+  (let* ((normalized-guild-id (disco-state--normalize-id guild-id))
+         (normalized-user-id (disco-state--normalize-id user-id))
+         (key (and normalized-guild-id normalized-user-id
+                   (disco-state--guild-member-key
+                    normalized-guild-id normalized-user-id)))
+         (present (and key
+                       (gethash key disco-state--guild-members-by-guild-user))))
+    (when key
+      (remhash key disco-state--guild-members-by-guild-user)
+      (remhash (disco-state--presence-key
+                normalized-guild-id normalized-user-id)
+               disco-state--presences-by-guild-user)
+      (let ((remaining
+             (delete normalized-user-id
+                     (copy-sequence
+                      (or (gethash normalized-guild-id
+                                   disco-state--guild-member-ids-by-guild)
+                          '())))))
+        (if remaining
+            (puthash normalized-guild-id
+                     remaining
+                     disco-state--guild-member-ids-by-guild)
+          (remhash normalized-guild-id
+                   disco-state--guild-member-ids-by-guild))))
+    (and present t)))
 
 (defun disco-state-apply-guild-members-chunk (guild-id members &optional presences)
   "Apply cached guild MEMBERS chunk and optional PRESENCES for GUILD-ID.
