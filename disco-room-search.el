@@ -14,6 +14,7 @@
 (require 'seq)
 (require 'subr-x)
 
+(require 'appkit-chat-history)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-gateway)
@@ -484,13 +485,21 @@ With BY-SENDER-P, also prompt for a sender and restrict matches to that user."
   (unless (disco-room--msg-filter-active-p)
     (user-error "disco: no active message filter"))
   (let ((message-id (ignore-errors (disco-room--message-id-at-point))))
+    ;; The transport may still complete, so invalidate its generation before
+    ;; clearing visible filter state.  A late callback must not resurrect it.
+    (setq-local disco-room--filter-generation
+                (1+ (or disco-room--filter-generation 0)))
     (setq-local disco-room--msg-filter nil)
     (setq-local disco-room--filter-in-flight nil)
-    (if (or (null message-id)
-            (disco-msg-find-in-channel disco-room--channel-id message-id))
-        (disco-room-render)
-      (disco-room-render)
+    ;; Reconcile away the filter projection before deciding visibility.  A
+    ;; canonical cache hit may belong to an unrelated island outside the exact
+    ;; AppKit window, so MESSAGE-ID always goes through normal jump resolution.
+    (disco-room-render)
+    (cond
+     (message-id
       (disco-room-jump-to-message message-id))
+     ((not (appkit-chat-history-window-known-p))
+      (disco-room-refresh)))
     (message "disco: message filter canceled")))
 
 (defconst disco-room-search--inplace-entry-points

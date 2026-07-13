@@ -929,11 +929,20 @@ LIMIT defaults to `disco-message-fetch-limit'."
       (setq query (append query `(("before" . ,before)))))
     (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
 
-(cl-defun disco-api-channel-messages-async (channel-id &key before limit on-success on-error)
-  "Fetch messages in CHANNEL-ID asynchronously."
+(cl-defun disco-api-channel-messages-async
+    (channel-id &key before after limit on-success on-error)
+  "Fetch messages in CHANNEL-ID asynchronously.
+
+BEFORE and AFTER are mutually exclusive Discord message cursors.  LIMIT is
+the maximum page size.  ON-SUCCESS receives the newest-first message array;
+ON-ERROR receives the transport error."
+  (when (and before after)
+    (error "disco: channel messages accepts only one of before/after"))
   (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit))))))
     (when before
-      (setq query (append query `(("before" . ,before)))))
+      (setq query (append query `(("before" . ,(format "%s" before))))))
+    (when after
+      (setq query (append query `(("after" . ,(format "%s" after))))))
     (disco-api--request-async
      "GET"
      (format "/channels/%s/messages" channel-id)

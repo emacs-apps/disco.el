@@ -932,11 +932,7 @@ State is kept newest-first to match REST message list ordering."
 
 (defun disco-gateway--delete-message (channel-id message-id)
   "Delete MESSAGE-ID from CHANNEL-ID cache."
-  (let* ((old (or (disco-state-messages channel-id) '()))
-         (updated (cl-remove-if (lambda (msg)
-                                  (equal (alist-get 'id msg) message-id))
-                                old)))
-    (disco-state-put-messages channel-id updated)))
+  (disco-state-delete-message channel-id message-id))
 
 (defun disco-gateway--versioned-entries (value)
   "Normalize VALUE into a list of entries.
@@ -1468,7 +1464,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
       (let ((watched (disco-gateway--channel-watched-p channel-id)))
         (if watched
             (disco-gateway--upsert-message channel-id payload)
-          (disco-state-upsert-message channel-id payload))
+          (disco-state-upsert-preview-message channel-id payload))
         (disco-state-apply-message-create
          channel-id
          payload

@@ -87,6 +87,33 @@
                  nil nil nil nil)
                captured)))))
 
+(ert-deftest disco-api-channel-messages-async-builds-after-query ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest args)
+                 (setq captured (list method endpoint args))
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-channel-messages-async
+            "123"
+            :after "456"
+            :limit 25
+            :on-success #'ignore
+            :on-error #'ignore)))
+      (should
+       (equal
+        '("GET" "/channels/123/messages"
+          (:query (("limit" . "25") ("after" . "456"))
+                  :on-success ignore
+                  :on-error ignore))
+        captured)))))
+
+(ert-deftest disco-api-channel-messages-async-rejects-conflicting-cursors ()
+  (should-error
+   (disco-api-channel-messages-async "123" :before "100" :after "200")
+   :type 'error))
+
 (ert-deftest disco-api-preload-channel-messages-async-builds-payload ()
   (let (captured)
     (cl-letf (((symbol-function 'disco-api--request-async)

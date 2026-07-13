@@ -25,7 +25,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
 - Send plain text message with `C-c RET` in room buffer; `C-c C-c` cancels an active message filter.
 - Send file attachments from room buffer (multipart upload) with structured composer objects: telega-like attach menu on `C-c C-a`, direct file attach on `C-c C-f`, reserved clipboard attach slot `C-c C-v`, remove attachment at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c RET`.
-- Reply/edit/delete/forward message from room buffer with telega-like timeline keys `r`/`f`/`e`/`d` when point is outside the composer, or via `C-c m r/f/e/d`; legacy `C-c C-F` still works for forward. Load older history with `M-<`.
+- Reply/edit/delete/forward message from room buffer with telega-like timeline keys `r`/`f`/`e`/`d` when point is outside the composer, or via `C-c m r/f/e/d`; legacy `C-c C-F` still works for forward. History extends automatically near either visible edge, while `M-<`/`M->` retain native Emacs behavior.
 - Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
 - Message rows render compact telega-inspired attachment cards: title/preview is the primary open/play action, only meaningful transfer status stays inline, and Download/Cancel/Save As/Copy URL live in the message transient.  Cards carry a backend-neutral action context shared with emacs-qq; audio keeps its stateful play/pause/stop waveform controls inline.
 - Message rows render telega-inspired rich embed cards (title/meta, description/fields/footer, URL/media actions, and inline embed-image preview loading).
@@ -174,7 +174,9 @@ built-in home/activity layouts, return an `items` view spec instead:
 - Room buffer: `r` set reply target from message-at-point, `C-c C-k` clears pending reply.
 - Room buffer: `C-c m f` forwards a message by id/channel, with optional comment and optional forward-only subset (`embed_indices` / `attachment_ids`) chosen from source message entries. Legacy `C-c C-F` still works. In picker prompts, press `RET` on empty input to skip one side.
 - Room buffer: `e` edits message-at-point, `d` deletes message-at-point (with confirmation).
-- Room buffer: `M-<` loads older message page using `before` cursor pagination.
+- Room history extends automatically near its older and newer visible edges using
+  Discord's `before`/`after` cursor pagination; `M-<` and `M->` keep their native
+  beginning/end-of-buffer bindings.
 - Room buffer draft: attachment objects can be removed at point with `C-c C-d`; `M-r` searches draft history; `M-RET` opens a parsed composer preview buffer.
 - Room transient (`?`): includes load older / reply / cancel reply / edit / delete actions.
 - Room buffer: `c` copies at point in DWIM fashion (region/url/code/message text), `l` copies the current message permalink, `n`/`p` move across visible messages, `o` opens the message action transient, `i` describes the message, `L` redisplays it, and `C-c m c/l/n/p/o/t/i/L` expose the msg-centric copy/action family.

@@ -230,7 +230,7 @@
   (should (= 4 (disco-state-channel-unread-count "dm")))
   (should (equal "102" (disco-state-channel-last-read-message-id "dm"))))
 
-(ert-deftest disco-state-apply-message-create-ignores-watched-channels ()
+(ert-deftest disco-state-apply-message-create-preserves-unread-for-watched-channel ()
   (disco-state-reset)
   (disco-state-upsert-channel '((id . "chan") (type . 1) (muted . :false)))
   (disco-state-set-channel-unread "chan" 4)
@@ -244,7 +244,7 @@
      (mention_everyone . :false))
    "u1"
    t)
-  (should (= 4 (disco-state-channel-unread-count "chan")))
+  (should (= 5 (disco-state-channel-unread-count "chan")))
   (should (equal "104" (alist-get 'last_message_id
                                     (disco-state-channel "chan"))))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
@@ -688,6 +688,56 @@
     (should (= 1 (length messages)))
     (should (equal "1000" (alist-get 'id (car messages))))
     (should-not (alist-get 'pending (car messages)))))
+
+(ert-deftest disco-state-canonical-upsert-preserves-exact-history-edges ()
+  (disco-state-reset)
+  (let ((messages
+         (cl-loop for id from 100 downto 51
+                  collect `((id . ,(number-to-string id))
+                            (channel_id . "c")))))
+    (disco-state-put-messages "c" messages)
+    (disco-state-upsert-message
+     "c" '((id . "101") (channel_id . "c")))
+    (should (= 51 (length (disco-state-messages "c"))))
+    (should (seq-find (lambda (message)
+                        (equal "51" (alist-get 'id message)))
+                      (disco-state-messages "c")))))
+
+(ert-deftest disco-state-preview-upsert-keeps-lightweight-cache-bounded ()
+  (disco-state-reset)
+  (let ((messages
+         (cl-loop for id from 100 downto 61
+                  collect `((id . ,(number-to-string id))
+                            (channel_id . "c")))))
+    (disco-state-put-messages "c" messages)
+    (disco-state-upsert-preview-message
+     "c" '((id . "101") (channel_id . "c")))
+    (should (= disco-state-message-preview-cache-limit
+               (length (disco-state-messages "c"))))
+    (should-not (seq-find (lambda (message)
+                            (equal "61" (alist-get 'id message)))
+                          (disco-state-messages "c")))))
+
+(ert-deftest disco-state-delete-unknown-message-blocks-stale-rest-page ()
+  (disco-state-reset)
+  (let ((request-revision (disco-state-message-revision "c")))
+    (disco-state-delete-message "c" "200")
+    (disco-state-merge-message-page
+     "c" '(((id . "200") (channel_id . "c"))) request-revision)
+    (should-not (disco-state-messages "c"))))
+
+(ert-deftest disco-state-last-message-seed-preserves-large-room-cache ()
+  (disco-state-reset)
+  (disco-state-put-messages
+   "c"
+   (cl-loop for id from 100 downto 51
+            collect `((id . ,(number-to-string id)) (channel_id . "c"))))
+  (disco-state-apply-last-messages
+   '(((id . "101") (channel_id . "c"))))
+  (should (= 51 (length (disco-state-messages "c"))))
+  (should (seq-find (lambda (message)
+                      (equal "51" (alist-get 'id message)))
+                    (disco-state-messages "c"))))
 
 (ert-deftest disco-state-guild-channel-snapshot-preserves-threads-and-removes-stale-channels ()
   (disco-state-reset)

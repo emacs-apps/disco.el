@@ -868,8 +868,8 @@ including deletions.  Return the resulting newest-first message list."
     (disco-state-put-messages channel-id merged)
     merged))
 
-(defun disco-state-upsert-message (channel-id message)
-  "Insert or replace MESSAGE in CHANNEL-ID cache, returning new message list."
+(defun disco-state--upsert-message (channel-id message &optional preview-limit)
+  "Insert MESSAGE in CHANNEL-ID, optionally capped to PREVIEW-LIMIT rows."
   (let* ((normalized-channel-id (disco-state--normalize-id channel-id))
          (message-id (disco-state--normalize-id (alist-get 'id message)))
          (nonce (disco-state--normalize-id (alist-get 'nonce message))))
@@ -890,12 +890,63 @@ including deletions.  Return the resulting newest-first message list."
                                                 (alist-get 'nonce it))
                                                nonce))))
                              existing))))
-        (when (and (integerp disco-state-message-preview-cache-limit)
-                   (> disco-state-message-preview-cache-limit 0)
-                   (> (length updated) disco-state-message-preview-cache-limit))
-          (setq updated (seq-take updated disco-state-message-preview-cache-limit)))
+        (when (and (integerp preview-limit)
+                   (> preview-limit 0)
+                   (> (length updated) preview-limit))
+          (setq updated (seq-take updated preview-limit)))
         (disco-state-put-messages normalized-channel-id updated)
         updated))))
+
+(defun disco-state-upsert-message (channel-id message)
+  "Insert or replace MESSAGE in CHANNEL-ID's canonical message cache.
+
+Canonical room history is never implicitly truncated because exact projected
+window edges may refer to any retained row."
+  (disco-state--upsert-message channel-id message))
+
+(defun disco-state-upsert-preview-message (channel-id message)
+  "Insert lightweight MESSAGE preview for CHANNEL-ID with a bounded cache."
+  (disco-state--upsert-message
+   channel-id message disco-state-message-preview-cache-limit))
+
+(defun disco-state-delete-message (channel-id message-id)
+  "Delete MESSAGE-ID from CHANNEL-ID and record a merge tombstone.
+
+The mutation is recorded even when MESSAGE-ID was not cached.  This prevents
+an older in-flight REST page from resurrecting a Gateway-deleted message."
+  (let* ((channel-id (disco-state--normalize-id channel-id))
+         (message-id (disco-state--normalize-id message-id))
+         (messages (or (disco-state-messages channel-id) '()))
+         (present-p
+          (seq-find (lambda (message)
+                      (equal message-id
+                             (disco-state--normalize-id
+                             (alist-get 'id message))))
+                    messages)))
+    (unless (and channel-id message-id)
+      (error "disco: message deletion requires channel and message ids"))
+    (disco-state-put-messages
+     channel-id
+     (seq-remove
+      (lambda (message)
+        (equal message-id
+               (disco-state--normalize-id (alist-get 'id message))))
+      messages))
+    (unless present-p
+      (let* ((revision
+              (1+ (gethash channel-id
+                           disco-state--message-revision-by-channel 0)))
+             (revisions
+              (or (gethash channel-id
+                           disco-state--message-revisions-by-channel)
+                  (let ((table (make-hash-table :test #'equal)))
+                    (puthash channel-id table
+                             disco-state--message-revisions-by-channel)
+                    table))))
+        (puthash channel-id revision
+                 disco-state--message-revision-by-channel)
+        (puthash message-id revision revisions)))
+    (disco-state-messages channel-id)))
 
 (defun disco-state-insert-pending-message (channel-id nonce content current-user-id
                                                       &optional reply-to-message-id)
@@ -1910,12 +1961,14 @@ cycles."
       (disco-state--message-mentions-user-p message current-user-id))
      (t nil))))
 
-(defun disco-state-apply-message-create (channel-id message current-user-id watched)
+(defun disco-state-apply-message-create (channel-id message current-user-id _watched)
   "Apply MESSAGE_CREATE read-state effects for CHANNEL-ID.
 
 MESSAGE is the gateway message object.
 CURRENT-USER-ID identifies the active account user.
-WATCHED means a room buffer currently tracks this channel."
+The final argument is retained for Gateway call compatibility.  Room
+visibility is resolved later by an optimistic ACK, so merely watching a
+channel must not suppress unread or mention state for hidden history windows."
   (let* ((channel (disco-state-channel channel-id))
          (message-id (disco-state--normalize-id (alist-get 'id message)))
          (message-type (alist-get 'type message))
@@ -1931,33 +1984,32 @@ WATCHED means a room buffer currently tracks this channel."
           (let ((updated (copy-tree channel)))
             (setf (alist-get 'last_message_id updated) message-id)
             (disco-state-upsert-channel updated))))
-      (unless watched
-        (if own-message
-            (when (/= message-type disco-state-message-type-poll-result)
-              (disco-state-apply-message-ack channel-id message-id 0))
-          (when (disco-state--message-create-should-increment-unread-p
-                 channel message current-user-id)
-            (let* ((state (disco-state-read-state
-                           disco-read-state-type-channel channel-id))
-                   (old-count (disco-state-channel-unread-count channel-id))
-                   (old-flags (or (and state (alist-get 'flags state))
-                                  (disco-state-channel-read-state-flags channel-id)))
-                   (ping-p (disco-state--message-mentions-user-p
-                            message current-user-id))
-                   (flags
-                    (if ping-p
-                        (logand old-flags
-                                (lognot disco-read-state-flag-is-mention-low-importance))
-                      (if (or (= old-count 0)
-                              (/= 0 (logand old-flags
-                                            disco-read-state-flag-is-mention-low-importance)))
-                          (logior old-flags
-                                  disco-read-state-flag-is-mention-low-importance)
-                        old-flags))))
-              (disco-state--upsert-read-state
-               disco-read-state-type-channel channel-id
-               `((mention_count . ,(1+ old-count))
-                 (flags . ,flags))))))))))
+      (if own-message
+          (when (/= message-type disco-state-message-type-poll-result)
+            (disco-state-apply-message-ack channel-id message-id 0))
+        (when (disco-state--message-create-should-increment-unread-p
+               channel message current-user-id)
+          (let* ((state (disco-state-read-state
+                         disco-read-state-type-channel channel-id))
+                 (old-count (disco-state-channel-unread-count channel-id))
+                 (old-flags (or (and state (alist-get 'flags state))
+                                (disco-state-channel-read-state-flags channel-id)))
+                 (ping-p (disco-state--message-mentions-user-p
+                          message current-user-id))
+                 (flags
+                  (if ping-p
+                      (logand old-flags
+                              (lognot disco-read-state-flag-is-mention-low-importance))
+                    (if (or (= old-count 0)
+                            (/= 0 (logand old-flags
+                                          disco-read-state-flag-is-mention-low-importance)))
+                        (logior old-flags
+                                disco-read-state-flag-is-mention-low-importance)
+                      old-flags))))
+            (disco-state--upsert-read-state
+             disco-read-state-type-channel channel-id
+             `((mention_count . ,(1+ old-count))
+               (flags . ,flags)))))))))
 
 (defun disco-state-apply-thread-create (thread current-user-id)
   "Apply THREAD_CREATE read-state effects from THREAD for CURRENT-USER-ID."

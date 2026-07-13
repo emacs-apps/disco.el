@@ -6,6 +6,32 @@
 (require 'disco-room)
 (require 'disco-state)
 
+(defun disco-room-test-establish-latest-window (&optional channel-id)
+  "Establish a known latest window for CHANNEL-ID's canonical fixture rows."
+  (let* ((channel-id (or channel-id disco-room--channel-id))
+         (messages
+          (disco-room--normalize-history-page
+           (disco-state-messages channel-id)))
+         (newest (disco-room--message-id (car messages)))
+         (oldest (disco-room--message-id (car (last messages)))))
+    (setq disco-room--remote-latest-message-id newest)
+    (if newest
+        (appkit-chat-history-window-set oldest nil)
+      (appkit-chat-history-window-establish-empty))))
+
+(defun disco-room-test-setup-channel (&optional channel-id)
+  "Reset state and bind the current room buffer to CHANNEL-ID."
+  (let ((channel-id (or channel-id "chan")))
+    (disco-state-reset)
+    (setq-local disco-room--channel-id channel-id)
+    (setq-local disco-room--channel-name channel-id)
+    (disco-state-upsert-channel
+     `((id . ,channel-id)
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    channel-id))
+
 (ert-deftest disco-room-mode-is-not-special-mode ()
   (with-temp-buffer
     (disco-room-mode)
@@ -47,6 +73,10 @@
     (should (eq (key-binding (kbd "C-c C-o") t) 'disco-room-input-options-transient))
     (should (eq (key-binding (kbd "C-c C-v") t) 'disco-room-attach-clipboard))
     (should (eq (key-binding (kbd "C-c M-v") t) 'disco-room-refetch-avatars))
+    (should-not (lookup-key disco-room-mode-map (kbd "M-<")))
+    (should-not (lookup-key disco-room-mode-map (kbd "M->")))
+    (should (eq (key-binding (kbd "M-<") t) 'beginning-of-buffer))
+    (should (eq (key-binding (kbd "M->") t) 'end-of-buffer))
     (goto-char (point-min))
     (disco-room--update-context-mode)
     (should disco-room-timeline-mode)
@@ -97,6 +127,7 @@
      '(((id . "m1")
         (channel_id . "chat")
         (content . "hello world"))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (should (eq disco-msg-resolve-function #'disco-room--resolve-message))
     (should (eq disco-msg-content-text-function #'disco-room--message-copy-text))
@@ -135,6 +166,7 @@
      '(((id . "m1")
         (channel_id . "chat")
         (content . "see [link](https://example.com) now"))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (goto-char (point-min))
     (search-forward "link")
@@ -164,6 +196,7 @@
        ((id . "m1")
         (channel_id . "chat")
         (content . "first"))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     ;; Room headers may precede the first message; navigation starts from the
     ;; first actual message property span, not blindly from `point-min'.
@@ -486,7 +519,6 @@
        (type . 0)
        (last_pin_timestamp . "2026-03-04T01:00:00.000000+00:00")))
     (let ((disco-room--channel-id "chan")
-          (disco-room--refresh-generation 1)
           called-channel-id)
       (cl-letf (((symbol-function 'disco-api-ack-channel-pins-async)
                  (lambda (channel-id &rest args)
@@ -556,6 +588,7 @@
         (timestamp . "2026-03-08T00:00:00.000000+00:00")
         (content . "first")
         (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (let ((ewoc (appkit-chat-timeline-ewoc))
           (node-m1 (appkit-chat-timeline-node "m1"))
@@ -620,6 +653,7 @@
         (timestamp . "2026-03-08T00:00:00.000000+00:00")
         (content . "first")
         (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (should (plist-get (appkit-chat-timeline-context "m2")
                        :compact))
@@ -681,6 +715,7 @@
         (timestamp . "2026-03-08T00:00:00.000000+00:00")
         (content . "source one")
         (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (let ((ewoc (appkit-chat-timeline-ewoc))
           (node-m3 (appkit-chat-timeline-node "m3"))
@@ -754,6 +789,7 @@
         (timestamp . "2026-03-08T00:00:00.000000+00:00")
         (content . "thread source")
         (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (let ((ewoc (appkit-chat-timeline-ewoc))
           (node-m2 (appkit-chat-timeline-node "m2"))
@@ -822,6 +858,7 @@
         (message_snapshots . [((content . "snap body")
                                (timestamp . "2026-03-08T00:00:00.000000+00:00"))])
         (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (let ((ewoc (appkit-chat-timeline-ewoc))
           (node-m1 (appkit-chat-timeline-node "m1"))
@@ -914,6 +951,7 @@
         (content . "first")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-state-apply-message-ack "chat" "m1" 1)
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (should (disco-util-json-true-p
              (plist-get (appkit-chat-timeline-context "m2")
@@ -968,6 +1006,7 @@
         (content . "first")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-state-apply-message-ack "chat" "m1" 1)
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (should (disco-util-json-true-p
              (plist-get (appkit-chat-timeline-context "m2")
@@ -983,6 +1022,27 @@
                            :insert-unread))
     (should-not (plist-get (appkit-chat-timeline-context "m3")
                            :insert-unread))))
+
+(ert-deftest disco-room-mark-read-empty-window-does-not-ack-stale-channel-id ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-upsert-channel
+     '((id . "chan")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")
+       (last_message_id . "300")))
+    (disco-state-set-channel-unread "chan" 2)
+    (appkit-chat-history-window-establish-empty)
+    (let (acked-id)
+      (cl-letf (((symbol-function 'disco-api-ack-message-async)
+                 (lambda (_channel-id message-id &rest _args)
+                   (setq acked-id message-id))))
+        (disco-room--mark-read))
+      (should-not acked-id))
+    (should (= 0 (disco-state-channel-unread-count "chan")))
+    (should-not (disco-state-channel-last-read-message-id "chan"))))
 
 (ert-deftest disco-room-mark-read-rolls-back-optimistic-unread-patch-on-error ()
   (with-temp-buffer
@@ -1013,6 +1073,7 @@
         (content . "first")
         (author . ((id . "u1") (username . "alice"))))))
     (disco-state-apply-message-ack "chat" "m1" 1)
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (let (error-callback)
       (cl-letf (((symbol-function 'disco-api-ack-message-async)
@@ -1060,13 +1121,14 @@
     (disco-room-mode)
     (let ((disco-room--channel-id "chan")
           (disco-room--pending-jump-message-id "20")
-          (disco-room--refresh-generation 0)
           jumped
           rendered)
       (disco-state-reset)
       (disco-state-put-messages
        "chan"
        '(((id . "90") (channel_id . "chan") (content . "newer"))))
+      (setq disco-room--remote-latest-message-id "90")
+      (appkit-chat-history-window-set "90" nil)
       (cl-letf (((symbol-function 'disco-api-channel-messages-around-async)
                  (lambda (_channel-id _message-id &rest args)
                    (funcall (plist-get args :on-success)
@@ -1090,13 +1152,18 @@
         (should-not disco-room--pending-jump-message-id)
         (should (equal '("90" "30" "20" "10")
                        (mapcar (lambda (msg) (alist-get 'id msg))
-                               (disco-state-messages "chan"))))))))
+                               (disco-state-messages "chan"))))
+        (should (equal "10" (appkit-chat-history-window-first-key)))
+        (should (equal "30" (appkit-chat-history-window-last-key)))
+        (should
+         (equal '("30" "20" "10")
+                (mapcar #'disco-room--message-id
+                        (disco-room--display-messages))))))))
 
 (ert-deftest disco-room-refresh-preserves-gateway-mutations-during-request ()
   (with-temp-buffer
     (disco-room-mode)
-    (let ((disco-room--channel-id "chan")
-          (disco-room--refresh-generation 0))
+    (let ((disco-room--channel-id "chan"))
       (disco-state-reset)
       (disco-state-put-messages
        "chan"
@@ -1134,7 +1201,6 @@
     (disco-room-mode)
     (let ((disco-room--channel-id "chan")
           (disco-room--pending-jump-message-id "m2")
-          (disco-room--refresh-generation 0)
           rendered)
       (disco-state-reset)
       (cl-letf (((symbol-function 'disco-api-channel-messages-around-async)
@@ -1151,7 +1217,743 @@
         (disco-room--fetch-around-pending-jump)
         (should-not rendered)
         (should-not disco-room--pending-jump-message-id)
-        (should-not (disco-state-messages "chan"))))))
+        (should (equal '("m3")
+                       (mapcar #'disco-room--message-id
+                               (disco-state-messages "chan"))))))))
+
+(ert-deftest disco-room-around-rejects-target-deleted-after-request ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "300") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "300"
+          disco-room--pending-jump-message-id "250")
+    (appkit-chat-history-window-set "100" "300")
+    (let (callback rendered)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-around-async)
+                 (lambda (_channel-id _message-id &rest args)
+                   (setq callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room-render)
+                 (lambda () (setq rendered t)))
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room--fetch-around-pending-jump)
+        (disco-state-delete-message "chan" "250")
+        (funcall callback
+                 '(((id . "300") (channel_id . "chan"))
+                   ((id . "250") (channel_id . "chan"))
+                   ((id . "200") (channel_id . "chan")))))
+      (should-not rendered))
+    (should-not disco-room--pending-jump-message-id)
+    (should (equal "100" (appkit-chat-history-window-first-key)))
+    (should (equal "300" (appkit-chat-history-window-last-key)))))
+
+(ert-deftest disco-room-history-window-strictly-hides-cache-islands ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "900") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "200") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))
+       ((id . "10") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "900")
+    (appkit-chat-history-window-set "100" "300")
+    (should
+     (equal '("300" "200" "100")
+            (mapcar #'disco-room--message-id
+                    (disco-room--display-messages))))
+    (disco-room-render)
+    (should (equal '("100" "200" "300")
+                   (appkit-chat-timeline-keys)))))
+
+(ert-deftest disco-room-refresh-replaces-around-window-with-latest-slice ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "900") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "200") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "900")
+    (appkit-chat-history-window-set "100" "300")
+    (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+               (lambda (_channel-id &rest args)
+                 ;; Deliberately oldest-first: room normalization owns order.
+                 (funcall (plist-get args :on-success)
+                          '(((id . "1000") (channel_id . "chan"))
+                            ((id . "1100") (channel_id . "chan"))))))
+              ((symbol-function 'disco-room--mark-read) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (disco-room-refresh))
+    (should (equal "1100" disco-room--remote-latest-message-id))
+    (should (equal "1000" (appkit-chat-history-window-first-key)))
+    (should-not (appkit-chat-history-window-last-key))
+    (should
+     (equal '("1100" "1000")
+            (mapcar #'disco-room--message-id
+                    (disco-room--display-messages))))))
+
+(ert-deftest disco-room-empty-latest-hides-stale-cache-islands ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan" '(((id . "900") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "900")
+    (appkit-chat-history-window-set "900" nil)
+    (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+               (lambda (_channel-id &rest args)
+                 (funcall (plist-get args :on-success) nil)))
+              ((symbol-function 'disco-room--mark-read) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (disco-room-refresh))
+    (should (appkit-chat-history-window-empty-p))
+    (should (appkit-chat-history-older-loaded-p))
+    (should-not disco-room--remote-latest-message-id)
+    (should-not (disco-room--display-messages))
+    (should (equal '("900")
+                   (mapcar #'disco-room--message-id
+                           (disco-state-messages "chan"))))))
+
+(ert-deftest disco-room-latest-uses-only-revision-retained-response-edges ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan" '(((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "100")
+    (appkit-chat-history-window-set "100" nil)
+    (let ((disco-message-fetch-limit 3)
+          callback)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (setq callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room--mark-read) #'ignore)
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-refresh)
+        (disco-state-delete-message "chan" "200")
+        (funcall callback
+                 '(((id . "400") (channel_id . "chan"))
+                   ((id . "300") (channel_id . "chan"))
+                   ((id . "200") (channel_id . "chan"))))))
+    (should (equal "300" (appkit-chat-history-window-first-key)))
+    (should-not (appkit-chat-history-window-last-key))
+    ;; Raw transport count was full even though revision filtering retained
+    ;; only two rows, so it does not prove the beginning of history.
+    (should-not (appkit-chat-history-older-loaded-p))
+    (should (equal "400" disco-room--remote-latest-message-id))))
+
+(ert-deftest disco-room-latest-full-page-with-no-retained-edge-stays-unknown ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan" '(((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "100")
+    (appkit-chat-history-window-set "100" nil)
+    (let ((disco-message-fetch-limit 2)
+          callback
+          marked-read)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (setq callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room--mark-read)
+                 (lambda (&rest _args) (setq marked-read t)))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-refresh)
+        (disco-state-delete-message "chan" "300")
+        (disco-state-delete-message "chan" "200")
+        (funcall callback
+                 '(((id . "300") (channel_id . "chan"))
+                   ((id . "200") (channel_id . "chan"))))
+        (should-not marked-read)))
+    (should-not (appkit-chat-history-window-known-p))
+    (should (equal "100" disco-room--remote-latest-message-id))))
+
+(ert-deftest disco-room-latest-conflict-keeps-concurrent-live-frontier ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan" '(((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "100")
+    (appkit-chat-history-window-set "100" nil)
+    (let ((disco-message-fetch-limit 2)
+          callback)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (setq callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room--mark-read) #'ignore)
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-refresh)
+        (disco-state-upsert-message
+         "chan" '((id . "300") (channel_id . "chan")))
+        (disco-room--observe-live-create "300")
+        (disco-state-delete-message "chan" "500")
+        (disco-state-delete-message "chan" "400")
+        (funcall callback
+                 '(((id . "500") (channel_id . "chan"))
+                   ((id . "400") (channel_id . "chan"))))))
+    (should (equal "300" disco-room--remote-latest-message-id))
+    (should (equal "300" (appkit-chat-history-window-first-key)))
+    (should-not (appkit-chat-history-window-last-key))
+    (should-not (appkit-chat-history-older-loaded-p))))
+
+(ert-deftest disco-room-load-older-uses-window-first-not-cache-minimum ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "900") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "200") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "900")
+    (appkit-chat-history-window-set "200" "300")
+    (let (captured-before)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (setq captured-before (plist-get args :before))
+                   (funcall (plist-get args :on-success)
+                            '(((id . "150") (channel_id . "chan"))
+                              ((id . "180") (channel_id . "chan"))))))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-load-older-messages t))
+      (should (equal "200" captured-before)))
+    (should (equal "150" (appkit-chat-history-window-first-key)))
+    (should (equal "300" (appkit-chat-history-window-last-key)))
+    (should
+     (equal '("300" "200" "180" "150")
+            (mapcar #'disco-room--message-id
+                    (disco-room--display-messages))))))
+
+(ert-deftest disco-room-older-full-page-does-not-confuse-retained-count-with-eof ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "300") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "300")
+    (appkit-chat-history-window-set "100" nil)
+    (let ((disco-message-fetch-limit 2)
+          callback)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (setq callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-load-older-messages t)
+        (disco-state-delete-message "chan" "80")
+        (funcall callback
+                 '(((id . "90") (channel_id . "chan"))
+                   ((id . "80") (channel_id . "chan"))))))
+    (should (equal "90" (appkit-chat-history-window-first-key)))
+    (should-not (appkit-chat-history-older-loaded-p))))
+
+(ert-deftest disco-room-newer-pages-normalize-order-and-attach-at-frontier ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "500") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "200") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "500")
+    (appkit-chat-history-window-set "100" "300")
+    (let (after-cursors)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (let ((after (plist-get args :after)))
+                     (push after after-cursors)
+                     (funcall
+                      (plist-get args :on-success)
+                      (if (equal after "300")
+                          '(((id . "350") (channel_id . "chan"))
+                            ((id . "400") (channel_id . "chan")))
+                        '(((id . "450") (channel_id . "chan"))
+                          ((id . "500") (channel_id . "chan"))))))))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-load-newer-messages t)
+        (should (equal "400" (appkit-chat-history-window-last-key)))
+        (should
+         (equal '("400" "350" "300" "200" "100")
+                (mapcar #'disco-room--message-id
+                        (disco-room--display-messages))))
+        (disco-room-load-newer-messages t))
+      (should (equal '("400" "300") after-cursors)))
+    (should-not (appkit-chat-history-window-last-key))
+    (should (equal "500" disco-room--remote-latest-message-id))
+    (should
+     (equal '("500" "450" "400" "350" "300" "200" "100")
+            (mapcar #'disco-room--message-id
+                    (disco-room--display-messages))))))
+
+(ert-deftest disco-room-newer-no-progress-stalls-only-current-edge ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "500") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "500")
+    (appkit-chat-history-window-set "100" "300")
+    (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+               (lambda (_channel-id &rest args)
+                 (funcall (plist-get args :on-success) nil)))
+              ((symbol-function 'disco-room-render) #'ignore)
+              ((symbol-function 'disco-room--update-frame) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (disco-room-load-newer-messages t))
+    (should (equal "300" (appkit-chat-history-window-last-key)))
+    (should (appkit-chat-history-newer-stalled-p))))
+
+(ert-deftest disco-room-newer-uses-only-revision-retained-response-edge ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "500") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "500")
+    (appkit-chat-history-window-set "100" "300")
+    (disco-room-render)
+    (let ((disco-message-fetch-limit 2)
+          callback)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (setq callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-load-newer-messages t)
+        (disco-state-delete-message "chan" "500")
+        (disco-room--apply-gateway-event
+         '(:type message-delete :channel-id "chan" :message-id "500"))
+        (funcall callback
+                 '(((id . "500") (channel_id . "chan"))
+                   ((id . "400") (channel_id . "chan"))))))
+    (should (equal "400" (appkit-chat-history-window-last-key)))
+    (should-not (member "500"
+                        (mapcar #'disco-room--message-id
+                                (disco-room--display-messages))))))
+
+(ert-deftest disco-room-stale-older-owner-cannot-overwrite-latest-refresh ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "300") (channel_id . "chan"))
+       ((id . "200") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "300")
+    (appkit-chat-history-window-set "200" nil)
+    (let (older-callback latest-callback)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (if (plist-get args :before)
+                       (setq older-callback (plist-get args :on-success))
+                     (setq latest-callback (plist-get args :on-success)))))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'disco-room--mark-read) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-load-older-messages t)
+        (let ((older-owner (appkit-chat-history-request-owner)))
+          (disco-room-refresh)
+          (should-not
+           (appkit-chat-history-request-current-p older-owner)))
+        (funcall latest-callback
+                 '(((id . "500") (channel_id . "chan"))
+                   ((id . "400") (channel_id . "chan"))))
+        (should-not (appkit-chat-history-loading-p))
+        (funcall older-callback
+                 '(((id . "150") (channel_id . "chan"))))))
+    (should (equal "400" (appkit-chat-history-window-first-key)))
+    (should-not (appkit-chat-history-window-last-key))
+    (should-not
+     (seq-find (lambda (message)
+                 (equal "150" (disco-room--message-id message)))
+               (disco-state-messages "chan")))))
+
+(ert-deftest disco-room-partial-live-create-stays-hidden-and-unread ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "900") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "200") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "900")
+    (appkit-chat-history-window-set "100" "300")
+    (disco-room-render)
+    (disco-state-apply-message-create
+     "chan"
+     '((id . "1000")
+       (type . 0)
+       (author . ((id . "u2")))
+       (mentions . [((id . "u1"))])
+       (mention_roles . [])
+       (mention_everyone . :false)
+       (member . ((roles . []))))
+     "u1" t)
+    (disco-state-upsert-message
+     "chan"
+     '((id . "1000")
+       (channel_id . "chan")
+       (type . 0)
+       (author . ((id . "u2")))
+       (mentions . [((id . "u1"))])))
+    (let (read-id)
+      (cl-letf (((symbol-function 'disco-room--mark-read)
+                 (lambda (&optional id) (setq read-id id))))
+        (disco-room--apply-gateway-event
+         '(:type message-create :channel-id "chan"
+           :message ((id . "1000") (channel_id . "chan")))))
+      (should-not read-id))
+    (should (equal "1000" disco-room--remote-latest-message-id))
+    (should (= 1 (disco-state-channel-unread-count "chan")))
+    (should (= 1 (disco-state-channel-unread-mention-count "chan")))
+    (should (equal '("100" "200" "300")
+                   (appkit-chat-timeline-keys)))
+    (should-not (member "1000"
+                        (mapcar #'disco-room--message-id
+                                (disco-room--display-messages))))))
+
+(ert-deftest disco-room-visible-live-create-optimistically-clears-unread ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan" '(((id . "300") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "300")
+    (appkit-chat-history-window-set "300" nil)
+    (disco-room-render)
+    (let ((message
+           '((id . "400")
+             (channel_id . "chan")
+             (type . 0)
+             (author . ((id . "u2")))
+             (mentions . [((id . "u1"))])
+             (mention_roles . [])
+             (mention_everyone . :false)
+             (member . ((roles . []))))))
+      (disco-state-apply-message-create "chan" message "u1" t)
+      (disco-state-upsert-message "chan" message)
+      (cl-letf (((symbol-function 'disco-api-ack-message-async)
+                 (lambda (&rest _args) nil)))
+        (disco-room--apply-gateway-event
+         (list :type 'message-create :channel-id "chan" :message message))))
+    (should (= 0 (disco-state-channel-unread-count "chan")))
+    (should (equal "400"
+                   (disco-state-channel-last-read-message-id "chan")))
+    (should (equal '("300" "400") (appkit-chat-timeline-keys)))))
+
+(ert-deftest disco-room-filter-live-create-advances-hidden-frontier ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "300") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "300"
+          disco-room--msg-filter
+          '(:active t
+            :query "needle"
+            :items (((id . "200") (channel_id . "chan")))))
+    (appkit-chat-history-window-set "100" "300")
+    (disco-room-render)
+    (disco-state-upsert-message
+     "chan" '((id . "400") (channel_id . "chan")))
+    (let (read-id)
+      (cl-letf (((symbol-function 'disco-room--mark-read)
+                 (lambda (&optional id) (setq read-id id))))
+        (disco-room--apply-gateway-event
+         '(:type message-create :channel-id "chan"
+           :message ((id . "400") (channel_id . "chan")))))
+      (should-not read-id))
+    (should (equal "400" disco-room--remote-latest-message-id))
+    (should (equal "100" (appkit-chat-history-window-first-key)))
+    (should (equal "300" (appkit-chat-history-window-last-key)))
+    (should (equal '("200")
+                   (mapcar #'disco-room--message-id
+                           (disco-room--display-messages))))))
+
+(ert-deftest disco-room-live-create-frontier-is-monotonic-and-clears-stall ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq disco-room--remote-latest-message-id "500")
+    (appkit-chat-history-window-set "100" "300")
+    (appkit-chat-history-newer-stalled-set "300")
+    (disco-room--observe-live-create "400")
+    (should (equal "500" disco-room--remote-latest-message-id))
+    (should (appkit-chat-history-newer-stalled-p))
+    (disco-room--observe-live-create "600")
+    (should (equal "600" disco-room--remote-latest-message-id))
+    (should-not (appkit-chat-history-newer-stalled-p))))
+
+(ert-deftest disco-room-filter-live-delete-invalidates-hidden-edge ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    ;; Gateway state mutation precedes room event delivery, so the deleted
+    ;; frontier is already absent from the canonical cache here.
+    (disco-state-put-messages
+     "chan"
+     '(((id . "200") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "300"
+          disco-room--msg-filter
+          '(:active t
+            :query "needle"
+            :items (((id . "200") (channel_id . "chan")))))
+    (appkit-chat-history-window-set "100" "300")
+    (let ((owner (appkit-chat-history-request-begin 'latest)))
+      (disco-room--apply-gateway-event
+       '(:type message-delete :channel-id "chan" :message-id "300"))
+      (should-not (appkit-chat-history-request-current-p owner)))
+    (should (equal "200" disco-room--remote-latest-message-id))
+    (should-not (appkit-chat-history-loading-p))
+    (should-not (appkit-chat-history-window-known-p))))
+
+(ert-deftest disco-room-filter-delete-removes-result-and-rejects-load-more ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (setq disco-room--msg-filter
+          '(:active t
+            :query "needle"
+            :items (((id . "200") (channel_id . "chan")))
+            :total-count 2
+            :has-more t))
+    (appkit-chat-history-window-establish-empty)
+    (let (success-callback)
+      (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
+                 (lambda (&rest args)
+                   (setq success-callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-filter-load-more)
+        (should disco-room--filter-in-flight)
+        (disco-room--apply-gateway-event
+         '(:type message-delete :channel-id "chan" :message-id "200"))
+        (should-not disco-room--filter-in-flight)
+        (should-not (plist-get disco-room--msg-filter :items))
+        (should (= 1 (plist-get disco-room--msg-filter :total-count)))
+        (funcall success-callback
+                 '((total_results . 2)
+                   (messages (((id . "300") (channel_id . "chan"))))))
+        (should-not (plist-get disco-room--msg-filter :items))))))
+
+(ert-deftest disco-room-filter-cancel-refreshes-invalidated-history-window ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (setq disco-room--msg-filter
+          '(:active t
+            :query "needle"
+            :items (((id . "200") (channel_id . "chan")))))
+    (appkit-chat-history-window-clear)
+    (let (refreshed rendered)
+      (cl-letf (((symbol-function 'disco-room-refresh)
+                 (lambda () (setq refreshed t)))
+                ((symbol-function 'disco-room-render)
+                 (lambda () (setq rendered t)))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-filter-cancel))
+      (should refreshed)
+      (should rendered)
+      (should-not disco-room--msg-filter))))
+
+(ert-deftest disco-room-filter-cancel-jumps-to-cached-item-outside-window ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "900") (channel_id . "chan"))
+       ((id . "300") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--msg-filter
+          '(:active t
+            :query "needle"
+            :items (((id . "900") (channel_id . "chan")))))
+    (appkit-chat-history-window-set "100" "300")
+    (let (jumped rendered)
+      (cl-letf (((symbol-function 'disco-room--message-id-at-point)
+                 (lambda () "900"))
+                ((symbol-function 'disco-room-render)
+                 (lambda () (setq rendered t)))
+                ((symbol-function 'disco-room-jump-to-message)
+                 (lambda (message-id &optional _channel-id)
+                   (setq jumped message-id)))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-filter-cancel))
+      (should rendered)
+      (should (equal "900" jumped)))))
+
+(ert-deftest disco-room-filter-cancel-rejects-late-success ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (appkit-chat-history-window-establish-empty)
+    (let (success-callback)
+      (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
+                 (lambda (&rest args)
+                   (setq success-callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room-render) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (disco-room-search--run-filter '(:query "needle"))
+        (should disco-room--filter-in-flight)
+        (disco-room-filter-cancel)
+        (should-not disco-room--msg-filter)
+        (funcall success-callback
+                 '((total_results . 1)
+                   (messages (((id . "200") (channel_id . "chan"))))))
+        (should-not disco-room--msg-filter)
+        (should-not disco-room--filter-in-flight)))))
+
+(ert-deftest disco-room-filter-edge-delete-rejects-inflight-history ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (disco-state-put-messages
+     "chan"
+     '(((id . "300") (channel_id . "chan"))
+       ((id . "100") (channel_id . "chan"))))
+    (setq disco-room--remote-latest-message-id "300")
+    (appkit-chat-history-window-set "100" "300")
+    (let (old-success refreshed)
+      (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                 (lambda (_channel-id &rest args)
+                   (setq old-success (plist-get args :on-success))))
+                ((symbol-function 'disco-room--update-frame) #'ignore))
+        (disco-room-refresh))
+      (setq disco-room--msg-filter
+            '(:active t
+              :query "needle"
+              :items (((id . "200") (channel_id . "chan")))))
+      ;; Mirror Gateway ordering: canonical deletion happens before delivery.
+      (disco-state-put-messages
+       "chan"
+       '(((id . "200") (channel_id . "chan"))
+         ((id . "100") (channel_id . "chan"))))
+      (disco-room--apply-gateway-event
+       '(:type message-delete :channel-id "chan" :message-id "300"))
+      (cl-letf (((symbol-function 'disco-room-refresh)
+                 (lambda () (setq refreshed t)))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-filter-cancel))
+      (funcall old-success
+               '(((id . "300") (channel_id . "chan"))
+                 ((id . "100") (channel_id . "chan"))))
+      (should refreshed)
+      (should-not (appkit-chat-history-window-known-p))
+      (should (equal "200" disco-room--remote-latest-message-id)))))
+
+(ert-deftest disco-room-empty-window-shows-pending-then-seeds-canonical-create ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (appkit-chat-history-window-establish-empty)
+    (disco-state-insert-pending-message "chan" "250" "pending" "u1")
+    (should (equal '("250")
+                   (mapcar #'disco-room--message-id
+                           (disco-room--display-messages))))
+    (disco-state-upsert-message
+     "chan"
+     '((id . "300") (nonce . "250") (channel_id . "chan")))
+    (disco-room--observe-live-create "300")
+    (should-not (appkit-chat-history-window-empty-p))
+    (should (equal "300" (appkit-chat-history-window-first-key)))
+    (should-not (appkit-chat-history-window-last-key))
+    (should (equal '("300")
+                   (mapcar #'disco-room--message-id
+                           (disco-room--display-messages))))))
+
+(ert-deftest disco-room-pending-upsert-preserves-large-exact-window-edge ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (let ((messages
+           (cl-loop for id from 100 downto 51
+                    collect `((id . ,(number-to-string id))
+                              (channel_id . "chan")))))
+      (disco-state-put-messages "chan" messages)
+      (setq disco-room--remote-latest-message-id "100")
+      (appkit-chat-history-window-set "51" nil)
+      (disco-state-insert-pending-message "chan" "local-1" "draft" "u1")
+      (let ((display (disco-room--display-messages)))
+        (should (= 51 (length (disco-state-messages "chan"))))
+        (should (member "51" (mapcar #'disco-room--message-id display)))
+        (should (member "local-1"
+                        (mapcar #'disco-room--message-id display)))))))
+
+(ert-deftest disco-room-footer-history-delimiter-is-passive ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (setq disco-room--chat-fill-column 24)
+    (appkit-chat-history-window-set "100" "300")
+    (let ((footer (disco-room--footer-text)))
+      (should (string-match-p "····" footer))
+      (with-temp-buffer
+        (insert footer)
+        (should-not (next-button (point-min)))))))
+
+(ert-deftest disco-room-history-autoload-respects-filter-and-both-edges ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (appkit-chat-history-window-set "100" "300")
+    (let ((disco-room-history-auto-load-threshold 100)
+          calls)
+      (cl-letf (((symbol-function 'appkit-chatbuf-point-in-input-p)
+                 (lambda (&optional _position) nil))
+                ((symbol-function 'appkit-chatbuf-composer-idle-p)
+                 (lambda () t))
+                ((symbol-function 'appkit-chat-timeline-footer-start-position)
+                 (lambda () 1000))
+                ((symbol-function 'disco-room-load-older-messages)
+                 (lambda (&optional quiet) (push (list 'older quiet) calls)))
+                ((symbol-function 'disco-room-load-newer-messages)
+                 (lambda (&optional quiet) (push (list 'newer quiet) calls))))
+        (goto-char (point-min))
+        (disco-room--maybe-auto-load-older)
+        (disco-room--maybe-auto-load-newer 950)
+        (should (equal '((newer t) (older t)) calls))
+        (setq calls nil
+              disco-room--msg-filter '(:active t :query "needle"))
+        (disco-room--maybe-auto-load-older)
+        (disco-room--maybe-auto-load-newer 950)
+        (should-not calls)))))
 
 (ert-deftest disco-room-filter-search-activates-msg-filter ()
   (with-temp-buffer
@@ -1632,6 +2434,7 @@
      "chat"
      '(((id . "m2") (channel_id . "chat") (content . "two"))
        ((id . "m1") (channel_id . "chat") (content . "one"))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (let ((ewoc (appkit-chat-timeline-ewoc))
           (node-m1 (appkit-chat-timeline-node "m1"))
@@ -1671,6 +2474,7 @@
           (attachments . (((id . "a1")
                            (filename . "doc.txt")
                            (url . "https://example.invalid/doc.txt")))))))
+      (disco-room-test-establish-latest-window)
       (disco-room-render)
       (should (string-match-p (regexp-quote "[file] doc.txt") (buffer-string)))
       (should (string-match-p (regexp-quote "https://example.invalid/doc.txt")
@@ -1741,6 +2545,7 @@
        ((id . "m1")
         (channel_id . "chat")
         (attachments . (((id . "a1") (filename . "one.ogg")))))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (should (equal '("m2")
                    (appkit-chat-timeline-dependent-keys
@@ -1784,6 +2589,7 @@
           (channel_id . "chat")
           (attachments . (,attachment)))
          ((id . "m1") (channel_id . "chat"))))
+      (disco-room-test-establish-latest-window)
       (disco-room-render)
       (should (equal '("m2")
                      (appkit-chat-timeline-dependent-keys
@@ -1853,6 +2659,7 @@
                            (width . 640)
                            (height . 480)
                            (url . "https://example.invalid/cat.png")))))))
+      (disco-room-test-establish-latest-window)
       (disco-room-render)
       (should (string-match-p (regexp-quote "[spoiler image hidden]")
                               (buffer-string)))
@@ -2453,6 +3260,7 @@
         (flags . 32)
         (content . "starter")
         (author . ((id . "u1") (username . "alice"))))))
+    (disco-room-test-establish-latest-window)
     (disco-room-render)
     (should (string-match-p (regexp-quote "↪ Thread: thread:m1")
                             (buffer-string)))
@@ -2649,6 +3457,7 @@
         (timestamp . "2026-07-11T12:00:00.000000+00:00")
         (content . "hello")
         (author . ((id . "u1") (username . "Alice"))))))
+    (disco-room-test-establish-latest-window)
     (let ((line-height 21)
           (disco-room-avatar-round-images nil))
       (cl-labels
