@@ -1512,33 +1512,45 @@ When NO-RERENDER is non-nil, update local state without rendering."
 
 (defun disco-room--attachment-input-object-display-text (attachment)
   "Return visible composer text for ATTACHMENT input object."
-  (format "[file] %s"
+  (let* ((path (plist-get attachment :path))
+         (filename
           (or (plist-get attachment :filename)
-              (file-name-nondirectory (or (plist-get attachment :path) ""))
-              "unnamed")))
+              (and path (file-name-nondirectory path))
+              "unnamed"))
+         (content-type (plist-get attachment :content-type))
+         (image-p
+          (or (and (stringp content-type)
+                   (string-prefix-p "image/" content-type))
+              (appkit-media-image-file-name-p filename)))
+         (image
+          (and image-p
+               (appkit-media-file-present-p path)
+               (appkit-media-one-line-preview-image-from-file path)))
+         (preview
+          (and image (appkit-media-image-display-string image "▧")))
+         (size
+          (and (appkit-media-file-present-p path)
+               (file-size-human-readable
+                (file-attribute-size (file-attributes path))))))
+    (concat (if image-p "[image] " "[file] ")
+            (if preview (concat preview " ") "")
+            (propertize filename 'help-echo path)
+            (if size (format " (%s)" size) ""))))
 
 (defun disco-room--attachment-input-object-string (attachment)
   "Return one propertized draft string representing ATTACHMENT."
   (let* ((object (copy-tree attachment))
-         (text (disco-room--attachment-input-object-display-text object))
-         (len (length text)))
-    (add-text-properties
-     0 len
-     (list appkit-chatbuf-input-object-property object
-           'face 'appkit-chatbuf-input-object)
-     text)
-    (when (> len 0)
-      (add-text-properties 0 1
-                           (list appkit-chatbuf-input-object-start-property t)
-                           text)
-      (add-text-properties (1- len) len
-                           (list appkit-chatbuf-input-object-end-property t)
-                           text))
-    text))
+         (text (disco-room--attachment-input-object-display-text object)))
+    (appkit-chatbuf-input-object-string text object)))
 
 (defun disco-room--insert-attachment-input-object (attachment)
   "Insert ATTACHMENT as one structured composer object at point."
   (let ((object (copy-tree attachment)))
+    ;; Do not insert the leading separator into an existing atomic object when
+    ;; point was placed unexpectedly inside its intangible display span.
+    (when-let* ((bounds (appkit-chatbuf-input-object-bounds-at-point)))
+      (unless (= (point) (car bounds))
+        (goto-char (cdr bounds))))
     (when (and (appkit-chatbuf-point-in-input-p)
                (> (point) (or (appkit-chatbuf-input-start-position) (point-min)))
                (let ((before (char-before)))
@@ -1598,9 +1610,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
     (while (< pos len)
       (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
         (if (disco-room--attachment-input-object-p object)
-            (let* ((end (or (next-single-property-change
-                             pos appkit-chatbuf-input-object-property text len)
-                            len))
+            (let* ((end (appkit-chatbuf-next-input-object-change
+                         pos text len))
                    (object-copy (copy-tree object))
                    (attachment (disco-room--attachment-input-object-to-attachment object-copy)))
               (push (list :type 'object
@@ -1611,9 +1622,8 @@ When NO-RERENDER is non-nil, update local state without rendering."
                           :label (disco-room--attachment-label attachment "[file]"))
                     refs)
               (setq pos end))
-          (let* ((next-object (or (next-single-property-change
-                                   pos appkit-chatbuf-input-object-property text len)
-                                  len))
+          (let* ((next-object
+                  (appkit-chatbuf-next-input-object-change pos text len))
                  (chunk (substring-no-properties text pos next-object))
                  (chunk-pos 0))
             (while (string-match disco-room--attachment-token-regexp chunk chunk-pos)
@@ -1668,14 +1678,12 @@ When NO-RERENDER is non-nil, update local state without rendering."
     (while (< pos len)
       (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
         (if object
-            (let ((end (or (next-single-property-change
-                            pos appkit-chatbuf-input-object-property text len)
-                           len)))
+            (let ((end (appkit-chatbuf-next-input-object-change
+                        pos text len)))
               (push (copy-tree object) objects)
               (setq pos end))
-          (setq pos (or (next-single-property-change
-                         pos appkit-chatbuf-input-object-property text len)
-                        len)))))
+          (setq pos (appkit-chatbuf-next-input-object-change
+                     pos text len)))))
     (nreverse objects)))
 
 (defun disco-room--next-attachment-token-id ()
@@ -1720,18 +1728,16 @@ When NO-RERENDER is non-nil, update local state without rendering."
     (while (< pos len)
       (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
         (if object
-            (let* ((end (or (next-single-property-change
-                             pos appkit-chatbuf-input-object-property text len)
-                            len))
+            (let* ((end (appkit-chatbuf-next-input-object-change
+                         pos text len))
                    (object-copy (copy-tree object)))
               (push object-copy objects)
               (when-let* ((attachment
                            (disco-room--attachment-input-object-to-attachment object-copy)))
                 (push attachment attachments))
               (setq pos end))
-          (let* ((end (or (next-single-property-change
-                           pos appkit-chatbuf-input-object-property text len)
-                          len))
+          (let* ((end (appkit-chatbuf-next-input-object-change
+                       pos text len))
                  (chunk (substring-no-properties text pos end))
                  (content-chunk
                   (replace-regexp-in-string disco-room--attachment-token-regexp "" chunk)))
@@ -1792,6 +1798,9 @@ When NO-RERENDER is non-nil, update local state without rendering."
   "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
   (unless (appkit-chatbuf-rendering-p)
     (appkit-chatbuf-post-command-clamp-point)
+    (when (and (appkit-chatbuf-point-in-input-p)
+               (appkit-chatbuf-input-has-objects-p))
+      (appkit-chatbuf-input-prune-broken-objects))
     (let ((current-message-id (or (get-text-property (point) 'disco-message-id)
                                   (get-text-property (line-beginning-position)
                                                      'disco-message-id))))
@@ -1810,10 +1819,11 @@ When NO-RERENDER is non-nil, update local state without rendering."
     (disco-room--prune-unused-attachment-tokens text)
     (disco-room--sync-pending-attachments-from-draft text)))
 
-(defun disco-room--after-change (beg end _old-len)
+(defun disco-room--after-change (beg end old-len)
   "Keep draft state synced after editable-region changes from BEG to END."
   (appkit-chatbuf-after-change
    beg end
+   :old-length old-len
    :rendering-p (appkit-chatbuf-rendering-p)
    :prune-broken-objects t
    :sync-function #'disco-room--sync-draft-from-buffer))
@@ -6297,6 +6307,9 @@ paragraph, line, and whitespace boundaries near the end of the chunk."
 
 When called with prefix argument, force draft edit in minibuffer first."
   (interactive)
+  (when (appkit-chatbuf-input-start-position)
+    (appkit-chatbuf-input-prune-broken-objects)
+    (disco-room--sync-draft-from-buffer))
   (disco-room--ensure-action-available
    (disco-room--send-message-unavailable-reason)
    (if (disco-room--composer-edit-active-p)
@@ -6782,12 +6795,20 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
 (defun disco-room-return-dwim ()
   "RET behavior for room buffer.
 
-When send-on-return is enabled, send current draft.  Otherwise open the draft
-editor."
+An unresolved composer token owns RET so completion cannot fall through into
+an accidental send.  RET outside the composer only returns point to the draft.
+Otherwise, when send-on-return is enabled, send current draft; when disabled,
+open the draft editor."
   (interactive)
-  (if (disco-room--input-option-send-on-return)
-      (disco-room-send-message)
-    (disco-room-edit-draft)))
+  (cond
+   ((not (appkit-chatbuf-point-in-input-p))
+    (goto-char (or (appkit-chatbuf-input-logical-end-position) (point-max))))
+   ((disco-company-completion-token-at-point)
+    (disco-room-complete-mention))
+   ((disco-room--input-option-send-on-return)
+    (disco-room-send-message))
+   (t
+    (disco-room-edit-draft))))
 
 (defun disco-room-toggle-breakline ()
   "Toggle visual breakline wrapping in the current room buffer."
@@ -7345,6 +7366,10 @@ _MSG is ignored because the transient resolves availability from point."
     (define-key map (kbd "C-c m") disco-room-message-prefix-map)
     (define-key map (kbd "M-<") #'disco-room-load-older-messages)
     (define-key map (kbd "RET") #'disco-room-return-dwim)
+    (define-key map (kbd "DEL") #'appkit-chatbuf-input-backward-delete)
+    (define-key map (kbd "<backspace>") #'appkit-chatbuf-input-backward-delete)
+    (define-key map (kbd "C-d") #'appkit-chatbuf-input-forward-delete)
+    (define-key map (kbd "<delete>") #'appkit-chatbuf-input-forward-delete)
     (define-key map (kbd "M-RET") #'disco-room-input-preview)
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)
     (define-key map (kbd "M-p") #'disco-room-draft-prev)

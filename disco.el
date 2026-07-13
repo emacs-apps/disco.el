@@ -7,7 +7,7 @@
 ;; Keywords: comm
 ;; URL: https://github.com/0WD0/disco.el
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.5.0") (appkit "0.1"))
+;; Package-Requires: ((emacs "27.1") (plz "0.8") (websocket "1.16") (transient "0.5.0") (appkit "0.2.0"))
 
 ;;; Commentary:
 

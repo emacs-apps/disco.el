@@ -28,6 +28,10 @@
     (should-not disco-room-timeline-mode)
     (should (eq (key-binding (kbd "q") t)
                 'self-insert-command))
+    (should (eq (key-binding (kbd "DEL") t)
+                'appkit-chatbuf-input-backward-delete))
+    (should (eq (key-binding (kbd "C-d") t)
+                'appkit-chatbuf-input-forward-delete))
     (should (eq (key-binding (kbd "M-RET") t) 'disco-room-input-preview))
     (should (eq (key-binding (kbd "M-r") t) 'disco-room-draft-history-search))
     (should (eq (key-binding (kbd "C-c C-e") t) 'disco-room-input-formatting-set))
@@ -196,6 +200,127 @@
     (should (equal "live"
                    (appkit-chatbuf-string-plain-text
                     (disco-room--current-draft))))))
+
+(ert-deftest disco-room-deleted-tail-does-not-return-after-frame-refresh ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (setq-local disco-room--channel-name "chat")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat")
+       (type . 0)
+       (guild_id . "g1")
+       (permissions . "2048")))
+    (disco-room-render)
+    (goto-char (point-max))
+    (insert "abc")
+    (delete-backward-char 1)
+    (should (equal "ab"
+                   (appkit-chatbuf-string-plain-text
+                    (disco-room--current-draft))))
+    (disco-room--update-frame)
+    (should (equal "ab" (appkit-chatbuf-input-string)))
+    (should (equal "ab"
+                   (appkit-chatbuf-string-plain-text
+                    (disco-room--current-draft))))))
+
+(ert-deftest disco-room-return-completes-token-without-sending ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (appkit-chatbuf-install-prompt "> ")
+    (insert "@ali")
+    (let (completed sent)
+      (cl-letf (((symbol-function 'disco-company-completion-token-at-point)
+                 (lambda () '(:trigger ?@ :raw "@ali")))
+                ((symbol-function 'disco-room-complete-mention)
+                 (lambda () (setq completed t)))
+                ((symbol-function 'disco-room-send-message)
+                 (lambda () (setq sent t))))
+        (disco-room-return-dwim))
+      (should completed)
+      (should-not sent)
+      (should (equal "@ali" (appkit-chatbuf-input-string))))))
+
+(ert-deftest disco-room-return-outside-composer-never-sends-draft ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (insert "timeline\n")
+    (appkit-chatbuf-install-prompt "> ")
+    (insert "unsent draft")
+    (goto-char (point-min))
+    (let (sent)
+      (cl-letf (((symbol-function 'disco-room-send-message)
+                 (lambda () (setq sent t))))
+        (disco-room-return-dwim))
+      (should-not sent)
+      (should (appkit-chatbuf-point-in-input-p))
+      (should (= (point) (point-max)))
+      (should (equal "unsent draft" (appkit-chatbuf-input-string))))))
+
+(ert-deftest disco-room-image-attachment-uses-canonical-preview-object ()
+  (let ((path (make-temp-file "disco-composer-preview" nil ".png")))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "123456"))
+          (cl-letf (((symbol-function
+                      'appkit-media-one-line-preview-image-from-file)
+                     (lambda (file &optional _max-width)
+                       (should (equal file path))
+                       '(:composer-preview)))
+                    ((symbol-function 'appkit-media-image-display-string)
+                     (lambda (image fallback)
+                       (propertize fallback 'display image))))
+            (let* ((object
+                    (disco-room--make-attachment-input-object
+                     path :filename "preview.png" :content-type "image/png"))
+                   (text (disco-room--attachment-input-object-string object)))
+              (should (string-match-p "\\[image\\]" text))
+              (should (string-match-p "preview.png" text))
+              (should (string-match-p "(6)" text))
+              (should (equal object
+                             (get-text-property
+                              0 appkit-chatbuf-input-object-property text)))
+              (should (equal
+                       (substring-no-properties text 0 (1- (length text)))
+                       (get-text-property
+                        0 appkit-chatbuf-input-object-text-property text)))
+              (should (get-text-property
+                       (1- (length text))
+                       appkit-chatbuf-input-object-end-property text)))))
+      (ignore-errors (delete-file path)))))
+
+(ert-deftest disco-room-equal-adjacent-objects-parse-as-two-attachments ()
+  (let* ((object
+          (disco-room--make-attachment-input-object
+           "/tmp/reused.png" :filename "reused.png"))
+         (label "[image] reused.png")
+         (draft
+          (concat (appkit-chatbuf-input-object-string label object)
+                  (appkit-chatbuf-input-object-string label object)))
+         (parsed (disco-room--parse-draft-input draft)))
+    (should (= 2 (length (plist-get parsed :objects))))
+    (should (= 2 (length (plist-get parsed :attachments))))
+    (should (equal "" (plist-get parsed :content)))))
+
+(ert-deftest disco-room-attachment-insertion-inside-object-keeps-both-atomic ()
+  (with-temp-buffer
+    (appkit-chatbuf-install-prompt "> ")
+    (let ((first (disco-room--make-attachment-input-object
+                  "/tmp/first.png" :filename "first.png"))
+          (second (disco-room--make-attachment-input-object
+                   "/tmp/second.png" :filename "second.png")))
+      (disco-room--insert-attachment-input-object first)
+      (goto-char (1+ (appkit-chatbuf-input-start-position)))
+      (disco-room--insert-attachment-input-object second)
+      (appkit-chatbuf-input-prune-broken-objects)
+      (let ((parsed (disco-room--parse-draft-input
+                     (appkit-chatbuf-input-string))))
+        (should (= 2 (length (plist-get parsed :attachments))))
+        (should (equal '("first.png" "second.png")
+                       (mapcar (lambda (attachment)
+                                 (plist-get attachment :filename))
+                               (plist-get parsed :attachments))))))))
 
 (ert-deftest disco-room-draft-history-prev-next-restores-structured-pending-draft ()
   (with-temp-buffer

@@ -179,6 +179,13 @@ completion row height stays stable across CAPF/Corfu and company popups."
   (or (appkit-chat-completion-delimited-token-bounds ?:)
       (appkit-chat-completion-token-bounds '(?@ ?#))))
 
+(defun disco-company-completion-token-at-point ()
+  "Return unresolved room completion token at point, or nil.
+
+This public query lets the room RET dispatcher guard against an active
+`@'/`#'/`:' token without depending on a particular completion frontend."
+  (disco-company--completion-token-bounds))
+
 (defun disco-company--member-search-query (raw-query)
   "Normalize RAW-QUERY for a remote guild member search."
   (let ((query (string-trim (or raw-query ""))))
