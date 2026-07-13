@@ -176,9 +176,8 @@ Current high-value follow-ups:
   room has a real implementation behind it
 - `C-c C-e` should remain reserved until room has a real formatting operation
   behind it
-- `C-c C-c` still needs an explicit long-term decision: either converge toward
-  telega's filter-cancel usage or remain a documented divergence because room
-  treats it as a send alias
+- `C-c C-c` now follows telega's filter-cancel usage; explicit send uses
+  `C-c RET`, while `RET` remains the configurable quick-send/editor action
 - `disco-root` and other read-only overview buffers still need a full audit
   against `telega-root-mode-map`
 

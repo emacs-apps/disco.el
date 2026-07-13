@@ -24,6 +24,7 @@
 (require 'disco-preview)
 (require 'disco-room)
 (require 'disco-thread)
+(require 'appkit-ui)
 (require 'appkit-view)
 (require 'disco-state)
 (require 'disco-root-layout)
@@ -131,12 +132,12 @@ Signal a user-facing error when the root controller callback is missing."
    disco-root-view-attach-live-updates-function
    'attach-live-updates))
 
-(defun disco-root-view--load-more-at-point ()
-  "Load more search results for the search row at point."
-  (interactive)
+(defun disco-root-view--load-more (tab)
+  "Load more search results for exact search TAB."
   (disco-root-view--call-controller
    disco-root-view-load-more-function
-   'load-more-at-point))
+   'load-more
+   tab))
 
 (defun disco-root-view--queue-live-update (channel-ids &optional structural-p header-p)
   "Queue one controller-driven live update for CHANNEL-IDS."
@@ -322,17 +323,6 @@ Signal a user-facing error when the root controller callback is missing."
 (defun disco-root--line-channel-id (&optional pos)
   "Return channel id for row at POS when row is channel/thread row."
   (disco-root--line-property 'disco-channel-id pos))
-(defun disco-root--line-search-message-id (&optional pos)
-  "Return root search message id for row at POS, or nil."
-  (disco-root--line-property 'disco-root-search-message-id pos))
-
-(defun disco-root--line-search-action (&optional pos)
-  "Return root search row action symbol for row at POS, or nil."
-  (disco-root--line-property 'disco-root-search-action pos))
-
-(defun disco-root--line-search-tab (&optional pos)
-  "Return root search tab symbol for row at POS, or nil."
-  (disco-root--line-property 'disco-root-search-tab pos))
 
 
 (defun disco-root--line-unread-count (&optional pos)
@@ -1266,19 +1256,32 @@ WIDTH overrides the root buffer's responsive fill column."
                      (format "Open channel %s and jump to message %s"
                              channel-id message-id)))))
 
+(defun disco-root--open-search-message (message)
+  "Open exact root search result MESSAGE."
+  (let ((message-id (alist-get 'id message))
+        (channel-id (alist-get 'channel_id message)))
+    (unless (and message-id channel-id)
+      (user-error "disco: search result has no openable message"))
+    (disco-room-jump-to-message message-id channel-id)))
+
 (defun disco-root--insert-search-message-line (message indent &optional tab)
   "Insert one root search result MESSAGE row with INDENT for TAB."
-  (appkit-view-insert-one-line-row
-   (disco-root--search-message-one-line-row message tab)
-   :indent indent
-   :width (max 60 (or disco-root--fill-column
-                      (disco-root--compute-fill-column)))
-   :icon-slot-width
-   (max 2
-        (ceiling (* disco-root--activity-icon-slot-width
-                    (disco-root--text-scale-factor))))
-   :context-width-spec disco-root-activity-context-width
-   :time-slot-width disco-root-activity-time-column-width))
+  (let ((row (disco-root--search-message-one-line-row message tab))
+        (start (point)))
+    (appkit-view-insert-one-line-row
+     row
+     :indent indent
+     :width (max 60 (or disco-root--fill-column
+                        (disco-root--compute-fill-column)))
+     :icon-slot-width
+     (max 2
+          (ceiling (* disco-root--activity-icon-slot-width
+                      (disco-root--text-scale-factor))))
+     :context-width-spec disco-root-activity-context-width
+     :time-slot-width disco-root-activity-time-column-width)
+    (appkit-ui-make-action-row
+     start (point) message #'disco-root--open-search-message
+     :help-echo (appkit-view-one-line-row-help-echo row))))
 
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
@@ -1643,6 +1646,27 @@ Higher score means channel should appear earlier in activity mode."
    :help-echo label
    :mouse-face 'highlight))
 
+(defun disco-root--activate-search-action (entry)
+  "Activate exact root search action ENTRY."
+  (pcase (disco-root-layout-entry-action entry)
+    ('load-more
+     (disco-root-view--load-more (disco-root-layout-entry-tab entry)))
+    (action
+     (user-error "disco: unsupported search action: %S" action))))
+
+(defun disco-root--insert-search-action-line (entry)
+  "Insert one exact actionable root search ENTRY."
+  (let* ((row (disco-root--search-action-label-row
+               (disco-root-layout-entry-label entry)
+               (disco-root-layout-entry-action entry)
+               (disco-root-layout-entry-tab entry)))
+         (start (point)))
+    (appkit-view-insert-label-row row)
+    (appkit-ui-make-action-row
+     start (point) entry #'disco-root--activate-search-action
+     :help-echo (appkit-view-label-row-help-echo row)
+     :mouse-face (appkit-view-label-row-mouse-face row))))
+
 (defun disco-root--layout-entry-label-row (entry)
   "Return label row model for renderable root layout ENTRY, or nil."
   (pcase (disco-root-layout-entry-type entry)
@@ -1669,26 +1693,30 @@ Higher score means channel should appear earlier in activity mode."
 
 (defun disco-root--insert-layout-entry (entry)
   "Insert one root layout ENTRY into the current buffer."
-  (if-let* ((row (disco-root--layout-entry-label-row entry)))
-      (appkit-view-insert-label-row row)
-    (pcase (disco-root-layout-entry-type entry)
-      ('search-message
-       (disco-root--insert-search-message-line
-        (disco-root-layout-entry-message entry)
-        (or (disco-root-layout-entry-indent entry) 2)
-        (disco-root-layout-entry-tab entry)))
-      ('text
-       (insert (or (disco-root-layout-entry-text entry) "") "\n"))
-      ('blank
-       (insert "\n"))
-      ('channel
-       (disco-root--insert-channel-line
-        (disco-root-layout-entry-channel entry)
-        (or (disco-root-layout-entry-indent entry) 0)
-        (or (disco-root-layout-entry-scope entry) 'root)))
-      (_
-       (error "Unknown root layout entry type: %S"
-              (disco-root-layout-entry-type entry))))))
+  (pcase (disco-root-layout-entry-type entry)
+    ('search-action
+     (disco-root--insert-search-action-line entry))
+    (_
+     (if-let* ((row (disco-root--layout-entry-label-row entry)))
+         (appkit-view-insert-label-row row)
+       (pcase (disco-root-layout-entry-type entry)
+         ('search-message
+          (disco-root--insert-search-message-line
+           (disco-root-layout-entry-message entry)
+           (or (disco-root-layout-entry-indent entry) 2)
+           (disco-root-layout-entry-tab entry)))
+         ('text
+          (insert (or (disco-root-layout-entry-text entry) "") "\n"))
+         ('blank
+          (insert "\n"))
+         ('channel
+          (disco-root--insert-channel-line
+           (disco-root-layout-entry-channel entry)
+           (or (disco-root-layout-entry-indent entry) 0)
+           (or (disco-root-layout-entry-scope entry) 'root)))
+         (_
+          (error "Unknown root layout entry type: %S"
+                 (disco-root-layout-entry-type entry))))))))
 
 (defun disco-root--ewoc-printer (entry)
   "Pretty-printer for one root EWOC ENTRY."
@@ -2225,35 +2253,32 @@ SCOPE is forwarded to extra-info providers."
 (defun disco-root-open-at-point ()
   "Open or toggle the actionable row at point.
 
-If point is not on actionable row, jump to next channel row and open it."
+Search layouts require point to be on the exact action button.  In other
+layouts, a non-actionable row falls forward to the next channel row."
   (interactive)
-  (let ((search-action (disco-root--line-search-action))
-        (search-message-id (disco-root--line-search-message-id))
-        (guild-id (disco-root--line-guild-id))
-        (channel-id (disco-root--line-channel-id)))
-    (cond
-     ((disco-root--toggle-node-at-point))
-     (guild-id
-      (disco-channel-directory-open guild-id))
-     ((eq search-action 'load-more)
-      (disco-root-view--load-more-at-point))
-     ((and search-message-id channel-id)
-      (disco-room-jump-to-message search-message-id channel-id))
-     (channel-id
-      (disco-root--open-channel channel-id))
-     (t
-      (let* ((positions (disco-root--channel-line-positions))
-             (next (disco-root--next-position-after
-                    positions
-                    (line-beginning-position))))
-        (if next
-            (progn
-              (goto-char next)
-              (if-let* ((next-message-id (disco-root--line-search-message-id next)))
-                  (disco-room-jump-to-message next-message-id
-                                              (disco-root--line-channel-id next))
-                (disco-root--open-channel (disco-root--line-channel-id next))))
-          (user-error "disco: no openable channel at point")))))))
+  (if (eq disco-root--layout 'search)
+      (if (button-at (point))
+          (push-button (point))
+        (user-error "disco: no search action at point"))
+    (let ((guild-id (disco-root--line-guild-id))
+          (channel-id (disco-root--line-channel-id)))
+      (cond
+       ((disco-root--toggle-node-at-point))
+       (guild-id
+        (disco-channel-directory-open guild-id))
+       (channel-id
+        (disco-root--open-channel channel-id))
+       (t
+        (let* ((positions (disco-root--channel-line-positions))
+               (next (disco-root--next-position-after
+                      positions
+                      (line-beginning-position))))
+          (if next
+              (progn
+                (goto-char next)
+                (disco-root--open-channel
+                 (disco-root--line-channel-id next)))
+            (user-error "disco: no openable channel at point"))))))))
 
 (defun disco-root-next-unread ()
   "Jump to next channel row with unread state."
@@ -2272,7 +2297,10 @@ If point is not on actionable row, jump to next channel row and open it."
   "Handle mouse EVENT by opening or toggling row at clicked point."
   (interactive "e")
   (mouse-set-point event)
-  (disco-root-open-at-point))
+  (if (eq disco-root--layout 'search)
+      (when (button-at (point))
+        (push-button (point)))
+    (disco-root-open-at-point)))
 
 (defun disco-root--clear-ewoc-state ()
   "Clear root EWOC and node indexes for non-EWOC layouts."

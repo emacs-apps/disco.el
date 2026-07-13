@@ -7345,7 +7345,7 @@ _MSG is ignored because the transient resolves availability from point."
      :inapt-if disco-room--thread-toggle-archived-unavailable-reason)
     ("A" "Parent archived threads..." disco-room-open-parent-archived-threads)]
    ["Inspect"
-    ("/" "Search channel..." disco-room-search-channel)
+    ("/" "Structured search..." disco-room-search-channel)
     ("f" "Filter search" disco-room-filter-search)
     ("F" "Cancel filter" disco-room-filter-cancel)
     ("v" "Refetch avatars" disco-room-refetch-avatars)
@@ -7383,7 +7383,7 @@ _MSG is ignored because the transient resolves availability from point."
     (define-key map (kbd "C-c C-r") #'disco-room-inplace-search-query)
     (define-key map (kbd "C-c C-s") #'disco-room-inplace-search-query-forward)
     (define-key map (kbd "C-c /") #'disco-room-filter-search)
-    (define-key map (kbd "C-c C-/") #'disco-room-filter-cancel)
+    (define-key map (kbd "C-c C-c") #'disco-room-filter-cancel)
     (define-key map (kbd "C-c M-/") #'disco-room-search-channel)
     (define-key map (kbd "C-c C-p s") #'disco-room-send-poll)
     (define-key map (kbd "C-c C-p +") #'disco-room-vote-poll-answer)
@@ -7393,7 +7393,7 @@ _MSG is ignored because the transient resolves availability from point."
     (define-key map (kbd "C-c C-p c") #'disco-room-clear-poll-votes)
     (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
     (define-key map (kbd "C-c C-P") #'disco-room-ack-channel-pins)
-    (define-key map (kbd "C-c C-c") #'disco-room-send-message)
+    (define-key map (kbd "C-c RET") #'disco-room-send-message)
     (define-key map (kbd "C-c C-a") #'disco-room-attach-transient)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-v") #'disco-room-attach-clipboard)

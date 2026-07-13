@@ -2,9 +2,16 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'mouse)
 (require 'seq)
 
 (require 'disco-root)
+
+(defun disco-root-test--primary-click (window position)
+  "Return a real primary-click event pair in WINDOW at POSITION."
+  (let ((posn (list window position '(0 . 0) 0 nil position)))
+    (vector (list 'down-mouse-1 posn)
+            (list 'mouse-1 posn))))
 
 (ert-deftest disco-root-displayable-channel-requires-resolved-view-permission ()
   (should
@@ -905,11 +912,12 @@
 (ert-deftest disco-root-open-at-point-jumps-to-search-message ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((inhibit-read-only t))
-      (insert "hit\n")
-      (add-text-properties (point-min) (point-max)
-                           '(disco-root-search-message-id "m1"
-                             disco-channel-id "c1")))
+    (setq-local disco-root--layout 'search)
+    (let ((inhibit-read-only t)
+          (disco-root--fill-column 80))
+      (disco-root--insert-search-message-line
+       '((id . "m1") (channel_id . "c1") (content . "hit"))
+       2 'messages))
     (goto-char (point-min))
     (let (jumped)
       (cl-letf (((symbol-function 'disco-room-jump-to-message)
@@ -917,6 +925,118 @@
                    (setq jumped (list message-id channel-id)))))
         (disco-root-open-at-point)
         (should (equal '("m1" "c1") jumped))))))
+
+(ert-deftest disco-root-search-result-button-dispatches-exact-primary-click ()
+  (save-window-excursion
+    (with-temp-buffer
+      (disco-root-mode)
+      (setq-local disco-root--layout 'search)
+      (let* ((inhibit-read-only t)
+             (disco-root--fill-column 80)
+             (first '((id . "m1") (channel_id . "c1") (content . "first")))
+             (second '((id . "900719925474099312345")
+                       (channel_id . "c2")
+                       (content . "second")))
+             first-button
+             second-button
+             first-newline
+             blank-position
+             jumped)
+        (disco-root--insert-search-message-line first 2 'messages)
+        (setq first-button (button-at (point-min))
+              first-newline (1- (point)))
+        (let ((start (point)))
+          (disco-root--insert-search-message-line second 2 'messages)
+          (setq second-button (button-at start)))
+        (setq blank-position (point))
+        (insert "\n")
+        (should (eq (button-type first-button) 'appkit-ui-action-row-button))
+        (should (eq (button-get first-button 'appkit-ui-action-row-object) first))
+        (should (eq (button-get second-button 'appkit-ui-action-row-object) second))
+        (should-not (button-at first-newline))
+        (should-not (button-at blank-position))
+        (switch-to-buffer (current-buffer))
+        (goto-char first-button)
+        (cl-letf (((symbol-function 'disco-room-jump-to-message)
+                   (lambda (message-id channel-id)
+                     (push (list message-id channel-id) jumped))))
+          (let ((mouse-1-click-follows-link 450))
+            (execute-kbd-macro
+             (disco-root-test--primary-click
+              (selected-window) (marker-position second-button)))
+            (should (= (point) (marker-position first-button)))
+            (execute-kbd-macro
+             (disco-root-test--primary-click
+              (selected-window) first-newline))
+            (execute-kbd-macro
+             (disco-root-test--primary-click
+              (selected-window) blank-position))))
+        (should (equal '(("900719925474099312345" "c2")) jumped))))))
+
+(ert-deftest disco-root-search-show-more-dispatches-exact-entry-tab ()
+  (save-window-excursion
+    (with-temp-buffer
+      (disco-root-mode)
+      (setq-local disco-root--layout 'search)
+      (let* ((inhibit-read-only t)
+             (first (disco-root--entry-search-action
+                     "Show more messages" 'load-more 'messages))
+             (second (disco-root--entry-search-action
+                      "Show more files" 'load-more 'files))
+             first-button
+             second-button
+             loaded-tabs)
+        (disco-root--insert-layout-entry first)
+        (setq first-button (button-at (point-min)))
+        (let ((start (point)))
+          (disco-root--insert-layout-entry second)
+          (setq second-button (button-at start)))
+        (should (eq (button-get first-button 'appkit-ui-action-row-object) first))
+        (should (eq (button-get second-button 'appkit-ui-action-row-object) second))
+        (switch-to-buffer (current-buffer))
+        (goto-char first-button)
+        (let ((disco-root-view-load-more-function
+               (lambda (tab) (push tab loaded-tabs)))
+              (mouse-1-click-follows-link 450))
+          (execute-kbd-macro
+           (disco-root-test--primary-click
+            (selected-window) (marker-position second-button))))
+        (should (equal '(files) loaded-tabs))))))
+
+(ert-deftest disco-root-search-open-does-not-fall-forward-from-blank-row ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (setq-local disco-root--layout 'search)
+    (let ((inhibit-read-only t)
+          (disco-root--fill-column 80)
+          jumped)
+      (insert "\n")
+      (disco-root--insert-search-message-line
+       '((id . "m1") (channel_id . "c1") (content . "hit"))
+       2 'messages)
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'disco-room-jump-to-message)
+                 (lambda (&rest args) (setq jumped args))))
+        (should-error (disco-root-open-at-point) :type 'user-error)
+        (should-not jumped)))))
+
+(ert-deftest disco-root-open-at-point-keeps-non-search-fall-forward ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (setq-local disco-root--layout 'tree)
+    (let ((inhibit-read-only t)
+          opened)
+      (insert "\n")
+      (let ((start (point)))
+        (insert "channel\n")
+        (add-text-properties start (point) '(disco-channel-id "c1")))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'disco-root--toggle-node-at-point) #'ignore)
+                ((symbol-function 'disco-root--open-channel)
+                 (lambda (channel-id) (setq opened channel-id))))
+        (disco-root-open-at-point)
+        (should (equal "c1" opened))
+        (should (= (line-number-at-pos) 2))))))
 
 (ert-deftest disco-root-search-parse-query-supports-discord-style-filters ()
   (with-temp-buffer

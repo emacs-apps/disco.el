@@ -2199,19 +2199,17 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   (message "disco: searching in %s"
            (disco-root--search-domain-label disco-root--search-domain)))
 
-(defun disco-root-search-load-more-at-point ()
-  "Load the next page of results for the search tab at point."
-  (interactive)
-  (let ((tab (disco-root--line-search-tab)))
-    (unless tab
-      (user-error "disco: no search tab at point"))
-    (unless (and (eq (disco-root--ensure-layout) 'search)
-                 disco-root--search-domain)
-      (user-error "disco: no active root search"))
-    (disco-root--search-dispatch (or disco-root--search-generation 0)
-                                 (disco-root--search-request-tabs tab))
-    (message "disco: loading more %s results"
-             (downcase (disco-root--search-tab-label tab)))))
+(defun disco-root-search-load-more (tab)
+  "Load the next page of results for exact search TAB."
+  (unless tab
+    (user-error "disco: no search tab to load"))
+  (unless (and (eq (disco-root--ensure-layout) 'search)
+               disco-root--search-domain)
+    (user-error "disco: no active root search"))
+  (disco-root--search-dispatch (or disco-root--search-generation 0)
+                               (disco-root--search-request-tabs tab))
+  (message "disco: loading more %s results"
+           (downcase (disco-root--search-tab-label tab))))
 
 (defun disco-root-search (query domain)
   "Search root buffer DOMAIN for QUERY and show results in search layout."
@@ -3460,7 +3458,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
 (setq disco-root-view-attach-live-updates-function
       #'disco-root--attach-live-updates
       disco-root-view-load-more-function
-      #'disco-root-search-load-more-at-point
+      #'disco-root-search-load-more
       disco-root-view-queue-live-update-function
       #'disco-root--queue-live-update
       disco-root-view-render-preserving-position-function

@@ -263,6 +263,9 @@ This mirrors Discord's language-tagged code block behavior."
 (defvar disco-markdown--cache (make-hash-table :test #'equal)
   "Cache table for rendered Markdown strings.")
 
+(defconst disco-markdown--interaction-policy-version 2
+  "Cache version for Markdown interaction text properties.")
+
 (defun disco-markdown-clear-cache ()
   "Clear Markdown render cache."
   (interactive)
@@ -296,9 +299,7 @@ This mirrors Discord's language-tagged code block behavior."
   (interactive (list last-input-event))
   (when (eventp event)
     (posn-set-point (event-start event)))
-  (let ((url (or (get-text-property (point) 'disco-markdown-url)
-                 (get-text-property (line-beginning-position)
-                                    'disco-markdown-url))))
+  (let ((url (get-text-property (point) 'disco-markdown-url)))
     (unless (disco-markdown--string-present-p url)
       (user-error "disco: no Markdown link at point"))
     (browse-url url t)))
@@ -308,9 +309,8 @@ This mirrors Discord's language-tagged code block behavior."
   (interactive (list last-input-event))
   (when (eventp event)
     (posn-set-point (event-start event)))
-  (let ((message-id (or (get-text-property (point) 'disco-markdown-spoiler-message-id)
-                        (get-text-property (line-beginning-position)
-                                           'disco-markdown-spoiler-message-id))))
+  (let ((message-id
+         (get-text-property (point) 'disco-markdown-spoiler-message-id)))
     (unless (and (disco-markdown--string-present-p message-id)
                  (fboundp 'disco-room-toggle-message-spoilers))
       (user-error "disco: spoiler is not interactive here"))
@@ -326,7 +326,8 @@ This mirrors Discord's language-tagged code block behavior."
    (prin1-to-string
     (list disco-markdown-fontify-code-blocks-natively
           disco-markdown-code-block-default-mode
-          disco-markdown-code-lang-modes))))
+          disco-markdown-code-lang-modes
+          disco-markdown--interaction-policy-version))))
 
 (defun disco-markdown--cache-get (key)
   "Return cached render value for KEY.
@@ -419,7 +420,6 @@ TEXT is the source string, POS is the current index, and LEN is its length."
      start end
      (append (list 'keymap keymap
                    'mouse-face 'highlight
-                   'follow-link t
                    'help-echo help-echo)
              properties)
      object)))

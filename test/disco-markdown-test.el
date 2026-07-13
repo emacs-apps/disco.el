@@ -2,8 +2,15 @@
 
 (require 'cl-lib)
 (require 'ert)
+(require 'mouse)
 
 (require 'disco-markdown)
+
+(defun disco-markdown-test--primary-click (window position)
+  "Return a real primary-click event pair in WINDOW at POSITION."
+  (let ((posn (list window position '(0 . 0) 0 nil position)))
+    (vector (list 'down-mouse-1 posn)
+            (list 'mouse-1 posn))))
 
 (ert-deftest disco-markdown-render-internal-inline-links-are-openable ()
   (let* ((rendered (disco-markdown-render
@@ -17,7 +24,80 @@
     (should (disco-markdown--face-match-p
              (get-text-property pos 'face rendered)
              'disco-markdown-link-face))
-    (should (keymapp (get-text-property pos 'keymap rendered)))))
+    (let ((map (get-text-property pos 'keymap rendered)))
+      (should (keymapp map))
+      (should (eq (lookup-key map [mouse-1])
+                  #'disco-markdown-open-at-point)))
+    (should-not (get-text-property pos 'follow-link rendered))))
+
+(ert-deftest disco-markdown-link-dispatches-exact-primary-click ()
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((rendered
+              (disco-markdown-render
+               "[first](https://first.example) [second](https://second.example)"
+               :context 'test-exact-link-click))
+             (first-pos (string-match "first" rendered))
+             (second-pos (string-match "second" rendered))
+             opened)
+        (insert rendered)
+        (switch-to-buffer (current-buffer))
+        (goto-char (1+ first-pos))
+        (cl-letf (((symbol-function 'browse-url)
+                   (lambda (url &rest _args) (setq opened url))))
+          (let ((mouse-1-click-follows-link 450))
+            (execute-kbd-macro
+             (disco-markdown-test--primary-click
+              (selected-window) (1+ second-pos)))))
+        (should (equal "https://second.example" opened))))))
+
+(ert-deftest disco-markdown-multiline-link-keeps-dedicated-exact-click-map ()
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((payload (disco-markdown--make-link-string
+                       "first line\nsecond line" "https://example.com/multiline"))
+             (second-line-pos (1+ (string-match "second" payload)))
+             opened)
+        (insert payload)
+        (should (eq (lookup-key (get-text-property second-line-pos 'keymap)
+                                [mouse-1])
+                    #'disco-markdown-open-at-point))
+        (should-not (get-text-property second-line-pos 'follow-link))
+        (switch-to-buffer (current-buffer))
+        (goto-char (point-min))
+        (cl-letf (((symbol-function 'browse-url)
+                   (lambda (url &rest _args) (setq opened url))))
+          (let ((mouse-1-click-follows-link 450))
+            (execute-kbd-macro
+             (disco-markdown-test--primary-click
+              (selected-window) second-line-pos))))
+        (should (equal "https://example.com/multiline" opened))))))
+
+(ert-deftest disco-markdown-spoiler-dispatches-exact-primary-click ()
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((first (disco-markdown--make-spoiler-string "first" "m1" nil))
+             (second (disco-markdown--make-spoiler-string "second" "m2" nil))
+             (second-pos (+ (length first) 2))
+             toggled)
+        (insert first " " second)
+        (should-not (get-text-property second-pos 'follow-link))
+        (switch-to-buffer (current-buffer))
+        (goto-char (point-min))
+        (cl-letf (((symbol-function 'disco-room-toggle-message-spoilers)
+                   (lambda (message-id) (setq toggled message-id))))
+          (let ((mouse-1-click-follows-link 450))
+            (execute-kbd-macro
+             (disco-markdown-test--primary-click
+              (selected-window) second-pos))))
+        (should (equal "m2" toggled))))))
+
+(ert-deftest disco-markdown-open-at-point-does-not-fall-back-to-line-start ()
+  (with-temp-buffer
+    (insert (disco-markdown--make-link-string "link" "https://example.com")
+            " blank")
+    (goto-char (point-max))
+    (should-error (disco-markdown-open-at-point) :type 'user-error)))
 
 (ert-deftest disco-markdown-render-internal-inline-links-support-escaped-delimiters ()
   (let* ((rendered (disco-markdown-render

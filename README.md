@@ -23,8 +23,8 @@ This repository currently contains an MVP scaffold designed with these reference
   expand in their guild directory; directory/lobby rows open inspect views.
 - Room timeline supports telega-inspired compact same-sender grouping, date separators, and unread divider rendering.
 - Room message rows now use a telega-like two-line feel: author/avatar header with right-aligned time, plus indented body/reply continuation lines for grouped messages.
-- Send plain text message with `C-c C-c` in room buffer.
-- Send file attachments from room buffer (multipart upload) with structured composer objects: telega-like attach menu on `C-c C-a`, direct file attach on `C-c C-f`, reserved clipboard attach slot `C-c C-v`, remove attachment at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c C-c`.
+- Send plain text message with `C-c RET` in room buffer; `C-c C-c` cancels an active message filter.
+- Send file attachments from room buffer (multipart upload) with structured composer objects: telega-like attach menu on `C-c C-a`, direct file attach on `C-c C-f`, reserved clipboard attach slot `C-c C-v`, remove attachment at point via `C-c C-d`, clear all via `C-c C-x`, list/edit/reorder via `C-c M-l`/`C-c M-e`/`C-c M-r`, then send via `RET`/`C-c RET`.
 - Reply/edit/delete/forward message from room buffer with telega-like timeline keys `r`/`f`/`e`/`d` when point is outside the composer, or via `C-c m r/f/e/d`; legacy `C-c C-F` still works for forward. Load older history with `M-<`.
 - Message rows with starter threads show `[Open thread]`; use `C-c C-t o` at message point to jump to the corresponding thread room.
 - Message rows render compact telega-inspired attachment cards: title/preview is the primary open/play action, only meaningful transfer status stays inline, and Download/Cancel/Save As/Copy URL live in the message transient.  Cards carry a backend-neutral action context shared with emacs-qq; audio keeps its stateful play/pause/stop waveform controls inline.
