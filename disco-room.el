@@ -4910,7 +4910,6 @@ current effective input-options state.  Return the normalized state plist."
                  (appkit-invalidations-position-p invalidations)))
         (disco-room-render))
        ((or resources entries)
-        (disco-room--update-frame)
         (disco-room--sync-timeline
          :force-keys entries
          :changed-resources resources))))))
@@ -4945,7 +4944,8 @@ current effective input-options state.  Return the normalized state plist."
   (appkit-chat-timeline-set-frame
    (disco-room--header-text channel)
    (disco-room--footer-text draft)
-   :bind-input-function #'disco-room--bind-input-region-from-footer))
+   :bind-input-function #'disco-room--bind-input-region-from-footer
+   :composer-visible-p (disco-room--composer-visible-p channel)))
 
 (defun disco-room--first-unread-message-id (ordered-messages)
   "Return first unread message id in ORDERED-MESSAGES, or nil."
@@ -5120,9 +5120,11 @@ current effective input-options state.  Return the normalized state plist."
     (disco-media-set-preview-fetch-budget preview-fetch-budget)
     (unwind-protect
         (progn
-          (disco-room--update-frame channel draft)
           ;; API returns newest-first by default; reverse for chat-like display.
           (disco-room--sync-timeline :ordered-messages (reverse messages))
+          ;; Bind the trailing composer only after first EWOC reconciliation;
+          ;; before that the empty footer has no stable external tail boundary.
+          (disco-room--update-frame channel draft)
           (when (and initial-p (appkit-chatbuf-input-start-position))
             (let ((logical-end (appkit-chatbuf-input-logical-end-position)))
               (when logical-end

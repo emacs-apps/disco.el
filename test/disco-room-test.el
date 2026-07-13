@@ -1736,18 +1736,21 @@
     (should (equal '("m2")
                    (appkit-chat-timeline-dependent-keys
                     '((:attachment "a2")))))
-    (let (changed-resources refreshed)
+    (let (changed-resources refreshed frame-updated)
       (cl-letf (((symbol-function 'buffer-list)
                  (lambda () (list (current-buffer))))
                 ((symbol-function 'disco-room--sync-timeline)
                  (lambda (&rest arguments)
                    (setq changed-resources
                          (plist-get arguments :changed-resources))))
+                ((symbol-function 'disco-room--update-frame)
+                 (lambda (&rest _args) (setq frame-updated t)))
                 ((symbol-function 'disco-room--refresh-open-rooms)
                  (lambda () (setq refreshed t))))
         (disco-room--handle-media-rerender 'audio "a2")
         (appkit-sync-invalidations (appkit-current-view))
         (should (equal '((:attachment "a2")) changed-resources))
+        (should-not frame-updated)
         (should-not refreshed)))))
 
 (ert-deftest disco-room-preview-completion-syncs-dependent-message-resource ()
