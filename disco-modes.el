@@ -8,6 +8,7 @@
 
 (require 'cl-lib)
 (require 'disco-customize)
+(require 'disco-directory)
 (require 'disco-gateway)
 (require 'appkit-mode-line)
 (require 'disco-root)
@@ -15,6 +16,9 @@
 
 (defvar disco-client-mode-line-string ""
   "Cached Discord mode-line string.")
+
+(defvar disco-client-mode-line-mode nil
+  "Non-nil when Discord mode-line status is enabled.")
 
 (defvar disco-client-mode-line--cached-counts '(0 . 0)
   "Cached (KNOWN-UNREAD-MESSAGES . MENTIONS) modeline counts.")
@@ -27,6 +31,11 @@
     message-create message-delete message-ack
     thread-create thread-update thread-delete thread-list-sync)
   "Gateway event types which can change Discord mode-line counts.")
+
+(defconst disco-client-mode-line--directory-count-event-types
+  '(index-loaded guild-loaded guild-enriched
+    parent-threads-page parent-threads-loaded)
+  "Directory events which replace or extend the indexed channel set.")
 
 (defcustom disco-client-mode-line-format
   '(disco-client-mode-line-mode ("" disco-client-mode-line-string))
@@ -112,6 +121,16 @@ therefore remains visible for muted channels."
     (appkit-mode-line-update-cache
      'disco-client-mode-line-string disco-mode-line-string-format)))
 
+(defun disco-client-mode-line--handle-directory-event (event)
+  "Rebuild mode-line counts after channel-mutating directory EVENT."
+  (when (memq (plist-get event :type)
+              disco-client-mode-line--directory-count-event-types)
+    (disco-client-mode-line-update)))
+
+(defun disco-client-mode-line--handle-state-reset ()
+  "Rebuild mode-line counts after the canonical state is reset."
+  (disco-client-mode-line-update))
+
 ;;;###autoload
 (define-minor-mode disco-client-mode-line-mode
   "Toggle Discord unread and mention status in the mode line."
@@ -122,11 +141,19 @@ therefore remains visible for muted channels."
       (progn
         (appkit-mode-line-install 'disco-client-mode-line-format)
         (add-hook 'disco-gateway-event-hook #'disco-client-mode-line-update)
+        (add-hook 'disco-directory-event-hook
+                  #'disco-client-mode-line--handle-directory-event)
+        (add-hook 'disco-state-reset-hook
+                  #'disco-client-mode-line--handle-state-reset)
         (disco-client-mode-line-update))
     (appkit-mode-line-uninstall 'disco-client-mode-line-format)
     (setq disco-client-mode-line-string ""
           disco-client-mode-line--cached-counts '(0 . 0))
     (remove-hook 'disco-gateway-event-hook #'disco-client-mode-line-update)
+    (remove-hook 'disco-directory-event-hook
+                 #'disco-client-mode-line--handle-directory-event)
+    (remove-hook 'disco-state-reset-hook
+                 #'disco-client-mode-line--handle-state-reset)
     (force-mode-line-update t)))
 
 (provide 'disco-modes)

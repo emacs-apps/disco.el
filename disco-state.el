@@ -14,6 +14,9 @@
 (require 'disco-read-state)
 (require 'disco-util)
 
+(defvar disco-state-reset-hook nil
+  "Hook run after all in-memory Discord state has been cleared.")
+
 (defvar disco-state--guilds nil
   "List of guild objects as alists.")
 
@@ -211,7 +214,8 @@
   (clrhash disco-state--voice-states-by-key)
   (clrhash disco-state--voice-state-keys-by-channel)
   (clrhash disco-state--channel-member-counts-by-channel)
-  (clrhash disco-state--conversation-summaries-by-channel))
+  (clrhash disco-state--conversation-summaries-by-channel)
+  (run-hooks 'disco-state-reset-hook))
 
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."

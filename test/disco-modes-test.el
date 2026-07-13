@@ -46,19 +46,47 @@
       (should (= 1 scans))
       (should (equal '(7 . 2) disco-client-mode-line--cached-counts)))))
 
+(ert-deftest disco-client-mode-line-external-state-events-rebuild-all-counts ()
+  (let ((disco-client-mode-line-mode t)
+        (disco-client-mode-line--cached-counts '(5 . 2))
+        (rebuilds 0))
+    (cl-letf (((symbol-function 'disco-client-mode-line--counts)
+               (lambda ()
+                 (cl-incf rebuilds)
+                 '(0 . 0)))
+              ((symbol-function 'appkit-mode-line-update-cache) #'ignore))
+      (disco-client-mode-line--handle-directory-event '(:type guild-loading))
+      (should (= 0 rebuilds))
+      (disco-client-mode-line--handle-directory-event '(:type guild-loaded))
+      (disco-client-mode-line--handle-directory-event
+       '(:type parent-threads-loaded))
+      (disco-client-mode-line--handle-state-reset)
+      (should (= 3 rebuilds))
+      (should (equal '(0 . 0) disco-client-mode-line--cached-counts)))))
+
 (ert-deftest disco-client-mode-line-mode-manages-provider-and-hook ()
   (let ((mode-line-misc-info nil)
-        (disco-gateway-event-hook nil))
+        (disco-gateway-event-hook nil)
+        (disco-directory-event-hook nil)
+        (disco-state-reset-hook nil))
     (unwind-protect
         (progn
           (disco-client-mode-line-mode 1)
           (should (memq 'disco-client-mode-line-format mode-line-misc-info))
           (should (memq #'disco-client-mode-line-update
-                        disco-gateway-event-hook)))
+                        disco-gateway-event-hook))
+          (should (memq #'disco-client-mode-line--handle-directory-event
+                        disco-directory-event-hook))
+          (should (memq #'disco-client-mode-line--handle-state-reset
+                        disco-state-reset-hook)))
       (disco-client-mode-line-mode -1))
     (should-not (memq 'disco-client-mode-line-format mode-line-misc-info))
     (should-not (memq #'disco-client-mode-line-update
-                      disco-gateway-event-hook))))
+                      disco-gateway-event-hook))
+    (should-not (memq #'disco-client-mode-line--handle-directory-event
+                      disco-directory-event-hook))
+    (should-not (memq #'disco-client-mode-line--handle-state-reset
+                      disco-state-reset-hook))))
 
 (provide 'disco-modes-test)
 

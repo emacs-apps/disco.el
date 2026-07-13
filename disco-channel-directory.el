@@ -97,6 +97,9 @@
 (defvar-local disco-channel-directory--fill-column nil
   "Effective width used to render directory rows.")
 
+(defvar-local disco-channel-directory--header-line-cache ""
+  "Cached guild-directory header line refreshed during reconciliation.")
+
 (defvar-local disco-channel-directory--gateway-handler nil
   "Buffer-local gateway event handler closure.")
 
@@ -691,7 +694,7 @@ are deleted and only new nodes are inserted."
                  force-channel-ids))))
 
 (defun disco-channel-directory--header-line ()
-  "Return dynamic header-line text for the current guild directory."
+  "Compute header-line text for the current guild directory."
   (let* ((guild-name (disco-channel-directory--guild-name))
          (loaded-p
           (disco-state-guild-channels-loaded-p
@@ -729,6 +732,12 @@ are deleted and only new nodes are inserted."
                         disco-channel-directory--guild-id)))
      (if (string-empty-p lens) "" (concat "  [" lens "]")))))
 
+(defun disco-channel-directory--refresh-header-line ()
+  "Refresh the cached guild-directory header line."
+  (setq disco-channel-directory--header-line-cache
+        (disco-channel-directory--header-line))
+  (force-mode-line-update))
+
 (defun disco-channel-directory--reconcile (&optional force-channel-ids)
   "Reconcile the current EWOC, forcing rows in FORCE-CHANNEL-IDS."
   (if disco-channel-directory--rendering
@@ -757,7 +766,7 @@ are deleted and only new nodes are inserted."
                 (goto-char position)
                 (beginning-of-line)
                 (setq disco-channel-directory--pending-focus-channel-id nil)))
-            (force-mode-line-update)
+            (disco-channel-directory--refresh-header-line)
             (force-window-update (current-buffer)))
         (setq disco-channel-directory--rendering nil))
       (when disco-channel-directory--render-pending
@@ -1058,6 +1067,17 @@ rows, so passive updates are coalesced until a real window is available."
                  disco-channel-directory--directory-handler)
     (setq disco-channel-directory--directory-handler nil)))
 
+(defun disco-channel-directory--handle-state-reset ()
+  "Refresh cached directory headers after canonical state is reset."
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (eq major-mode 'disco-channel-directory-mode)
+          (disco-channel-directory--refresh-header-line))))))
+
+(add-hook 'disco-state-reset-hook
+          #'disco-channel-directory--handle-state-reset)
+
 (defun disco-channel-directory--attach-live-updates ()
   "Attach the current directory to gateway and directory events."
   (disco-channel-directory--detach-live-updates)
@@ -1170,12 +1190,13 @@ rows, so passive updates are coalesced until a real window is available."
   (setq-local disco-channel-directory--filter nil)
   (setq-local disco-channel-directory--unread-only nil)
   (setq-local disco-channel-directory--fill-column nil)
+  (setq-local disco-channel-directory--header-line-cache "")
   (setq-local disco-channel-directory--rendering nil)
   (setq-local disco-channel-directory--render-pending nil)
   (setq-local disco-channel-directory--deferred-reconcile-p nil)
   (setq-local disco-channel-directory--deferred-channel-ids nil)
   (setq-local header-line-format
-              '(:eval (disco-channel-directory--header-line)))
+              'disco-channel-directory--header-line-cache)
   (setq-local revert-buffer-function
               (lambda (&rest _ignored)
                 (disco-channel-directory-refresh)))

@@ -127,6 +127,12 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--last-header-refresh-at nil
   "Timestamp of the last root header refresh in current buffer.")
 
+(defvar-local disco-root--header-refresh-timer nil
+  "Timer ensuring a throttled root header refresh is eventually applied.")
+
+(defvar-local disco-root--header-state-cache nil
+  "Cached expensive state-derived portions of the root header line.")
+
 (defvar-local disco-root--fill-column nil
   "Effective root layout width used for the latest render pass.")
 
@@ -2776,6 +2782,12 @@ if structural reconciliation is required."
     (cancel-timer disco-root--live-update-timer)
     (setq disco-root--live-update-timer nil)))
 
+(defun disco-root--cancel-header-refresh-timer ()
+  "Cancel a pending throttled root header refresh when present."
+  (when (timerp disco-root--header-refresh-timer)
+    (cancel-timer disco-root--header-refresh-timer))
+  (setq disco-root--header-refresh-timer nil))
+
 (defun disco-root--live-updatable-buffer-mode-p ()
   "Return non-nil when current buffer supports root-style live updates."
   (memq major-mode '(disco-root-mode
@@ -2894,7 +2906,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                        (needs-header
                         (disco-root--refresh-header-line))
                        ((and dirty-channel-ids
-                             (eq layout 'activity))
+                             (not (eq layout 'search)))
                         (disco-root--maybe-refresh-activity-header-line)))
                       (when (and (not needs-structural)
                                  position-snapshot)
@@ -3005,6 +3017,7 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 (defun disco-root--detach-live-updates ()
   "Detach root buffer from global gateway update stream."
   (disco-root--cancel-live-update-timer)
+  (disco-root--cancel-header-refresh-timer)
   (setq disco-root--dirty-channel-ids nil)
   (setq disco-root--dirty-structure-p nil)
   (setq disco-root--dirty-header-p nil)
@@ -3018,6 +3031,19 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
     (remove-hook 'disco-preview-update-hook disco-root--preview-handler)
     (setq disco-root--preview-handler nil))
   (disco-gateway-unwatch-global))
+
+(defun disco-root--handle-state-reset ()
+  "Invalidate cached root headers after canonical state is reset."
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (eq major-mode 'disco-root-mode)
+          (disco-root--cancel-header-refresh-timer)
+          (setq disco-root--header-state-cache nil
+                disco-root--last-header-refresh-at nil)
+          (force-mode-line-update))))))
+
+(add-hook 'disco-state-reset-hook #'disco-root--handle-state-reset)
 
 (defun disco-root-toggle-sort-mode ()
   "Toggle root channel sort mode between activity and name."
@@ -3185,14 +3211,28 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
     ("Offline" 'error)
     (_ 'shadow)))
 
+(defun disco-root--compute-header-state ()
+  "Compute expensive state-derived portions of the root header line."
+  (let ((metadata
+         (delq nil
+               (list (disco-root--sessions-summary-label)
+                     (disco-root--voice-summary-label)
+                     (disco-root--feature-badge-summary)))))
+    (list
+     :metadata-suffix
+     (if metadata
+         (concat "  ·  "
+                 (propertize (string-join metadata "  ·  ") 'face 'shadow))
+       "")
+     :filters (disco-root--filters-line))))
+
 (defun disco-root--header-line ()
   "Return the compact, persistent root header-line."
   (let* ((status (disco-root--gateway-status-label))
-         (metadata
-          (delq nil
-                (list (disco-root--sessions-summary-label)
-                      (disco-root--voice-summary-label)
-                      (disco-root--feature-badge-summary))))
+         (header-state
+          (or disco-root--header-state-cache
+              (setq-local disco-root--header-state-cache
+                          (disco-root--compute-header-state))))
          (identity
           (concat
            " "
@@ -3200,27 +3240,44 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
            "  "
            (propertize (format "● %s" status)
                        'face (disco-root--gateway-status-face status))
-           (when metadata
-             (concat "  ·  "
-                     (propertize (string-join metadata "  ·  ")
-                                 'face 'shadow))))))
-    (concat identity "      " (disco-root--filters-line) " ")))
+           (plist-get header-state :metadata-suffix))))
+    (concat identity "      " (plist-get header-state :filters) " ")))
 
 (defun disco-root--refresh-header-line ()
   "Refresh the persistent root header-line."
   (disco-root--debug-log "refresh-header-line")
+  (disco-root--cancel-header-refresh-timer)
+  (setq disco-root--header-state-cache
+        (disco-root--compute-header-state))
   (setq disco-root--last-header-refresh-at (float-time))
   (force-mode-line-update t))
 
+(defun disco-root--run-deferred-header-refresh (buffer)
+  "Apply a throttled header refresh in live root BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq disco-root--header-refresh-timer nil)
+      (when (derived-mode-p 'disco-root-mode)
+        (disco-root--refresh-header-line)))))
+
 (defun disco-root--maybe-refresh-activity-header-line ()
-  "Refresh activity header line when throttle interval has elapsed."
+  "Refresh the activity header now or at the throttle deadline."
   (let ((interval (max 0 (or disco-root-activity-header-refresh-interval 0)))
         (now (float-time))
         (last (or disco-root--last-header-refresh-at 0.0)))
-    (when (or (zerop interval)
-              (>= (- now last) interval))
-      (disco-root--refresh-header-line)
-      t)))
+    (if (or (zerop interval)
+            (>= (- now last) interval))
+        (progn
+          (disco-root--refresh-header-line)
+          t)
+      (unless (timerp disco-root--header-refresh-timer)
+        (setq disco-root--header-refresh-timer
+              (run-with-timer
+               (max 0 (- interval (- now last)))
+               nil
+               #'disco-root--run-deferred-header-refresh
+               (current-buffer))))
+      nil)))
 
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
@@ -3238,10 +3295,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
              disco-root--view-mode
              disco-root--fill-column)
             (erase-buffer)
-            (setq-local disco-root--last-header-refresh-at (float-time))
             (disco-root--clear-ewoc-state)
             (disco-root-layout-render layout)
-            (force-mode-line-update t)
+            (disco-root--refresh-header-line)
             (goto-char (point-min)))
         (when disco-root--render-pending
           (setq disco-root--render-pending nil)
@@ -3351,6 +3407,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (buffer-disable-undo)
   (setq-local buffer-undo-list t)
   (disco-root--cancel-live-update-timer)
+  (disco-root--cancel-header-refresh-timer)
   (disco-root--ensure-window-size-hook)
   (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
   (setq-local disco-root--sort-mode 'activity)
@@ -3365,6 +3422,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (setq-local disco-root--section-node-table (make-hash-table :test #'eq))
   (setq-local disco-root--guild-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--live-update-timer nil)
+  (setq-local disco-root--header-refresh-timer nil)
   (setq-local disco-root--directory-handler nil)
   (setq-local disco-root--rendering nil)
   (setq-local disco-root--render-pending nil)
@@ -3372,6 +3430,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (setq-local disco-root--dirty-structure-p nil)
   (setq-local disco-root--dirty-header-p nil)
   (setq-local disco-root--last-header-refresh-at nil)
+  (setq-local disco-root--header-state-cache nil)
   (setq-local disco-root--fill-column nil)
   (setq-local disco-root--search-query nil)
   (setq-local disco-root--search-domain nil)

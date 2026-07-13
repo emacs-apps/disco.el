@@ -100,6 +100,32 @@
       (should (= 3 (car (disco-channel-directory-entry-stamp
                          (ewoc-data node))))))))
 
+(ert-deftest disco-channel-directory-header-is-cached-between-reconciles ()
+  (disco-channel-directory-test--with-guild
+    (should (eq 'disco-channel-directory--header-line-cache
+                header-line-format))
+    (let ((computations 0))
+      (cl-letf (((symbol-function 'disco-channel-directory--header-line)
+                 (lambda ()
+                   (cl-incf computations)
+                   " cached header"))
+                ((symbol-function 'force-mode-line-update) #'ignore))
+        (disco-channel-directory--refresh-header-line)
+        (should (= 1 computations))
+        (should (equal " cached header"
+                       disco-channel-directory--header-line-cache))
+        (format-mode-line header-line-format)
+         (format-mode-line header-line-format)
+         (should (= 1 computations))))))
+
+(ert-deftest disco-channel-directory-state-reset-refreshes-cached-header ()
+  (disco-channel-directory-test--with-guild
+    (let ((refreshes 0))
+      (cl-letf (((symbol-function 'disco-channel-directory--refresh-header-line)
+                 (lambda () (cl-incf refreshes))))
+        (disco-channel-directory--handle-state-reset)
+        (should (= 1 refreshes))))))
+
 (ert-deftest disco-channel-directory-filter-reveals-matching-channel-path ()
   (disco-channel-directory-test--with-guild
     (puthash "cat" t disco-channel-directory--collapsed-groups)
