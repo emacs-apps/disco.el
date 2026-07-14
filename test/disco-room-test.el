@@ -1955,6 +1955,102 @@
         (disco-room--maybe-auto-load-newer 950)
         (should-not calls)))))
 
+(ert-deftest disco-room-window-scroll-autoloads-from-selected-viewport-end ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (appkit-chat-history-window-set "100" "300")
+    (let ((disco-room-history-auto-load-threshold 100)
+          (window (selected-window))
+          calls)
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'window-live-p)
+                 (lambda (candidate) (eq candidate window)))
+                ((symbol-function 'window-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function
+                  'appkit-chat-timeline-window-visible-end-position)
+                 (lambda (candidate)
+                   (should (eq candidate window))
+                   950))
+                ((symbol-function 'appkit-chat-timeline-footer-start-position)
+                 (lambda () 1000))
+                ((symbol-function 'appkit-chatbuf-composer-idle-p)
+                 (lambda () t))
+                ((symbol-function 'disco-room-load-newer-messages)
+                 (lambda (&optional quiet) (push quiet calls))))
+        (disco-room--window-scroll window 1)
+        (should (equal '(t) calls))))))
+
+(ert-deftest disco-room-window-scroll-autoloads-from-inactive-viewport-end ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (appkit-chat-history-window-set "100" "300")
+    (let ((disco-room-history-auto-load-threshold 100)
+          (window 'inactive-room-window)
+          calls)
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'window-live-p)
+                 (lambda (candidate) (eq candidate window)))
+                ((symbol-function 'window-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function
+                  'appkit-chat-timeline-window-visible-end-position)
+                 (lambda (_window) 950))
+                ((symbol-function 'appkit-chat-timeline-footer-start-position)
+                 (lambda () 1000))
+                ((symbol-function 'appkit-chatbuf-composer-idle-p)
+                 (lambda () t))
+                ((symbol-function 'disco-room-load-newer-messages)
+                 (lambda (&optional quiet) (push quiet calls))))
+        (disco-room--window-scroll window 1)
+        (should (equal '(t) calls))))))
+
+(ert-deftest disco-room-window-scroll-newer-respects-viewport-and-client-gates ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel)
+    (appkit-chat-history-window-set "100" "300")
+    (let ((disco-room-history-auto-load-threshold 100)
+          (window 'room-window)
+          (visible-end 800)
+          (composer-idle-p t)
+          calls)
+      (cl-letf (((symbol-function 'window-live-p) (lambda (_window) t))
+                ((symbol-function 'window-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function
+                  'appkit-chat-timeline-window-visible-end-position)
+                 (lambda (_window) visible-end))
+                ((symbol-function 'appkit-chat-timeline-footer-start-position)
+                 (lambda () 1000))
+                ((symbol-function 'appkit-chatbuf-composer-idle-p)
+                 (lambda () composer-idle-p))
+                ((symbol-function 'disco-room-load-newer-messages)
+                 (lambda (&optional quiet) (push quiet calls))))
+        ;; The viewport is still far from the footer.
+        (disco-room--window-scroll window 1)
+        (should-not calls)
+        ;; An active filter suppresses history paging.
+        (setq visible-end 950
+              disco-room--msg-filter '(:active t :query "needle"))
+        (disco-room--window-scroll window 1)
+        (should-not calls)
+        ;; An active composer interaction also suppresses paging.
+        (setq disco-room--msg-filter nil
+              composer-idle-p nil)
+        (disco-room--window-scroll window 1)
+        (should-not calls)
+        ;; AppKit's shared loading gate suppresses overlapping requests.
+        (setq composer-idle-p t)
+        (let ((owner (appkit-chat-history-request-begin 'newer)))
+          (unwind-protect
+              (progn
+                (disco-room--window-scroll window 1)
+                (should-not calls))
+            (appkit-chat-history-request-end owner)))))))
+
 (ert-deftest disco-room-filter-search-activates-msg-filter ()
   (with-temp-buffer
     (disco-room-mode)

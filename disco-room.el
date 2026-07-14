@@ -1836,6 +1836,21 @@ operations keep their own protocol-specific sequence/token validation."
                 (appkit-chatbuf-composer-idle-p)))
       (disco-room-load-newer-messages t))))
 
+(defun disco-room--window-scroll (window _display-start)
+  "Auto-load newer history from WINDOW's actual visible timeline edge.
+
+`post-command-hook' covers keyboard motion through point.  Window scrolling
+can move the viewport without moving point, so use AppKit's composer-clamped
+visible end for both selected and inactive room windows."
+  (when (and (window-live-p window)
+             (buffer-live-p (window-buffer window)))
+    (with-current-buffer (window-buffer window)
+      (when (derived-mode-p 'disco-room-mode)
+        (when-let* ((position
+                     (appkit-chat-timeline-window-visible-end-position
+                      window)))
+          (disco-room--maybe-auto-load-newer position))))))
+
 (defun disco-room--post-command ()
   "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
   (unless (appkit-chatbuf-rendering-p)
@@ -7948,6 +7963,7 @@ _MSG is ignored because the transient resolves availability from point."
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'after-change-functions #'disco-room--after-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command nil t)
+  (add-hook 'window-scroll-functions #'disco-room--window-scroll nil t)
   (disco-room--update-context-mode))
 
 (defun disco-room-open (channel-id channel-name)
