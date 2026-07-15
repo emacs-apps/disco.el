@@ -16,6 +16,9 @@
 (require 'transient)
 (require 'seq)
 (require 'subr-x)
+(require 'appkit-core)
+(require 'appkit-invalidation)
+(require 'appkit-transaction)
 (require 'appkit-view)
 (require 'appkit-position)
 (require 'disco-util)
@@ -33,6 +36,7 @@
 (require 'disco-root-layout)
 (require 'disco-root-view)
 (require 'disco-channel-directory)
+(require 'disco-runtime)
 
 (autoload 'disco-reset-session-state "disco" nil t)
 
@@ -72,6 +76,9 @@
 (defvar-local disco-root--preview-handler nil
   "Buffer-local preview hydration handler closure.")
 
+(defvar-local disco-root--live-updates-handle nil
+  "Appkit lifecycle handle owning this root buffer's global subscriptions.")
+
 (defvar-local disco-root--refresh-in-flight nil
   "Non-nil while an async root refresh is in progress.")
 
@@ -106,29 +113,11 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--guild-node-table nil
   "Hash table mapping guild IDs to EWOC nodes.")
 
-(defvar-local disco-root--live-update-timer nil
-  "Debounce timer used to flush aggregated gateway updates.")
-
 (defvar-local disco-root--rendering nil
   "Non-nil while a root render transaction is rebuilding the buffer.")
 
 (defvar-local disco-root--render-pending nil
   "Non-nil when an update arrives during a root render transaction.")
-
-(defvar-local disco-root--dirty-channel-ids nil
-  "List of channel IDs queued for incremental live patching.")
-
-(defvar-local disco-root--dirty-structure-p nil
-  "Non-nil when queued live updates require full root reconcile.")
-
-(defvar-local disco-root--dirty-header-p nil
-  "Non-nil when queued live updates require root header refresh.")
-
-(defvar-local disco-root--last-header-refresh-at nil
-  "Timestamp of the last root header refresh in current buffer.")
-
-(defvar-local disco-root--header-refresh-timer nil
-  "Timer ensuring a throttled root header refresh is eventually applied.")
 
 (defvar-local disco-root--header-state-cache nil
   "Cached expensive state-derived portions of the root header line.")
@@ -324,7 +313,7 @@ The default fits the longest built-in date format plus its status symbol."
   :group 'disco)
 
 (defcustom disco-root-auto-fill-on-window-size-change t
-  "When non-nil, rerender visible root buffers after window width changes."
+  "When non-nil, reproject visible root buffers after window width changes."
   :type 'boolean
   :group 'disco)
 
@@ -334,23 +323,10 @@ The default fits the longest built-in date format plus its status symbol."
           integer)
   :group 'disco)
 
-(defcustom disco-root-live-update-debounce 0.06
-  "Seconds to debounce aggregated gateway updates before UI flush."
-  :type 'number
-  :group 'disco)
-
 (defcustom disco-root-permission-hydration-concurrency 4
   "Maximum concurrent guild permission-snapshot requests from root."
   :type 'integer
   :safe (lambda (value) (and (integerp value) (> value 0)))
-  :group 'disco)
-
-(defcustom disco-root-activity-header-refresh-interval 0.2
-  "Minimum seconds between activity header refreshes from live row updates.
-
-This throttle applies only to implicit header refresh caused by dirty activity
-rows. Explicit header-dirty events bypass the throttle."
-  :type 'number
   :group 'disco)
 
 (defcustom disco-root-debug-log-enabled nil
@@ -465,7 +441,7 @@ the controller hydrates unresolved guilds before their channels can appear."
           sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
 
 (defun disco-root-set-layout (layout)
-  "Set root LAYOUT and rerender the current root buffer."
+  "Set root LAYOUT and synchronize the current root projection."
   (interactive
    (list
     (intern
@@ -477,7 +453,8 @@ the controller hydrates unresolved guilds before their channels can appear."
   (unless (memq layout (disco-root-layout-names))
     (user-error "disco: unknown root layout: %s" layout))
   (setq disco-root--layout layout)
-  (disco-root--render-preserving-position)
+  (disco-root--queue-live-update nil t t)
+  (appkit-sync-invalidations (appkit-current-view))
   (message "disco: root layout -> %s" (disco-root-layout-label layout)))
 
 (defun disco-root-cycle-layout ()
@@ -513,7 +490,8 @@ between current view mode and unread-only filter."
       (progn
         (setq disco-root--tree-show-unread-section
               (not disco-root--tree-show-unread-section))
-        (disco-root--render-preserving-position)
+        (disco-root--queue-live-update nil t t)
+        (appkit-sync-invalidations (appkit-current-view))
         (message "disco: home unread section %s"
                  (if disco-root--tree-show-unread-section
                      "shown"
@@ -521,13 +499,15 @@ between current view mode and unread-only filter."
     (if (eq disco-root--view-mode 'unread)
         (disco-root--set-view-mode disco-root--pre-unread-view-mode)
       (disco-root--set-view-mode 'unread))
-    (disco-root--render-preserving-position)
+    (disco-root--queue-live-update nil t t)
+    (appkit-sync-invalidations (appkit-current-view))
     (message "disco: root view mode -> %s" disco-root--view-mode)))
 
 (defun disco-root--render-preserving-position ()
-  "Render root and keep point near the previous line and column."
+  "Project root while preserving semantic point and viewport positions."
   (appkit-position-render-preserving
    #'disco-root-render
+   :anchor-property 'disco-root-entry-key
    :preserve-window-start t)
   (disco-root--update-window-points))
 
@@ -551,15 +531,10 @@ nil `switch-to-buffer-preserve-window-point' in passive windows."
                                (marker-insertion-type (nth 2 entry))))))))))
 
 (defun disco-root--update-window-points (&optional point)
-  "Update window points for current buffer to POINT.
+  "Update passive previous-buffer markers for current buffer to POINT.
 
-Mirrors telega's root buffer behavior for keeping window points aligned
-after passive EWOC and full-buffer updates."
-  (let ((pos (or point (point))))
-    (disco-root--hack-window-points pos)
-    (dolist (win (get-buffer-window-list (current-buffer) nil t))
-      (when (window-live-p win)
-        (set-window-point win pos)))))
+Live window points remain independent and are restored by `appkit-position'."
+  (disco-root--hack-window-points point))
 
 
 (defun disco-root--search-domain-equal-p (left right)
@@ -1235,21 +1210,6 @@ after passive EWOC and full-buffer updates."
   "Synchronize display query string from current structured search spec."
   (setq-local disco-root--search-query
               (string-join (disco-root--search-summary-chips) "  ")))
-
-(defun disco-root--search-refresh-active-completions (&optional guild-id)
-  "Refresh active root search completion UI when it matches GUILD-ID.
-
-When GUILD-ID is nil, refresh any active root search completion session."
-  (when-let* ((miniwin (active-minibuffer-window))
-              (minibuf (window-buffer miniwin)))
-    (when (get-buffer-window "*Completions*" t)
-      (with-current-buffer minibuf
-        (when (and disco-root--search-completion-domain
-                   (or (null guild-id)
-                       (equal (disco-root--search-domain-guild-id disco-root--search-completion-domain)
-                              guild-id)))
-          (ignore-errors
-            (minibuffer-completion-help)))))))
 
 (defun disco-root--search-user-completion-table (domain filter)
   "Return completion table for root search users in DOMAIN for FILTER."
@@ -2033,10 +1993,10 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   (and tab (assq tab tabs-alist)))
 
 (defun disco-root--search-render-if-visible ()
-  "Rerender root buffer when currently in search layout."
+  "Request a coalesced projection sync when search layout is visible."
   (when (and (eq major-mode 'disco-root-mode)
              (eq (disco-root--ensure-layout) 'search))
-    (disco-root--render-preserving-position)))
+    (disco-root--queue-live-update nil t nil)))
 
 (defun disco-root--search-filter-messages (messages)
   "Apply client-side root search filters to MESSAGES list."
@@ -2112,9 +2072,20 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
         (disco-root--search-set-tab-state tab state)))
     (disco-root--search-render-if-visible)))
 
+(defun disco-root--search-deliver-to-view (view buffer function &rest arguments)
+  "Call FUNCTION with ARGUMENTS for the still-current VIEW in BUFFER.
+Late responses are inert after VIEW is killed or BUFFER is attached to a
+replacement view."
+  (when (and (appkit-view-live-p view)
+             (eq buffer (appkit-view-buffer view)))
+    (with-current-buffer buffer
+      (when (eq view (appkit-current-view))
+        (apply function arguments)))))
+
 (defun disco-root--search-dispatch (generation tabs-alist)
   "Dispatch async root search request for GENERATION using TABS-ALIST."
   (let* ((root-buffer (current-buffer))
+         (request-view (appkit-current-view))
          (domain disco-root--search-domain)
          (channel-ids (or (disco-root--search-domain-fixed-channel-ids disco-root--search-domain)
                           (plist-get disco-root--search-query-spec :channel-ids)))
@@ -2131,13 +2102,15 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
         :include-nsfw include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
-                      (when (buffer-live-p root-buffer)
-                        (with-current-buffer root-buffer
-                          (disco-root--search-handle-success generation tabs-alist body))))
+                      (disco-root--search-deliver-to-view
+                       request-view root-buffer
+                       #'disco-root--search-handle-success
+                       generation tabs-alist body))
         :on-error (lambda (err)
-                    (when (buffer-live-p root-buffer)
-                      (with-current-buffer root-buffer
-                        (disco-root--search-handle-error generation tabs-alist err))))))
+                    (disco-root--search-deliver-to-view
+                     request-view root-buffer
+                     #'disco-root--search-handle-error
+                     generation tabs-alist err))))
       ('channel
        (if-let* ((guild-id (disco-root--search-domain-guild-id domain)))
            (disco-api-guild-search-messages-tabs-async
@@ -2147,39 +2120,45 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
             :include-nsfw include-nsfw
             :track-exact-total-hits disco-root-search-track-exact-total-hits
             :on-success (lambda (body)
-                          (when (buffer-live-p root-buffer)
-                            (with-current-buffer root-buffer
-                              (disco-root--search-handle-success generation tabs-alist body))))
+                          (disco-root--search-deliver-to-view
+                           request-view root-buffer
+                           #'disco-root--search-handle-success
+                           generation tabs-alist body))
             :on-error (lambda (err)
-                        (when (buffer-live-p root-buffer)
-                          (with-current-buffer root-buffer
-                            (disco-root--search-handle-error generation tabs-alist err)))))
+                        (disco-root--search-deliver-to-view
+                         request-view root-buffer
+                         #'disco-root--search-handle-error
+                         generation tabs-alist err)))
          (disco-api-channel-search-messages-tabs-async
           (disco-root--search-domain-channel-id domain)
           :tabs tabs-alist
           :include-nsfw include-nsfw
           :track-exact-total-hits disco-root-search-track-exact-total-hits
           :on-success (lambda (body)
-                        (when (buffer-live-p root-buffer)
-                          (with-current-buffer root-buffer
-                            (disco-root--search-handle-success generation tabs-alist body))))
+                        (disco-root--search-deliver-to-view
+                         request-view root-buffer
+                         #'disco-root--search-handle-success
+                         generation tabs-alist body))
           :on-error (lambda (err)
-                      (when (buffer-live-p root-buffer)
-                        (with-current-buffer root-buffer
-                          (disco-root--search-handle-error generation tabs-alist err)))))))
+                      (disco-root--search-deliver-to-view
+                       request-view root-buffer
+                       #'disco-root--search-handle-error
+                       generation tabs-alist err)))))
       (_
        (disco-api-user-search-messages-tabs-async
         :tabs tabs-alist
         :include-nsfw include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
-                      (when (buffer-live-p root-buffer)
-                        (with-current-buffer root-buffer
-                          (disco-root--search-handle-success generation tabs-alist body))))
+                      (disco-root--search-deliver-to-view
+                       request-view root-buffer
+                       #'disco-root--search-handle-success
+                       generation tabs-alist body))
         :on-error (lambda (err)
-                    (when (buffer-live-p root-buffer)
-                      (with-current-buffer root-buffer
-                        (disco-root--search-handle-error generation tabs-alist err)))))))))
+                    (disco-root--search-deliver-to-view
+                     request-view root-buffer
+                     #'disco-root--search-handle-error
+                     generation tabs-alist err)))))))
 
 (defun disco-root-search-refresh ()
   "Rerun current root search query in the active search domain."
@@ -2265,19 +2244,15 @@ buffer without CHANNEL, use the channel at point."
     (unless (disco-channel-searchable-p resolved-channel)
       (user-error "disco: channel search is unsupported for %s channels"
                   (disco-channel-type-name resolved-channel)))
-    (let ((buf (get-buffer-create disco-root-buffer-name))
+    (let ((buf (disco-root-open))
           (domain (disco-root--search-channel-domain resolved-channel)))
       (with-current-buffer buf
-        (unless (derived-mode-p 'disco-root-mode)
-          (disco-root-mode))
-        (disco-root--attach-live-updates)
         (unless (and disco-root--search-domain
                      (disco-root--search-domain-equal-p disco-root--search-domain domain))
           (setq-local disco-root--search-domain domain)
           (setq-local disco-root--search-query-spec (disco-root--search-default-spec))
           (setq-local disco-root--search-query "")
           (disco-root--search-sync-query-display)))
-      (pop-to-buffer buf)
       (with-current-buffer buf
         (disco-root-search-transient)))))
 
@@ -2399,9 +2374,10 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
       (disco-root-render))))
 
 (defun disco-root--reflow-preserving-position ()
-  "Reflow root layout and keep point near previous line/column."
+  "Reflow root while preserving semantic point and viewport positions."
   (appkit-position-render-preserving
    #'disco-root--reflow-layout
+   :anchor-property 'disco-root-entry-key
    :preserve-window-start t)
   (disco-root--update-window-points))
 
@@ -2414,13 +2390,14 @@ When FORCE is non-nil, reflow even if WIDTH matches current value."
              (or force
                  (not (eq width disco-root--fill-column))))
     (setq disco-root--fill-column width)
-    (disco-root--reflow-preserving-position)
+    (when-let* ((view (appkit-current-view)))
+      (appkit-request-sync view :part 'geometry :position t))
     t))
 
 (defun disco-root-buffer-auto-fill (&optional force)
   "Reflow current root buffer to match current window width.
 
-With FORCE non-nil, rerender even if width has not changed."
+With FORCE non-nil, reproject even if width has not changed."
   (interactive "P")
   (unless (derived-mode-p 'disco-root-mode)
     (user-error "disco: `disco-root-buffer-auto-fill' only works in root buffer"))
@@ -2486,10 +2463,11 @@ With FORCE non-nil, rerender even if width has not changed."
   (and expanded t))
 
 (defun disco-root--toggle-section (section)
-  "Toggle root SECTION expansion and rerender the projection."
+  "Toggle root SECTION expansion and synchronize the projection."
   (disco-root--set-section-expanded
    section (not (disco-root--section-expanded-p section)))
-  (disco-root--render-preserving-position))
+  (disco-root--queue-live-update nil t nil)
+  (appkit-sync-invalidations (appkit-current-view)))
 
 (defun disco-root--toggle-node-at-point ()
   "Toggle the root section at point and return non-nil on success."
@@ -2774,145 +2752,158 @@ if structural reconciliation is required."
     (dolist (guild-id guild-ids)
       (disco-root--refresh-guild-node guild-id))))
 
-(defun disco-root--cancel-live-update-timer ()
-  "Cancel pending root live-update debounce timer when present."
-  (when (timerp disco-root--live-update-timer)
-    (cancel-timer disco-root--live-update-timer)
-    (setq disco-root--live-update-timer nil)))
-
-(defun disco-root--cancel-header-refresh-timer ()
-  "Cancel a pending throttled root header refresh when present."
-  (when (timerp disco-root--header-refresh-timer)
-    (cancel-timer disco-root--header-refresh-timer))
-  (setq disco-root--header-refresh-timer nil))
-
 (defun disco-root--live-updatable-buffer-mode-p ()
   "Return non-nil when current buffer supports root-style live updates."
   (memq major-mode '(disco-root-mode
                      disco-root-archived-threads-mode)))
 
-(defun disco-root--queue-live-update (channel-ids &optional structural-p header-p)
-  "Queue CHANNEL-IDS for debounced UI update.
+(defun disco-root--view-id ()
+  "Return the Appkit view id for the current root-related buffer."
+  (pcase major-mode
+    ('disco-root-mode '(root main))
+    ('disco-root-archived-threads-mode
+     (let ((parent-id (alist-get 'id disco-root--archived-parent-channel)))
+       (unless parent-id
+         (error "Disco: archived root view has no parent channel"))
+       (list 'root 'archived-threads parent-id)))
+    (_
+     (error "Disco: unsupported root view mode: %S" major-mode))))
 
-When STRUCTURAL-P is non-nil, the next flush performs full reconcile.
-When HEADER-P is non-nil, root header line is refreshed on flush."
-  (let ((ids (cond
-              ((null channel-ids) nil)
-              ((listp channel-ids) channel-ids)
-              (t (list channel-ids)))))
+(defun disco-root--ensure-view ()
+  "Return the live Appkit view owning the current root-related buffer."
+  (unless (disco-root--live-updatable-buffer-mode-p)
+    (error "Disco: current buffer does not support root live updates"))
+  (let* ((app (disco-runtime-app))
+         (id (disco-root--view-id))
+         (current (appkit-current-view)))
+    (cond
+     ((and (appkit-view-live-p current)
+           (eq app (appkit-view-app current))
+           (equal id (appkit-view-id current)))
+      (setf (appkit-view-sync-function current)
+            #'disco-root--sync-invalidations)
+      current)
+     ((appkit-view-live-p current)
+      (error "Disco: root buffer belongs to a different Appkit view"))
+     (t
+      (appkit-attach-view
+       :app app
+       :id id
+       :mode major-mode
+       :sync-function #'disco-root--sync-invalidations
+       :parts '(content header geometry))))))
+
+(defun disco-root--queue-live-update (channel-ids &optional structural-p header-p)
+  "Invalidate root projections affected by CHANNEL-IDS.
+
+When STRUCTURAL-P is non-nil, the next Appkit sync performs full reconcile.
+When HEADER-P is non-nil, the root header is invalidated too."
+  (let* ((ids (delete-dups
+               (delq nil
+                     (copy-sequence
+                      (cond
+                       ((null channel-ids) nil)
+                       ((listp channel-ids) channel-ids)
+                       (t (list channel-ids)))))))
+         (view (appkit-current-view)))
     (disco-root--debug-log
      "queue-live-update ids=%s structural=%s header=%s"
      ids
      (and structural-p t)
      (and header-p t))
-    (dolist (channel-id ids)
-      (when channel-id
-        (cl-pushnew channel-id disco-root--dirty-channel-ids :test #'equal))))
-  (setq disco-root--dirty-structure-p
-        (or disco-root--dirty-structure-p structural-p))
-  (setq disco-root--dirty-header-p
-        (or disco-root--dirty-header-p header-p))
-  (unless (timerp disco-root--live-update-timer)
-    (setq disco-root--live-update-timer
-          (run-with-timer
-           (max 0 disco-root-live-update-debounce)
-           nil
-           #'disco-root--flush-live-updates
-           (current-buffer)))))
+    (when (and (appkit-view-live-p view)
+               (or ids structural-p header-p))
+      (appkit-request-sync
+       view
+       :entries ids
+       :structure structural-p
+       :part (and header-p 'header)))))
 
-(defun disco-root--flush-live-updates (root-buffer)
-  "Flush queued live updates into ROOT-BUFFER."
-  (when (buffer-live-p root-buffer)
-    (with-current-buffer root-buffer
-      (when (disco-root--live-updatable-buffer-mode-p)
-        (setq disco-root--live-update-timer nil)
-        (if (and (eq major-mode 'disco-root-mode)
-                 disco-root--refresh-in-flight)
-            (setq disco-root--live-update-timer
-                  (run-with-timer
-                   (max 0.02 disco-root-live-update-debounce)
-                   nil
-                   #'disco-root--flush-live-updates
-                   root-buffer))
-          (let* ((dirty-channel-ids (nreverse disco-root--dirty-channel-ids))
-                 (needs-structural disco-root--dirty-structure-p)
-                 (needs-header disco-root--dirty-header-p))
-            (setq disco-root--dirty-channel-ids nil)
-            (setq disco-root--dirty-structure-p nil)
-            (setq disco-root--dirty-header-p nil)
-            (cond
-             ((eq major-mode 'disco-root-archived-threads-mode)
-              (when (or dirty-channel-ids needs-structural needs-header)
-                (appkit-view-render-list-spec-preserving-position
-                 (disco-root--archived-threads-list-spec)
-                 :anchor-property 'disco-channel-id
-                 :preserve-window-start t
-                 :after-restore #'disco-root--update-window-points)))
-             (t
-              (let* ((layout (disco-root--ensure-layout))
-                     (layout-update-mode
-                      (disco-root-layout-update-mode layout)))
-                (disco-root--debug-log
-                 "flush-live-updates layout=%s view=%s dirty=%d structural=%s header=%s"
-                 layout
-                 disco-root--view-mode
-                 (length dirty-channel-ids)
-                 (and needs-structural t)
-                 (and needs-header t))
-                (cond
-                 (needs-structural
-                  (disco-root--debug-log "flush-live-updates -> structural")
-                  (disco-root--render-preserving-position))
-                 ((eq layout 'search)
-                  (disco-root--debug-log "flush-live-updates -> search-static")
-                  (when needs-header
-                    (disco-root--refresh-header-line)))
-                 ((and (eq layout-update-mode 'full)
-                       (or dirty-channel-ids needs-header))
-                  (disco-root--debug-log "flush-live-updates -> full-render")
-                  (if (and needs-header (null dirty-channel-ids))
-                      (disco-root--refresh-header-line)
-                    (disco-root--render-preserving-position)))
-                 ((and dirty-channel-ids
-                       (eq disco-root--view-mode 'unread))
-                  (disco-root--debug-log "flush-live-updates -> unread-render")
-                  (disco-root--render-preserving-position))
-                 (t
-                  (disco-root--debug-log "flush-live-updates -> incremental")
-                  (let ((inhibit-read-only t)
-                        (buffer-undo-list t)
-                        (position-snapshot
-                         (appkit-position-capture
-                          :anchor-property 'disco-channel-id
-                          :preserve-window-start t)))
-                    (with-silent-modifications
-                      (dolist (channel-id dirty-channel-ids)
-                        (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
-                          (setq needs-structural t)
-                          (disco-root--debug-log
-                           "flush-live-updates -> structural(stale %s)" channel-id)))
-                      (when (and (not needs-structural)
-                                 dirty-channel-ids
-                                 (eq layout 'activity))
-                        (when (disco-root--activity-reorder-visible-nodes dirty-channel-ids)
-                          (setq needs-structural t)
-                          (disco-root--debug-log
-                           "flush-live-updates -> structural(activity-reorder)")))
-                      (when dirty-channel-ids
-                        (disco-root--refresh-active-layout-headings dirty-channel-ids))
-                      (cond
-                       (needs-header
-                        (disco-root--refresh-header-line))
-                       ((and dirty-channel-ids
-                             (not (eq layout 'search)))
-                        (disco-root--maybe-refresh-activity-header-line)))
-                      (when (and (not needs-structural)
-                                 position-snapshot)
-                        (appkit-position-restore position-snapshot)
-                        (disco-root--update-window-points))))
-                  (when needs-structural
-                    (disco-root--debug-log "flush-live-updates -> structural-reconcile")
-                    (disco-root--render-preserving-position)))))))))))))
+(defun disco-root--sync-invalidations (view invalidations)
+  "Synchronize VIEW from Appkit INVALIDATIONS."
+  (let ((dirty-channel-ids
+         (copy-sequence (appkit-invalidations-entry-keys invalidations)))
+        (needs-structural
+         (appkit-invalidations-structure-p invalidations))
+        (needs-header
+         (memq 'header (appkit-invalidations-parts invalidations)))
+        (needs-geometry
+         (or (memq 'geometry (appkit-invalidations-parts invalidations))
+             (appkit-invalidations-position-p invalidations))))
+    (appkit-with-content-update view
+      (cond
+       ((eq major-mode 'disco-root-archived-threads-mode)
+        (when (or dirty-channel-ids needs-structural needs-header needs-geometry)
+          (appkit-view-render-list-spec-preserving-position
+           (disco-root--archived-threads-list-spec)
+           :anchor-property 'disco-channel-id
+           :preserve-window-start t
+           :after-restore #'disco-root--update-window-points)))
+       ((eq major-mode 'disco-root-mode)
+        (let* ((layout (disco-root--ensure-layout))
+               (layout-update-mode (disco-root-layout-update-mode layout)))
+          (disco-root--debug-log
+           "sync-invalidations layout=%s view=%s dirty=%d structural=%s header=%s geometry=%s"
+           layout
+           disco-root--view-mode
+           (length dirty-channel-ids)
+           (and needs-structural t)
+           (and needs-header t)
+           (and needs-geometry t))
+          (cond
+           (needs-structural
+            (disco-root--debug-log "sync-invalidations -> structural")
+            (disco-root--render-preserving-position))
+           ((and needs-geometry (null dirty-channel-ids) (not needs-header))
+            (disco-root--debug-log "sync-invalidations -> geometry")
+            (disco-root--reflow-preserving-position))
+           (needs-geometry
+            (disco-root--debug-log "sync-invalidations -> geometry+state")
+            (disco-root--render-preserving-position))
+           ((eq layout 'search)
+            (disco-root--debug-log "sync-invalidations -> search-static")
+            (when needs-header
+              (disco-root--refresh-header-line)))
+           ((and (eq layout-update-mode 'full)
+                 (or dirty-channel-ids needs-header))
+            (disco-root--debug-log "sync-invalidations -> full-render")
+            (if (and needs-header (null dirty-channel-ids))
+                (disco-root--refresh-header-line)
+              (disco-root--render-preserving-position)))
+           ((and dirty-channel-ids
+                 (eq disco-root--view-mode 'unread))
+            (disco-root--debug-log "sync-invalidations -> unread-render")
+            (disco-root--render-preserving-position))
+           (t
+            (disco-root--debug-log "sync-invalidations -> incremental")
+            (let ((position-snapshot
+                   (appkit-position-capture
+                    :anchor-property 'disco-root-entry-key
+                    :preserve-window-start t)))
+              (with-silent-modifications
+                (dolist (channel-id dirty-channel-ids)
+                  (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
+                    (setq needs-structural t)
+                    (disco-root--debug-log
+                     "sync-invalidations -> structural(stale %s)" channel-id)))
+                (when (and (not needs-structural)
+                           dirty-channel-ids
+                           (eq layout 'activity))
+                  (when (disco-root--activity-reorder-visible-nodes
+                         dirty-channel-ids)
+                    (setq needs-structural t)
+                    (disco-root--debug-log
+                     "sync-invalidations -> structural(activity-reorder)")))
+                (when dirty-channel-ids
+                  (disco-root--refresh-active-layout-headings dirty-channel-ids))
+                (when (or needs-header dirty-channel-ids)
+                  (disco-root--refresh-header-line))
+                (when (and (not needs-structural) position-snapshot)
+                  (appkit-position-restore position-snapshot)
+                  (disco-root--update-window-points))))
+            (when needs-structural
+              (disco-root--debug-log "sync-invalidations -> structural-reconcile")
+              (disco-root--render-preserving-position))))))))))
 
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
@@ -2921,8 +2912,6 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
                 '(guild-create guild-update guild-sync
                   channel-create channel-update channel-update-partial))
       (disco-root--ensure-guild-channel-permissions))
-    (when (eq event-type 'guild-members-chunk)
-      (disco-root--search-refresh-active-completions (plist-get event :guild-id)))
     (when (disco-root--live-event-p event-type)
       (let ((channel-ids (disco-gateway-event-channel-ids event))
             (structural (disco-root--live-event-structural-p event-type))
@@ -2974,72 +2963,67 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 
 (defun disco-root--attach-live-updates ()
   "Attach root buffer to global gateway update stream."
-  (when disco-root--gateway-handler
-    (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
-    (disco-gateway-unwatch-global))
-  (when disco-root--directory-handler
-    (remove-hook 'disco-directory-event-hook disco-root--directory-handler))
-  (when disco-root--preview-handler
-    (remove-hook 'disco-preview-update-hook disco-root--preview-handler))
-  (setq disco-root--directory-handler nil)
-  (setq disco-root--preview-handler nil)
-  (disco-root--cancel-live-update-timer)
-  (setq disco-root--dirty-channel-ids nil)
-  (setq disco-root--dirty-structure-p nil)
-  (setq disco-root--dirty-header-p nil)
-  (let ((root-buffer (current-buffer)))
+  (let ((view (disco-root--ensure-view)))
+    (when (and (appkit-handle-p disco-root--live-updates-handle)
+               (appkit-handle-alive-p disco-root--live-updates-handle))
+      (appkit-cancel-handle disco-root--live-updates-handle))
+    (disco-root--detach-live-updates)
     (setq disco-root--gateway-handler
           (lambda (event)
-            (when (buffer-live-p root-buffer)
-              (with-current-buffer root-buffer
+            (when (appkit-view-live-p view)
+              (with-current-buffer (appkit-view-buffer view)
                 (disco-root--handle-gateway-event event)))))
     (when (eq major-mode 'disco-root-mode)
       (setq disco-root--directory-handler
             (lambda (event)
-              (when (buffer-live-p root-buffer)
-                (with-current-buffer root-buffer
+              (when (appkit-view-live-p view)
+                (with-current-buffer (appkit-view-buffer view)
                   (disco-root--handle-directory-event event)))))
       (setq disco-root--preview-handler
             (lambda (channel-id)
-              (when (buffer-live-p root-buffer)
-                (with-current-buffer root-buffer
-                  (disco-root--handle-preview-update channel-id)))))))
-  (add-hook 'disco-gateway-event-hook disco-root--gateway-handler)
-  (when disco-root--directory-handler
-    (add-hook 'disco-directory-event-hook disco-root--directory-handler))
-  (when disco-root--preview-handler
-    (add-hook 'disco-preview-update-hook disco-root--preview-handler))
-  (disco-gateway-watch-global)
-  (add-hook 'kill-buffer-hook #'disco-root--detach-live-updates nil t))
+              (when (appkit-view-live-p view)
+                (with-current-buffer (appkit-view-buffer view)
+                  (disco-root--handle-preview-update channel-id))))))
+    (add-hook 'disco-gateway-event-hook disco-root--gateway-handler)
+    (when disco-root--directory-handler
+      (add-hook 'disco-directory-event-hook disco-root--directory-handler))
+    (when disco-root--preview-handler
+      (add-hook 'disco-preview-update-hook disco-root--preview-handler))
+    (disco-gateway-watch-global)
+    (let ((buffer (current-buffer)))
+      (setq disco-root--live-updates-handle
+            (appkit-register-handle
+             view 'function
+             (lambda ()
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (setq disco-root--live-updates-handle nil)
+                   (disco-root--detach-live-updates)))))))
+    view))
 
 (defun disco-root--detach-live-updates ()
   "Detach root buffer from global gateway update stream."
-  (disco-root--cancel-live-update-timer)
-  (disco-root--cancel-header-refresh-timer)
-  (setq disco-root--dirty-channel-ids nil)
-  (setq disco-root--dirty-structure-p nil)
-  (setq disco-root--dirty-header-p nil)
-  (when disco-root--gateway-handler
-    (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
-    (setq disco-root--gateway-handler nil))
-  (when disco-root--directory-handler
-    (remove-hook 'disco-directory-event-hook disco-root--directory-handler)
-    (setq disco-root--directory-handler nil))
-  (when disco-root--preview-handler
-    (remove-hook 'disco-preview-update-hook disco-root--preview-handler)
-    (setq disco-root--preview-handler nil))
-  (disco-gateway-unwatch-global))
+  (let ((watched (and disco-root--gateway-handler t)))
+    (when disco-root--gateway-handler
+      (remove-hook 'disco-gateway-event-hook disco-root--gateway-handler)
+      (setq disco-root--gateway-handler nil))
+    (when disco-root--directory-handler
+      (remove-hook 'disco-directory-event-hook disco-root--directory-handler)
+      (setq disco-root--directory-handler nil))
+    (when disco-root--preview-handler
+      (remove-hook 'disco-preview-update-hook disco-root--preview-handler)
+      (setq disco-root--preview-handler nil))
+    (when watched
+      (disco-gateway-unwatch-global))))
 
 (defun disco-root--handle-state-reset ()
-  "Invalidate cached root headers after canonical state is reset."
+  "Invalidate open root views after canonical state is reset."
   (dolist (buffer (buffer-list))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when (eq major-mode 'disco-root-mode)
-          (disco-root--cancel-header-refresh-timer)
-          (setq disco-root--header-state-cache nil
-                disco-root--last-header-refresh-at nil)
-          (force-mode-line-update))))))
+        (when (and (eq major-mode 'disco-root-mode)
+                   (appkit-view-live-p (appkit-current-view)))
+          (disco-root--queue-live-update nil t t))))))
 
 (add-hook 'disco-state-reset-hook #'disco-root--handle-state-reset)
 
@@ -3047,7 +3031,8 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
   "Toggle root channel sort mode between activity and name."
   (interactive)
   (setq disco-root--sort-mode (if (eq disco-root--sort-mode 'activity) 'name 'activity))
-  (disco-root-render)
+  (disco-root--queue-live-update nil t nil)
+  (appkit-sync-invalidations (appkit-current-view))
   (message "disco: root sort mode -> %s" disco-root--sort-mode))
 
 (defun disco-root-cycle-view-mode ()
@@ -3058,7 +3043,8 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
      ('all 'unread)
      ('unread 'dms)
      (_ 'all)))
-  (disco-root-render)
+  (disco-root--queue-live-update nil t t)
+  (appkit-sync-invalidations (appkit-current-view))
   (message "disco: root view mode -> %s" disco-root--view-mode))
 
 (defun disco-root--refresh-active-layout-headings (channel-ids)
@@ -3244,38 +3230,9 @@ When HEADER-P is non-nil, root header line is refreshed on flush."
 (defun disco-root--refresh-header-line ()
   "Refresh the persistent root header-line."
   (disco-root--debug-log "refresh-header-line")
-  (disco-root--cancel-header-refresh-timer)
   (setq disco-root--header-state-cache
         (disco-root--compute-header-state))
-  (setq disco-root--last-header-refresh-at (float-time))
   (force-mode-line-update t))
-
-(defun disco-root--run-deferred-header-refresh (buffer)
-  "Apply a throttled header refresh in live root BUFFER."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (setq disco-root--header-refresh-timer nil)
-      (when (derived-mode-p 'disco-root-mode)
-        (disco-root--refresh-header-line)))))
-
-(defun disco-root--maybe-refresh-activity-header-line ()
-  "Refresh the activity header now or at the throttle deadline."
-  (let ((interval (max 0 (or disco-root-activity-header-refresh-interval 0)))
-        (now (float-time))
-        (last (or disco-root--last-header-refresh-at 0.0)))
-    (if (or (zerop interval)
-            (>= (- now last) interval))
-        (progn
-          (disco-root--refresh-header-line)
-          t)
-      (unless (timerp disco-root--header-refresh-timer)
-        (setq disco-root--header-refresh-timer
-              (run-with-timer
-               (max 0 (- interval (- now last)))
-               nil
-               #'disco-root--run-deferred-header-refresh
-               (current-buffer))))
-      nil)))
 
 (defun disco-root-render ()
   "Render root dashboard from in-memory state."
@@ -3391,6 +3348,39 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
     map)
   "Keymap for `disco-root-mode'.")
 
+(defun disco-root--reset-controller-state ()
+  "Reset buffer-local root projection and asynchronous controller state."
+  (setq-local disco-root--sort-mode 'activity)
+  (setq-local disco-root--view-mode 'all)
+  (setq-local disco-root--pre-unread-view-mode 'all)
+  (setq-local disco-root--layout disco-root-default-layout)
+  (setq-local disco-root--tree-show-unread-section
+              disco-root-tree-default-show-unread-section)
+  (setq-local disco-root--section-expanded nil)
+  (disco-root--ensure-layout)
+  (setq-local disco-root--ewoc nil)
+  (setq-local disco-root--channel-node-table (make-hash-table :test #'equal))
+  (setq-local disco-root--section-node-table (make-hash-table :test #'eq))
+  (setq-local disco-root--guild-node-table (make-hash-table :test #'equal))
+  (setq-local disco-root--gateway-handler nil)
+  (setq-local disco-root--directory-handler nil)
+  (setq-local disco-root--preview-handler nil)
+  (setq-local disco-root--live-updates-handle nil)
+  (setq-local disco-root--refresh-in-flight nil)
+  (setq-local disco-root--rendering nil)
+  (setq-local disco-root--render-pending nil)
+  (setq-local disco-root--header-state-cache nil)
+  (setq-local disco-root--fill-column nil)
+  (setq-local disco-root--search-query nil)
+  (setq-local disco-root--search-domain nil)
+  (setq-local disco-root--search-query-spec nil)
+  (setq-local disco-root--search-tabs nil)
+  (setq-local disco-root--search-generation 0)
+  (setq-local disco-root--search-in-flight nil)
+  (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-prev-layout nil))
+
 (define-derived-mode disco-root-mode special-mode "Disco-Root"
   "Major mode for disco.el root buffer."
   (setq buffer-read-only t)
@@ -3404,55 +3394,33 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (add-hook 'after-change-functions #'disco-root--debug-after-change nil t)
   (buffer-disable-undo)
   (setq-local buffer-undo-list t)
-  (disco-root--cancel-live-update-timer)
-  (disco-root--cancel-header-refresh-timer)
   (disco-root--ensure-window-size-hook)
   (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
-  (setq-local disco-root--sort-mode 'activity)
-  (setq-local disco-root--view-mode 'all)
-  (setq-local disco-root--pre-unread-view-mode 'all)
-  (setq-local disco-root--layout disco-root-default-layout)
-  (setq-local disco-root--tree-show-unread-section
-              disco-root-tree-default-show-unread-section)
-  (disco-root--ensure-layout)
-  (setq-local disco-root--ewoc nil)
-  (setq-local disco-root--channel-node-table (make-hash-table :test #'equal))
-  (setq-local disco-root--section-node-table (make-hash-table :test #'eq))
-  (setq-local disco-root--guild-node-table (make-hash-table :test #'equal))
-  (setq-local disco-root--live-update-timer nil)
-  (setq-local disco-root--header-refresh-timer nil)
-  (setq-local disco-root--directory-handler nil)
-  (setq-local disco-root--rendering nil)
-  (setq-local disco-root--render-pending nil)
-  (setq-local disco-root--dirty-channel-ids nil)
-  (setq-local disco-root--dirty-structure-p nil)
-  (setq-local disco-root--dirty-header-p nil)
-  (setq-local disco-root--last-header-refresh-at nil)
-  (setq-local disco-root--header-state-cache nil)
-  (setq-local disco-root--fill-column nil)
-  (setq-local disco-root--search-query nil)
-  (setq-local disco-root--search-domain nil)
-  (setq-local disco-root--search-query-spec nil)
-  (setq-local disco-root--search-tabs nil)
-  (setq-local disco-root--search-generation 0)
-  (setq-local disco-root--search-in-flight nil)
-  (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
-  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
-  (setq-local disco-root--search-prev-layout nil))
+  (disco-root--reset-controller-state))
 
 (defun disco-root-open ()
   "Open root buffer and render current state."
   (interactive)
-  (let ((buf (get-buffer-create disco-root-buffer-name)))
+  (let* ((app (disco-runtime-app))
+         (existing (appkit-view-for-id app '(root main)))
+         (view
+          (appkit-open-view
+           :app app
+           :id '(root main)
+           :mode 'disco-root-mode
+           :buffer-name disco-root-buffer-name
+           :sync-function #'disco-root--sync-invalidations
+           :parts '(content header geometry)
+           :setup (lambda (_view) (disco-root--reset-controller-state))
+           :select t))
+         (buf (appkit-view-buffer view)))
     (with-current-buffer buf
-      (unless (derived-mode-p 'disco-root-mode)
-        (disco-root-mode))
-      (setq-local buffer-undo-list t))
-    (pop-to-buffer buf)
-    (with-current-buffer buf
+      (setq-local buffer-undo-list t)
       (disco-root--attach-live-updates)
       (disco-root--ensure-guild-channel-permissions)
-      (disco-root-render))
+      (unless existing
+        (appkit-invalidate view :structure t :part 'header)
+        (appkit-sync-invalidations view)))
     buf))
 
 (setq disco-root-view-attach-live-updates-function
@@ -3461,8 +3429,6 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
       #'disco-root-search-load-more
       disco-root-view-queue-live-update-function
       #'disco-root--queue-live-update
-      disco-root-view-render-preserving-position-function
-      #'disco-root--render-preserving-position
       disco-root-view-transient-function
       #'disco-root-transient)
 

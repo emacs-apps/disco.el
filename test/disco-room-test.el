@@ -32,10 +32,911 @@
        (permissions . "2048")))
     channel-id))
 
+(defun disco-room-test-poll-message (&optional channel-id)
+  "Return a two-answer open poll fixture for CHANNEL-ID."
+  `((id . "p1")
+    (channel_id . ,(or channel-id "poll-race"))
+    (content . "")
+    (poll . ((question . ((text . "Question")))
+             (allow_multiselect . t)
+             (answers . (((answer_id . 1)
+                          (poll_media . ((text . "one"))))
+                         ((answer_id . 2)
+                          (poll_media . ((text . "two"))))))
+             (results . ((answer_counts . (((id . 1)
+                                            (count . 0)
+                                            (me_voted . :false))
+                                           ((id . 2)
+                                            (count . 0)
+                                            (me_voted . :false))))))))))
+
 (ert-deftest disco-room-mode-is-not-special-mode ()
   (with-temp-buffer
     (disco-room-mode)
     (should-not (derived-mode-p 'special-mode))))
+
+(ert-deftest disco-room-open-resets-replacement-view-state-but-reuses-live-state ()
+  (let ((disco-runtime--app nil)
+        (channel-id "room-replacement")
+        (channel-name "replacement")
+        buffer
+        old-view
+        history-owner
+        (refreshes 0))
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     `((id . ,channel-id)
+       (name . ,channel-name)
+       (type . 0)
+       (guild_id . "g-replacement")
+       (permissions . "2048")))
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buf &rest _args) (setq buffer buf)))
+              ((symbol-function 'disco-room--attach-live-updates) #'ignore)
+              ((symbol-function 'disco-room-refresh)
+               (lambda () (cl-incf refreshes)))
+              ((symbol-function 'disco-room--on-window-size-change) #'ignore)
+              ((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (progn
+            (disco-room-open channel-id channel-name)
+            (should (buffer-live-p buffer))
+            (should (= 1 refreshes))
+            (with-current-buffer buffer
+              (setq old-view (appkit-current-view))
+              (appkit-chatbuf-input-state-set "surviving draft")
+              (appkit-chatbuf-input-history-push "old history")
+              (appkit-chat-history-window-set "100" "200")
+              (setq history-owner
+                    (appkit-chat-history-request-begin 'older '(old-owner)))
+              (setq-local disco-room--pending-reply-to "reply-old"
+                          disco-room--pending-edit '(:type edit :message-id "edit-old")
+                          disco-room--pending-jump-message-id "jump-old"
+                          disco-room--send-in-flight t
+                          disco-room--remote-latest-message-id "remote-old"
+                          disco-room--filter-generation 7
+                          disco-room--filter-in-flight t
+                          disco-room--msg-filter '(:active t :query "old")
+                          disco-room--inplace-search-generation 9
+                          disco-room--inplace-search-filter '(:query "old")
+                          disco-room--pending-attachments '((:path "old"))
+                          disco-room--optimistic-read-ack-seq 4
+                          disco-room--pending-optimistic-read-ack '(:seq 4)
+                          disco-room--poll-vote-op-seq 5
+                          disco-room--reaction-op-seq 6
+                          disco-room--pins-ack-seq 7)
+              (puthash "poll-old" '(1)
+                       disco-room--poll-selection-drafts)
+              (puthash "poll-old" '(:token 5 :target (1))
+                       disco-room--poll-vote-ops)
+              (puthash '("message-old" (name . "wave"))
+                       '(:token 6 :addp t)
+                       disco-room--reaction-ops))
+            ;; SETUP is not run for a still-live view, so reopening preserves
+            ;; controller, composer, and history ownership.
+            (disco-room-open channel-id channel-name)
+            (should (= 1 refreshes))
+            (with-current-buffer buffer
+              (should (eq old-view (appkit-current-view)))
+              (should (eq history-owner
+                          (appkit-chat-history-request-owner)))
+              (should (equal "surviving draft" (disco-room--current-draft)))
+              (should (= 7 disco-room--filter-generation))
+              (should disco-room--send-in-flight))
+            (appkit-kill-view old-view)
+            (should-not (appkit-view-live-p old-view))
+            ;; The same major-mode buffer survives, but the new Appkit view gets
+            ;; fresh ownership instead of inheriting the dead predecessor.
+            (disco-room-open channel-id channel-name)
+            (should (= 2 refreshes))
+            (with-current-buffer buffer
+              (let ((replacement (appkit-current-view)))
+                (should (appkit-view-live-p replacement))
+                (should-not (eq old-view replacement))
+                (should (equal channel-id disco-room--channel-id))
+                (should (equal "g-replacement" disco-room--guild-id))
+                (should (equal "" (disco-room--current-draft)))
+                (should-not (appkit-chat-history-window-known-p))
+                (should-not (appkit-chat-history-loading-p))
+                (should-not (appkit-chat-history-request-owner))
+                (should-not disco-room--pending-reply-to)
+                (should-not disco-room--pending-edit)
+                (should-not disco-room--pending-jump-message-id)
+                (should-not disco-room--send-in-flight)
+                (should-not disco-room--remote-latest-message-id)
+                (should (= 0 disco-room--filter-generation))
+                (should-not disco-room--filter-in-flight)
+                (should-not disco-room--msg-filter)
+                (should (= 0 disco-room--inplace-search-generation))
+                (should-not disco-room--inplace-search-filter)
+                (should-not disco-room--pending-attachments)
+                (should (= 0 (hash-table-count
+                              disco-room--poll-selection-drafts)))
+                (should (= 0 disco-room--poll-vote-op-seq))
+                (should (= 0 (hash-table-count disco-room--poll-vote-ops)))
+                (should (= 0 disco-room--reaction-op-seq))
+                (should (= 0 (hash-table-count disco-room--reaction-ops)))
+                (should (= 0 disco-room--optimistic-read-ack-seq))
+                (should-not disco-room--pending-optimistic-read-ack)
+                (should (= 0 disco-room--pins-ack-seq))
+                (should (= 0 (hash-table-count
+                              (appkit-view-request-table replacement)))))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-history-callback-cannot-land-in-replacement-view ()
+  (let ((disco-runtime--app nil)
+        success-callback)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "callback-view")
+            (let ((old-view (disco-room--ensure-view)))
+              (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                         (lambda (_channel-id &rest args)
+                           (setq success-callback
+                                 (plist-get args :on-success))))
+                        ((symbol-function 'disco-room--update-frame) #'ignore)
+                        ((symbol-function 'message) #'ignore))
+                (disco-room-refresh))
+              (should (functionp success-callback))
+              (appkit-kill-view old-view)
+              (let ((replacement (disco-room--ensure-view)))
+                (should-not (eq old-view replacement))
+                ;; Buffer, channel, generation, and history owner still look
+                ;; compatible; originating view identity is the decisive guard.
+                (funcall success-callback
+                         '(((id . "200")
+                            (channel_id . "callback-view")
+                            (content . "stale"))))
+                (should-not (disco-state-messages "callback-view")))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-gateway-hook-and-watch-are-view-owned-and-idempotent ()
+  (let ((disco-runtime--app nil)
+        (watch-count 0)
+        (unwatch-count 0)
+        (requests 0))
+    (cl-letf (((symbol-function 'disco-gateway-watch-channel)
+               (lambda (_channel-id) (cl-incf watch-count)))
+              ((symbol-function 'disco-gateway-unwatch-channel)
+               (lambda (_channel-id) (cl-incf unwatch-count)))
+              ((symbol-function 'disco-gateway-stop) #'ignore)
+              ((symbol-function 'appkit-request-sync)
+               (lambda (&rest _args) (cl-incf requests)))
+              ((symbol-function 'appkit-invalidate)
+               (lambda (&rest _args)
+                 (ert-fail "gateway callback invalidated and scheduled separately")))
+              ((symbol-function 'appkit-schedule-sync)
+               (lambda (&rest _args)
+                 (ert-fail "gateway callback scheduled separately"))))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "gateway-owner")
+            (let* ((view (disco-room--attach-live-updates))
+                   (handler disco-room--gateway-handler)
+                   (handle disco-room--live-update-handle))
+              (should (= 1 watch-count))
+              (should (memq handler disco-gateway-event-hook))
+              (should (appkit-handle-alive-p handle))
+              (should (eq view (appkit-handle-owner handle)))
+              (should (eq view (disco-room--attach-live-updates)))
+              (should (= 1 watch-count))
+              (should (eq handle disco-room--live-update-handle))
+              (funcall handler '(:type channel-update :channel-id "gateway-owner"))
+              (should (= 1 requests))
+              (appkit-kill-view view)
+              (should-not (memq handler disco-gateway-event-hook))
+              (should-not (appkit-handle-alive-p handle))
+              (should-not disco-room--gateway-handler)
+              (should-not disco-room--live-update-handle)
+              (should (= 1 unwatch-count))
+              (disco-room--detach-live-updates)
+              (disco-room--detach-live-updates)
+              (should (= 1 unwatch-count))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-async-refresh-callback-only-requests-appkit-sync ()
+  (let ((disco-runtime--app nil)
+        callback
+        requests)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "refresh-boundary")
+            (disco-room--ensure-view)
+            (cl-letf (((symbol-function 'disco-api-channel-messages-async)
+                       (lambda (_channel-id &rest args)
+                         (setq callback (plist-get args :on-success))))
+                      ((symbol-function 'disco-room--update-frame) #'ignore)
+                      ((symbol-function 'disco-room--mark-read) #'ignore)
+                      ((symbol-function 'disco-room-render)
+                       (lambda ()
+                         (ert-fail "async callback rendered directly")))
+                      ((symbol-function 'appkit-sync-invalidations)
+                       (lambda (&rest _args)
+                         (ert-fail "async callback synced directly")))
+                      ((symbol-function 'appkit-request-sync)
+                       (lambda (view &rest args)
+                         (push (cons view args) requests)))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-refresh)
+              ;; Ignore the explicit request-start loading invalidation; this
+              ;; assertion is about the transport callback boundary itself.
+              (setq requests nil)
+              (funcall callback
+                       '(((id . "300")
+                          (channel_id . "refresh-boundary")
+                          (content . "fresh"))))
+              (should (= 1 (length requests)))
+              (should (plist-get (cdar requests) :structure))
+              (should (equal '(frame timeline composer)
+                             (plist-get (cdar requests) :parts)))
+              (should (equal "300"
+                             (alist-get 'id
+                                        (car (disco-state-messages
+                                              "refresh-boundary")))))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-filter-callback-only-requests-appkit-sync ()
+  (let ((disco-runtime--app nil)
+        callback
+        requests)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "filter-boundary")
+            (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
+                       (lambda (&rest args)
+                         (setq callback (plist-get args :on-success))))
+                      ((symbol-function 'disco-room-render)
+                       (lambda ()
+                         (ert-fail "filter path rendered directly")))
+                      ((symbol-function 'appkit-sync-invalidations)
+                       (lambda (&rest _args)
+                         (ert-fail "filter callback synced directly")))
+                      ((symbol-function 'appkit-request-sync)
+                       (lambda (view &rest args)
+                         (push (cons view args) requests)))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-search--run-filter '(:query "needle"))
+              (should (= 1 (length requests)))
+              (setq requests nil)
+              (funcall callback
+                       '((total_results . 1)
+                         (messages (((id . "result")
+                                     (channel_id . "filter-boundary"))))))
+              (should (= 1 (length requests)))
+              (should (equal "result"
+                             (alist-get
+                              'id
+                              (car (plist-get disco-room--msg-filter :items)))))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-typing-callbacks-never-project-directly ()
+  (let ((disco-runtime--app nil)
+        requests)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "typing-boundary")
+            (let ((view (disco-room--ensure-view)))
+              (puthash "expired"
+                       (list :user-id "expired"
+                             :display-name "Expired"
+                             :expires-at (- (float-time) 1)
+                             :updated-at (- (float-time) 2))
+                       disco-room--typing-users)
+              (cl-letf (((symbol-function 'disco-room--update-frame)
+                         (lambda (&rest _args)
+                           (ert-fail "typing callback updated frame directly")))
+                        ((symbol-function 'disco-room-render)
+                         (lambda ()
+                           (ert-fail "typing callback rendered directly")))
+                        ((symbol-function 'disco-room--sync-timeline)
+                         (lambda (&rest _args)
+                           (ert-fail "typing callback projected timeline directly")))
+                        ((symbol-function 'appkit-sync-invalidations)
+                         (lambda (&rest _args)
+                           (ert-fail "typing callback synced directly")))
+                        ((symbol-function 'disco-room--typing-reschedule-expire-timer)
+                         #'ignore)
+                        ((symbol-function 'appkit-request-sync)
+                         (lambda (owner &rest args)
+                           (push (cons owner args) requests))))
+                (disco-room--typing-expire-timer-callback
+                 (current-buffer) view)
+                (should-not (gethash "expired" disco-room--typing-users))
+                (should (= 1 (length requests)))
+                (should (eq view (caar requests)))
+                (should (eq 'frame (plist-get (cdar requests) :part)))
+                ;; Track/stop run while a gateway event is already being
+                ;; consumed by Appkit sync, so they remain controller-only.
+                (should (disco-room--typing-track-user
+                         "active" nil (float-time)))
+                (should (gethash "active" disco-room--typing-users))
+                (should (disco-room--typing-stop-user "active"))
+                (should-not (gethash "active" disco-room--typing-users)))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-post-command-spoiler-hide-only-requests-entry-sync ()
+  (let ((disco-runtime--app nil)
+        request)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "post-command-boundary")
+            (let ((view (disco-room--ensure-view)))
+              (setq-local disco-room--revealed-spoiler-message-id "m1")
+              (cl-letf (((symbol-function 'appkit-chatbuf-post-command-clamp-point)
+                         #'ignore)
+                        ((symbol-function 'appkit-chatbuf-point-in-input-p)
+                         (lambda () nil))
+                        ((symbol-function 'disco-room--update-context-mode) #'ignore)
+                        ((symbol-function 'disco-room--maybe-auto-load-newer) #'ignore)
+                        ((symbol-function 'disco-room--maybe-auto-load-older) #'ignore)
+                        ((symbol-function 'disco-room--invalidate-message-node)
+                         (lambda (&rest _args)
+                           (ert-fail "post-command hook invalidated a row directly")))
+                        ((symbol-function 'disco-room--update-frame)
+                         (lambda (&rest _args)
+                           (ert-fail "post-command hook updated frame directly")))
+                        ((symbol-function 'disco-room-render)
+                         (lambda ()
+                           (ert-fail "post-command hook rendered directly")))
+                        ((symbol-function 'appkit-sync-invalidations)
+                         (lambda (&rest _args)
+                           (ert-fail "post-command hook synced directly")))
+                        ((symbol-function 'appkit-request-sync)
+                         (lambda (owner &rest args)
+                           (setq request (cons owner args)))))
+                (disco-room--post-command)
+                (should-not disco-room--revealed-spoiler-message-id)
+                (should (eq view (car request)))
+                (should (equal "m1" (plist-get (cdr request) :entry))))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-media-visual-callback-only-requests-geometry-sync ()
+  (let ((disco-runtime--app nil)
+        request)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "media-visual-boundary")
+            (let ((view (disco-room--ensure-view)))
+              (cl-letf (((symbol-function 'buffer-list)
+                         (lambda () (list (current-buffer))))
+                        ((symbol-function 'disco-room-render)
+                         (lambda ()
+                           (ert-fail "media callback rendered directly")))
+                        ((symbol-function 'disco-room--update-frame)
+                         (lambda (&rest _args)
+                           (ert-fail "media callback updated frame directly")))
+                        ((symbol-function 'disco-room--refresh-timeline-layout)
+                         (lambda ()
+                           (ert-fail "media callback refreshed layout directly")))
+                        ((symbol-function 'appkit-sync-invalidations)
+                         (lambda (&rest _args)
+                           (ert-fail "media callback synced directly")))
+                        ((symbol-function 'appkit-request-sync)
+                         (lambda (owner &rest args)
+                           (setq request (cons owner args)))))
+                (disco-room--handle-media-rerender 'visual nil)
+                (should (eq view (car request)))
+                (should (eq 'geometry (plist-get (cdr request) :part))))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-reaction-callback-only-requests-entry-sync ()
+  (let ((disco-runtime--app nil)
+        callback
+        request)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "reaction-boundary")
+            (disco-state-put-messages
+             "reaction-boundary"
+             '(((id . "m1")
+                (channel_id . "reaction-boundary")
+                (content . "hello"))))
+            (let ((view (disco-room--ensure-view)))
+              (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
+                         (lambda (&optional _msg) nil))
+                        ((symbol-function 'disco-api-add-reaction-async)
+                         (lambda (_channel-id _message-id _emoji &rest args)
+                           (setq callback (plist-get args :on-success)))))
+                (disco-room-add-reaction "wave" "m1"))
+              (should (functionp callback))
+              (cl-letf (((symbol-function 'disco-room--update-frame)
+                         (lambda (&rest _args)
+                           (ert-fail "reaction callback updated frame directly")))
+                        ((symbol-function 'disco-room-render)
+                         (lambda ()
+                           (ert-fail "reaction callback rendered directly")))
+                        ((symbol-function 'disco-room--sync-timeline)
+                         (lambda (&rest _args)
+                           (ert-fail "reaction callback projected timeline directly")))
+                        ((symbol-function 'appkit-sync-invalidations)
+                         (lambda (&rest _args)
+                           (ert-fail "reaction callback synced directly")))
+                        ((symbol-function 'appkit-request-sync)
+                         (lambda (owner &rest args)
+                           (setq request (cons owner args))))
+                        ((symbol-function 'message) #'ignore))
+                (funcall callback nil)
+                (should (eq view (car request)))
+                (should (equal "m1" (plist-get (cdr request) :entry)))
+                (should (equal "wave"
+                               (disco-msg-reaction-emoji
+                                (car (disco-msg-reactions
+                                      (car (disco-state-messages
+                                            "reaction-boundary"))))))))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-reaction-rest-success-and-self-echo-are-idempotent ()
+  (let ((disco-runtime--app nil)
+        success-callback)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "reaction-echo")
+            (disco-state-put-messages
+             "reaction-echo"
+             '(((id . "m1")
+                (channel_id . "reaction-echo")
+                (content . "hello"))))
+            (disco-room--ensure-view)
+            (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
+                       (lambda (&optional _msg) nil))
+                      ((symbol-function 'disco-api-add-reaction-async)
+                       (lambda (_channel-id _message-id _emoji &rest args)
+                         (setq success-callback
+                               (plist-get args :on-success))))
+                      ((symbol-function 'disco-gateway-current-user-id)
+                       (lambda () "self"))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-add-reaction "oldname:42" "m1")
+              (funcall success-callback nil)
+              ;; Gateway may report a renamed custom emoji.  Its id owns the
+              ;; operation and the self echo must not increment count twice.
+              (disco-room--apply-live-reaction-event
+               '(:type message-reaction-add
+                 :message-id "m1"
+                 :user-id "self"
+                 :emoji ((id . "42") (name . "renamed")))))
+            (let* ((message (disco-room--message-by-id "m1"))
+                   (reaction (car (disco-msg-reactions message))))
+              (should (= 1 (disco-msg-reaction-count reaction)))
+              (should (disco-msg-reaction-selected-p reaction))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-reaction-self-echo-before-rest-completion-is-authoritative ()
+  (let ((disco-runtime--app nil)
+        success-callback
+        (requests 0))
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "reaction-echo-first")
+            (disco-state-put-messages
+             "reaction-echo-first"
+             '(((id . "m1")
+                (channel_id . "reaction-echo-first")
+                (content . "hello"))))
+            (disco-room--ensure-view)
+            (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
+                       (lambda (&optional _msg) nil))
+                      ((symbol-function 'disco-api-add-reaction-async)
+                       (lambda (_channel-id _message-id _emoji &rest args)
+                         (setq success-callback
+                               (plist-get args :on-success))))
+                      ((symbol-function 'disco-gateway-current-user-id)
+                       (lambda () "self"))
+                      ((symbol-function 'appkit-request-sync)
+                       (lambda (&rest _args) (cl-incf requests)))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-add-reaction "wave" "m1")
+              (disco-room--apply-live-reaction-event
+               '(:type message-reaction-add
+                 :message-id "m1"
+                 :user-id "self"
+                 :emoji ((name . "wave"))))
+              ;; The echo retired the request owner.  Its later REST success
+              ;; cannot mutate or schedule presentation again.
+              (funcall success-callback nil))
+            (let* ((message (disco-room--message-by-id "m1"))
+                   (reaction (car (disco-msg-reactions message))))
+              (should (= 1 (disco-msg-reaction-count reaction)))
+              (should (disco-msg-reaction-selected-p reaction))
+              (should (= 0 requests))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-other-user-reaction-delta-preserves-own-selection ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "reaction-other")
+    (disco-state-put-messages
+     "reaction-other"
+     '(((id . "m1")
+        (channel_id . "reaction-other")
+        (reactions . (((count . 1)
+                       (me . t)
+                       (emoji . ((name . "wave") (id . nil)))))))))
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "self")))
+      (disco-room--apply-live-reaction-event
+       '(:type message-reaction-add
+         :message-id "m1"
+         :user-id "other"
+         :emoji ((name . "wave"))))
+      (let ((reaction
+             (car (disco-msg-reactions (disco-room--message-by-id "m1")))))
+        (should (= 2 (disco-msg-reaction-count reaction)))
+        (should (disco-msg-reaction-selected-p reaction)))
+      (disco-room--apply-live-reaction-event
+       '(:type message-reaction-remove
+         :message-id "m1"
+         :user-id "other"
+         :emoji ((name . "wave"))))
+      (let ((reaction
+             (car (disco-msg-reactions (disco-room--message-by-id "m1")))))
+        (should (= 1 (disco-msg-reaction-count reaction)))
+        (should (disco-msg-reaction-selected-p reaction)))
+      ;; Even an out-of-order/duplicate other-user remove cannot erase the
+      ;; aggregate vote implied by our own selected state.
+      (disco-room--apply-live-reaction-event
+       '(:type message-reaction-remove
+         :message-id "m1"
+         :user-id "other"
+         :emoji ((name . "wave"))))
+      (let ((reaction
+             (car (disco-msg-reactions (disco-room--message-by-id "m1")))))
+        (should (= 1 (disco-msg-reaction-count reaction)))
+        (should (disco-msg-reaction-selected-p reaction))))))
+
+(ert-deftest disco-room-stale-reaction-rest-success-cannot-overwrite-newer-op ()
+  (let ((disco-runtime--app nil)
+        add-success
+        remove-success
+        (requests 0))
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "reaction-generation")
+            (disco-state-put-messages
+             "reaction-generation"
+             '(((id . "m1")
+                (channel_id . "reaction-generation")
+                (content . "hello"))))
+            (disco-room--ensure-view)
+            (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
+                       (lambda (&optional _msg) nil))
+                      ((symbol-function 'disco-api-add-reaction-async)
+                       (lambda (_channel-id _message-id _emoji &rest args)
+                         (setq add-success (plist-get args :on-success))))
+                      ((symbol-function 'disco-api-remove-own-reaction-async)
+                       (lambda (_channel-id _message-id _emoji &rest args)
+                         (setq remove-success (plist-get args :on-success))))
+                      ((symbol-function 'appkit-request-sync)
+                       (lambda (&rest _args) (cl-incf requests)))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-add-reaction "wave" "m1")
+              (disco-room-remove-reaction "wave" "m1")
+              (funcall remove-success nil)
+              (funcall add-success nil))
+            (should-not
+             (disco-msg-reactions (disco-room--message-by-id "m1")))
+            (should (= 1 requests)))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-poll-rest-success-and-self-echo-are-idempotent ()
+  (let ((disco-runtime--app nil)
+        success-callback)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "poll-echo")
+            (disco-state-put-messages
+             "poll-echo" (list (disco-room-test-poll-message "poll-echo")))
+            (disco-room--ensure-view)
+            (disco-room--poll-set-draft-selection "p1" '(1))
+            (cl-letf (((symbol-function 'disco-api-create-poll-vote-async)
+                       (lambda (_channel-id _message-id _answer-ids &rest args)
+                         (setq success-callback
+                               (plist-get args :on-success))))
+                      ((symbol-function 'disco-gateway-current-user-id)
+                       (lambda () "self"))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-submit-poll-vote "p1")
+              (funcall success-callback nil)
+              ;; This is a newer unsent draft and must survive the old echo.
+              (disco-room--poll-set-draft-selection "p1" '(2))
+              (disco-room--apply-live-poll-vote-event
+               '(:type message-poll-vote-add
+                 :message-id "p1"
+                 :answer-id 1
+                 :user-id "self")))
+            (let ((poll (disco-msg-poll (disco-room--message-by-id "p1"))))
+              (should (= 1 (disco-msg-poll-answer-count poll 1)))
+              (should (equal '(1) (disco-msg-poll-voted-answer-ids poll)))
+              (should (equal '(2)
+                             (disco-room--poll-draft-selection "p1")))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-poll-self-echo-before-rest-completion-is-authoritative ()
+  (let ((disco-runtime--app nil)
+        success-callback
+        (requests 0))
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "poll-echo-first")
+            (disco-state-put-messages
+             "poll-echo-first"
+             (list (disco-room-test-poll-message "poll-echo-first")))
+            (disco-room--ensure-view)
+            (disco-room--poll-set-draft-selection "p1" '(1))
+            (cl-letf (((symbol-function 'disco-api-create-poll-vote-async)
+                       (lambda (_channel-id _message-id _answer-ids &rest args)
+                         (setq success-callback
+                               (plist-get args :on-success))))
+                      ((symbol-function 'disco-gateway-current-user-id)
+                       (lambda () "self"))
+                      ((symbol-function 'appkit-request-sync)
+                       (lambda (&rest _args) (cl-incf requests)))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-submit-poll-vote "p1")
+              (disco-room--apply-live-poll-vote-event
+               '(:type message-poll-vote-add
+                 :message-id "p1"
+                 :answer-id 1
+                 :user-id "self"))
+              (funcall success-callback nil))
+            (let ((poll (disco-msg-poll (disco-room--message-by-id "p1"))))
+              (should (= 1 (disco-msg-poll-answer-count poll 1)))
+              (should (equal '(1) (disco-msg-poll-voted-answer-ids poll)))
+              (should-not (disco-room--poll-draft-selection-present-p "p1"))
+              (should (= 0 requests))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-stale-poll-rest-success-cannot-overwrite-newer-op ()
+  (let ((disco-runtime--app nil)
+        callbacks
+        (requests 0))
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "poll-generation")
+            (disco-state-put-messages
+             "poll-generation"
+             (list (disco-room-test-poll-message "poll-generation")))
+            (disco-room--ensure-view)
+            (cl-letf (((symbol-function 'disco-api-create-poll-vote-async)
+                       (lambda (_channel-id _message-id _answer-ids &rest args)
+                         (setq callbacks
+                               (append callbacks
+                                       (list (plist-get args :on-success))))))
+                      ((symbol-function 'appkit-request-sync)
+                       (lambda (&rest _args) (cl-incf requests)))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room--poll-set-draft-selection "p1" '(1))
+              (disco-room-submit-poll-vote "p1")
+              (disco-room--poll-set-draft-selection "p1" '(2))
+              (disco-room-submit-poll-vote "p1")
+              ;; New completion wins, then a newly staged draft must survive
+              ;; the old completion as well.
+              (funcall (nth 1 callbacks) nil)
+              (disco-room--poll-set-draft-selection "p1" '(1 2))
+              (funcall (nth 0 callbacks) nil))
+            (let ((poll (disco-msg-poll (disco-room--message-by-id "p1"))))
+              (should (equal '(2) (disco-msg-poll-voted-answer-ids poll)))
+              (should (= 0 (disco-msg-poll-answer-count poll 1)))
+              (should (= 1 (disco-msg-poll-answer-count poll 2)))
+              (should (equal '(1 2)
+                             (disco-room--poll-draft-selection "p1")))
+              (should (= 1 requests))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-inplace-search-callback-only-queues-appkit-jump ()
+  (let ((disco-runtime--app nil)
+        callback
+        requests)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "search-boundary")
+            (setq-local disco-room--newest-message-id "m9")
+            (let ((view (disco-room--ensure-view)))
+              (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
+                         (lambda (&rest args)
+                           (setq callback (plist-get args :on-success))))
+                        ((symbol-function 'appkit-request-sync)
+                         (lambda (owner &rest args)
+                           (push (cons owner args) requests)))
+                        ((symbol-function 'message) #'ignore))
+                (disco-room--inplace-search-dispatch
+                 '(:query "needle") nil "m9"))
+              (should (functionp callback))
+              (setq requests nil)
+              (cl-letf (((symbol-function 'disco-room-jump-to-message)
+                         (lambda (&rest _args)
+                           (ert-fail "search callback jumped directly")))
+                        ((symbol-function 'disco-room--update-frame)
+                         (lambda (&rest _args)
+                           (ert-fail "search callback updated frame directly")))
+                        ((symbol-function 'disco-room-render)
+                         (lambda ()
+                           (ert-fail "search callback rendered directly")))
+                        ((symbol-function 'disco-room--sync-timeline)
+                         (lambda (&rest _args)
+                           (ert-fail "search callback projected timeline directly")))
+                        ((symbol-function 'appkit-sync-invalidations)
+                         (lambda (&rest _args)
+                           (ert-fail "search callback synced directly")))
+                        ((symbol-function 'appkit-request-sync)
+                         (lambda (owner &rest args)
+                           (push (cons owner args) requests)))
+                        ((symbol-function 'message) #'ignore))
+                (funcall callback
+                         '((messages (((id . "m5")
+                                       (channel_id . "search-boundary")
+                                       (content . "needle"))))))
+                (should (equal "m5" disco-room--pending-jump-message-id))
+                (should (= 1 (length requests)))
+                (should (eq view (caar requests)))
+                (should (eq t (plist-get (cdar requests) :position)))
+                (should (eq 'timeline (plist-get (cdar requests) :part))))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-attachment-send-error-callback-restores-controller-only ()
+  (let ((disco-runtime--app nil)
+        callback
+        requests)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "attachment-send-boundary")
+            (disco-state-upsert-channel
+             `((id . "attachment-send-boundary")
+               (type . 0)
+               (guild_id . "g1")
+               (permissions . ,(number-to-string
+                                 (logior 2048 (ash 1 15))))))
+            (let ((path (make-temp-file "disco-room-callback-attach")))
+              (unwind-protect
+                  (let* ((view (disco-room--ensure-view))
+                         (draft
+                          (concat
+                           "hello "
+                           (disco-room--attachment-input-object-string
+                            (disco-room--make-attachment-input-object path)))))
+                    (disco-room--set-draft draft)
+                    (cl-letf (((symbol-function
+                                'disco-api-send-message-with-attachments-async)
+                               (lambda (_channel-id &rest args)
+                                 (setq callback (plist-get args :on-error))))
+                              ((symbol-function 'message) #'ignore))
+                      (disco-room-send-message))
+                    (should (functionp callback))
+                    (should disco-room--send-in-flight)
+                    (setq requests nil)
+                    (cl-letf (((symbol-function 'disco-room--update-frame)
+                               (lambda (&rest _args)
+                                 (ert-fail "send callback updated frame directly")))
+                              ((symbol-function 'disco-room-render)
+                               (lambda ()
+                                 (ert-fail "send callback rendered directly")))
+                              ((symbol-function 'disco-room--sync-timeline)
+                               (lambda (&rest _args)
+                                 (ert-fail "send callback projected timeline directly")))
+                              ((symbol-function 'appkit-chatbuf-input-replace)
+                               (lambda (&rest _args)
+                                 (ert-fail "send callback replaced live input directly")))
+                              ((symbol-function 'appkit-sync-invalidations)
+                               (lambda (&rest _args)
+                                 (ert-fail "send callback synced directly")))
+                              ((symbol-function 'appkit-request-sync)
+                               (lambda (owner &rest args)
+                                 (push (cons owner args) requests)))
+                              ((symbol-function 'message) #'ignore))
+                      (funcall callback '(:message "upload failed"))
+                      (should-not disco-room--send-in-flight)
+                      (should (= 1 (length requests)))
+                      (should (eq view (caar requests)))
+                      (should (plist-get (cdar requests) :structure))
+                      (should (equal "hello "
+                                     (disco-room--draft-without-attachment-tokens)))
+                      (should (equal path
+                                     (plist-get
+                                      (car (disco-room--attachments-from-draft))
+                                      :path)))))
+                (delete-file path))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-edit-success-callback-restores-controller-only ()
+  (let ((disco-runtime--app nil)
+        callback
+        requests)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "edit-callback-boundary")
+            (let ((message
+                   '((id . "m1")
+                     (channel_id . "edit-callback-boundary")
+                     (content . "old body")
+                     (author . ((id . "self") (username . "Me"))))))
+              (disco-state-put-messages "edit-callback-boundary" (list message))
+              (let ((view (disco-room--ensure-view)))
+                (disco-room--set-draft "saved draft")
+                (disco-room--composer-enter-edit message)
+                (disco-room--set-draft "updated body")
+                (cl-letf (((symbol-function 'disco-room--edit-permission-reason)
+                           (lambda (&optional _msg) nil))
+                          ((symbol-function 'disco-api-edit-message-async)
+                           (lambda (_channel-id _message-id _content &rest args)
+                             (setq callback (plist-get args :on-success))))
+                          ((symbol-function 'message) #'ignore))
+                  (disco-room-send-message))
+                (should (functionp callback))
+                (should disco-room--send-in-flight)
+                (setq requests nil)
+                (cl-letf (((symbol-function 'disco-room--update-frame)
+                           (lambda (&rest _args)
+                             (ert-fail "edit callback updated frame directly")))
+                          ((symbol-function 'disco-room-render)
+                           (lambda ()
+                             (ert-fail "edit callback rendered directly")))
+                          ((symbol-function 'disco-room--sync-timeline)
+                           (lambda (&rest _args)
+                             (ert-fail "edit callback projected timeline directly")))
+                          ((symbol-function 'appkit-chatbuf-input-replace)
+                           (lambda (&rest _args)
+                             (ert-fail "edit callback replaced live input directly")))
+                          ((symbol-function 'appkit-sync-invalidations)
+                           (lambda (&rest _args)
+                             (ert-fail "edit callback synced directly")))
+                          ((symbol-function 'appkit-request-sync)
+                           (lambda (owner &rest args)
+                             (push (cons owner args) requests)))
+                          ((symbol-function 'message) #'ignore))
+                  (funcall callback
+                           '((id . "m1")
+                             (channel_id . "edit-callback-boundary")
+                             (content . "updated body")
+                             (author . ((id . "self") (username . "Me")))))
+                  (should-not disco-room--send-in-flight)
+                  (should-not (disco-room--composer-edit-active-p))
+                  (should (equal "saved draft"
+                                 (appkit-chatbuf-string-plain-text
+                                  (disco-room--current-draft))))
+                  (should (equal "updated body"
+                                 (alist-get
+                                  'content
+                                  (car (disco-state-messages
+                                        "edit-callback-boundary")))))
+                  (should (= 1 (length requests)))
+                  (should (eq view (caar requests)))
+                  (should (plist-get (cdar requests) :structure))))))
+        (disco-runtime-stop)))))
 
 (ert-deftest disco-room-contextual-bindings-follow-point-location ()
   (with-temp-buffer
@@ -552,6 +1453,58 @@
                  (lambda (&rest _args) nil)))
         (disco-room-ack-channel-pins)
         (should-not api-called)))))
+
+(ert-deftest disco-room-stale-pins-ack-success-cannot-regress-newer-cursor ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chan")
+       (type . 0)
+       (last_pin_timestamp . "2026-03-04T01:00:00.000000+00:00")))
+    (setq-local disco-room--channel-id "chan")
+    (let (success-callbacks)
+      (cl-letf (((symbol-function 'disco-api-ack-channel-pins-async)
+                 (lambda (_channel-id &rest args)
+                   (setq success-callbacks
+                         (append success-callbacks
+                                 (list (plist-get args :on-success))))))
+                ((symbol-function 'disco-room--callback-active-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-ack-channel-pins)
+        (disco-state-apply-channel-pins-update
+         "chan" "2026-03-04T02:00:00.000000+00:00")
+        (disco-room-ack-channel-pins)
+        (funcall (nth 1 success-callbacks) nil)
+        (funcall (nth 0 success-callbacks) nil))
+      (should
+       (equal "2026-03-04T02:00:00.000000+00:00"
+              (disco-state-channel-last-read-pin-timestamp "chan"))))))
+
+(ert-deftest disco-room-pins-ack-success-never-overwrites-newer-gateway-ack ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chan")
+       (type . 0)
+       (last_pin_timestamp . "2026-03-04T01:00:00.000000+00:00")))
+    (setq-local disco-room--channel-id "chan")
+    (let (success-callback)
+      (cl-letf (((symbol-function 'disco-api-ack-channel-pins-async)
+                 (lambda (_channel-id &rest args)
+                   (setq success-callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room--callback-active-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-ack-channel-pins)
+        (disco-state-apply-channel-pins-ack
+         "chan" "2026-03-04T02:00:00.000000+00:00")
+        (funcall success-callback nil))
+      (should
+       (equal "2026-03-04T02:00:00.000000+00:00"
+              (disco-state-channel-last-read-pin-timestamp "chan"))))))
 
 (ert-deftest disco-room-handle-gateway-pin-events-refresh-current-frame ()
   (with-temp-buffer
@@ -1075,14 +2028,44 @@
     (disco-state-apply-message-ack "chat" "m1" 1)
     (disco-room-test-establish-latest-window)
     (disco-room-render)
-    (let (error-callback)
+    (let (error-callback
+          request)
       (cl-letf (((symbol-function 'disco-api-ack-message-async)
                  (lambda (&rest args)
                    (setq error-callback (plist-get args :on-error))))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
-        (disco-room--mark-read "m3")
-        (funcall error-callback '(:message "boom"))))
+        (disco-room--mark-read "m3"))
+      (should-not (plist-get (appkit-chat-timeline-context "m2")
+                             :insert-unread))
+      (cl-letf (((symbol-function 'disco-room--update-frame)
+                 (lambda (&rest _args)
+                   (ert-fail "read ACK callback updated frame directly")))
+                ((symbol-function 'disco-room-render)
+                 (lambda ()
+                   (ert-fail "read ACK callback rendered directly")))
+                ((symbol-function 'disco-room--sync-timeline)
+                 (lambda (&rest _args)
+                   (ert-fail "read ACK callback projected timeline directly")))
+                ((symbol-function 'appkit-sync-invalidations)
+                 (lambda (&rest _args)
+                   (ert-fail "read ACK callback synced directly")))
+                ((symbol-function 'appkit-request-sync)
+                 (lambda (owner &rest args)
+                   (setq request (cons owner args))))
+                ((symbol-function 'message) #'ignore))
+        (funcall error-callback '(:message "boom"))
+        (should (eq (appkit-current-view) (car request)))
+        (should (eq 'timeline (plist-get (cdr request) :part)))
+        ;; Controller state is rolled back immediately, while the old
+        ;; optimistic projection remains until Appkit consumes the request.
+        (should-not disco-room--pending-optimistic-read-ack)
+        (should (equal "m1"
+                       (disco-state-channel-last-read-message-id "chat")))
+        (should-not (plist-get (appkit-chat-timeline-context "m2")
+                               :insert-unread)))
+      (appkit-request-sync (appkit-current-view) :part 'timeline)
+      (appkit-sync-invalidations (appkit-current-view)))
     (should-not disco-room--pending-optimistic-read-ack)
     (should (equal "m1" (disco-state-channel-last-read-message-id "chat")))
     (should (disco-util-json-true-p
@@ -1147,6 +2130,11 @@
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room--fetch-around-pending-jump)
+        ;; The transport callback updates state and only queues presentation.
+        (should-not rendered)
+        (should-not jumped)
+        (should (equal "20" disco-room--pending-jump-message-id))
+        (appkit-sync-invalidations (appkit-current-view))
         (should rendered)
         (should (equal "20" jumped))
         (should-not disco-room--pending-jump-message-id)
@@ -2055,7 +3043,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (let ((disco-room--channel-id "chan")
-          rendered)
+          requested)
       (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
                  (lambda (&rest args)
                    (funcall (plist-get args :on-success)
@@ -2064,11 +3052,14 @@
                                           (channel_id . "chan")
                                           (content . "hello"))))))))
                 ((symbol-function 'disco-room-render)
-                 (lambda () (setq rendered t)))
+                 (lambda ()
+                   (ert-fail "filter command rendered outside Appkit sync")))
+                ((symbol-function 'appkit-request-sync)
+                 (lambda (&rest _args) (setq requested t)))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room-filter-search "hello")
-        (should rendered)
+        (should requested)
         (should (equal "hello" (plist-get disco-room--msg-filter :query)))
         (should (equal '("m1")
                        (mapcar (lambda (msg) (alist-get 'id msg))
@@ -3098,7 +4089,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (let ((disco-room--channel-id "chan")
-          rendered)
+          requested)
       (disco-state-reset)
       (disco-state-put-messages "chan"
                                 '(((id . "m1") (channel_id . "chan") (content . "alpha"))))
@@ -3107,15 +4098,18 @@
         (add-text-properties (point-min) (point-max) '(disco-message-id "m1")))
       (goto-char (point-min))
       (cl-letf (((symbol-function 'disco-room-render)
-                 (lambda () (setq rendered t))))
+                 (lambda ()
+                   (ert-fail "inplace command rendered outside Appkit sync")))
+                ((symbol-function 'appkit-request-sync)
+                 (lambda (&rest _args) (setq requested t))))
         (disco-room--inplace-search-dispatch '(:query "alpha") t)
-        (should rendered)))))
+        (should requested)))))
 
 (ert-deftest disco-room-inplace-search-dispatch-server-hit-jumps-to-message ()
   (with-temp-buffer
     (disco-room-mode)
     (let ((disco-room--channel-id "chan")
-          jumped)
+          queued)
       (disco-state-reset)
       (setq-local disco-room--newest-message-id "m9")
       (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
@@ -3124,13 +4118,14 @@
                             '((messages (((id . "m5")
                                           (channel_id . "chan")
                                           (content . "match"))))))))
-                ((symbol-function 'disco-room-jump-to-message)
-                 (lambda (message-id &optional channel-id)
-                   (setq jumped (list message-id channel-id))))
+                ((symbol-function 'disco-room--queue-jump)
+                 (lambda (message-id view)
+                   (setq queued (list message-id view))))
                 ((symbol-function 'message)
                  (lambda (&rest _args) nil)))
         (disco-room--inplace-search-dispatch '(:query "match") nil "m9")
-        (should (equal '("m5" "chan") jumped))))))
+        (should (equal "m5" (car queued)))
+        (should (eq (cadr queued) (appkit-current-view)))))))
 
 (ert-deftest disco-room-inplace-search-unsupported-channel-skips-remote-search ()
   (with-temp-buffer
@@ -3295,7 +4290,7 @@
   (with-temp-buffer
     (disco-room-mode)
     (let ((disco-room--channel-id "target")
-          rendered
+          requested
           refreshed)
       (disco-state-reset)
       (cl-letf (((symbol-function 'disco-room--forward-unavailable-reason)
@@ -3306,9 +4301,20 @@
                  (lambda () '((id . "target") (type . 0))))
                 ((symbol-function 'disco-permission-ensure-channel) #'ignore)
                 ((symbol-function 'disco-room--ensure-jump-permissions) #'ignore)
-                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'disco-room--update-frame)
+                 (lambda (&rest _args)
+                   (ert-fail "forward callback updated frame directly")))
+                ((symbol-function 'disco-room-render)
+                 (lambda ()
+                   (ert-fail "forward callback rendered directly")))
                 ((symbol-function 'disco-room--render-send-state-change)
-                 (lambda () (setq rendered t)))
+                 (lambda ()
+                   (ert-fail "forward callback rendered directly")))
+                ((symbol-function 'appkit-sync-invalidations)
+                 (lambda (&rest _args)
+                   (ert-fail "forward callback synced directly")))
+                ((symbol-function 'appkit-request-sync)
+                 (lambda (&rest _args) (setq requested t)))
                 ((symbol-function 'disco-room-refresh)
                  (lambda () (setq refreshed t)))
                 ((symbol-function 'disco-api-forward-message-async)
@@ -3318,7 +4324,7 @@
                               (content . "forwarded")))))
                 ((symbol-function 'message) #'ignore))
         (disco-room-forward-message "50" "source" nil nil)
-        (should rendered)
+        (should requested)
         (should-not refreshed)
         (should-not disco-room--send-in-flight)
         (should (equal "100"
@@ -3588,25 +4594,34 @@
             (should (= 21 (avatar-slice-height)))
             (setq line-height 35)
             (disco-room--on-text-scale-change)
+            ;; The hook only invalidates; the Appkit transaction owns redraw.
+            (should (= 21 (avatar-slice-height)))
+            (appkit-sync-invalidations (appkit-current-view))
             (should (eq node (appkit-chat-timeline-node "m1")))
             (should (= 35 (avatar-slice-height)))))))))
 
 (ert-deftest disco-room-window-resize-refreshes-presentation-geometry ()
   (with-temp-buffer
-    (setq major-mode 'disco-room-mode)
-    (setq-local disco-room--chat-fill-column 70)
-    (let ((renders 0)
-          (layout-refreshes 0))
-      (cl-letf (((symbol-function 'disco-room--update-chat-fill-column)
-                 (lambda (&optional _window)
-                   (setq disco-room--chat-fill-column 90)))
-                ((symbol-function 'disco-room-render)
-                 (lambda () (cl-incf renders)))
-                ((symbol-function 'disco-room--refresh-timeline-layout)
-                 (lambda () (cl-incf layout-refreshes))))
-        (disco-room--on-window-size-change)
-        (should (= 1 renders))
-        (should (= 1 layout-refreshes))))))
+    (disco-room-mode)
+    (disco-room-test-setup-channel "geometry")
+    (let ((view (disco-room--ensure-view)))
+      (setq-local disco-room--chat-fill-column 70)
+      (let (request)
+        (cl-letf (((symbol-function 'disco-room--update-chat-fill-column)
+                   (lambda (&optional _window)
+                     (setq disco-room--chat-fill-column 90)))
+                  ((symbol-function 'disco-room-render)
+                   (lambda () (ert-fail "window hook rendered directly")))
+                  ((symbol-function 'disco-room--refresh-timeline-layout)
+                   (lambda () (ert-fail "window hook refreshed directly")))
+                  ((symbol-function 'appkit-sync-invalidations)
+                   (lambda (&rest _args) (ert-fail "window hook synced directly")))
+                  ((symbol-function 'appkit-request-sync)
+                   (lambda (owner &rest args)
+                     (setq request (cons owner args)))))
+          (disco-room--on-window-size-change)
+          (should (eq view (car request)))
+          (should (eq 'geometry (plist-get (cdr request) :part))))))))
 
 (provide 'disco-room-test)
 

@@ -1,5 +1,7 @@
 ;;; disco-channel-directory-test.el --- Guild directory tests -*- lexical-binding: t; -*-
 
+;;; Code:
+
 (require 'ert)
 (require 'cl-lib)
 (require 'seq)
@@ -43,6 +45,18 @@
        (cl-letf (((symbol-function 'disco-permission-channel-viewable-p)
                   (lambda (&rest _args) t)))
          ,@body))))
+
+(defmacro disco-channel-directory-test--with-appkit-guild (&rest body)
+  "Evaluate BODY with `view' bound to a live guild-directory Appkit view."
+  (declare (indent 0) (debug t))
+  `(let ((disco-runtime--app nil))
+     (unwind-protect
+         (disco-channel-directory-test--with-guild
+           (let ((view (disco-channel-directory--ensure-view)))
+             ,@body))
+       (when (appkit-app-p disco-runtime--app)
+         (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+           (appkit-stop-app disco-runtime--app))))))
 
 (ert-deftest disco-channel-directory-excludes-ordinary-channel-threads ()
   (disco-channel-directory-test--with-guild
@@ -118,13 +132,17 @@
          (format-mode-line header-line-format)
          (should (= 1 computations))))))
 
-(ert-deftest disco-channel-directory-state-reset-refreshes-cached-header ()
-  (disco-channel-directory-test--with-guild
-    (let ((refreshes 0))
-      (cl-letf (((symbol-function 'disco-channel-directory--refresh-header-line)
-                 (lambda () (cl-incf refreshes))))
+(ert-deftest disco-channel-directory-state-reset-queues-structural-sync ()
+  (disco-channel-directory-test--with-appkit-guild
+    (let (updates)
+      (cl-letf (((symbol-function
+                  'disco-channel-directory--queue-view-update)
+                 (lambda (target &rest args)
+                   (push (cons target args) updates))))
         (disco-channel-directory--handle-state-reset)
-        (should (= 1 refreshes))))))
+        (should (= 1 (length updates)))
+        (should (eq view (caar updates)))
+        (should (plist-get (cdar updates) :structure))))))
 
 (ert-deftest disco-channel-directory-filter-reveals-matching-channel-path ()
   (disco-channel-directory-test--with-guild
@@ -317,39 +335,161 @@
     (disco-directory-reset)))
 
 (ert-deftest disco-channel-directory-rehydrates-provisional-gateway-sync ()
-  (disco-channel-directory-test--with-guild
+  (disco-channel-directory-test--with-appkit-guild
     (disco-state-seed-guild-channels
      "g1" (disco-state-guild-channels "g1"))
-    (let (requested reconciled)
+    (let ((requests 0)
+          requested)
       (cl-letf (((symbol-function 'disco-directory-load-guild-async)
                  (lambda (guild-id &rest args)
+                   (cl-incf requests)
                    (setq requested (cons guild-id args))))
-                ((symbol-function 'disco-channel-directory--request-reconcile)
-                 (lambda (&optional channel-ids)
-                   (setq reconciled channel-ids))))
+                ((symbol-function 'disco-channel-directory--displayed-p)
+                 (lambda () nil)))
         (disco-channel-directory--handle-gateway-event
-         '(:type guild-sync :guild-ids ("g1")))
+         '(:type guild-sync :guild-ids ("g1")) view)
+        (should-not requested)
+        (appkit-sync-invalidations view)
         (should (equal '("g1") requested))
-        (should-not reconciled)))))
+        (should (= 1 requests))
+        (should disco-channel-directory--deferred-reconcile-p)
+        (disco-channel-directory--handle-directory-event
+         '(:type guild-error :guild-id "g1") view)
+        (appkit-sync-invalidations view)
+        (should (= 1 requests))))))
 
-(ert-deftest disco-channel-directory-hidden-updates-defer-until-displayed ()
-  (disco-channel-directory-test--with-guild
+(ert-deftest disco-channel-directory-gateway-events-coalesce-one-sync ()
+  (disco-channel-directory-test--with-appkit-guild
+    (let ((reconciles 0)
+          forced
+          first-handle)
+      (cl-letf (((symbol-function 'disco-channel-directory--displayed-p)
+                 (lambda () t))
+                ((symbol-function 'disco-channel-directory--reconcile)
+                 (lambda (_channel-ids entry-keys)
+                   (cl-incf reconciles)
+                   (setq forced entry-keys))))
+        (disco-channel-directory--handle-gateway-event
+         '(:type message-create :guild-id "g1" :channel-id "c1") view)
+        (setq first-handle
+              (appkit-invalidations-scheduled-handle
+               (appkit-view-invalidations view)))
+        (disco-channel-directory--handle-gateway-event
+         '(:type message-update :guild-id "g1" :channel-id "c2") view)
+        (should (eq first-handle
+                    (appkit-invalidations-scheduled-handle
+                     (appkit-view-invalidations view))))
+        (should (zerop reconciles))
+        (appkit-sync-invalidations view)
+        (should (= 1 reconciles))
+        (should
+         (equal '("channel:c1" "channel:c2")
+                (sort (copy-sequence forced) #'string-lessp)))))))
+
+(ert-deftest disco-channel-directory-callbacks-target-or-structure-only ()
+  (disco-channel-directory-test--with-appkit-guild
+    (let (requests
+          (mutations 0))
+      (cl-letf (((symbol-function 'appkit-request-sync)
+                 (lambda (candidate &rest options)
+                   (push (cons candidate options) requests)
+                   (apply #'appkit-invalidate candidate options)))
+                ((symbol-function 'appkit-schedule-sync)
+                 (lambda (&rest _args)
+                   (ert-fail "directory callback used bare scheduling")))
+                ((symbol-function 'disco-channel-directory--reconcile)
+                 (lambda (&rest _args) (cl-incf mutations)))
+                ((symbol-function 'force-window-update)
+                 (lambda (&rest _args) (cl-incf mutations))))
+        (disco-channel-directory--handle-gateway-event
+         '(:type message-update :guild-id "g1" :channel-id "c1") view)
+        (let ((pending (appkit-invalidations-take
+                        (appkit-view-invalidations view))))
+          (should-not (appkit-invalidations-structure-p pending))
+          (should (equal '("channel:c1")
+                         (appkit-invalidations-entry-keys pending))))
+        (disco-channel-directory--handle-gateway-event
+         '(:type channel-create :guild-id "g1" :channel-id "c2") view)
+        (let ((pending (appkit-invalidations-take
+                        (appkit-view-invalidations view))))
+          (should (appkit-invalidations-structure-p pending))
+          (should (equal '("channel:c2")
+                         (appkit-invalidations-entry-keys pending)))
+          (should
+           (equal '((guild-channel-snapshot "g1"))
+                  (appkit-invalidations-resource-keys pending))))
+        (disco-channel-directory--handle-directory-event
+         '(:type parent-threads-loaded :guild-id "g1"
+           :parent-id "c2" :channel-id "t1")
+         view)
+        (let ((pending (appkit-invalidations-take
+                        (appkit-view-invalidations view))))
+          (should (appkit-invalidations-structure-p pending))
+          (should
+           (equal '("channel:c2" "channel:t1")
+                  (sort (copy-sequence
+                         (appkit-invalidations-entry-keys pending))
+                        #'string-lessp))))
+        (should (= 3 (length requests)))
+        (should (seq-every-p (lambda (request) (eq view (car request)))
+                             requests))
+        (should (zerop mutations))))))
+
+(ert-deftest disco-channel-directory-dead-view-callbacks-are-inert ()
+  (disco-channel-directory-test--with-appkit-guild
+    (appkit-kill-view view)
+    (let ((updates 0))
+      (cl-letf (((symbol-function
+                  'disco-channel-directory--queue-view-update)
+                 (lambda (&rest _args) (cl-incf updates))))
+        (disco-channel-directory--handle-gateway-event
+         '(:type channel-create :guild-id "g1" :channel-id "c1") view)
+        (disco-channel-directory--handle-directory-event
+         '(:type guild-loaded :guild-id "g1") view)
+        (should (zerop updates))))))
+
+(ert-deftest disco-channel-directory-reconcile-never-implicitly-reattaches-view ()
+  (with-temp-buffer
+    (disco-channel-directory-mode)
+    (cl-letf (((symbol-function 'disco-channel-directory--ensure-view)
+               (lambda () (ert-fail "reconcile must not attach a view"))))
+      (should-not (disco-channel-directory--request-reconcile nil t t))
+      (setq-local disco-channel-directory--fill-column nil)
+      (disco-channel-directory--reflow-to-width 80)
+      (should (= 80 disco-channel-directory--fill-column)))))
+
+(ert-deftest disco-channel-directory-hidden-sync-defers-until-visible ()
+  (disco-channel-directory-test--with-appkit-guild
     (let ((displayed nil)
           reconciled)
       (cl-letf (((symbol-function 'disco-channel-directory--displayed-p)
                  (lambda () displayed))
                 ((symbol-function 'disco-channel-directory--reconcile)
-                 (lambda (&optional channel-ids)
-                   (push channel-ids reconciled))))
-        (disco-channel-directory--request-reconcile '("c1" "c2"))
-        (disco-channel-directory--request-reconcile '("c2"))
+                 (lambda (_channel-ids entry-keys)
+                   (push entry-keys reconciled))))
+        (disco-channel-directory--queue-view-update
+         view :channel-ids '("c1" "c2"))
+        (appkit-sync-invalidations view)
         (should disco-channel-directory--deferred-reconcile-p)
         (should-not reconciled)
         (setq displayed t)
-        (disco-channel-directory--request-reconcile)
+        (disco-channel-directory--schedule-deferred-sync view)
+        (appkit-sync-invalidations view)
         (should-not disco-channel-directory--deferred-reconcile-p)
-        (should-not disco-channel-directory--deferred-channel-ids)
-        (should (equal '(("c1" "c2")) reconciled))))))
+        (should-not disco-channel-directory--deferred-entry-keys)
+        (should
+         (equal '(("channel:c1" "channel:c2")) reconciled))))))
+
+(ert-deftest disco-channel-directory-visible-sync-does-not-force-redisplay ()
+  (disco-channel-directory-test--with-appkit-guild
+    (let ((forced 0))
+      (cl-letf (((symbol-function 'disco-channel-directory--displayed-p)
+                 (lambda () t))
+                ((symbol-function 'force-window-update)
+                 (lambda (&rest _args) (cl-incf forced))))
+        (disco-channel-directory--queue-view-update view :structure t)
+        (appkit-sync-invalidations view)
+        (should (zerop forced))))))
 
 (ert-deftest disco-channel-directory-thread-rows-use-parent-thread-layout ()
   (with-temp-buffer
@@ -381,32 +521,44 @@
   (disco-state-reset)
   (disco-directory-reset)
   (disco-state-set-guilds '(((id . "g1") (name . "Guild One"))))
-  (let (loaded displayed order)
+  (let ((disco-runtime--app nil)
+        loaded displayed order)
     (cl-letf (((symbol-function 'disco-channel-directory--attach-live-updates)
                (lambda () (push 'attach order)))
               ((symbol-function 'disco-channel-directory--reflow-to-width)
                (lambda (_width) (push 'reflow order)))
-              ((symbol-function 'disco-channel-directory--reconcile)
-               (lambda (&rest _args) (push 'reconcile order)))
+              ((symbol-function 'disco-channel-directory--request-reconcile)
+               (lambda (&rest _args) (push 'request order)))
               ((symbol-function 'disco-directory-load-guild-async)
                (lambda (guild-id &rest _args)
                  (push 'load order)
                  (setq loaded guild-id)))
+              ((symbol-function 'appkit-sync-invalidations)
+               (lambda (_view) (push 'sync order)))
               ((symbol-function 'pop-to-buffer)
                (lambda (buffer &rest _args)
                  (push 'pop order)
-                 (setq displayed buffer))))
+                 (setq displayed buffer)))
+              ((symbol-function 'disco-gateway-stop) #'ignore))
       (unwind-protect
           (progn
             (disco-channel-directory-open "g1")
             (should (equal "g1" loaded))
             (should (buffer-live-p displayed))
-            (should (equal '(pop attach reflow reconcile load)
+            (should (equal '(pop attach reflow request load sync)
                            (nreverse order)))
             (with-current-buffer displayed
-              (should (equal "g1" disco-channel-directory--guild-id))))
+              (let ((view (appkit-current-view)))
+                (should (appkit-view-live-p view))
+                (should (equal '(channel-directory "g1")
+                               (appkit-view-id view)))
+                (should (equal "g1" (appkit-view-state view)))
+                (should (equal "g1"
+                               disco-channel-directory--guild-id)))))
         (when (buffer-live-p displayed)
-          (kill-buffer displayed))))))
+          (kill-buffer displayed))
+        (when (appkit-app-p disco-runtime--app)
+          (appkit-stop-app disco-runtime--app))))))
 
 (provide 'disco-channel-directory-test)
 

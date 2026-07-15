@@ -60,6 +60,7 @@ Custom entries can override built-in layouts when NAME matches."
 
 (cl-defstruct (disco-root-layout-entry
                (:constructor disco-root-layout-entry-create))
+  key
   type
   section
   title

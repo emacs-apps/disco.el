@@ -88,6 +88,19 @@
     (should-not (memq #'disco-client-mode-line--handle-state-reset
                       disco-state-reset-hook))))
 
+(ert-deftest disco-client-mode-line-gateway-hook-does-not-force-redisplay ()
+  (let ((disco-client-mode-line-mode t)
+        (disco-client-mode-line-string "")
+        (disco-client-mode-line--cached-counts '(0 . 0))
+        (redisplays 0))
+    (cl-letf (((symbol-function 'disco-client-mode-line--counts)
+               (lambda () '(6 . 2)))
+              ((symbol-function 'force-mode-line-update)
+               (lambda (&rest _) (cl-incf redisplays))))
+      (disco-client-mode-line-update '(:type message-create))
+      (should (equal disco-client-mode-line--cached-counts '(6 . 2)))
+      (should (zerop redisplays)))))
+
 (provide 'disco-modes-test)
 
 ;;; disco-modes-test.el ends here

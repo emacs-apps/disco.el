@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'appkit-core)
 (require 'appkit-chat-completion)
 (require 'appkit-chat-emoji)
 (require 'disco-msg)
@@ -88,7 +89,62 @@ completion row height stays stable across CAPF/Corfu and company popups."
 (defvar-local disco-company--gateway-handler nil
   "Buffer-owned Gateway handler for member completion responses.")
 
+(defvar-local disco-company--gateway-handle nil
+  "Appkit lifecycle handle owning the room completion Gateway hook.")
+
+(defvar-local disco-company--owner-token nil
+  "Opaque lifecycle token captured by room completion callbacks and timers.")
+
 (declare-function disco-room--sync-draft-from-buffer "disco-room")
+
+(defun disco-company--ensure-owner-token ()
+  "Return the current room completion lifecycle token."
+  (or disco-company--owner-token
+      (setq-local disco-company--owner-token
+                  (list 'disco-company-owner (current-buffer)))))
+
+(defun disco-company--callback-active-p (buffer view owner-token)
+  "Return non-nil when BUFFER still belongs to VIEW and OWNER-TOKEN.
+
+Detached test/initialization buffers use nil VIEW, but become inactive as soon
+as any Appkit view attaches, so nil can never degrade into replacement access."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (and (eq owner-token disco-company--owner-token)
+              (if view
+                  (and (appkit-view-live-p view)
+                       (eq view (appkit-current-view))
+                       (eq buffer (appkit-view-buffer view)))
+                (null (appkit-current-view)))))))
+
+(defun disco-company--install-gateway-handler (view owner-token)
+  "Install a VIEW-owned completion Gateway hook for OWNER-TOKEN."
+  (let ((buffer (current-buffer))
+        handler
+        handle)
+    (setq handler
+          (lambda (event)
+            (when (disco-company--callback-active-p
+                   buffer view owner-token)
+              (with-current-buffer buffer
+                (disco-company--handle-gateway-event event)))))
+    (add-hook 'disco-gateway-event-hook handler)
+    (setq handle
+          (appkit-register-handle
+           view 'function
+           (lambda ()
+             (remove-hook 'disco-gateway-event-hook handler)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (when (eq handler disco-company--gateway-handler)
+                   (setq disco-company--gateway-handler nil))
+                 (when (eq handle disco-company--gateway-handle)
+                   (setq disco-company--gateway-handle nil))
+                 (when (eq owner-token disco-company--owner-token)
+                   (disco-company--clear-member-search-state)
+                   (setq disco-company--owner-token nil)))))))
+    (setq-local disco-company--gateway-handler handler
+                disco-company--gateway-handle handle)))
 
 (defun disco-company--as-list (value)
   "Return VALUE normalized as a proper list."
@@ -102,16 +158,25 @@ completion row height stays stable across CAPF/Corfu and company popups."
   (unless (hash-table-p disco-company--member-search-requests)
     (setq-local disco-company--member-search-requests
                 (make-hash-table :test #'equal)))
-  (unless disco-company--gateway-handler
-    (let ((room-buffer (current-buffer)))
-      (setq-local
-       disco-company--gateway-handler
-       (lambda (event)
-         (when (buffer-live-p room-buffer)
-           (with-current-buffer room-buffer
-             (disco-company--handle-gateway-event event)))))
-      (add-hook 'disco-gateway-event-hook disco-company--gateway-handler)
-      (add-hook 'kill-buffer-hook #'disco-company--teardown-room-buffer nil t)))
+  (let ((view (appkit-current-view)))
+    (cond
+     ((and (appkit-view-live-p view)
+           (functionp disco-company--gateway-handler)
+           (appkit-handle-p disco-company--gateway-handle)
+           (appkit-handle-alive-p disco-company--gateway-handle)
+           (eq view (appkit-handle-owner disco-company--gateway-handle))))
+     ((appkit-view-live-p view)
+      (disco-company--teardown-room-buffer)
+      (let ((owner-token (disco-company--ensure-owner-token)))
+        (disco-company--install-gateway-handler view owner-token)))
+     (t
+      ;; Major-mode initialization precedes Appkit attachment.  The room setup
+      ;; callback runs again after attach and installs the exact-view handler.
+      (when (or disco-company--gateway-handler
+                disco-company--gateway-handle)
+        (disco-company--teardown-room-buffer))
+      (disco-company--ensure-owner-token))))
+  (add-hook 'kill-buffer-hook #'disco-company--teardown-room-buffer nil t)
   (let* ((existing-capf
           (disco-company--as-list completion-at-point-functions))
          (existing-dispatch
@@ -147,9 +212,16 @@ completion row height stays stable across CAPF/Corfu and company popups."
 (defun disco-company--teardown-room-buffer ()
   "Remove current room's global Gateway completion handler."
   (disco-company--clear-member-search-state)
-  (when disco-company--gateway-handler
-    (remove-hook 'disco-gateway-event-hook disco-company--gateway-handler)
-    (setq disco-company--gateway-handler nil)))
+  (let ((handler disco-company--gateway-handler)
+        (handle disco-company--gateway-handle))
+    (setq disco-company--gateway-handler nil
+          disco-company--gateway-handle nil
+          disco-company--owner-token nil)
+    (when handler
+      (remove-hook 'disco-gateway-event-hook handler))
+    (when (and (appkit-handle-p handle)
+               (appkit-handle-alive-p handle))
+      (appkit-cancel-handle handle))))
 
 (defun disco-company--normalize-id (value)
   "Return normalized snowflake-like ID string from VALUE, or nil."
@@ -243,9 +315,10 @@ This public query lets the room RET dispatcher guard against an active
          (plist-get (cdr item) :timer))
         (remhash (car item) disco-company--member-search-requests)))))
 
-(defun disco-company--member-search-timeout (buffer key nonce)
-  "Expire BUFFER's member search for KEY when NONCE still owns it."
-  (when (buffer-live-p buffer)
+(defun disco-company--member-search-timeout
+    (buffer view owner-token key nonce)
+  "Expire BUFFER's VIEW-owned search for KEY when NONCE still owns it."
+  (when (disco-company--callback-active-p buffer view owner-token)
     (with-current-buffer buffer
       (when (hash-table-p disco-company--member-search-requests)
         (let ((entry (gethash key disco-company--member-search-requests)))
@@ -255,13 +328,12 @@ This public query lets the room RET dispatcher guard against an active
                        (equal nonce
                               (plist-get disco-company--pending-member-search
                                          :nonce)))
-              (setq disco-company--pending-member-search nil)
-              (message "disco: member search timed out"))))))))
+              (setq disco-company--pending-member-search nil))))))))
 
 (defun disco-company--run-debounced-member-search
-    (buffer guild-id raw-query)
-  "Run BUFFER's debounced RAW-QUERY if GUILD-ID still owns the room."
-  (when (buffer-live-p buffer)
+    (buffer view owner-token guild-id raw-query)
+  "Run BUFFER's debounced RAW-QUERY when VIEW and GUILD-ID still own it."
+  (when (disco-company--callback-active-p buffer view owner-token)
     (with-current-buffer buffer
       (when (equal raw-query disco-company--member-search-debounce-query)
         (let ((token (disco-company--completion-token-bounds)))
@@ -295,14 +367,17 @@ This public query lets the room RET dispatcher guard against an active
              (max 0 disco-company-member-search-debounce-seconds)
              nil
              #'disco-company--run-debounced-member-search
-             (current-buffer) guild-id raw-query))))))
+             (current-buffer)
+             (appkit-current-view)
+             (disco-company--ensure-owner-token)
+             guild-id raw-query))))))
 
 (cl-defun disco-company--maybe-request-guild-members
     (raw-query &key explicit)
   "Request guild members matching RAW-QUERY when the local request is stale.
 
 When EXPLICIT is non-nil, remember an in-flight request so its matching
-Gateway chunk can safely reopen completion for the same room token."
+Gateway chunk can advance the same room token's completion model."
   (when explicit
     (disco-company--cancel-member-search-debounce))
   (unless (hash-table-p disco-company--member-search-requests)
@@ -314,6 +389,8 @@ Gateway chunk can safely reopen completion for the same room token."
          (key (and guild-id (cons guild-id query-key)))
          (now (float-time))
          (buffer (current-buffer))
+         (view (appkit-current-view))
+         (owner-token (disco-company--ensure-owner-token))
          entry)
     (disco-company--prune-member-search-requests now)
     (setq entry (and key
@@ -333,6 +410,8 @@ Gateway chunk can safely reopen completion for the same room token."
                               :query query
                               :key key
                               :nonce nonce
+                              :view view
+                              :owner-token owner-token
                               :status 'in-flight
                               :time now))
                sent
@@ -364,7 +443,7 @@ Gateway chunk can safely reopen completion for the same room token."
                   (run-at-time
                    (max 0.1 disco-company-member-search-timeout-seconds)
                    nil #'disco-company--member-search-timeout
-                   buffer key nonce))
+                   buffer view owner-token key nonce))
             (setq request (plist-put request :timer timeout-timer))
             (puthash key request disco-company--member-search-requests)
             (when explicit
@@ -384,27 +463,6 @@ Gateway chunk can safely reopen completion for the same room token."
        disco-company--member-search-requests))
     found))
 
-(defun disco-company--schedule-member-completion-refresh (guild-id query)
-  "Refresh completion later if GUILD-ID and QUERY still own point."
-  (let ((room-buffer (current-buffer)))
-    (run-at-time
-     0 nil
-     (lambda ()
-       (when (and (buffer-live-p room-buffer)
-                  (eq (window-buffer (selected-window)) room-buffer))
-         (with-current-buffer room-buffer
-           (let ((token (disco-company--completion-token-bounds)))
-             (when (and token
-                        (eq (plist-get token :trigger) ?@)
-                        (equal guild-id
-                               (disco-company--normalize-id
-                                disco-room--guild-id))
-                        (equal (downcase query)
-                               (downcase
-                                (disco-company--member-search-query
-                                 (plist-get token :query)))))
-               (appkit-chat-completion-complete)))))))))
-
 (defun disco-company--handle-gateway-event (event)
   "Handle member completion response EVENT for the current room."
   (pcase (plist-get event :type)
@@ -416,7 +474,11 @@ Gateway chunk can safely reopen completion for the same room token."
             (event-guild-id
              (disco-company--normalize-id (plist-get event :guild-id))))
        (when (and entry
-                  (equal event-guild-id (plist-get entry :guild-id)))
+                  (equal event-guild-id (plist-get entry :guild-id))
+                  (disco-company--callback-active-p
+                   (current-buffer)
+                   (plist-get entry :view)
+                   (plist-get entry :owner-token)))
          (disco-company--cancel-member-search-timer
           (plist-get entry :timer))
          (setq entry (plist-put (copy-sequence entry) :status 'done))
@@ -430,9 +492,10 @@ Gateway chunk can safely reopen completion for the same room token."
                            (plist-get disco-company--pending-member-search
                                       :nonce)))
            (setq disco-company--pending-member-search nil))
-         (disco-company--schedule-member-completion-refresh
-          (plist-get entry :guild-id)
-          (plist-get entry :query)))))))
+         ;; Candidate tables read guild-member state lazily.  The gateway
+         ;; callback only advances this request model; completion presentation
+         ;; remains owned by the next explicit frontend action.
+         entry)))))
 
 (defun disco-company--completion-string-present-p (value)
   "Return non-nil when VALUE is a non-empty trimmed string."

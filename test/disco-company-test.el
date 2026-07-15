@@ -78,7 +78,7 @@
          "@kite" "@徐天天" "<@1356835185> "))
     (disco-state-reset)))
 
-(ert-deftest disco-company-member-search-owns-response-and-refreshes-once ()
+(ert-deftest disco-company-member-search-response-updates-model-without-presentation ()
   (with-temp-buffer
     (appkit-chatbuf-install-prompt ">>> ")
     (setq-local disco-room--guild-id "g1")
@@ -86,17 +86,19 @@
     (setq-local disco-company--member-search-requests
                 (make-hash-table :test #'equal))
     (insert "@alice")
-    (let (requests refresh)
+    (let (requests)
       (cl-letf (((symbol-function 'disco-gateway-running-p)
                  (lambda () t))
                 ((symbol-function 'disco-gateway-request-guild-members)
                  (lambda (guild-id &rest args)
                    (push (cons guild-id args) requests)
                    t))
-                ((symbol-function
-                  'disco-company--schedule-member-completion-refresh)
-                 (lambda (guild-id query)
-                   (setq refresh (list guild-id query)))))
+                ((symbol-function 'appkit-chat-completion-complete)
+                 (lambda (&rest _args)
+                   (ert-fail "gateway callback reopened completion UI")))
+                ((symbol-function 'minibuffer-completion-help)
+                 (lambda (&rest _args)
+                   (ert-fail "gateway callback refreshed minibuffer UI"))))
         (disco-company--maybe-request-guild-members "alice" :explicit t)
         (disco-company--maybe-request-guild-members "alice" :explicit t)
         (should (= 1 (length requests)))
@@ -110,18 +112,65 @@
                  :guild-id "wrong-guild"
                  :nonce nonce
                  :members nil))
-          (should-not refresh)
           (should disco-company--pending-member-search)
           (disco-company--handle-gateway-event
            (list :type 'guild-members-chunk
                  :guild-id "g1"
                  :nonce nonce
                  :members '(((user (id . "u1"))))))
-          (should (equal '("g1" "alice") refresh))
           (should-not disco-company--pending-member-search)
+          (should (eq 'done
+                      (plist-get
+                       (gethash '("g1" . "alice")
+                                disco-company--member-search-requests)
+                       :status)))
           ;; A completed request is cached for the retry window.
           (disco-company--maybe-request-guild-members "alice" :explicit t)
           (should (= 1 (length requests))))))))
+
+(ert-deftest disco-company-gateway-and-timers-are-exact-view-owned ()
+  (appkit-register-app-kind 'disco-company-test nil)
+  (let ((app (appkit-start-app 'disco-company-test :id 'completion-owner)))
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((view
+                  (appkit-attach-view
+                   :app app :id '(room completion-owner)
+                   :mode major-mode :parts nil))
+                 old-handler
+                 old-token)
+            (disco-company-setup-room-buffer)
+            (setq old-handler disco-company--gateway-handler
+                  old-token disco-company--owner-token)
+            (should (functionp old-handler))
+            (should (appkit-handle-alive-p disco-company--gateway-handle))
+            (should (eq view
+                        (appkit-handle-owner disco-company--gateway-handle)))
+            (appkit-kill-view view)
+            (should-not (memq old-handler disco-gateway-event-hook))
+            (should-not disco-company--gateway-handler)
+            (should-not disco-company--gateway-handle)
+            (let ((replacement
+                   (appkit-attach-view
+                    :app app :id '(room completion-owner)
+                    :mode major-mode :parts nil))
+                  (key '("g1" . "alice")))
+              (disco-company-setup-room-buffer)
+              (setq-local disco-company--member-search-requests
+                          (make-hash-table :test #'equal))
+              (puthash key '(:nonce "new" :status in-flight)
+                       disco-company--member-search-requests)
+              (setq-local disco-company--pending-member-search
+                          '(:nonce "new" :status in-flight))
+              ;; A canceled predecessor timer and handler cannot clear the
+              ;; replacement view's completion request model.
+              (disco-company--member-search-timeout
+               (current-buffer) view old-token key "new")
+              (funcall old-handler '(:type ready))
+              (should (gethash key disco-company--member-search-requests))
+              (should disco-company--pending-member-search)
+              (should (eq replacement (appkit-current-view))))))
+      (appkit-stop-app app))))
 
 (ert-deftest disco-company-automatic-member-search-debounces-prefixes ()
   (with-temp-buffer

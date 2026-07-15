@@ -14,6 +14,7 @@
 (require 'seq)
 (require 'subr-x)
 
+(require 'appkit-core)
 (require 'appkit-chat-history)
 (require 'disco-api)
 (require 'disco-channel-type)
@@ -43,13 +44,15 @@
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-object "disco-room")
 (declare-function disco-room--display-messages "disco-room")
+(declare-function disco-room--ensure-view "disco-room")
 (declare-function disco-room--message-at-point "disco-room")
 (declare-function disco-room--message-author "disco-room" (msg))
 (declare-function disco-room--message-author-id "disco-room" (msg))
 (declare-function disco-room--message-by-id "disco-room" (message-id))
 (declare-function disco-room--message-id-at-point "disco-room")
 (declare-function disco-room--msg-filter-active-p "disco-room")
-(declare-function disco-room--update-frame "disco-room")
+(declare-function disco-room--queue-jump "disco-room" (message-id view))
+(declare-function disco-room--request-render "disco-room" (view))
 (declare-function disco-room-jump-to-message "disco-room"
                   (message-id &optional channel-id))
 (declare-function disco-room-render "disco-room")
@@ -354,22 +357,27 @@ ACTION is optional text describing the attempted search action."
         (setq parts (append parts '("More results available"))))
       (string-join parts "  ·  "))))
 
-(defun disco-room-search--filter-callback-active-p (room-buffer channel-id generation)
-  "Return non-nil when filter callback still matches ROOM-BUFFER state."
+(defun disco-room-search--filter-callback-active-p
+    (room-buffer channel-id generation view)
+  "Return non-nil when filter callback still matches ROOM-BUFFER and VIEW."
   (and (buffer-live-p room-buffer)
        (with-current-buffer room-buffer
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)
-              (= disco-room--filter-generation generation)))))
+              (= disco-room--filter-generation generation)
+              (eq view (appkit-current-view))
+              (appkit-view-live-p view)))))
 
 (defun disco-room-search--inplace-search-callback-active-p
-    (room-buffer channel-id generation)
-  "Return non-nil when inplace search callback still matches ROOM-BUFFER state."
+    (room-buffer channel-id generation view)
+  "Return non-nil when inplace callback matches ROOM-BUFFER state and VIEW."
   (and (buffer-live-p room-buffer)
        (with-current-buffer room-buffer
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)
-              (= disco-room--inplace-search-generation generation)))))
+              (= disco-room--inplace-search-generation generation)
+              (eq view (appkit-current-view))
+              (appkit-view-live-p view)))))
 
 (defun disco-room-search--run-filter (filter &optional append)
   "Run room message FILTER asynchronously.
@@ -377,19 +385,25 @@ ACTION is optional text describing the attempted search action."
 When APPEND is non-nil, load the next page of matching messages."
   (let* ((room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
+         (view (disco-room--ensure-view))
          (generation (1+ disco-room--filter-generation))
          (existing (if append
                        (or (plist-get disco-room--msg-filter :items) '())
                      '()))
          (offset (if append (length existing) 0)))
     (setq-local disco-room--filter-generation generation)
+    ;; Entering a filter is a newer search intent and retires every pending
+    ;; inplace-search callback, including one whose next intent hits locally.
+    (setq-local disco-room--inplace-search-generation
+                (1+ disco-room--inplace-search-generation))
+    (setq-local disco-room--inplace-search-filter nil)
     (setq-local disco-room--filter-in-flight t)
     (setq-local disco-room--msg-filter
                 (plist-put (copy-sequence filter) :active t))
     (when append
       (setq-local disco-room--msg-filter
                   (plist-put disco-room--msg-filter :items existing)))
-    (disco-room-render)
+    (disco-room--request-render view)
     (disco-room--search-current-channel-async
      :query (plist-get filter :query)
      :author-id (plist-get filter :author-id)
@@ -399,7 +413,7 @@ When APPEND is non-nil, load the next page of matching messages."
      :on-success
      (lambda (body)
        (when (disco-room-search--filter-callback-active-p
-              room-buffer channel-id generation)
+              room-buffer channel-id generation view)
          (with-current-buffer room-buffer
            (let* ((page (disco-room-search--flatten-messages
                          (alist-get 'messages body)))
@@ -418,16 +432,16 @@ When APPEND is non-nil, load the next page of matching messages."
                                              (< (length items) total)
                                            (= (length page)
                                               disco-room-search-filter-limit))))
-             (disco-room-render)
+             (disco-room--request-render view)
              (message "disco: filter -> %s"
                       (disco-room--msg-filter-title disco-room--msg-filter))))))
      :on-error
      (lambda (err)
        (when (disco-room-search--filter-callback-active-p
-              room-buffer channel-id generation)
+              room-buffer channel-id generation view)
          (with-current-buffer room-buffer
            (setq-local disco-room--filter-in-flight nil)
-           (disco-room--update-frame)
+           (disco-room--request-render view)
            (message "disco: filter search failed: %s"
                     (disco-room--async-error-message err))))))))
 
@@ -494,7 +508,11 @@ With BY-SENDER-P, also prompt for a sender and restrict matches to that user."
     ;; Reconcile away the filter projection before deciding visibility.  A
     ;; canonical cache hit may belong to an unrelated island outside the exact
     ;; AppKit window, so MESSAGE-ID always goes through normal jump resolution.
-    (disco-room-render)
+    (let ((view (disco-room--ensure-view)))
+      (disco-room--request-render view)
+      ;; Jump visibility is projection-dependent, so consume the explicit
+      ;; command's invalidation through the one room sync boundary.
+      (appkit-sync-invalidations view))
     (cond
      (message-id
       (disco-room-jump-to-message message-id))
@@ -535,19 +553,23 @@ When FORWARD is non-nil, search toward newer messages.  FROM-MESSAGE-ID, when
 non-nil, overrides the message id at point as the search boundary."
   (when (disco-room--msg-filter-active-p)
     (user-error "disco: can't search inplace while message filter is applied"))
-  (let ((title (disco-room-search--title filter))
-        (old-query (disco-room--active-highlight-query)))
+  (let* ((title (disco-room-search--title filter))
+         (old-query (disco-room--active-highlight-query))
+         (view (disco-room--ensure-view))
+         (generation (1+ disco-room--inplace-search-generation)))
+    ;; Every new intent invalidates its predecessor before local/unsupported
+    ;; branches are selected, so a late remote callback cannot win afterward.
+    (setq-local disco-room--inplace-search-generation generation)
     (if (disco-room-search--move-local filter forward 1)
         (progn
           (setq-local disco-room--inplace-search-filter filter)
           (when-let* ((query (plist-get filter :query)))
             (setq-local disco-room--last-search-query query))
           (unless (equal old-query (disco-room--active-highlight-query))
-            (disco-room-render))
+            (disco-room--request-render view))
           (message "disco: %s" title))
       (let* ((room-buffer (current-buffer))
              (channel-id disco-room--channel-id)
-             (generation (1+ disco-room--inplace-search-generation))
              (cursor-id (or from-message-id
                             (disco-room-search--current-message-id forward))))
         (unless cursor-id
@@ -556,12 +578,11 @@ non-nil, overrides the message id at point as the search boundary."
             (message "disco: no loaded message matches '%s' and remote search is not supported for %s channels"
                      title
                      (disco-room--searchable-channel-type-name))
-          (setq-local disco-room--inplace-search-generation generation)
           (setq-local disco-room--inplace-search-filter filter)
           (when-let* ((query (plist-get filter :query)))
             (setq-local disco-room--last-search-query query))
           (unless (equal old-query (disco-room--active-highlight-query))
-            (disco-room-render))
+            (disco-room--request-render view))
           (message "disco: searching %s..." title)
           (disco-room--search-current-channel-async
            :query (plist-get filter :query)
@@ -573,7 +594,7 @@ non-nil, overrides the message id at point as the search boundary."
            :on-success
            (lambda (body)
              (when (disco-room-search--inplace-search-callback-active-p
-                    room-buffer channel-id generation)
+                    room-buffer channel-id generation view)
                (with-current-buffer room-buffer
                  (let* ((messages (disco-room-search--flatten-messages
                                    (alist-get 'messages body)))
@@ -585,13 +606,13 @@ non-nil, overrides the message id at point as the search boundary."
                                              (alist-get 'id match))))
                        (progn
                          (message "")
-                         (disco-room-jump-to-message message-id channel-id)
+                         (disco-room--queue-jump message-id view)
                          (message "disco: %s" title))
                      (message "disco: no message matches '%s'" title))))))
            :on-error
            (lambda (err)
              (when (disco-room-search--inplace-search-callback-active-p
-                    room-buffer channel-id generation)
+                    room-buffer channel-id generation view)
                (with-current-buffer room-buffer
                  (message "disco: inplace search failed: %s"
                           (disco-room--async-error-message err)))))))))))

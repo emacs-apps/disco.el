@@ -145,7 +145,8 @@ therefore remains visible for muted channels."
                   #'disco-client-mode-line--handle-directory-event)
         (add-hook 'disco-state-reset-hook
                   #'disco-client-mode-line--handle-state-reset)
-        (disco-client-mode-line-update))
+        (disco-client-mode-line-update)
+        (force-mode-line-update t))
     (appkit-mode-line-uninstall 'disco-client-mode-line-format)
     (setq disco-client-mode-line-string ""
           disco-client-mode-line--cached-counts '(0 . 0))
