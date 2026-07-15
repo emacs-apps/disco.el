@@ -74,6 +74,10 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-preview-fetching (make-hash-table :test #'equal)
   "Set of attachment preview cache keys currently being fetched.")
 
+(defvar disco-media--attachment-preview-owner-table
+  (make-hash-table :test #'equal)
+  "Exact asynchronous preview owner keyed by preview cache key.")
+
 (defvar disco-media--attachment-preview-fetch-budget nil
   "Dynamic cap for number of preview fetches started during one render pass.")
 
@@ -83,11 +87,30 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-download-state-table (make-hash-table :test #'equal)
   "Attachment download state keyed by stable attachment download key.")
 
+(defvar disco-media--attachment-download-owner-table
+  (make-hash-table :test #'equal)
+  "Exact asynchronous download owner keyed by attachment download key.")
+
+(defvar disco-media--attachment-export-owners nil
+  "Exact owners of concurrent explicit save-as attachment transfers.")
+
 (defvar disco-media--attachment-audio-state-table (make-hash-table :test #'equal)
   "Inline audio playback state keyed by stable attachment download key.")
 
 (defvar disco-media--attachment-audio-current-process nil
   "Current inline audio playback process, if any.")
+
+(defvar disco-media--attachment-audio-current-owner nil
+  "Exact owner of `disco-media--attachment-audio-current-process'.")
+
+(defvar disco-media--attachment-external-audio-owners nil
+  "Exact owners of non-inline attachment audio processes.")
+
+(defvar disco-media--generation 0
+  "Generation of the active account's asynchronous media work.")
+
+(defvar disco-media--reset-in-progress nil
+  "Non-nil while account-scoped media state is being destroyed.")
 
 (defvar disco-media--attachment-waveform-image-cache (make-hash-table :test #'equal)
   "Cache of rendered audio waveform image objects.")
@@ -97,6 +120,237 @@ Values are image objects or the symbol `:missing'.")
 
 (defvar disco-media--attachment-decorated-preview-cache (make-hash-table :test #'equal)
   "Cache of SVG-decorated preview images keyed by source/spec/mode.")
+
+(defun disco-media--session-current-p (generation)
+  "Return non-nil when GENERATION may still mutate active session state."
+  (and (not disco-media--reset-in-progress)
+       (integerp generation)
+       (= generation disco-media--generation)))
+
+(defun disco-media--start-allowed-p ()
+  "Return non-nil when account-owned media work may be started."
+  (not disco-media--reset-in-progress))
+
+(defun disco-media--ensure-start-allowed ()
+  "Reject creation of account-owned work during destructive reset."
+  (unless (disco-media--start-allowed-p)
+    (user-error "disco: media session reset is in progress")))
+
+(defun disco-media--preview-owner-current-p (cache-key owner)
+  "Return non-nil when OWNER still owns preview CACHE-KEY exactly."
+  (and (consp owner)
+       (disco-media--session-current-p (plist-get owner :generation))
+       (eq owner (gethash cache-key disco-media--attachment-preview-owner-table))))
+
+(defun disco-media--download-owner-current-p (key owner)
+  "Return non-nil when OWNER still owns default download KEY exactly."
+  (and (consp owner)
+       (disco-media--session-current-p (plist-get owner :generation))
+       (eq owner (gethash key disco-media--attachment-download-owner-table))
+       (eq owner
+           (plist-get (gethash key disco-media--attachment-download-state-table)
+                      :owner))))
+
+(defun disco-media--export-owner-current-p (owner)
+  "Return non-nil when save-as transfer OWNER is still authoritative."
+  (and (consp owner)
+       (disco-media--session-current-p (plist-get owner :generation))
+       (memq owner disco-media--attachment-export-owners)))
+
+(defun disco-media--external-audio-owner-current-p (owner process)
+  "Return non-nil when OWNER exactly owns external audio PROCESS."
+  (and (consp owner)
+       (processp process)
+       (disco-media--session-current-p (plist-get owner :generation))
+       (memq owner disco-media--attachment-external-audio-owners)
+       (eq process (plist-get owner :process))))
+
+(defun disco-media--audio-owner-current-p (process)
+  "Return non-nil when PROCESS exactly owns active inline audio state."
+  (when (processp process)
+    (let* ((properties (process-plist process))
+           (generation (plist-get properties :disco-media-generation))
+           (owner (plist-get properties :disco-media-owner))
+           (key (plist-get properties :attachment-key))
+           (entry (and key
+                       (gethash key disco-media--attachment-audio-state-table))))
+      (and owner
+           (disco-media--session-current-p generation)
+           (eq owner disco-media--attachment-audio-current-owner)
+           (eq process disco-media--attachment-audio-current-process)
+           (eq owner (plist-get entry :owner))
+           (eq process (plist-get entry :process))))))
+
+(defun disco-media--run-cleanup-items (items function)
+  "Apply FUNCTION to all ITEMS despite failures or a nonlocal transfer."
+  (let ((remaining items)
+        complete-p)
+    (unwind-protect
+        (progn
+          (while remaining
+            (let ((item (pop remaining)))
+              (condition-case err
+                  (funcall function item)
+                (error
+                 (message "disco: media cleanup failed: %s"
+                          (error-message-string err)))
+                (quit
+                 (message "disco: media cleanup was interrupted")))))
+          (setq complete-p t))
+      ;; A cleanup hook may throw to a caller-owned catch.  Finish every
+      ;; remaining privacy action while that transfer unwinds.
+      (unless complete-p
+        (disco-media--run-cleanup-items remaining function)))))
+
+(defun disco-media--force-dispose-process-buffer (buffer)
+  "Erase and kill exact process BUFFER without consulting its name."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      ;; Do this before dynamically binding `buffer-undo-list', so a failed
+      ;; kill cannot restore an undo ring retaining erased account text.
+      (buffer-disable-undo)
+      (let ((inhibit-read-only t)
+            (inhibit-modification-hooks t)
+            (buffer-undo-list t)
+            (kill-buffer-hook nil)
+            (kill-buffer-query-functions nil)
+            (buffer-offer-save nil)
+            (quit-flag nil))
+        (widen)
+        (erase-buffer)
+        (set-buffer-modified-p nil)
+        (kill-buffer buffer)))))
+
+(defun disco-media--cancel-cleanup-item (item)
+  "Cancel one account-owned media cleanup ITEM."
+  (pcase (plist-get item :kind)
+    ('video
+     (appkit-media-cancel-video-preview (plist-get item :key)))
+    ('transfer
+     (appkit-media-cancel-transfer (plist-get item :transfer)))
+    ('process
+     (unwind-protect
+         (let ((process (plist-get item :process)))
+           (when (processp process)
+             ;; The process object itself may outlive deletion in a caller.
+             ;; Remove account keys/URLs before any synchronous sentinel.
+             (unwind-protect
+                 (set-process-plist process nil)
+               (when (process-live-p process)
+                 (delete-process process)))))
+       (disco-media--force-dispose-process-buffer
+        (plist-get item :buffer))))
+    ('decoration
+     (appkit-media-clear-video-decoration-cache 'disco))))
+
+(defun disco-media--preview-cleanup-items ()
+  "Return cleanup items for every currently owned preview operation."
+  (let (keys transfers)
+    (maphash
+     (lambda (key fetching)
+       (push (concat "disco:" key) keys)
+       (when (appkit-media-transfer-p fetching)
+         (push fetching transfers)))
+     disco-media--attachment-preview-fetching)
+    (maphash
+     (lambda (key owner)
+       (push (concat "disco:" key) keys)
+       (when-let* ((transfer (plist-get owner :transfer)))
+         (push transfer transfers)))
+     disco-media--attachment-preview-owner-table)
+    (append
+     (mapcar (lambda (key) (list :kind 'video :key key))
+             (delete-dups keys))
+     (mapcar (lambda (transfer)
+               (list :kind 'transfer :transfer transfer))
+             (delete-dups transfers)))))
+
+(defun disco-media--session-cleanup-items ()
+  "Return cleanup items for tracked preview, transfer, and audio work."
+  (let ((items (disco-media--preview-cleanup-items))
+        transfers
+        process-records)
+    (maphash
+     (lambda (_key entry)
+       (when-let* ((transfer (plist-get entry :transfer)))
+         (push transfer transfers))
+       (when-let* ((process (plist-get entry :process)))
+         (when (processp process)
+           (push (cons process (plist-get entry :buffer)) process-records))))
+     disco-media--attachment-download-state-table)
+    (maphash
+     (lambda (_key entry)
+       (when-let* ((process (plist-get entry :process)))
+         (when (processp process)
+           (push (cons process (plist-get entry :buffer)) process-records))))
+     disco-media--attachment-audio-state-table)
+    (dolist (owner disco-media--attachment-export-owners)
+      (when-let* ((transfer (plist-get owner :transfer)))
+        (push transfer transfers)))
+    (dolist (owner disco-media--attachment-external-audio-owners)
+      (when-let* ((process (plist-get owner :process)))
+        (when (processp process)
+          (push (cons process (plist-get owner :buffer)) process-records))))
+    (when (processp disco-media--attachment-audio-current-process)
+      (push
+       (cons
+        disco-media--attachment-audio-current-process
+        (plist-get (process-plist disco-media--attachment-audio-current-process)
+                   :disco-media-owned-buffer))
+       process-records))
+    (let ((seen (make-hash-table :test #'eq))
+          unique-records)
+      (dolist (record process-records)
+        (unless (gethash (car record) seen)
+          (puthash (car record) t seen)
+          (push record unique-records)))
+    (setq items
+          (append
+           items
+           (mapcar (lambda (transfer)
+                     (list :kind 'transfer :transfer transfer))
+                   (delete-dups transfers))
+           (mapcar (lambda (record)
+                     (list :kind 'process
+                           :process (car record)
+                           :buffer (cdr record)))
+                   unique-records)
+           (list (list :kind 'decoration))))
+      items)))
+
+(defun disco-media--clear-session-memory ()
+  "Clear tracked attachment media state without running callbacks."
+  (clrhash disco-media--attachment-preview-image-cache)
+  (clrhash disco-media--attachment-preview-fetching)
+  (clrhash disco-media--attachment-preview-owner-table)
+  (clrhash disco-media--attachment-download-state-table)
+  (clrhash disco-media--attachment-download-owner-table)
+  (clrhash disco-media--attachment-audio-state-table)
+  (clrhash disco-media--attachment-waveform-image-cache)
+  (clrhash disco-media--attachment-placeholder-image-cache)
+  (clrhash disco-media--attachment-decorated-preview-cache)
+  (setq disco-media--attachment-preview-fetch-budget nil
+        disco-media--attachment-export-owners nil
+        disco-media--attachment-audio-current-process nil
+        disco-media--attachment-audio-current-owner nil
+        disco-media--attachment-external-audio-owners nil))
+
+(defun disco-media-reset-session-state ()
+  "Destroy tracked attachment media work for the retired account.
+
+Downloaded files and the on-disk preview cache are intentionally preserved."
+  (let ((disco-media--reset-in-progress t)
+        (items (disco-media--session-cleanup-items)))
+    ;; Revoke every callback before cancellation; Appkit cancellation may call
+    ;; its error callback synchronously.
+    (cl-incf disco-media--generation)
+    (disco-media--clear-session-memory)
+    (unwind-protect
+        (disco-media--run-cleanup-items
+         items #'disco-media--cancel-cleanup-item)
+      ;; A broken cancellation hook may directly repopulate a cache.  The
+      ;; reset barrier remains active throughout this final privacy sweep.
+      (disco-media--clear-session-memory))))
 
 (defun disco-media--visual-custom-set (symbol value)
   "Set SYMBOL to VALUE and invalidate media preview caches."
@@ -184,23 +438,26 @@ Values are image objects or the symbol `:missing'.")
 (defun disco-media-clear-preview-memory-cache ()
   "Clear Discord attachment preview caches without touching other clients."
   (interactive)
-  (appkit-media-clear-video-decoration-cache 'disco)
-  (let (keys transfers)
-    (maphash
-     (lambda (key fetching)
-       (push key keys)
-       (when (appkit-media-transfer-p fetching)
-         (push fetching transfers)))
-     disco-media--attachment-preview-fetching)
-    (dolist (key keys)
-      (appkit-media-cancel-video-preview (concat "disco:" key)))
-    (dolist (transfer transfers)
-      (appkit-media-cancel-transfer transfer)))
-  (clrhash disco-media--attachment-preview-image-cache)
-  (clrhash disco-media--attachment-preview-fetching)
-  (clrhash disco-media--attachment-waveform-image-cache)
-  (clrhash disco-media--attachment-placeholder-image-cache)
-  (clrhash disco-media--attachment-decorated-preview-cache))
+  (let ((items (append (disco-media--preview-cleanup-items)
+                       (list (list :kind 'decoration)))))
+    ;; Revocation precedes cancellation so synchronous callbacks cannot refill
+    ;; a visually invalidated cache.  This helper deliberately remains scoped
+    ;; to preview/decoration state and does not retire downloads or audio.
+    (clrhash disco-media--attachment-preview-fetching)
+    (clrhash disco-media--attachment-preview-owner-table)
+    (clrhash disco-media--attachment-preview-image-cache)
+    (clrhash disco-media--attachment-waveform-image-cache)
+    (clrhash disco-media--attachment-placeholder-image-cache)
+    (clrhash disco-media--attachment-decorated-preview-cache)
+    (unwind-protect
+        (disco-media--run-cleanup-items
+         items #'disco-media--cancel-cleanup-item)
+      (clrhash disco-media--attachment-preview-fetching)
+      (clrhash disco-media--attachment-preview-owner-table)
+      (clrhash disco-media--attachment-preview-image-cache)
+      (clrhash disco-media--attachment-waveform-image-cache)
+      (clrhash disco-media--attachment-placeholder-image-cache)
+      (clrhash disco-media--attachment-decorated-preview-cache))))
 
 (defun disco-media--configured-audio-player-command ()
   "Return the configured Discord attachment audio player command."
@@ -801,17 +1058,28 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
 
 KIND is a symbol such as `audio', `download', or `preview'.  KEY is the stable
 attachment/download key associated with the update when available."
-  (let ((callback disco-media-rerender-function))
-    (when (functionp callback)
-      (funcall callback kind key))))
+  (unless disco-media--reset-in-progress
+    (let ((callback disco-media-rerender-function))
+      (when (functionp callback)
+        (funcall callback kind key)))))
 
-(defun disco-media--attachment-preview-complete-fetch (cache-key image &optional target-file)
-  "Finalize one attachment preview fetch for CACHE-KEY with IMAGE."
-  (when (and (null image) target-file (file-exists-p target-file))
-    (ignore-errors (delete-file target-file)))
-  (puthash cache-key (or image :missing) disco-media--attachment-preview-image-cache)
-  (remhash cache-key disco-media--attachment-preview-fetching)
-  (disco-media--notify-state-updated 'preview cache-key))
+(defun disco-media--attachment-preview-complete-fetch
+    (cache-key image &optional target-file owner)
+  "Finalize preview CACHE-KEY with IMAGE when OWNER is still exact.
+
+When OWNER is nil, perform the completion unconditionally for compatibility
+with direct callers; asynchronous entrypoints always provide an exact owner."
+  (when (or (null owner)
+            (disco-media--preview-owner-current-p cache-key owner))
+    (when (and (null image) target-file (file-exists-p target-file))
+      (ignore-errors (delete-file target-file)))
+    (puthash cache-key (or image :missing)
+             disco-media--attachment-preview-image-cache)
+    (remhash cache-key disco-media--attachment-preview-fetching)
+    (when (eq owner
+              (gethash cache-key disco-media--attachment-preview-owner-table))
+      (remhash cache-key disco-media--attachment-preview-owner-table))
+    (disco-media--notify-state-updated 'preview cache-key)))
 
 (cl-defun disco-media-open-discord-resource (resource &optional kind cache-key)
   "Adapt and open Discord RESOURCE through the shared media runtime."
@@ -850,14 +1118,18 @@ attachment/download key associated with the update when available."
 
 (defun disco-media--start-video-preview-fetch (cache-key attachment cache-base)
   "Start asynchronous video preview extraction for ATTACHMENT."
-  (unless (or (gethash cache-key disco-media--attachment-preview-fetching)
-              (gethash cache-key disco-media--attachment-preview-image-cache)
-              (and (numberp disco-media--attachment-preview-fetch-budget)
-                   (<= disco-media--attachment-preview-fetch-budget 0)))
+  (when (and (disco-media--start-allowed-p)
+             (not (gethash cache-key disco-media--attachment-preview-fetching))
+             (not (gethash cache-key disco-media--attachment-preview-image-cache))
+             (not (and (numberp disco-media--attachment-preview-fetch-budget)
+                       (<= disco-media--attachment-preview-fetch-budget 0))))
     (when (numberp disco-media--attachment-preview-fetch-budget)
       (cl-decf disco-media--attachment-preview-fetch-budget))
-    (puthash cache-key t disco-media--attachment-preview-fetching)
-    (let* ((local-file (and (appkit-media-file-present-p
+    (let* ((owner (list :generation disco-media--generation
+                        :kind 'video
+                        :key cache-key
+                        :transfer nil))
+           (local-file (and (appkit-media-file-present-p
                              (alist-get 'file attachment))
                             (alist-get 'file attachment)))
            (preview-source (or local-file
@@ -865,55 +1137,86 @@ attachment/download key associated with the update when available."
            (source (or local-file
                        (disco-media-attachment-download-url attachment)
                        preview-source)))
+      (puthash cache-key owner disco-media--attachment-preview-owner-table)
+      (puthash cache-key t disco-media--attachment-preview-fetching)
       (condition-case err
-          (appkit-media-start-video-preview
-           :key (concat "disco:" cache-key)
-           :source source
-           :preview-source preview-source
-           :source-size (alist-get 'size attachment)
-           :duration (alist-get 'duration_secs attachment)
-           :cache-base cache-base
-           :callback
-           (lambda (image target-file)
-             (disco-media--attachment-preview-complete-fetch
-              cache-key image target-file)))
-        (error
-         (disco-media--attachment-preview-complete-fetch cache-key nil)
-         (message "disco: video preview enqueue failed for %s: %s"
-                  cache-key
-                  (error-message-string err)))))))
+          (progn
+            (appkit-media-start-video-preview
+             :key (concat "disco:" cache-key)
+             :source source
+             :preview-source preview-source
+             :source-size (alist-get 'size attachment)
+             :duration (alist-get 'duration_secs attachment)
+             :cache-base cache-base
+             :callback
+             (lambda (image target-file)
+               (disco-media--attachment-preview-complete-fetch
+                cache-key image target-file owner)))
+            ;; A mocked or reentrant constructor can reset the account before
+            ;; returning, after the reset snapshot already ran.  Re-cancel the
+            ;; known Appkit key instead of abandoning a newly published job.
+            (unless (disco-media--preview-owner-current-p cache-key owner)
+              (disco-media--run-cleanup-items
+               (list (list :kind 'video :key (concat "disco:" cache-key)))
+               #'disco-media--cancel-cleanup-item)))
+        ((error quit)
+         (disco-media--attachment-preview-complete-fetch
+          cache-key nil nil owner)
+         (when (disco-media--session-current-p (plist-get owner :generation))
+           (message "disco: video preview enqueue failed for %s: %s"
+                    cache-key
+                    (error-message-string err))))))))
 
 (defun disco-media--start-attachment-preview-fetch (cache-key url cache-base)
   "Start asynchronous preview fetch for CACHE-KEY from URL into CACHE-BASE."
-  (unless (or (gethash cache-key disco-media--attachment-preview-fetching)
-              (gethash cache-key disco-media--attachment-preview-image-cache)
-              (and (numberp disco-media--attachment-preview-fetch-budget)
-                   (<= disco-media--attachment-preview-fetch-budget 0)))
+  (when (and (disco-media--start-allowed-p)
+             (not (gethash cache-key disco-media--attachment-preview-fetching))
+             (not (gethash cache-key disco-media--attachment-preview-image-cache))
+             (not (and (numberp disco-media--attachment-preview-fetch-budget)
+                       (<= disco-media--attachment-preview-fetch-budget 0))))
     (when (numberp disco-media--attachment-preview-fetch-budget)
       (cl-decf disco-media--attachment-preview-fetch-budget))
-    (puthash cache-key t disco-media--attachment-preview-fetching)
-    (condition-case err
-        (let ((transfer
-               (appkit-media-cache-image-resource-async
-                (appkit-media-resource-create :url url)
-                cache-base
-                (lambda (target-file)
-                  (disco-media--attachment-preview-complete-fetch
-                   cache-key
-                   (disco-media--attachment-preview-image-from-file target-file)
-                   target-file))
-                (lambda (_reason)
-                  (disco-media--attachment-preview-complete-fetch
-                   cache-key nil)))))
-          ;; Setup errors report synchronously and remove CACHE-KEY.
-          (when (gethash cache-key disco-media--attachment-preview-fetching)
-            (puthash cache-key transfer
-                     disco-media--attachment-preview-fetching)))
-      (error
-       (disco-media--attachment-preview-complete-fetch cache-key nil)
-       (message "disco: attachment preview enqueue failed for %s: %s"
-                cache-key
-                (error-message-string err))))))
+    (let ((owner (list :generation disco-media--generation
+                       :kind 'image
+                       :key cache-key
+                       :transfer nil)))
+      (puthash cache-key owner disco-media--attachment-preview-owner-table)
+      (puthash cache-key t disco-media--attachment-preview-fetching)
+      (condition-case err
+          (let ((transfer
+                 (appkit-media-cache-image-resource-async
+                  (appkit-media-resource-create :url url)
+                  cache-base
+                  (lambda (target-file)
+                    (when (disco-media--preview-owner-current-p cache-key owner)
+                      (disco-media--attachment-preview-complete-fetch
+                       cache-key
+                       (disco-media--attachment-preview-image-from-file target-file)
+                       target-file
+                       owner)))
+                  (lambda (_reason)
+                    (disco-media--attachment-preview-complete-fetch
+                     cache-key nil nil owner)))))
+            ;; A local resource or unusual backend may finish synchronously.
+            ;; Publish its handle only if this exact operation still owns KEY.
+            (if (disco-media--preview-owner-current-p cache-key owner)
+                (progn
+                  (setf (plist-get owner :transfer) transfer)
+                  (puthash cache-key transfer
+                           disco-media--attachment-preview-fetching))
+              ;; Reset may have happened inside the constructor, before the
+              ;; returned transfer was visible to its cleanup snapshot.
+              (when transfer
+                (disco-media--run-cleanup-items
+                 (list (list :kind 'transfer :transfer transfer))
+                 #'disco-media--cancel-cleanup-item))))
+        ((error quit)
+         (disco-media--attachment-preview-complete-fetch
+          cache-key nil nil owner)
+         (when (disco-media--session-current-p (plist-get owner :generation))
+           (message "disco: attachment preview enqueue failed for %s: %s"
+                    cache-key
+                    (error-message-string err))))))))
 
 (defun disco-media--attachment-real-preview-image (attachment image-like video-like)
   "Return real fetched preview image for ATTACHMENT, or nil."
@@ -1292,12 +1595,16 @@ available."
 
 When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion.
 When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
+  (disco-media--ensure-start-allowed)
   (let* ((url (disco-media-attachment-download-url attachment))
          (key (disco-media-attachment-download-key attachment))
          (entry (disco-media-attachment-download-state attachment))
          (path (plist-get entry :path))
          (status (plist-get entry :status))
-         (expected-size (alist-get 'size attachment)))
+         (expected-size (alist-get 'size attachment))
+         (owner (list :generation disco-media--generation
+                      :key key
+                      :transfer nil)))
     (unless (appkit-media-url-present-p url)
       (user-error "disco: attachment has no downloadable URL"))
     (when (eq status 'downloading)
@@ -1305,73 +1612,128 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
     (cl-labels
         ((current-entry ()
            (copy-tree (or (gethash key disco-media--attachment-download-state-table) '())))
-         (finish-success (current)
-           (setq current (plist-put current :status 'downloaded))
-           (setq current (plist-put current :path path))
-           (setq current (plist-put current :transfer nil))
-           (setq current (plist-put current :cancel-requested nil))
-           (setq current (plist-put current :error nil))
-           (puthash key current disco-media--attachment-download-state-table)
-           (disco-media--notify-state-updated 'download key)
-           (message "disco: downloaded attachment -> %s" path)
-           (when open-after
-             (appkit-media-open-file path))
-           (when (functionp on-success)
-             (funcall on-success path)))
-         (finish-error (current err)
-           (setq current (plist-put current :status 'error))
-           (setq current (plist-put current :transfer nil))
-           (setq current (plist-put current :cancel-requested nil))
-           (setq current (plist-put current :error
-                                    (disco-media--attachment-error-message err)))
-           (puthash key current disco-media--attachment-download-state-table)
-           (disco-media--notify-state-updated 'download key)
-           (message "disco: attachment download failed: %s"
-                    (plist-get current :error)))
-         (finish-canceled (current)
-           (setq current (plist-put current :status 'not-downloaded))
-           (setq current (plist-put current :transfer nil))
-           (setq current (plist-put current :cancel-requested nil))
-           (setq current (plist-put current :error nil))
-           (puthash key current disco-media--attachment-download-state-table)
-           (disco-media--notify-state-updated 'download key)
-           (message "disco: attachment download canceled")))
+         (current-p ()
+           (disco-media--download-owner-current-p key owner))
+         (retire-owner ()
+           (when (eq owner
+                     (gethash key disco-media--attachment-download-owner-table))
+             (remhash key disco-media--attachment-download-owner-table))
+           (let ((current (gethash key disco-media--attachment-download-state-table)))
+             (when (eq owner (plist-get current :owner))
+               (setq current (plist-put current :owner nil))
+               (setq current (plist-put current :generation nil))
+               (puthash key current
+                        disco-media--attachment-download-state-table))))
+         (finish-success ()
+           (when (current-p)
+             (let ((current (current-entry)))
+               (setq current (plist-put current :status 'downloaded))
+               (setq current (plist-put current :path path))
+               (setq current (plist-put current :transfer nil))
+               (setq current (plist-put current :cancel-requested nil))
+               (setq current (plist-put current :error nil))
+               (puthash key current disco-media--attachment-download-state-table)
+               (unwind-protect
+                   (progn
+                     (disco-media--notify-state-updated 'download key)
+                     (when (current-p)
+                       (message "disco: downloaded attachment -> %s" path))
+                     (when (and open-after (current-p))
+                       (appkit-media-open-file path))
+                     (when (and (functionp on-success) (current-p))
+                       (funcall on-success path)))
+                 (retire-owner)))))
+         (finish-error (err)
+           (when (current-p)
+             (let ((current (current-entry)))
+               (setq current (plist-put current :status 'error))
+               (setq current (plist-put current :transfer nil))
+               (setq current (plist-put current :cancel-requested nil))
+               (setq current
+                     (plist-put current :error
+                                (disco-media--attachment-error-message err)))
+               (puthash key current disco-media--attachment-download-state-table)
+               (unwind-protect
+                   (progn
+                     (disco-media--notify-state-updated 'download key)
+                     (when (current-p)
+                       (message "disco: attachment download failed: %s"
+                                (plist-get current :error))))
+                 (retire-owner)))))
+         (finish-canceled ()
+           (when (current-p)
+             (let ((current (current-entry)))
+               (setq current (plist-put current :status 'not-downloaded))
+               (setq current (plist-put current :transfer nil))
+               (setq current (plist-put current :cancel-requested nil))
+               (setq current (plist-put current :error nil))
+               (puthash key current disco-media--attachment-download-state-table)
+               (unwind-protect
+                   (progn
+                     (disco-media--notify-state-updated 'download key)
+                     (when (current-p)
+                       (message "disco: attachment download canceled")))
+                 (retire-owner))))))
       (setq entry (plist-put entry :status 'downloading))
       (setq entry (plist-put entry :transfer nil))
       (setq entry (plist-put entry :cancel-requested nil))
       (setq entry (plist-put entry :error nil))
+      (setq entry (plist-put entry :generation disco-media--generation))
+      (setq entry (plist-put entry :owner owner))
+      (puthash key owner disco-media--attachment-download-owner-table)
       (puthash key entry disco-media--attachment-download-state-table)
-      (disco-media--notify-state-updated 'download key)
-      (message "disco: downloading attachment %s"
-               (disco-media-attachment-display-name attachment))
-      (let ((transfer
-             (appkit-media-copy-or-download-resource-async
-              (disco-media--attachment-appkit-resource attachment)
-              path
-              (lambda (downloaded)
-                (let* ((attributes (file-attributes downloaded))
-                       (actual-size (and attributes
-                                         (file-attribute-size attributes)))
-                       (current (current-entry)))
-                  (if (and (numberp expected-size)
-                           (> expected-size 0)
-                           (or (not (numberp actual-size))
-                               (<= actual-size 0)))
+      (let (setup-complete-p)
+        (unwind-protect
+            (progn
+              (disco-media--notify-state-updated 'download key)
+              (when (current-p)
+                (message "disco: downloading attachment %s"
+                         (disco-media-attachment-display-name attachment)))
+              (when (current-p)
+                (let ((transfer
+                       (appkit-media-copy-or-download-resource-async
+                        (disco-media--attachment-appkit-resource attachment)
+                        path
+                        (lambda (downloaded)
+                          (when (current-p)
+                            (let* ((attributes (file-attributes downloaded))
+                                   (actual-size
+                                    (and attributes
+                                         (file-attribute-size attributes))))
+                              (if (and (numberp expected-size)
+                                       (> expected-size 0)
+                                       (or (not (numberp actual-size))
+                                           (<= actual-size 0)))
+                                  (progn
+                                    (ignore-errors (delete-file downloaded))
+                                    (finish-error
+                                     "downloaded attachment is empty"))
+                                (finish-success)))))
+                        (lambda (err)
+                          (when (current-p)
+                            (if (plist-get (current-entry) :cancel-requested)
+                                (finish-canceled)
+                              (finish-error err)))))))
+                  ;; Setup or a local copy may finish synchronously.  Never
+                  ;; resurrect its retired owner with the returned handle.
+                  (if (current-p)
                       (progn
-                        (ignore-errors (delete-file downloaded))
-                        (finish-error current "downloaded attachment is empty"))
-                    (finish-success current))))
-              (lambda (err)
-                (let ((current (current-entry)))
-                  (if (plist-get current :cancel-requested)
-                      (finish-canceled current)
-                    (finish-error current err)))))))
-        ;; Setup errors report synchronously.  Do not overwrite that terminal
-        ;; state with a stale transfer handle.
-        (let ((current (current-entry)))
-          (when (eq (plist-get current :status) 'downloading)
-            (setq current (plist-put current :transfer transfer))
-            (puthash key current disco-media--attachment-download-state-table)))))))
+                        (setf (plist-get owner :transfer) transfer)
+                        (let ((current (current-entry)))
+                          (setq current (plist-put current :transfer transfer))
+                          (puthash key current
+                                   disco-media--attachment-download-state-table)))
+                    ;; Reset can run synchronously inside the constructor,
+                    ;; before its returned handle entered the reset snapshot.
+                    (when transfer
+                      (disco-media--run-cleanup-items
+                       (list (list :kind 'transfer :transfer transfer))
+                       #'disco-media--cancel-cleanup-item)))))
+              (setq setup-complete-p t))
+          (unless setup-complete-p
+            (when (current-p)
+              (remhash key disco-media--attachment-download-state-table)
+              (retire-owner))))))))
 
 (defun disco-media-cancel-attachment-download (attachment)
   "Cancel active asynchronous download for ATTACHMENT."
@@ -1455,30 +1817,80 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
     (disco-media--audio-store-state key entry)
     entry))
 
+(defun disco-media--external-audio-process-sentinel (process _event)
+  "Retire exact external audio PROCESS ownership after it exits."
+  (unless (process-live-p process)
+    (let ((owner (plist-get (process-plist process)
+                            :disco-media-external-owner)))
+      (when (disco-media--external-audio-owner-current-p owner process)
+        (setq disco-media--attachment-external-audio-owners
+              (delq owner disco-media--attachment-external-audio-owners)))
+      ;; A dead process may remain referenced by a caller; do not retain its
+      ;; account owner through the process plist.
+      (set-process-plist process nil))))
+
 (defun disco-media--start-external-audio-player (source)
   "Start configured non-inline audio player for SOURCE.
 
 Return non-nil on success."
+  (disco-media--ensure-start-allowed)
   (let* ((command (disco-media--configured-audio-player-command))
          (argv (appkit-media-command-arguments command))
          (program (car argv))
-         (args (append (cdr argv) (list source))))
+         (args (append (cdr argv) (list source)))
+         (generation disco-media--generation)
+         (owner (list :generation disco-media--generation
+                      :process nil
+                      :buffer nil))
+         process
+         completed-p)
     (when (and program
                (appkit-media-command-runnable-p command))
-      (condition-case nil
-          (progn
-            (make-process
-             :name "disco-audio-player"
-             :buffer nil
-             :command (cons program args)
-             :noquery t)
-            t)
-        (error nil)))))
+      ;; Register the pending owner before process construction.  Reset may
+      ;; run synchronously inside a mocked or unusual process constructor.
+      (push owner disco-media--attachment-external-audio-owners)
+      (unwind-protect
+          (condition-case nil
+              (progn
+                (setq process
+                      (make-process
+                       :name "disco-audio-player"
+                       :buffer nil
+                       :command (cons program args)
+                       :noquery t))
+                (when (and (processp process)
+                           (disco-media--session-current-p generation)
+                           (memq owner
+                                 disco-media--attachment-external-audio-owners))
+                  (setf (plist-get owner :process) process
+                        (plist-get owner :buffer) nil)
+                  (set-process-plist
+                   process
+                   (list :disco-media-generation generation
+                         :disco-media-external-owner owner))
+                  (set-process-sentinel
+                   process #'disco-media--external-audio-process-sentinel)
+                  ;; Immediate normal exit may already retire OWNER.  It is
+                  ;; still a successful launch when the session did not reset.
+                  (setq completed-p
+                        (disco-media--session-current-p generation))))
+            ((error quit) nil))
+        (unless completed-p
+          ;; Revoke before compensating deletion so its synchronous sentinel
+          ;; cannot mutate the active account.  This covers reset occurring
+          ;; before MAKE-PROCESS returned and exposed PROCESS to the snapshot.
+          (setq disco-media--attachment-external-audio-owners
+                (delq owner disco-media--attachment-external-audio-owners))
+          (when (processp process)
+            (disco-media--run-cleanup-items
+             (list (list :kind 'process :process process :buffer nil))
+             #'disco-media--cancel-cleanup-item))))
+      completed-p)))
 
 (defun disco-media--stop-inline-audio-process (&optional process stop-reason)
   "Stop inline audio PROCESS and record STOP-REASON for the sentinel."
   (when-let* ((proc (or process disco-media--attachment-audio-current-process)))
-    (when (process-live-p proc)
+    (when (and (processp proc) (process-live-p proc))
       (let ((proc-plist (process-plist proc)))
         (setq proc-plist (plist-put proc-plist :stop-reason stop-reason))
         (set-process-plist proc proc-plist)
@@ -1486,73 +1898,86 @@ Return non-nil on success."
 
 (defun disco-media--inline-audio-process-filter (proc output)
   "Track ffplay progress for inline audio PROC from OUTPUT."
-  (let ((buffer (process-buffer proc))
-        new-progress)
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (goto-char (point-max))
-        (insert output)
-        (when (> (buffer-size) 20000)
-          (delete-region (point-min) (max (point-min) (- (point-max) 10000))))
-        (cond
-         ((save-excursion
-            (re-search-backward "\r\\s-*\\([0-9.]+\\)" nil t))
-          (setq new-progress (string-to-number (match-string 1))))
-         ((save-excursion
-            (re-search-backward
-             " time=\\([0-9][0-9]\\):\\([0-9][0-9]\\):\\([0-9.]+\\) "
-             nil t))
-          (setq new-progress
-                (+ (* 3600 (string-to-number (match-string 1)))
-                   (* 60 (string-to-number (match-string 2)))
-                   (string-to-number (match-string 3))))))))
-    (when (numberp new-progress)
-      (let* ((proc-plist (process-plist proc))
-             (key (plist-get proc-plist :attachment-key))
-             (entry (and key (disco-media--audio-state-entry key))))
-        (setq proc-plist (plist-put proc-plist :progress new-progress))
-        (when key
+  (when (disco-media--audio-owner-current-p proc)
+    (let ((buffer (process-buffer proc))
+          new-progress)
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (let ((inhibit-modification-hooks t))
+            (goto-char (point-max))
+            (insert output)
+            (when (> (buffer-size) 20000)
+              (delete-region (point-min)
+                             (max (point-min) (- (point-max) 10000)))))
+          (cond
+           ((save-excursion
+              (re-search-backward "\r\\s-*\\([0-9.]+\\)" nil t))
+            (setq new-progress (string-to-number (match-string 1))))
+           ((save-excursion
+              (re-search-backward
+               " time=\\([0-9][0-9]\\):\\([0-9][0-9]\\):\\([0-9.]+\\) "
+               nil t))
+            (setq new-progress
+                  (+ (* 3600 (string-to-number (match-string 1)))
+                     (* 60 (string-to-number (match-string 2)))
+                     (string-to-number (match-string 3))))))))
+      (when (and (numberp new-progress)
+                 (disco-media--audio-owner-current-p proc))
+        (let* ((proc-plist (process-plist proc))
+               (key (plist-get proc-plist :attachment-key))
+               (entry (disco-media--audio-state-entry key))
+               (last-second (plist-get proc-plist :last-second))
+               (next-second (floor new-progress)))
+          (setq proc-plist (plist-put proc-plist :progress new-progress))
           (setq entry (plist-put entry :progress new-progress))
-          (when (eq (plist-get entry :process) proc)
-            (disco-media--audio-store-state key entry)))
-        (let ((last-second (plist-get proc-plist :last-second))
-              (next-second (floor new-progress)))
+          (disco-media--audio-store-state key entry)
           (unless (equal last-second next-second)
-            (setq proc-plist (plist-put proc-plist :last-second next-second))
-            (disco-media--notify-state-updated 'audio key)))
-        (set-process-plist proc proc-plist)))))
+            (setq proc-plist (plist-put proc-plist :last-second next-second)))
+          (set-process-plist proc proc-plist)
+          (when (and (not (equal last-second next-second))
+                     (disco-media--audio-owner-current-p proc))
+            (disco-media--notify-state-updated 'audio key)))))))
 
 (defun disco-media--inline-audio-process-sentinel (proc _event)
   "Finalize inline audio state after PROC exits."
   (unless (process-live-p proc)
     (let* ((proc-plist (process-plist proc))
            (key (plist-get proc-plist :attachment-key))
+           (generation (plist-get proc-plist :disco-media-generation))
+           (owned-buffer (plist-get proc-plist :disco-media-owned-buffer))
+           (current-p (disco-media--audio-owner-current-p proc))
            (stop-reason (plist-get proc-plist :stop-reason))
            (final-progress (or (and (consp stop-reason)
                                     (eq (car stop-reason) 'paused)
                                     (cdr stop-reason))
                                (plist-get proc-plist :progress))))
-      (when key
+      (when current-p
         (let ((entry (disco-media--audio-state-entry key)))
-          (when (eq (plist-get entry :process) proc)
-            (cond
-             ((and (consp stop-reason) (eq (car stop-reason) 'paused))
-              (setq entry (plist-put entry :status 'paused))
-              (setq entry (plist-put entry :progress (max 0.0 (or final-progress 0.0)))))
-             (t
-              (setq entry (plist-put entry :status 'stopped))
-              (setq entry (plist-put entry :progress nil))))
-            (setq entry (plist-put entry :pending-play nil))
-            (setq entry (plist-put entry :process nil))
-            (disco-media--audio-store-state key entry))))
-      (when (eq proc disco-media--attachment-audio-current-process)
-        (setq disco-media--attachment-audio-current-process nil))
-      (when (buffer-live-p (process-buffer proc))
-        (kill-buffer (process-buffer proc)))
-      (disco-media--notify-state-updated 'audio key))))
+          (cond
+           ((and (consp stop-reason) (eq (car stop-reason) 'paused))
+            (setq entry (plist-put entry :status 'paused))
+            (setq entry
+                  (plist-put entry :progress
+                             (max 0.0 (or final-progress 0.0)))))
+           (t
+            (setq entry (plist-put entry :status 'stopped))
+            (setq entry (plist-put entry :progress nil))))
+          (setq entry (plist-put entry :pending-play nil))
+          (setq entry (plist-put entry :process nil))
+          (setq entry (plist-put entry :owner nil))
+          (setq entry (plist-put entry :generation nil))
+          (disco-media--audio-store-state key entry))
+        (setq disco-media--attachment-audio-current-process nil
+              disco-media--attachment-audio-current-owner nil))
+      ;; Buffer ownership is by exact process pointer, never its conventional
+      ;; name; stale sentinels may still dispose their own scratch buffer.
+      (disco-media--force-dispose-process-buffer owned-buffer)
+      (when (and current-p (disco-media--session-current-p generation))
+        (disco-media--notify-state-updated 'audio key)))))
 
 (defun disco-media--start-inline-audio-player (attachment source &optional start-at)
   "Start ffplay-backed inline audio playback for ATTACHMENT using SOURCE."
+  (disco-media--ensure-start-allowed)
   (let* ((command (disco-media--configured-audio-player-command))
          (argv (appkit-media-command-arguments command))
          (program (car argv))
@@ -1562,35 +1987,75 @@ Return non-nil on success."
                          (list "-ss" (format "%.2f" start-at)))
                        (list source)))
          (key (disco-media-attachment-download-key attachment))
-         (buffer (get-buffer-create " *disco-audio-player*")))
+         (generation disco-media--generation)
+         (owner (list :generation disco-media--generation :key key))
+         buffer
+         process
+         published-p)
     (unless (and program
                  (disco-media-audio-inline-playback-available-p))
       (user-error "disco: inline audio playback requires ffplay"))
-    (when (process-live-p disco-media--attachment-audio-current-process)
-      (disco-media--stop-inline-audio-process disco-media--attachment-audio-current-process 'stopped))
+    (when (and (processp disco-media--attachment-audio-current-process)
+               (process-live-p disco-media--attachment-audio-current-process))
+      (disco-media--stop-inline-audio-process
+       disco-media--attachment-audio-current-process 'stopped))
+    (unless (disco-media--session-current-p generation)
+      (user-error "disco: media session changed before audio start"))
+    (setq buffer (generate-new-buffer " *disco-audio-player*"))
     (with-current-buffer buffer
-      (erase-buffer))
-    (let ((proc (apply #'start-process "disco-audio-player" buffer program args)))
-      (set-process-query-on-exit-flag proc nil)
-      (set-process-filter proc #'disco-media--inline-audio-process-filter)
-      (set-process-sentinel proc #'disco-media--inline-audio-process-sentinel)
-      (set-process-plist
-       proc
-       (list :attachment-key key
-             :progress (and (numberp start-at)
-                            (max 0.0 start-at))
-             :last-second (and (numberp start-at)
-                               (floor start-at))))
-      (setq disco-media--attachment-audio-current-process proc)
-      (let ((entry (disco-media--audio-state-entry key)))
-        (setq entry (plist-put entry :status 'playing))
-        (setq entry (plist-put entry :progress (and (numberp start-at)
-                                                    (max 0.0 start-at))))
-        (setq entry (plist-put entry :pending-play nil))
-        (setq entry (plist-put entry :process proc))
-        (disco-media--audio-store-state key entry))
-      (disco-media--notify-state-updated 'audio key)
-      proc)))
+      (buffer-disable-undo))
+    (unwind-protect
+        (progn
+          (setq process
+                (apply #'start-process "disco-audio-player" buffer program args))
+          (unless (disco-media--session-current-p generation)
+            (user-error "disco: media session changed during audio start"))
+          (set-process-query-on-exit-flag process nil)
+          (set-process-plist
+           process
+           (list :attachment-key key
+                 :disco-media-generation generation
+                 :disco-media-owner owner
+                 :disco-media-owned-buffer buffer
+                 :progress (and (numberp start-at)
+                                (max 0.0 start-at))
+                 :last-second (and (numberp start-at)
+                                   (floor start-at))))
+          (setq disco-media--attachment-audio-current-process process
+                disco-media--attachment-audio-current-owner owner)
+          (let ((entry (disco-media--audio-state-entry key)))
+            (setq entry (plist-put entry :status 'playing))
+            (setq entry
+                  (plist-put entry :progress
+                             (and (numberp start-at) (max 0.0 start-at))))
+            (setq entry (plist-put entry :pending-play nil))
+            (setq entry (plist-put entry :generation generation))
+            (setq entry (plist-put entry :owner owner))
+            (setq entry (plist-put entry :process process))
+            (setq entry (plist-put entry :buffer buffer))
+            (disco-media--audio-store-state key entry))
+          (set-process-filter process #'disco-media--inline-audio-process-filter)
+          (set-process-sentinel process #'disco-media--inline-audio-process-sentinel)
+          (when (disco-media--audio-owner-current-p process)
+            (disco-media--notify-state-updated 'audio key))
+          (setq published-p (disco-media--audio-owner-current-p process))
+          (and published-p process))
+      (unless published-p
+        ;; Revoke before deletion so a synchronous sentinel cannot repopulate
+        ;; state or rerender the retired account.
+        (when (eq process disco-media--attachment-audio-current-process)
+          (setq disco-media--attachment-audio-current-process nil
+                disco-media--attachment-audio-current-owner nil))
+        (when (eq owner
+                  (plist-get
+                   (gethash key disco-media--attachment-audio-state-table)
+                   :owner))
+          (remhash key disco-media--attachment-audio-state-table))
+        (if (processp process)
+            (disco-media--run-cleanup-items
+             (list (list :kind 'process :process process :buffer buffer))
+             #'disco-media--cancel-cleanup-item)
+          (disco-media--force-dispose-process-buffer buffer))))))
 
 (defun disco-media-stop-attachment-audio (attachment)
   "Stop inline playback for ATTACHMENT and clear any paused position."
@@ -1613,6 +2078,7 @@ Unlike the earlier URL-first implementation, this prefers a downloaded local
 file for playback and will queue a download before first play when needed.
 This matches telega's approach more closely and avoids ffplay timing quirks on
 streamed Discord voice-message URLs."
+  (disco-media--ensure-start-allowed)
   (let* ((download-state (disco-media-attachment-download-state attachment))
          (path (plist-get download-state :path))
          (status (plist-get download-state :status))
@@ -1661,7 +2127,9 @@ streamed Discord voice-message URLs."
 
 When TARGET-PATH is nil, prompt interactively for destination path."
   (interactive)
-  (let* ((url (disco-media-attachment-download-url attachment))
+  (disco-media--ensure-start-allowed)
+  (let* ((generation disco-media--generation)
+         (url (disco-media-attachment-download-url attachment))
          (download-state (disco-media-attachment-download-state attachment))
          (cached-path (plist-get download-state :path))
          (has-cached (and (stringp cached-path) (file-exists-p cached-path)))
@@ -1675,15 +2143,56 @@ When TARGET-PATH is nil, prompt interactively for destination path."
                                      default-name))))
     (unless (or has-cached has-url)
       (user-error "disco: attachment has neither local cache nor downloadable URL"))
-    (appkit-media-copy-or-download-resource-async
-     (disco-media--attachment-appkit-resource
-      attachment (and has-cached cached-path))
-     target
-     (lambda (downloaded)
-       (message "disco: downloaded attachment -> %s" downloaded))
-     (lambda (err)
-       (message "disco: attachment download failed: %s"
-                (disco-media--attachment-error-message err))))))
+    (unless (disco-media--session-current-p generation)
+      (user-error "disco: media session changed before attachment save"))
+    (let ((owner (list :generation generation :transfer nil))
+          transfer
+          returned-p)
+      (cl-labels
+          ((current-p () (disco-media--export-owner-current-p owner))
+           (retire ()
+             (setq disco-media--attachment-export-owners
+                   (delq owner disco-media--attachment-export-owners)))
+           (cancel-returned ()
+             (when transfer
+               (disco-media--run-cleanup-items
+                (list (list :kind 'transfer :transfer transfer))
+                #'disco-media--cancel-cleanup-item))))
+        (push owner disco-media--attachment-export-owners)
+        (unwind-protect
+            (progn
+              (setq transfer
+                    (appkit-media-copy-or-download-resource-async
+                     (disco-media--attachment-appkit-resource
+                      attachment (and has-cached cached-path))
+                     target
+                     (lambda (downloaded)
+                       (when (current-p)
+                         (unwind-protect
+                             (when (current-p)
+                               (message "disco: downloaded attachment -> %s"
+                                        downloaded))
+                           (retire))))
+                     (lambda (err)
+                       (when (current-p)
+                         (unwind-protect
+                             (when (current-p)
+                               (message
+                                "disco: attachment download failed: %s"
+                                (disco-media--attachment-error-message err)))
+                           (retire))))))
+              (setq returned-p t)
+              (if (current-p)
+                  (progn
+                    (setf (plist-get owner :transfer) transfer)
+                    transfer)
+                ;; Reset or synchronous completion may retire OWNER before
+                ;; the constructor exposes its returned handle.
+                (cancel-returned)
+                nil))
+          (unless returned-p
+            (retire)
+            (cancel-returned)))))))
 
 (defun disco-media-open-attachment (attachment)
   "Open or play ATTACHMENT according to its media kind."

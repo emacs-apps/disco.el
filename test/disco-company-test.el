@@ -397,6 +397,16 @@
               beginning-of-line)
             appkit-chat-completion-functions))))
 
+(ert-deftest disco-company-session-cache-reset-clears-rounded-avatars ()
+  (let ((disco-company--rounded-avatar-cache
+         (make-hash-table :test #'equal)))
+    (puthash "https://OLD_ACCOUNT_SECRET.invalid/avatar.png"
+             "OLD_ACCOUNT_SECRET-image"
+             disco-company--rounded-avatar-cache)
+    (disco-company-reset-session-cache-state)
+    (should (= 0 (hash-table-count
+                  disco-company--rounded-avatar-cache)))))
+
 (provide 'disco-company-test)
 
 ;;; disco-company-test.el ends here

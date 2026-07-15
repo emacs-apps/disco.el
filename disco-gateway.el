@@ -82,6 +82,7 @@ Event schema:
 - :role-id string for role delete events
 - :emoji reaction emoji object/string for reaction events when present
 - :answer-id integer for poll vote events when present
+- :self-p frozen current-user identity for reaction/poll vote events
 - :watched non-nil for message-create when channel has active room watcher
 - :channel channel object for channel/thread events
 - :guild guild object for guild events
@@ -123,6 +124,15 @@ Event schema:
 (defvar disco-gateway--connecting nil)
 (defvar disco-gateway--stopping nil)
 
+(defvar disco-gateway--connection-generation 0
+  "Generation owning the current Gateway connection lifecycle.")
+
+(defvar disco-gateway--connection-owner nil
+  "Exact owner plist for the current or pending Gateway connection.")
+
+(defvar disco-gateway--reset-in-progress nil
+  "Non-nil while destructive account reset forbids Gateway publication.")
+
 (defvar disco-gateway--seq nil)
 (defvar disco-gateway--session-id nil)
 (defvar disco-gateway--resume-url nil)
@@ -133,9 +143,13 @@ Event schema:
 
 (defvar disco-gateway--heartbeat-interval-ms nil)
 (defvar disco-gateway--heartbeat-timer nil)
+(defvar disco-gateway--heartbeat-timer-owner nil
+  "Exact connection-generation owner of the heartbeat timer.")
 (defvar disco-gateway--awaiting-heartbeat-ack nil)
 
 (defvar disco-gateway--reconnect-timer nil)
+(defvar disco-gateway--reconnect-timer-owner nil
+  "Exact connection-generation owner of the reconnect timer.")
 (defvar disco-gateway--reconnect-attempt 0)
 
 (defvar disco-gateway--send-history nil
@@ -149,6 +163,9 @@ Event schema:
 
 (defvar disco-gateway--send-queue-timer nil
   "Timer used to continue draining outbound send queue when rate limited.")
+
+(defvar disco-gateway--send-queue-timer-owner nil
+  "Exact connection-generation owner of the send queue drain timer.")
 
 (defvar disco-gateway--send-opcode-cooldowns (make-hash-table :test #'equal)
   "Hash table of outbound opcode cooldown deadlines keyed by opcode scope.")
@@ -170,6 +187,80 @@ Event schema:
 
 (defvar disco-gateway--zlib-stream-output-bytes 0
   "Previously produced decompressed byte count from stream buffer.")
+
+(defun disco-gateway--connection-owner-current-p (owner &optional websocket)
+  "Return non-nil when OWNER may still act for WEBSOCKET.
+
+Before `websocket-open' returns, OWNER has no published websocket yet.  Its
+private callbacks may therefore claim the socket passed by the constructor;
+after publication, callbacks must match that exact socket object."
+  (and (consp owner)
+       (not disco-gateway--reset-in-progress)
+       (eq owner disco-gateway--connection-owner)
+       (= (or (plist-get owner :generation) -1)
+          disco-gateway--connection-generation)
+       (let ((owned-websocket (plist-get owner :websocket)))
+         (or (null websocket)
+             (null owned-websocket)
+             (eq websocket owned-websocket)))))
+
+(defun disco-gateway--retire-connection-owner (owner)
+  "Revoke exact connection OWNER and return non-nil when it was current."
+  (when (disco-gateway--connection-owner-current-p owner)
+    (cl-incf disco-gateway--connection-generation)
+    (setq disco-gateway--connection-owner nil
+          disco-gateway--ws nil
+          disco-gateway--connecting nil)
+    t))
+
+(defun disco-gateway--revoke-connection-owner ()
+  "Unconditionally revoke the current or pending Gateway connection."
+  (cl-incf disco-gateway--connection-generation)
+  (setq disco-gateway--connection-owner nil
+        disco-gateway--ws nil
+        disco-gateway--connecting nil))
+
+(defun disco-gateway--close-websocket (websocket)
+  "Close exact WEBSOCKET while isolating backend failures."
+  (when websocket
+    (ignore-errors (websocket-close websocket))))
+
+(defun disco-gateway--connection-timer-owner-current-p
+    (owner current-owner &optional timer)
+  "Return non-nil when timer OWNER is exact in CURRENT-OWNER.
+
+TIMER, when non-nil, must match the published timer.  A nil timer is accepted
+while `run-at-time' has not returned yet.  The optional :connection field ties
+heartbeat/send timers to an exact socket owner; reconnect timers created after
+a close rely on the same session generation without a live connection."
+  (and (consp owner)
+       (not disco-gateway--reset-in-progress)
+       (eq owner current-owner)
+       (= (or (plist-get owner :generation) -1)
+          disco-gateway--connection-generation)
+       (let ((connection (plist-get owner :connection))
+             (owned-timer (plist-get owner :timer)))
+         (and (or (null connection)
+                  (eq connection disco-gateway--connection-owner))
+              (or (null timer)
+                  (null owned-timer)
+                  (eq timer owned-timer))))))
+
+(defun disco-gateway--cancel-heartbeat-timer ()
+  "Revoke and cancel the exact current heartbeat timer."
+  (let ((timer disco-gateway--heartbeat-timer))
+    (setq disco-gateway--heartbeat-timer nil
+          disco-gateway--heartbeat-timer-owner nil)
+    (when (timerp timer)
+      (cancel-timer timer))))
+
+(defun disco-gateway--cancel-reconnect-timer ()
+  "Revoke and cancel the exact current reconnect timer."
+  (let ((timer disco-gateway--reconnect-timer))
+    (setq disco-gateway--reconnect-timer nil
+          disco-gateway--reconnect-timer-owner nil)
+    (when (timerp timer)
+      (cancel-timer timer))))
 
 (defun disco-gateway-running-p ()
   "Return non-nil when gateway transport is active or connecting."
@@ -514,31 +605,72 @@ Return nil if FRAME does not yet contain a complete payload."
   "Disconnect gateway transport.
 
 If CLEAR-SESSION is non-nil, drop resume-related values too."
-  (when (timerp disco-gateway--heartbeat-timer)
-    (cancel-timer disco-gateway--heartbeat-timer)
-    (setq disco-gateway--heartbeat-timer nil))
-  (when (and (not preserve-reconnect-timer)
-             (timerp disco-gateway--reconnect-timer))
-    (cancel-timer disco-gateway--reconnect-timer)
-    (setq disco-gateway--reconnect-timer nil))
+  (let ((websocket disco-gateway--ws)
+        (preserved-reconnect-owner
+         (and preserve-reconnect-timer
+              disco-gateway--reconnect-timer-owner)))
+    ;; Revoke before cancellation because `websocket-close' may synchronously
+    ;; invoke the old socket's close/error callbacks.
+    (disco-gateway--revoke-connection-owner)
+    (disco-gateway--cancel-heartbeat-timer)
+    (if preserve-reconnect-timer
+        ;; `disco-gateway--reconnect' deliberately schedules before closing
+        ;; the old socket.  Transfer that exact timer to the newly revoked
+        ;; generation, without letting it retain the old connection owner.
+        (when (eq preserved-reconnect-owner
+                  disco-gateway--reconnect-timer-owner)
+          (setf (plist-get preserved-reconnect-owner :generation)
+                disco-gateway--connection-generation
+                (plist-get preserved-reconnect-owner :connection) nil))
+      (disco-gateway--cancel-reconnect-timer))
 
-  (setq disco-gateway--connecting nil)
-  (setq disco-gateway--heartbeat-interval-ms nil)
-  (setq disco-gateway--awaiting-heartbeat-ack nil)
-  (disco-gateway--zlib-reset-state)
-  (disco-gateway--reset-send-rate-state)
+    (setq disco-gateway--heartbeat-interval-ms nil)
+    (setq disco-gateway--awaiting-heartbeat-ack nil)
+    (disco-gateway--zlib-reset-state)
+    (disco-gateway--reset-send-rate-state)
+    (clrhash disco-gateway--lazy-subscribed-channels)
+
+    (disco-gateway--close-websocket websocket)
+
+    (when clear-session
+      (setq disco-gateway--seq nil)
+      (setq disco-gateway--session-id nil)
+      (setq disco-gateway--resume-url nil)
+      (setq disco-gateway--current-user-id nil)
+      (disco-gateway--reset-reconnect-backoff))))
+
+(defun disco-gateway--clear-session-data ()
+  "Purely forget all Gateway account state after transport cancellation.
+
+This helper intentionally invokes no timer, websocket, hook, or callback.  A
+destructive reset must call `disco-gateway-stop' first, then may use this as a
+terminal no-callback privacy sweep."
+  (cl-incf disco-gateway--connection-generation)
+  (setq disco-gateway--connection-owner nil
+        disco-gateway--ws nil
+        disco-gateway--connecting nil
+        disco-gateway--stopping t
+        disco-gateway--seq nil
+        disco-gateway--session-id nil
+        disco-gateway--resume-url nil
+        disco-gateway--current-user-id nil
+        disco-gateway--heartbeat-interval-ms nil
+        disco-gateway--heartbeat-timer nil
+        disco-gateway--heartbeat-timer-owner nil
+        disco-gateway--awaiting-heartbeat-ack nil
+        disco-gateway--reconnect-timer nil
+        disco-gateway--reconnect-timer-owner nil
+        disco-gateway--send-history nil
+        disco-gateway--send-queue-high nil
+        disco-gateway--send-queue-normal nil
+        disco-gateway--send-queue-timer nil
+        disco-gateway--send-queue-timer-owner nil
+        disco-gateway--zlib-stream-buffer ""
+        disco-gateway--zlib-stream-output-bytes 0
+        disco-gateway--global-watch-count 0)
+  (clrhash disco-gateway--watch-counts)
   (clrhash disco-gateway--lazy-subscribed-channels)
-
-  (when disco-gateway--ws
-    (ignore-errors (websocket-close disco-gateway--ws))
-    (setq disco-gateway--ws nil))
-
-  (when clear-session
-    (setq disco-gateway--seq nil)
-    (setq disco-gateway--session-id nil)
-    (setq disco-gateway--resume-url nil)
-    (setq disco-gateway--current-user-id nil)
-    (disco-gateway--reset-reconnect-backoff)))
+  (clrhash disco-gateway--send-opcode-cooldowns))
 
 (defun disco-gateway--reconnect (&optional delay clear-session)
   "Reconnect websocket transport after optional DELAY.
@@ -601,9 +733,13 @@ If CLEAR-SESSION is non-nil, clear resume values first."
 
 (defun disco-gateway--cancel-send-queue-timer ()
   "Cancel pending outbound send queue drain timer when present."
-  (when (timerp disco-gateway--send-queue-timer)
-    (cancel-timer disco-gateway--send-queue-timer)
-    (setq disco-gateway--send-queue-timer nil)))
+  (let ((timer disco-gateway--send-queue-timer))
+    ;; Revoke first because cancellation can synchronously invoke advice or an
+    ;; unusual timer backend.
+    (setq disco-gateway--send-queue-timer nil
+          disco-gateway--send-queue-timer-owner nil)
+    (when (timerp timer)
+      (cancel-timer timer))))
 
 (defun disco-gateway--reset-send-rate-state ()
   "Reset outbound send history, cooldowns, and pending queue state."
@@ -744,14 +880,39 @@ Return non-nil when payload is written to websocket process."
 (defun disco-gateway--schedule-send-queue-drain (delay)
   "Schedule queue drain attempt after DELAY seconds."
   (disco-gateway--cancel-send-queue-timer)
-  (setq disco-gateway--send-queue-timer
-        (run-at-time (max 0.01 delay)
-                     nil
-                     #'disco-gateway--flush-send-queue)))
+  (let* ((owner (list :generation disco-gateway--connection-generation
+                      :connection disco-gateway--connection-owner
+                      :timer nil))
+         timer
+         published-p)
+    (setq disco-gateway--send-queue-timer-owner owner)
+    (unwind-protect
+        (progn
+          (setq timer
+                (run-at-time
+                 (max 0.01 delay)
+                 nil
+                 (lambda ()
+                   (when (disco-gateway--connection-timer-owner-current-p
+                          owner disco-gateway--send-queue-timer-owner timer)
+                     (setq disco-gateway--send-queue-timer nil
+                           disco-gateway--send-queue-timer-owner nil)
+                     (disco-gateway--flush-send-queue)))))
+          (when (disco-gateway--connection-timer-owner-current-p
+                 owner disco-gateway--send-queue-timer-owner timer)
+            (setf (plist-get owner :timer) timer)
+            (setq disco-gateway--send-queue-timer timer
+                  published-p t))
+          (and published-p timer))
+      (unless published-p
+        (when (eq owner disco-gateway--send-queue-timer-owner)
+          (setq disco-gateway--send-queue-timer-owner nil))
+        (when (timerp timer)
+          (cancel-timer timer))))))
 
 (defun disco-gateway--flush-send-queue ()
   "Attempt to drain outbound gateway queue under rate limits."
-  (setq disco-gateway--send-queue-timer nil)
+  (disco-gateway--cancel-send-queue-timer)
   (when (and disco-gateway--ws (websocket-openp disco-gateway--ws)
              (> (disco-gateway--send-queue-size) 0))
     (let ((delay (max (disco-gateway--next-send-delay)
@@ -804,14 +965,38 @@ Return non-nil when payload is queued for send."
 
 (defun disco-gateway--start-heartbeat (interval-ms)
   "Start heartbeat loop using INTERVAL-MS."
-  (when (timerp disco-gateway--heartbeat-timer)
-    (cancel-timer disco-gateway--heartbeat-timer))
+  (disco-gateway--cancel-heartbeat-timer)
   (setq disco-gateway--heartbeat-interval-ms interval-ms)
   (setq disco-gateway--awaiting-heartbeat-ack nil)
-  (let ((interval-sec (/ (max interval-ms 1000) 1000.0)))
-    (setq disco-gateway--heartbeat-timer
-          (run-at-time interval-sec interval-sec #'disco-gateway--heartbeat-tick))
-    (disco-gateway--send-heartbeat)))
+  (let* ((interval-sec (/ (max interval-ms 1000) 1000.0))
+         (owner (list :generation disco-gateway--connection-generation
+                      :connection disco-gateway--connection-owner
+                      :timer nil))
+         timer
+         published-p)
+    (setq disco-gateway--heartbeat-timer-owner owner)
+    (unwind-protect
+        (progn
+          (setq timer
+                (run-at-time
+                 interval-sec interval-sec
+                 (lambda ()
+                   (when (disco-gateway--connection-timer-owner-current-p
+                          owner disco-gateway--heartbeat-timer-owner timer)
+                     (disco-gateway--heartbeat-tick)))))
+          (when (disco-gateway--connection-timer-owner-current-p
+                 owner disco-gateway--heartbeat-timer-owner timer)
+            (setf (plist-get owner :timer) timer)
+            (setq disco-gateway--heartbeat-timer timer
+                  published-p t))
+          (when published-p
+            (disco-gateway--send-heartbeat))
+          (and published-p timer))
+      (unless published-p
+        (when (eq owner disco-gateway--heartbeat-timer-owner)
+          (setq disco-gateway--heartbeat-timer-owner nil))
+        (when (timerp timer)
+          (cancel-timer timer))))))
 
 (defun disco-gateway--identify-properties ()
   "Build identify properties payload.
@@ -867,30 +1052,58 @@ This shape follows Discord gateway identify expectations."
 
 (defun disco-gateway--schedule-reconnect (&optional delay)
   "Schedule reconnect after DELAY seconds."
-  (let* ((attempt (1+ disco-gateway--reconnect-attempt))
-         (max-attempts disco-gateway-max-reconnect-attempts))
-    (if (and (integerp max-attempts)
-             (> attempt max-attempts))
-        (progn
-          (setq disco-gateway--stopping t)
-          (disco-gateway--disconnect-internal nil)
-          (message "disco: reached max reconnect attempts (%d), gateway stopped"
-                   max-attempts))
-      (setq disco-gateway--reconnect-attempt attempt)
-      (let ((effective-delay (or delay (disco-gateway--backoff-delay-for-attempt attempt))))
-        (when (timerp disco-gateway--reconnect-timer)
-          (cancel-timer disco-gateway--reconnect-timer))
-        (setq disco-gateway--reconnect-timer
-              (run-at-time
-               effective-delay
-               nil
-               (lambda ()
-                 (setq disco-gateway--reconnect-timer nil)
-                 (unless disco-gateway--stopping
-                   (disco-gateway--connect)))))
-        (message "disco: scheduling gateway reconnect in %.2fs (attempt %d)"
-                 effective-delay
-                 attempt)))))
+  (unless disco-gateway--reset-in-progress
+    (let* ((attempt (1+ disco-gateway--reconnect-attempt))
+           (max-attempts disco-gateway-max-reconnect-attempts))
+      (if (and (integerp max-attempts)
+               (> attempt max-attempts))
+          (progn
+            (setq disco-gateway--stopping t)
+            (disco-gateway--disconnect-internal nil)
+            (message
+             "disco: reached max reconnect attempts (%d), gateway stopped"
+             max-attempts))
+        (setq disco-gateway--reconnect-attempt attempt)
+        (let ((effective-delay
+               (or delay
+                   (disco-gateway--backoff-delay-for-attempt attempt))))
+          (disco-gateway--cancel-reconnect-timer)
+          (let* ((owner
+                  (list :generation disco-gateway--connection-generation
+                        :connection disco-gateway--connection-owner
+                        :timer nil))
+                 timer
+                 published-p)
+            (setq disco-gateway--reconnect-timer-owner owner)
+            (unwind-protect
+                (progn
+                  (setq timer
+                        (run-at-time
+                         effective-delay
+                         nil
+                         (lambda ()
+                           (when
+                               (disco-gateway--connection-timer-owner-current-p
+                                owner
+                                disco-gateway--reconnect-timer-owner
+                                timer)
+                             (setq disco-gateway--reconnect-timer nil
+                                   disco-gateway--reconnect-timer-owner nil)
+                             (unless disco-gateway--stopping
+                               (disco-gateway--connect))))))
+                  (when (disco-gateway--connection-timer-owner-current-p
+                         owner disco-gateway--reconnect-timer-owner timer)
+                    (setf (plist-get owner :timer) timer)
+                    (setq disco-gateway--reconnect-timer timer
+                          published-p t)))
+              (unless published-p
+                (when (eq owner disco-gateway--reconnect-timer-owner)
+                  (setq disco-gateway--reconnect-timer-owner nil))
+                (when (timerp timer)
+                  (cancel-timer timer)))))
+          (message "disco: scheduling gateway reconnect in %.2fs (attempt %d)"
+                   effective-delay
+                   attempt))))))
 
 (defun disco-gateway--channel-watched-p (channel-id)
   "Return non-nil if CHANNEL-ID has active watchers."
@@ -1034,18 +1247,30 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   (or (alist-get 'emoji payload)
       (alist-get 'emoji_name payload)))
 
+(defun disco-gateway--event-user-self-p (user-id)
+  "Return non-nil when USER-ID is the current Gateway account."
+  (and disco-gateway--current-user-id
+       user-id
+       (equal (format "%s" disco-gateway--current-user-id)
+              (format "%s" user-id))))
+
 (defun disco-gateway--emit-reaction-event (event-type payload)
   "Emit reaction EVENT-TYPE from gateway PAYLOAD."
   (let ((channel-id (alist-get 'channel_id payload))
-        (message-id (alist-get 'message_id payload)))
+        (message-id (alist-get 'message_id payload))
+        (user-id (alist-get 'user_id payload)))
     (when (and channel-id message-id)
       (disco-gateway--emit
        (append
         (list :type event-type
               :channel-id channel-id
-              :message-id message-id)
+              :message-id message-id
+              ;; Freeze identity while the READY session still owns it.  Room
+              ;; events may sit in Appkit's queue until after a disconnect has
+              ;; cleared `disco-gateway--current-user-id'.
+              :self-p (and (disco-gateway--event-user-self-p user-id) t))
         (when (assq 'user_id payload)
-          (list :user-id (alist-get 'user_id payload)))
+          (list :user-id user-id))
         (when (or (assq 'emoji payload)
                   (assq 'emoji_name payload))
           (list :emoji (disco-gateway--reaction-emoji payload)))
@@ -1064,6 +1289,9 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
              :guild-id (alist-get 'guild_id payload)
              :message-id message-id
              :user-id (alist-get 'user_id payload)
+             :self-p (and (disco-gateway--event-user-self-p
+                           (alist-get 'user_id payload))
+                          t)
              :answer-id answer-id)))))
 
 (defun disco-gateway--dispatch-ready (payload)
@@ -1797,10 +2025,12 @@ Discord may request immediate heartbeats outside the regular interval."
 (defun disco-gateway--handle-op-hello (payload)
   "Handle Gateway opcode 10 Hello PAYLOAD."
   (let ((interval (alist-get 'heartbeat_interval (alist-get 'd payload))))
-    (disco-gateway--start-heartbeat interval)
-    (if (disco-gateway--can-resume-p)
-        (disco-gateway--send-resume)
-      (disco-gateway--send-identify))))
+    ;; Timer construction is an external lifecycle boundary.  If it resets or
+    ;; supersedes this connection synchronously, do not identify afterward.
+    (when (disco-gateway--start-heartbeat interval)
+      (if (disco-gateway--can-resume-p)
+          (disco-gateway--send-resume)
+        (disco-gateway--send-identify)))))
 
 (defun disco-gateway--handle-op-heartbeat-ack (_payload)
   "Handle Gateway opcode 11 Heartbeat ACK."
@@ -1863,62 +2093,107 @@ Discord may request immediate heartbeats outside the regular interval."
 
 (defun disco-gateway--connect ()
   "Connect websocket transport if needed."
-  (unless (or disco-gateway--stopping
+  (unless (or disco-gateway--reset-in-progress
+              disco-gateway--stopping
               disco-gateway--connecting
               (and disco-gateway--ws (websocket-openp disco-gateway--ws)))
     (disco-gateway--ensure-token)
-    (setq disco-gateway--connecting t)
-    (let ((url (disco-gateway--connect-url)))
-      (setq disco-gateway--ws
-            (websocket-open
-             url
-             :on-open (lambda (_ws)
-                        (disco-gateway--zlib-reset-state)
-                        (disco-gateway--reset-send-rate-state)
-                        (setq disco-gateway--connecting nil)
-                        (message "disco: gateway websocket opened"))
-             :on-message (lambda (_ws frame)
-                           (condition-case err
-                               (let ((payload-text (disco-gateway--frame-json-text frame)))
-                                 (when (and payload-text
-                                            (not (string-empty-p (string-trim payload-text))))
-                                   (disco-gateway--handle-payload
-                                    (disco-gateway--json-decode payload-text))))
-                             (error
-                              (message "disco: gateway payload error: %s"
-                                       (error-message-string err)))))
-             :on-close (lambda (_ws)
-                         (setq disco-gateway--ws nil)
-                         (setq disco-gateway--connecting nil)
-                         (when (timerp disco-gateway--heartbeat-timer)
-                           (cancel-timer disco-gateway--heartbeat-timer)
-                           (setq disco-gateway--heartbeat-timer nil))
-                         (setq disco-gateway--awaiting-heartbeat-ack nil)
-                         (disco-gateway--zlib-reset-state)
-                         (disco-gateway--reset-send-rate-state)
-                         (unless (or disco-gateway--stopping
-                                     (timerp disco-gateway--reconnect-timer))
-                           (message "disco: gateway websocket closed, reconnecting")
-                           (disco-gateway--schedule-reconnect nil)))
-             :on-error (lambda (_ws _type err)
-                         (setq disco-gateway--connecting nil)
-                         (disco-gateway--zlib-reset-state)
-                         (disco-gateway--reset-send-rate-state)
-                         (message "disco: gateway websocket error: %s"
-                                  (error-message-string err))
-                         (unless (or disco-gateway--stopping
-                                     (timerp disco-gateway--reconnect-timer))
-                           (disco-gateway--schedule-reconnect nil))))))))
+    (let* ((url (disco-gateway--connect-url))
+           (generation (cl-incf disco-gateway--connection-generation))
+           ;; Preallocate :websocket so later `setf' preserves OWNER's `eq'
+           ;; identity for callbacks that captured it before construction.
+           (owner (list :generation generation :websocket nil))
+           websocket
+           published-p)
+      (setq disco-gateway--connection-owner owner
+            disco-gateway--connecting t)
+      (unwind-protect
+          (progn
+            (setq websocket
+                  (websocket-open
+                   url
+                   :on-open
+                   (lambda (opened-websocket)
+                     (when (disco-gateway--connection-owner-current-p
+                            owner opened-websocket)
+                       (disco-gateway--zlib-reset-state)
+                       (disco-gateway--reset-send-rate-state)
+                       (setq disco-gateway--connecting nil)
+                       (message "disco: gateway websocket opened")))
+                   :on-message
+                   (lambda (message-websocket frame)
+                     (when (disco-gateway--connection-owner-current-p
+                            owner message-websocket)
+                       (condition-case err
+                           (let ((payload-text
+                                  (disco-gateway--frame-json-text frame)))
+                             ;; Frame decoding may itself reconnect/reset (for
+                             ;; example after a corrupt zlib stream), so prove
+                             ;; exact ownership once more before dispatch.
+                             (when (and
+                                    (disco-gateway--connection-owner-current-p
+                                     owner message-websocket)
+                                    payload-text
+                                    (not (string-empty-p
+                                          (string-trim payload-text))))
+                               (disco-gateway--handle-payload
+                                (disco-gateway--json-decode payload-text))))
+                         (error
+                          (when (disco-gateway--connection-owner-current-p
+                                 owner message-websocket)
+                            (message "disco: gateway payload error: %s"
+                                     (error-message-string err)))))))
+                   :on-close
+                   (lambda (closed-websocket)
+                     (when (and
+                            (disco-gateway--connection-owner-current-p
+                             owner closed-websocket)
+                            (disco-gateway--retire-connection-owner owner))
+                       (disco-gateway--cancel-heartbeat-timer)
+                       (setq disco-gateway--awaiting-heartbeat-ack nil)
+                       (disco-gateway--zlib-reset-state)
+                       (disco-gateway--reset-send-rate-state)
+                       (unless (or disco-gateway--stopping
+                                   (timerp disco-gateway--reconnect-timer))
+                         (message
+                          "disco: gateway websocket closed, reconnecting")
+                         (disco-gateway--schedule-reconnect nil))))
+                   :on-error
+                   (lambda (error-websocket _type err)
+                     (when (disco-gateway--connection-owner-current-p
+                            owner error-websocket)
+                       (setq disco-gateway--connecting nil)
+                       (disco-gateway--zlib-reset-state)
+                       (disco-gateway--reset-send-rate-state)
+                       (message "disco: gateway websocket error: %s"
+                                (error-message-string err))
+                       (unless (or disco-gateway--stopping
+                                   (timerp disco-gateway--reconnect-timer))
+                         (disco-gateway--schedule-reconnect nil))))))
+            ;; The constructor may call reset/stop synchronously before its
+            ;; returned socket becomes visible to the disconnect snapshot.
+            (when (and websocket
+                       (disco-gateway--connection-owner-current-p
+                        owner websocket))
+              (setf (plist-get owner :websocket) websocket)
+              (setq disco-gateway--ws websocket
+                    published-p t))
+            (and published-p websocket))
+        (unless published-p
+          (when (disco-gateway--connection-owner-current-p owner)
+            (disco-gateway--retire-connection-owner owner))
+          (disco-gateway--close-websocket websocket))))))
 
 (defun disco-gateway-start ()
   "Start gateway transport if enabled and needed."
   (interactive)
-  (setq disco-gateway--stopping nil)
-  (unless (timerp disco-gateway--reconnect-timer)
-    (disco-gateway--reset-reconnect-backoff))
-  (when (and disco-enable-live-updates
-             (disco-gateway--watchers-active-p))
-    (disco-gateway--connect)))
+  (unless disco-gateway--reset-in-progress
+    (setq disco-gateway--stopping nil)
+    (unless (timerp disco-gateway--reconnect-timer)
+      (disco-gateway--reset-reconnect-backoff))
+    (when (and disco-enable-live-updates
+               (disco-gateway--watchers-active-p))
+      (disco-gateway--connect))))
 
 (defun disco-gateway-stop ()
   "Stop gateway transport and clear resume state."
@@ -1930,17 +2205,20 @@ Discord may request immediate heartbeats outside the regular interval."
 
 (defun disco-gateway-watch-channel (channel-id)
   "Start watching CHANNEL-ID for live message updates."
-  (let ((count (gethash channel-id disco-gateway--watch-counts 0)))
-    (puthash channel-id (1+ count) disco-gateway--watch-counts))
-  (when disco-enable-live-updates
-    (disco-gateway-start)
-    (disco-gateway--maybe-subscribe-watched-channel channel-id)))
+  (unless disco-gateway--reset-in-progress
+    (let ((count (gethash channel-id disco-gateway--watch-counts 0)))
+      (puthash channel-id (1+ count) disco-gateway--watch-counts))
+    (when disco-enable-live-updates
+      (disco-gateway-start)
+      (disco-gateway--maybe-subscribe-watched-channel channel-id))))
 
 (defun disco-gateway-watch-global ()
   "Start watching gateway dispatch globally for non-channel consumers."
-  (setq disco-gateway--global-watch-count (1+ disco-gateway--global-watch-count))
-  (when disco-enable-live-updates
-    (disco-gateway-start)))
+  (unless disco-gateway--reset-in-progress
+    (setq disco-gateway--global-watch-count
+          (1+ disco-gateway--global-watch-count))
+    (when disco-enable-live-updates
+      (disco-gateway-start))))
 
 (defun disco-gateway-unwatch-channel (channel-id)
   "Decrease watch count for CHANNEL-ID and stop when no channels remain."

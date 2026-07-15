@@ -33,6 +33,43 @@
 (defvar disco-api--bucket-rate-limit-until (make-hash-table :test #'equal)
   "Hash bucket-id -> unix timestamp deadline.")
 
+(defvar disco-api--generation 0
+  "Generation of asynchronous work owned by the active API session.")
+
+(defvar disco-api--reset-in-progress nil
+  "Non-nil while account-scoped API work is being destructively reset.")
+
+(defvar disco-api--retry-owners nil
+  "Exact owners of scheduled asynchronous API dispatch/retry timers.")
+
+(defvar-local disco-api--rate-limit-buffer-owner-p nil
+  "Non-nil when this buffer is a Disco rate-limit projection.")
+
+(put 'disco-api--rate-limit-buffer-owner-p 'permanent-local t)
+
+(defconst disco-api--rate-limit-buffer-name "*disco-rate-limit*"
+  "Preferred name for the owned rate-limit diagnostic buffer.")
+
+(defvar disco-api--rate-limit-buffer nil
+  "Live Disco-owned rate-limit buffer, including after a user rename.")
+
+(defun disco-api--owned-rate-limit-buffer ()
+  "Return the explicitly owned rate-limit diagnostic buffer."
+  (or (and (buffer-live-p disco-api--rate-limit-buffer)
+           (buffer-local-value 'disco-api--rate-limit-buffer-owner-p
+                               disco-api--rate-limit-buffer)
+           disco-api--rate-limit-buffer)
+      (let* ((named (get-buffer disco-api--rate-limit-buffer-name))
+             (buffer
+              (if (and (buffer-live-p named)
+                       (buffer-local-value
+                        'disco-api--rate-limit-buffer-owner-p named))
+                  named
+                (generate-new-buffer disco-api--rate-limit-buffer-name))))
+        (with-current-buffer buffer
+          (setq-local disco-api--rate-limit-buffer-owner-p t))
+        (setq disco-api--rate-limit-buffer buffer))))
+
 (defun disco-api--blocked-entries (table)
   "Return sorted list of active blocked entries in TABLE.
 
@@ -67,7 +104,7 @@ Each element is (KEY . remaining-seconds)."
          (global-block (plist-get snapshot :global-block))
          (route-blocks (plist-get snapshot :route-blocks))
          (bucket-blocks (plist-get snapshot :bucket-blocks))
-         (buf (get-buffer-create "*disco-rate-limit*")))
+         (buf (disco-api--owned-rate-limit-buffer)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -86,15 +123,121 @@ Each element is (KEY . remaining-seconds)."
             (dolist (entry (seq-take bucket-blocks 20))
               (insert (format "  %s => %.3fs\n" (car entry) (cdr entry))))
           (insert "  (none)\n"))
-        (special-mode)))
+        (special-mode)
+        (setq-local disco-api--rate-limit-buffer-owner-p t)))
     (pop-to-buffer buf)))
 
-(defun disco-api-reset-rate-limit-state ()
-  "Reset cached rate-limit tracking state."
+(defun disco-api--session-current-p (generation)
+  "Return non-nil when GENERATION may still act for the active API session."
+  (and (not disco-api--reset-in-progress)
+       (integerp generation)
+       (= generation disco-api--generation)))
+
+(defun disco-api--ensure-start-allowed ()
+  "Reject API work while the current account session is being destroyed."
+  (when disco-api--reset-in-progress
+    (user-error "disco: API session reset is in progress")))
+
+(defun disco-api--ensure-session-current (generation)
+  "Signal when GENERATION no longer owns the active API session."
+  (unless (disco-api--session-current-p generation)
+    (signal
+     'disco-api-error
+     (list "disco: API session was reset while request was in progress"
+           0 nil))))
+
+(defun disco-api--retry-owner-current-p (owner)
+  "Return non-nil when timer OWNER remains exact and current."
+  (and (consp owner)
+       (disco-api--session-current-p (plist-get owner :generation))
+       (memq owner disco-api--retry-owners)))
+
+(defun disco-api--cancel-retry-owner (owner)
+  "Cancel exact API timer OWNER after revoking its callback metadata."
+  (let ((timer (plist-get owner :timer)))
+    (setf (plist-get owner :timer) nil)
+    (when (timerp timer)
+      (cancel-timer timer))))
+
+(defun disco-api--run-cleanup-items (items function)
+  "Apply FUNCTION to all ITEMS despite failures or a nonlocal transfer."
+  (let ((remaining items)
+        complete-p)
+    (unwind-protect
+        (progn
+          (while remaining
+            (let ((item (pop remaining)))
+              (condition-case err
+                  (funcall function item)
+                (error
+                 (message "disco: API cleanup failed: %s"
+                          (error-message-string err)))
+                (quit
+                 (message "disco: API cleanup was interrupted")))))
+          (setq complete-p t))
+      ;; Preserve an arbitrary caller-owned `throw' while still attempting
+      ;; every remaining privacy action during the unwind.
+      (unless complete-p
+        (disco-api--run-cleanup-items remaining function)))))
+
+(defun disco-api--schedule-session-timer (generation delay function)
+  "Run FUNCTION after DELAY only while GENERATION owns the API session."
+  (when (disco-api--session-current-p generation)
+    ;; Pre-seed the mutable timer slot so `setf' preserves OWNER's `eq'
+    ;; identity in both this list and the timer callback closure.
+    (let ((owner (list :generation generation :timer nil))
+          timer
+          returned-p)
+      (push owner disco-api--retry-owners)
+      (unwind-protect
+          (progn
+            (setq timer
+                  (run-at-time
+                   (max 0 (or delay 0.0)) nil
+                   (lambda ()
+                     (when (disco-api--retry-owner-current-p owner)
+                       ;; Retire before invoking client/transport code.  A
+                       ;; nested reset therefore cannot rediscover this fired
+                       ;; timer as live account work.
+                       (setq disco-api--retry-owners
+                             (delq owner disco-api--retry-owners))
+                       (setf (plist-get owner :timer) nil)
+                       (when (disco-api--session-current-p generation)
+                         (funcall function))))))
+            (setq returned-p t)
+            (if (disco-api--retry-owner-current-p owner)
+                (setf (plist-get owner :timer) timer)
+              ;; A synchronous timer constructor/reset retired OWNER before
+              ;; exposing its returned handle.  Compensate immediately.
+              (when (timerp timer)
+                (cancel-timer timer)))
+            timer)
+        (unless returned-p
+          (setq disco-api--retry-owners
+                (delq owner disco-api--retry-owners))
+          (when (timerp timer)
+            (cancel-timer timer)))))))
+
+(defun disco-api--clear-rate-limit-memory ()
+  "Clear cached rate-limit data without invoking lifecycle cancellation."
   (setq disco-api--global-rate-limit-until 0.0)
   (clrhash disco-api--route-rate-limit-until)
   (clrhash disco-api--route-bucket-map)
   (clrhash disco-api--bucket-rate-limit-until))
+
+(defun disco-api-reset-rate-limit-state ()
+  "Revoke asynchronous API work and clear cached rate-limit state."
+  (let ((disco-api--reset-in-progress t)
+        (owners disco-api--retry-owners))
+    ;; Generation/list revocation must precede cancellation because an
+    ;; instrumented timer cancellation may synchronously invoke old code.
+    (cl-incf disco-api--generation)
+    (setq disco-api--retry-owners nil)
+    (unwind-protect
+        (disco-api--run-cleanup-items owners
+                                      #'disco-api--cancel-retry-owner)
+      (setq disco-api--retry-owners nil)
+      (disco-api--clear-rate-limit-memory))))
 
 (defun disco-api--now ()
   "Return current unix timestamp as float."
@@ -162,38 +305,50 @@ Return a number (seconds) or nil."
       (puthash bucket-id deadline disco-api--bucket-rate-limit-until)
     (puthash route-key deadline disco-api--route-rate-limit-until)))
 
-(defun disco-api--update-rate-limit-state (route-key status headers body)
+(defun disco-api--update-rate-limit-state
+    (route-key status headers body &optional generation)
   "Update in-memory rate-limit state from one response.
 
 ROUTE-KEY identifies the API route.
-STATUS, HEADERS, BODY come from transport layer."
-  (let* ((now (disco-api--now))
-         (bucket-id (disco-api--header headers 'x-ratelimit-bucket))
-         (remaining (disco-api--header headers 'x-ratelimit-remaining))
-         (reset-after (disco-api--to-number
-                       (disco-api--header headers 'x-ratelimit-reset-after)))
-         (retry-after (disco-api--extract-retry-after headers body))
-         (global-header (disco-api--header headers 'x-ratelimit-global))
-         (global-body (and (listp body) (alist-get 'global body))))
-    (when bucket-id
-      (puthash route-key bucket-id disco-api--route-bucket-map))
+STATUS, HEADERS, BODY come from transport layer.  When GENERATION is non-nil,
+discard the update if that asynchronous or synchronous request was retired."
+  (cl-labels ((current-p ()
+                (or (null generation)
+                    (disco-api--session-current-p generation))))
+    (when (current-p)
+      (let* ((now (disco-api--now))
+             (bucket-id (disco-api--header headers 'x-ratelimit-bucket))
+             (remaining (disco-api--header headers 'x-ratelimit-remaining))
+             (reset-after
+              (disco-api--to-number
+               (disco-api--header headers 'x-ratelimit-reset-after)))
+             (retry-after (disco-api--extract-retry-after headers body))
+             (global-header
+              (disco-api--header headers 'x-ratelimit-global))
+             (global-body (and (listp body) (alist-get 'global body))))
+        (when (and (current-p) bucket-id)
+          (puthash route-key bucket-id disco-api--route-bucket-map))
 
-    ;; Proactive cooldown when bucket is exhausted.
-    (when (and (disco-api--remaining-zero-p remaining)
-               reset-after
-               (> reset-after 0))
-      (disco-api--set-route-deadline
-       route-key
-       (+ now reset-after disco-rate-limit-safety-margin)
-       bucket-id))
+        ;; Proactive cooldown when bucket is exhausted.
+        (when (and (current-p)
+                   (disco-api--remaining-zero-p remaining)
+                   reset-after
+                   (> reset-after 0))
+          (disco-api--set-route-deadline
+           route-key
+           (+ now reset-after disco-rate-limit-safety-margin)
+           bucket-id))
 
-    ;; Authoritative cooldown on 429 responses.
-    (when (and (= status 429) retry-after)
-      (let ((deadline (+ now retry-after disco-rate-limit-safety-margin)))
-        (if (or (disco-util-json-true-p global-body)
-                (equal global-header "true"))
-            (setq disco-api--global-rate-limit-until deadline)
-          (disco-api--set-route-deadline route-key deadline bucket-id))))))
+        ;; Authoritative cooldown on 429 responses.
+        (when (and (current-p) (= status 429) retry-after)
+          (let ((deadline (+ now retry-after disco-rate-limit-safety-margin)))
+            (if (or (disco-util-json-true-p global-body)
+                    (equal global-header "true"))
+                (when (current-p)
+                  (setq disco-api--global-rate-limit-until deadline))
+              (when (current-p)
+                (disco-api--set-route-deadline
+                 route-key deadline bucket-id)))))))))
 
 (defun disco-api--auth-header ()
   "Return Authorization header value from active token source."
@@ -289,7 +444,9 @@ RAW-BODY and EXTRA-HEADERS enable non-JSON requests (for example multipart).
 BODY-TYPE is forwarded to transport layer."
   (when (and payload raw-body)
     (error "disco: payload and raw-body cannot be combined"))
-  (let* ((headers
+  (disco-api--ensure-start-allowed)
+  (let* ((generation disco-api--generation)
+         (headers
           (append
            (unless raw-body
              '(("Content-Type" . "application/json")))
@@ -315,7 +472,11 @@ BODY-TYPE is forwarded to transport layer."
          (attempt 0))
     (catch 'disco-api-return
       (while t
+        (disco-api--ensure-session-current generation)
         (disco-api--wait-for-rate-limit route-key)
+        ;; `sleep-for' may run timers and therefore complete a reset before
+        ;; returning to this old synchronous stack.
+        (disco-api--ensure-session-current generation)
         (let* ((response (disco-http-request
                           :method method
                           :url url
@@ -328,7 +489,12 @@ BODY-TYPE is forwarded to transport layer."
                (response-headers (or (plist-get response :headers) nil))
                (body (disco-api--decode-json raw-body))
                (retry-after (disco-api--extract-retry-after response-headers body)))
-          (disco-api--update-rate-limit-state route-key status response-headers body)
+          ;; A synchronous transport wait can process the reset timer.  Do not
+          ;; let its retired response refill maps, publish a body, or retry.
+          (disco-api--ensure-session-current generation)
+          (disco-api--update-rate-limit-state
+           route-key status response-headers body generation)
+          (disco-api--ensure-session-current generation)
           (cond
            ((and (>= status 200) (< status 300))
             (throw 'disco-api-return body))
@@ -341,7 +507,8 @@ BODY-TYPE is forwarded to transport layer."
                        status
                        body))
               (setq attempt (1+ attempt))
-              (sleep-for (or retry-after 1.0))))
+              (sleep-for (or retry-after 1.0))
+              (disco-api--ensure-session-current generation)))
            (t
             (signal
              'disco-api-error
@@ -359,7 +526,9 @@ RAW-BODY and EXTRA-HEADERS enable non-JSON requests (for example multipart).
 BODY-TYPE is forwarded to transport layer."
   (when (and payload raw-body)
     (error "disco: payload and raw-body cannot be combined"))
-  (let* ((headers
+  (disco-api--ensure-start-allowed)
+  (let* ((generation disco-api--generation)
+         (headers
           (append
            (unless raw-body
              '(("Content-Type" . "application/json")))
@@ -385,50 +554,67 @@ BODY-TYPE is forwarded to transport layer."
          (attempt 0))
     (cl-labels
         ((emit-error (status body message)
-           (when on-error
-             (funcall on-error (disco-api--error-plist status body message))))
+           (when (and on-error
+                      (disco-api--session-current-p generation))
+             (let ((error-data
+                    (disco-api--error-plist status body message)))
+               (when (disco-api--session-current-p generation)
+                 (funcall on-error error-data)))))
          (schedule-next (delay)
-           (run-at-time (max 0 (or delay 0.0)) nil
-                        (lambda ()
-                          (dispatch-request))))
+           (when (disco-api--session-current-p generation)
+             (disco-api--schedule-session-timer
+              generation delay #'dispatch-request)))
          (handle-response (response)
-           (let* ((status (or (plist-get response :status) 0))
-                  (raw-body (or (plist-get response :body) ""))
-                  (response-headers (or (plist-get response :headers) nil))
-                  (body (disco-api--decode-json raw-body))
-                  (retry-after (disco-api--extract-retry-after response-headers body)))
-             (disco-api--update-rate-limit-state route-key status response-headers body)
-             (cond
-              ((and (>= status 200) (< status 300))
-               (when on-success
-                 (funcall on-success body)))
-              ((= status 429)
-               (if (>= attempt disco-rate-limit-max-retries)
-                   (emit-error
-                    status
-                    body
-                    (format "rate limited (429), retries exhausted, retry-after=%s"
-                            (or retry-after "unknown")))
-                 (setq attempt (1+ attempt))
-                 (schedule-next (or retry-after 1.0))))
-              (t
-               (emit-error status body
-                           (disco-api--http-error-message status raw-body body))))))
+           (when (disco-api--session-current-p generation)
+             (let* ((status (or (plist-get response :status) 0))
+                    (raw-body (or (plist-get response :body) ""))
+                    (response-headers (or (plist-get response :headers) nil))
+                    (body (disco-api--decode-json raw-body))
+                    (retry-after
+                     (disco-api--extract-retry-after response-headers body)))
+               (when (disco-api--session-current-p generation)
+                 (disco-api--update-rate-limit-state
+                  route-key status response-headers body generation)
+                 ;; An instrumented state update or nested callback may reset
+                 ;; the account.  Never publish or retry after that boundary.
+                 (when (disco-api--session-current-p generation)
+                   (cond
+                    ((and (>= status 200) (< status 300))
+                     (when on-success
+                       (funcall on-success body)))
+                    ((= status 429)
+                     (if (>= attempt disco-rate-limit-max-retries)
+                         (emit-error
+                          status
+                          body
+                          (format
+                           (concat "rate limited (429), retries exhausted, "
+                                   "retry-after=%s")
+                           (or retry-after "unknown")))
+                       (setq attempt (1+ attempt))
+                       (schedule-next (or retry-after 1.0))))
+                    (t
+                     (emit-error
+                      status body
+                      (disco-api--http-error-message
+                       status raw-body body)))))))))
          (dispatch-request ()
-           (let* ((deadline (max disco-api--global-rate-limit-until
-                                 (disco-api--route-deadline route-key)))
-                  (wait-time (- deadline (disco-api--now))))
-             (if (> wait-time 0)
-                 (schedule-next wait-time)
-               (disco-http-request-async
-                :method method
-                :url url
-                :headers headers
-                :body data
-                :body-type effective-body-type
-                :timeout disco-http-timeout
-                :on-success #'handle-response
-                :on-error #'handle-response)))))
+           (when (disco-api--session-current-p generation)
+             (let* ((deadline (max disco-api--global-rate-limit-until
+                                   (disco-api--route-deadline route-key)))
+                    (wait-time (- deadline (disco-api--now))))
+               (when (disco-api--session-current-p generation)
+                 (if (> wait-time 0)
+                     (schedule-next wait-time)
+                   (disco-http-request-async
+                    :method method
+                    :url url
+                    :headers headers
+                    :body data
+                    :body-type effective-body-type
+                    :timeout disco-http-timeout
+                    :on-success #'handle-response
+                    :on-error #'handle-response)))))))
       (dispatch-request))))
 
 (defun disco-api-current-user ()

@@ -67,6 +67,10 @@ completion row height stays stable across CAPF/Corfu and company popups."
 (defvar disco-company--rounded-avatar-cache (make-hash-table :test #'equal)
   "Cache of rounded completion avatar images keyed by file/size/mtime.")
 
+(defun disco-company-reset-session-cache-state ()
+  "Clear account-scoped completion avatar images without redrawing."
+  (clrhash disco-company--rounded-avatar-cache))
+
 (defvar disco-company--member-search-nonce-counter 0
   "Monotonic counter used to own guild member search responses.")
 

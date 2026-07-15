@@ -184,8 +184,8 @@
       (remhash key disco-state--read-states)
       (remhash key disco-state--ack-token-by-read-state))))
 
-(defun disco-state-reset ()
-  "Reset all in-memory state."
+(defun disco-state-clear-session-data ()
+  "Clear all account-scoped state without running reset hooks."
   (setq disco-state--guilds nil)
   (setq disco-state--private-channels nil)
   (setq disco-state--sessions nil)
@@ -214,7 +214,11 @@
   (clrhash disco-state--voice-states-by-key)
   (clrhash disco-state--voice-state-keys-by-channel)
   (clrhash disco-state--channel-member-counts-by-channel)
-  (clrhash disco-state--conversation-summaries-by-channel)
+  (clrhash disco-state--conversation-summaries-by-channel))
+
+(defun disco-state-reset ()
+  "Reset all in-memory state and notify reset observers."
+  (disco-state-clear-session-data)
   (run-hooks 'disco-state-reset-hook))
 
 (defun disco-state-channel-thread-p (channel)
@@ -1734,15 +1738,40 @@ ping and therefore contributes zero here."
    `((last_pin_timestamp . ,timestamp)))
   timestamp)
 
+(defun disco-state--pin-timestamp-time (value)
+  "Return parsed time for pin timestamp VALUE, or nil when invalid."
+  (when (stringp value)
+    (condition-case nil
+        (date-to-time value)
+      (error nil))))
+
+(defun disco-state--pin-timestamp-compare (left right)
+  "Compare valid pin timestamps LEFT and RIGHT.
+
+Return -1 when LEFT is earlier, 0 when they denote the same instant, and 1
+when LEFT is later.  Return nil when either value is missing or invalid."
+  (let ((left-time (disco-state--pin-timestamp-time left))
+        (right-time (disco-state--pin-timestamp-time right)))
+    (when (and left-time right-time)
+      (cond
+       ((time-less-p left-time right-time) -1)
+       ((time-less-p right-time left-time) 1)
+       (t 0)))))
+
 (defun disco-state-channel-has-unread-pins-p (channel)
   "Return non-nil when CHANNEL has unacknowledged pinned-message updates."
   (let* ((channel-id (alist-get 'id channel))
          (channel-pin-timestamp (alist-get 'last_pin_timestamp channel))
          (read-pin-timestamp (and channel-id
-                                  (disco-state-channel-last-read-pin-timestamp channel-id))))
-    (and (stringp channel-pin-timestamp)
-         (or (null read-pin-timestamp)
-             (string-lessp read-pin-timestamp channel-pin-timestamp)))))
+                                  (disco-state-channel-last-read-pin-timestamp channel-id)))
+         (channel-pin-time
+          (disco-state--pin-timestamp-time channel-pin-timestamp))
+         (read-pin-time
+          (disco-state--pin-timestamp-time read-pin-timestamp)))
+    (and channel-pin-time
+         (or (null read-pin-time)
+             (eq -1 (disco-state--pin-timestamp-compare
+                     read-pin-timestamp channel-pin-timestamp))))))
 
 (defun disco-state-channel-own-has-unread-p (channel)
   "Return non-nil when CHANNEL itself has unread state."
@@ -1848,15 +1877,47 @@ FLAGS, LAST-VIEWED and VERSION are applied when provided."
         t))))
 
 (defun disco-state-apply-channel-pins-ack (channel-id timestamp &optional version)
-  "Apply CHANNEL_PINS_ACK payload fields to local read-state."
+  "Monotonically apply CHANNEL_PINS_ACK fields to local read-state.
+
+An incoming numeric VERSION lower than the stored numeric version is stale and
+is ignored in full.  Otherwise TIMESTAMP advances only when it is a valid
+ISO-8601 string newer than the stored pin timestamp; an equal, older, invalid,
+or missing timestamp never erases or regresses the cursor.  A newer VERSION is
+still recorded when TIMESTAMP cannot advance.  When VERSION is absent,
+TIMESTAMP alone may advance the cursor.  Return nil for a stale-version ACK,
+otherwise return the resulting state (or nil when there is no field or prior
+state)."
   (when channel-id
-    (let ((fields `((last_pin_timestamp . ,timestamp))))
-      (when (numberp version)
-        (setq fields (append fields `((version . ,version)))))
-      (disco-state--upsert-read-state
-       disco-read-state-type-channel
-       channel-id
-       fields))))
+    (let* ((current (disco-state-read-state
+                     disco-read-state-type-channel channel-id))
+           (current-version (and (listp current)
+                                 (alist-get 'version current)))
+           (current-timestamp (and (listp current)
+                                   (alist-get 'last_pin_timestamp current)))
+           (timestamp-time (disco-state--pin-timestamp-time timestamp))
+           (current-timestamp-time
+            (disco-state--pin-timestamp-time current-timestamp))
+           (stale-version-p
+            (and (numberp version)
+                 (numberp current-version)
+                 (< version current-version))))
+      (unless stale-version-p
+        (let (fields)
+          (when (and timestamp-time
+                     (or (not current-timestamp-time)
+                         (eq -1 (disco-state--pin-timestamp-compare
+                                 current-timestamp timestamp))))
+            (push `(last_pin_timestamp . ,timestamp) fields))
+          (when (and (numberp version)
+                     (or (not (numberp current-version))
+                         (> version current-version)))
+            (push `(version . ,version) fields))
+          (if fields
+              (disco-state--upsert-read-state
+               disco-read-state-type-channel
+               channel-id
+               (nreverse fields))
+            current))))))
 
 (defun disco-state-apply-feature-ack (read-state-type resource-id entity-id &optional version)
   "Apply feature ACK semantics for READ-STATE-TYPE/RESOURCE-ID.

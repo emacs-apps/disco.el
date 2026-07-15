@@ -111,6 +111,55 @@
   (should (disco-state-channel-has-unread-pins-p
            (disco-state-channel "chan"))))
 
+(ert-deftest disco-state-channel-pins-ack-rejects-lower-version-regression ()
+  (disco-state-reset)
+  (should (disco-state-apply-channel-pins-ack
+           "chan" "2026-03-04T02:00:00.000000+00:00" 8))
+  (should-not (disco-state-apply-channel-pins-ack
+               "chan" "2026-03-04T01:00:00.000000+00:00" 7))
+  ;; Version order is authoritative even if the stale payload carries a
+  ;; lexically newer timestamp.
+  (should-not (disco-state-apply-channel-pins-ack
+               "chan" "2026-03-04T03:00:00.000000+00:00" 6))
+  (let ((state (disco-state-read-state 0 "chan")))
+    (should (equal "2026-03-04T02:00:00.000000+00:00"
+                   (alist-get 'last_pin_timestamp state)))
+    (should (= 8 (alist-get 'version state)))))
+
+(ert-deftest disco-state-channel-pins-ack-merges-missing-equal-and-older-timestamp ()
+  (disco-state-reset)
+  (disco-state-apply-channel-pins-ack
+   "chan" "2026-03-04T02:00:00.000000+00:00" 2)
+  ;; Missing timestamp advances only the read-state version.
+  (should (disco-state-apply-channel-pins-ack "chan" nil 3))
+  ;; Equal timestamp remains stable while a newer version is retained.
+  (should (disco-state-apply-channel-pins-ack
+           "chan" "2026-03-04T02:00:00.000000+00:00" 4))
+  ;; A higher version cannot make the pin cursor move backward.
+  (should (disco-state-apply-channel-pins-ack
+           "chan" "2026-03-04T01:00:00.000000+00:00" 5))
+  ;; Without a version, timestamps may only advance.
+  (should (disco-state-apply-channel-pins-ack
+           "chan" "2026-03-04T01:30:00.000000+00:00"))
+  (should (disco-state-apply-channel-pins-ack
+           "chan" "2026-03-04T03:00:00.000000+00:00"))
+  (let ((state (disco-state-read-state 0 "chan")))
+    (should (equal "2026-03-04T03:00:00.000000+00:00"
+                   (alist-get 'last_pin_timestamp state)))
+    (should (= 5 (alist-get 'version state)))))
+
+(ert-deftest disco-state-channel-pins-unread-compares-equivalent-timezones ()
+  (disco-state-reset)
+  (disco-state-upsert-channel
+   '((id . "chan")
+     (type . 0)
+     (last_pin_timestamp . "2026-03-04T02:00:00+01:00")))
+  (disco-state-apply-channel-pins-ack
+   "chan" "2026-03-04T01:00:00Z")
+  (should-not
+   (disco-state-channel-has-unread-pins-p
+    (disco-state-channel "chan"))))
+
 (ert-deftest disco-state-channel-age-restricted-p-uses-explicit-flag ()
   (should (disco-state-channel-age-restricted-p
            '((id . "adult")

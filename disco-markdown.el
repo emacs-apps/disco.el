@@ -263,13 +263,31 @@ This mirrors Discord's language-tagged code block behavior."
 (defvar disco-markdown--cache (make-hash-table :test #'equal)
   "Cache table for rendered Markdown strings.")
 
+(defvar disco-markdown--fontification-buffers (make-hash-table :test #'eq)
+  "Owned native-code fontification buffers keyed by major mode.")
+
+(defvar-local disco-markdown--fontification-buffer-owner-p nil
+  "Non-nil when this is an internal Markdown fontification buffer.")
+
+(put 'disco-markdown--fontification-buffer-owner-p 'permanent-local t)
+
+(defvar-local disco-markdown--fontification-buffer-mode nil
+  "Language major mode owned by this internal fontification buffer.")
+
+(put 'disco-markdown--fontification-buffer-mode 'permanent-local t)
+
 (defconst disco-markdown--interaction-policy-version 2
   "Cache version for Markdown interaction text properties.")
+
+(defun disco-markdown-reset-session-state ()
+  "Clear rendered message data retained for the previous account."
+  (clrhash disco-markdown--cache)
+  (clrhash disco-markdown--fontification-buffers))
 
 (defun disco-markdown-clear-cache ()
   "Clear Markdown render cache."
   (interactive)
-  (clrhash disco-markdown--cache)
+  (disco-markdown-reset-session-state)
   (message "disco: markdown render cache cleared"))
 
 (defun disco-markdown--string-present-p (value)
@@ -994,6 +1012,35 @@ OBJECT defaults to the current buffer and may also be a string."
              (string-match "\\`[ \\t]*```[ \\t]*\\([^ \\t`\\r\\n]+\\)" line))
     (match-string 1 line)))
 
+(defun disco-markdown--fontification-buffer (lang-mode)
+  "Return the explicitly owned native fontification buffer for LANG-MODE."
+  (let ((buffer (gethash lang-mode disco-markdown--fontification-buffers)))
+    (unless (and (buffer-live-p buffer)
+                 (buffer-local-value
+                  'disco-markdown--fontification-buffer-owner-p buffer)
+                 (eq lang-mode
+                     (buffer-local-value
+                      'disco-markdown--fontification-buffer-mode buffer)))
+      (let* ((name
+              (format " *disco-markdown-code-fontification:%s*"
+                      (symbol-name lang-mode)))
+             (named (get-buffer name)))
+        (setq buffer
+              (if (and (buffer-live-p named)
+                       (buffer-local-value
+                        'disco-markdown--fontification-buffer-owner-p named)
+                       (eq lang-mode
+                           (buffer-local-value
+                            'disco-markdown--fontification-buffer-mode named)))
+                  named
+                ;; A same-named ordinary hidden buffer is still foreign.
+                (generate-new-buffer name)))
+        (with-current-buffer buffer
+          (setq-local disco-markdown--fontification-buffer-owner-p t)
+          (setq-local disco-markdown--fontification-buffer-mode lang-mode))
+        (puthash lang-mode buffer disco-markdown--fontification-buffers)))
+    buffer))
+
 (defun disco-markdown--make-code-string (text &optional lang kind)
   "Return TEXT propertized as code, optionally fontified for LANG.
 
@@ -1008,10 +1055,7 @@ KIND is an optional symbol describing the code span, typically `inline' or
     (when (and (< 0 (length payload))
                (symbolp lang-mode)
                (fboundp lang-mode))
-      (with-current-buffer
-          (get-buffer-create
-           (format " *disco-markdown-code-fontification:%s*"
-                   (symbol-name lang-mode)))
+      (with-current-buffer (disco-markdown--fontification-buffer lang-mode)
         (let ((inhibit-modification-hooks nil))
           (erase-buffer)
           (insert payload " "))

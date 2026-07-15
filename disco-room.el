@@ -113,6 +113,17 @@ This is a search boundary, not the remote/latest protocol frontier.")
 (defvar-local disco-room--pins-ack-seq 0
   "Monotonic owner token for pinned-message acknowledgements.")
 
+(defvar-local disco-room--preview-buffer-owner-p nil
+  "Non-nil when this buffer is a Disco composer-preview projection.")
+
+(put 'disco-room--preview-buffer-owner-p 'permanent-local t)
+
+(defconst disco-room--preview-buffer-name "*disco-room-preview*"
+  "Preferred display name for the composer preview buffer.")
+
+(defvar disco-room--preview-buffer nil
+  "Live explicitly owned composer preview buffer, including after a rename.")
+
 (defconst disco-room--attachment-token-regexp "\\[file:\\([0-9]+\\)\\]"
   "Regexp used to match attachment tokens in room draft input.")
 
@@ -167,6 +178,13 @@ avatar cache is explicitly cleared.")
 (defvar disco-room--avatar-fetch-generation 0
   "Generation used to ignore callbacks from canceled avatar fetch batches.")
 
+(defvar disco-room--session-cache-reset-in-progress nil
+  "Non-nil while account-scoped room media state is being retired.
+
+Fetch, timer, and projection callbacks must remain inert while this barrier is
+set.  `disco-reset-session-state' binds it for the complete reset transaction,
+including kill hooks which can run between the early and final cache drains.")
+
 (defvar disco-room--avatar-round-image-cache (make-hash-table :test #'equal)
   "Global rounded avatar image cache keyed by file/size/mtime.")
 
@@ -174,7 +192,13 @@ avatar cache is explicitly cleared.")
   "Global forwarded-source guild icon cache keyed by icon cache key.")
 
 (defvar disco-room--forward-guild-icon-fetching (make-hash-table :test #'equal)
-  "Global set of forwarded-source guild icon cache keys currently fetching.")
+  "Forwarded guild icon request owners keyed by icon cache key.
+
+Each owner is a unique plist containing its generation and exact `plz'
+process, so a late callback cannot retire or overwrite a replacement request.")
+
+(defvar disco-room--forward-guild-icon-fetch-generation 0
+  "Generation used to revoke forwarded guild icon request callbacks.")
 
 (defvar disco-room--avatar-fetch-budget nil
   "Dynamic cap for number of avatar fetches started in current render pass.")
@@ -2147,16 +2171,11 @@ caller is already inside, or will request, an Appkit projection transaction."
            (when (disco-room--callback-active-p room-buffer channel-id view)
              (with-current-buffer room-buffer
                ;; A later local request owns the cursor.  A Gateway ACK may
-               ;; also have advanced it while this request was in flight, so
-               ;; never replace a newer timestamp with the captured one.
+               ;; also have advanced it while this request was in flight.  The
+               ;; state merge owns version/timezone-aware monotonicity.
                (when (= ack-seq disco-room--pins-ack-seq)
-                 (let ((current
-                        (disco-state-channel-last-read-pin-timestamp channel-id)))
-                   (when (or (null current)
-                             (and (stringp current)
-                                  (string-lessp current last-pin-timestamp)))
-                     (disco-state-apply-channel-pins-ack
-                      channel-id last-pin-timestamp)))
+                 (disco-state-apply-channel-pins-ack
+                  channel-id last-pin-timestamp)
                  (appkit-request-sync view :part 'frame)
                  (message "disco: acknowledged pins for %s" channel-id)))))
          :on-error
@@ -2680,11 +2699,12 @@ message id and render that context before jumping."
       (let* ((target-chan-obj (disco-room--resolve-target-channel target-channel))
              (target-name (or (and (listp target-chan-obj)
                                    (alist-get 'name target-chan-obj))
-                              target-channel))
-             (target-buffer-name (disco-room--buffer-name target-name target-channel)))
+                              target-channel)))
         (disco-room--ensure-jump-permissions target-channel target-chan-obj)
-        (disco-room-open target-channel target-name)
-        (when-let* ((target-buffer (get-buffer target-buffer-name)))
+        ;; Appkit owns room identity.  A live room buffer may have been renamed,
+        ;; so use the actual buffer returned by the view opener instead of
+        ;; reconstructing and looking up its original display name.
+        (when-let* ((target-buffer (disco-room-open target-channel target-name)))
           (with-current-buffer target-buffer
             (let ((view (disco-room--ensure-view)))
               (disco-room--queue-jump target-id view)
@@ -3008,36 +3028,120 @@ source message, not the synthetic starter row itself."
 (defun disco-room--forward-guild-icon-rendering-available-p ()
   "Return non-nil when forwarded-source guild icons can be rendered."
   (and disco-room-show-forward-guild-icons
+       (not disco-room--session-cache-reset-in-progress)
        (appkit-media-inline-image-rendering-available-p)
        (fboundp 'plz)))
 
+(defun disco-room--forward-guild-icon-owner-current-p (cache-key owner)
+  "Return non-nil when OWNER still owns CACHE-KEY in this account session."
+  (and (not disco-room--session-cache-reset-in-progress)
+       (= (or (plist-get owner :generation) -1)
+          disco-room--forward-guild-icon-fetch-generation)
+       (eq owner
+           (gethash cache-key disco-room--forward-guild-icon-fetching))))
+
+(defun disco-room--cancel-icon-process (process)
+  "Cancel PROCESS when it is live, isolating ordinary cancellation failures."
+  (when process
+    (condition-case nil
+        (when (process-live-p process)
+          (delete-process process))
+      ((error quit) nil))))
+
+(defun disco-room--cancel-icon-processes (processes)
+  "Cancel PROCESSES while guaranteeing every remaining cancellation attempt."
+  (let ((remaining processes))
+    ;; The cleanup loop is the nonlocal-exit fallback.  Unlike one nested
+    ;; `unwind-protect' per process, both passes are stack-safe for thousands
+    ;; of concurrent icon owners.
+    (unwind-protect
+        (while remaining
+          (disco-room--cancel-icon-process (pop remaining)))
+      ;; Recursion occurs only after an arbitrary nonlocal transfer, not once
+      ;; per item on the normal path.  A second transfer during cleanup gets
+      ;; its own cleanup frame, so it still cannot skip later owners.
+      (when remaining
+        (disco-room--cancel-icon-processes remaining)))))
+
+(defun disco-room--run-session-cleanup-actions (actions)
+  "Run cleanup ACTIONS even when an earlier action exits nonlocally."
+  (when actions
+    (unwind-protect
+        (funcall (car actions))
+      (disco-room--run-session-cleanup-actions (cdr actions)))))
+
+(defun disco-room--forward-guild-icon-finish
+    (cache-key owner image valid-p guild-id)
+  "Publish IMAGE for CACHE-KEY owned by OWNER and optionally sync GUILD-ID."
+  (when (disco-room--forward-guild-icon-owner-current-p cache-key owner)
+    (puthash cache-key (if valid-p image :missing)
+             disco-room--forward-guild-icon-image-cache)
+    ;; Revalidate after the cache mutation in case an instrumented cache or a
+    ;; synchronous reset hook retired this owner.
+    (when (disco-room--forward-guild-icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-room--forward-guild-icon-fetching)
+      (when (and valid-p
+                 (not disco-room--session-cache-reset-in-progress)
+                 (= (plist-get owner :generation)
+                    disco-room--forward-guild-icon-fetch-generation))
+        (disco-room--sync-resource-changes-in-open-rooms
+         (list (list :guild guild-id)))))))
+
+(defun disco-room--forward-guild-icon-fail (cache-key owner)
+  "Publish a missing icon for CACHE-KEY only when OWNER remains current."
+  (when (disco-room--forward-guild-icon-owner-current-p cache-key owner)
+    (puthash cache-key :missing disco-room--forward-guild-icon-image-cache)
+    (when (disco-room--forward-guild-icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-room--forward-guild-icon-fetching))))
+
 (defun disco-room--start-forward-guild-icon-fetch (cache-key guild-id url)
   "Start async guild icon fetch for CACHE-KEY and GUILD-ID from URL."
-  (unless (or (gethash cache-key disco-room--forward-guild-icon-fetching)
+  (unless (or disco-room--session-cache-reset-in-progress
+              (gethash cache-key disco-room--forward-guild-icon-fetching)
               (gethash cache-key disco-room--forward-guild-icon-image-cache))
-    (puthash cache-key t disco-room--forward-guild-icon-fetching)
-    (plz 'get url
-      :as 'binary
-      :headers '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
-      :then
-      (lambda (bytes)
-        (let* ((image
-                (ignore-errors
-                  (create-image bytes 'png t
-                                :width disco-room-forward-guild-icon-size
-                                :height disco-room-forward-guild-icon-size
-                                :ascent 'center)))
-               (valid-p (disco-room--forward-guild-icon-image-valid-p image)))
-          (puthash cache-key (if valid-p image :missing)
-                   disco-room--forward-guild-icon-image-cache)
-          (remhash cache-key disco-room--forward-guild-icon-fetching)
-          (when valid-p
-            (disco-room--sync-resource-changes-in-open-rooms
-             (list (list :guild guild-id))))))
-      :else
-      (lambda (_err)
-        (puthash cache-key :missing disco-room--forward-guild-icon-image-cache)
-        (remhash cache-key disco-room--forward-guild-icon-fetching)))))
+    (let* ((generation disco-room--forward-guild-icon-fetch-generation)
+           (owner (list :generation generation :process nil))
+           process
+           returned-p)
+      (puthash cache-key owner disco-room--forward-guild-icon-fetching)
+      (unwind-protect
+          (progn
+            (setq process
+                  (plz 'get url
+                    :as 'binary
+                    :headers
+                    '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
+                    :then
+                    (lambda (bytes)
+                      (when (disco-room--forward-guild-icon-owner-current-p
+                             cache-key owner)
+                        (let* ((image
+                                (ignore-errors
+                                  (create-image
+                                   bytes 'png t
+                                   :width disco-room-forward-guild-icon-size
+                                   :height disco-room-forward-guild-icon-size
+                                   :ascent 'center)))
+                               (valid-p
+                                (disco-room--forward-guild-icon-image-valid-p
+                                 image)))
+                          (disco-room--forward-guild-icon-finish
+                           cache-key owner image valid-p guild-id))))
+                    :else
+                    (lambda (_err)
+                      (disco-room--forward-guild-icon-fail cache-key owner))))
+            (setq returned-p t))
+        (cond
+         ((and returned-p
+               (disco-room--forward-guild-icon-owner-current-p
+                cache-key owner))
+          (setf (plist-get owner :process) process))
+         ((disco-room--forward-guild-icon-owner-current-p cache-key owner)
+          (remhash cache-key disco-room--forward-guild-icon-fetching))
+         (returned-p
+          ;; A synchronous callback/reset retired OWNER before `plz' returned.
+          ;; Do not leave the returned process unowned.
+          (disco-room--cancel-icon-process process)))))))
 
 (defun disco-room--forward-guild-icon-image (guild)
   "Return image object for forwarded-source GUILD icon when available."
@@ -3177,40 +3281,43 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
     (maphash (lambda (cache-key _value) (push cache-key cache-keys))
              disco-room--avatar-pending-invalidations)
     (clrhash disco-room--avatar-pending-invalidations)
-    (when cache-keys
+    (when (and cache-keys
+               (not disco-room--session-cache-reset-in-progress))
       (disco-room--sync-resource-changes-in-open-rooms
        (mapcar (lambda (cache-key) (list :avatar cache-key)) cache-keys)))))
 
 (defun disco-room--avatar-schedule-invalidation (cache-key)
   "Coalesce targeted timeline invalidation for avatar CACHE-KEY."
-  (puthash cache-key t disco-room--avatar-pending-invalidations)
-  (unless (timerp disco-room--avatar-invalidation-timer)
-    (setq disco-room--avatar-invalidation-timer
-          (run-at-time
-           (max 0.0 disco-room-avatar-invalidation-delay)
-           nil
-           #'disco-room--avatar-flush-invalidations))))
+  (unless disco-room--session-cache-reset-in-progress
+    (puthash cache-key t disco-room--avatar-pending-invalidations)
+    (unless (timerp disco-room--avatar-invalidation-timer)
+      (setq disco-room--avatar-invalidation-timer
+            (run-at-time
+             (max 0.0 disco-room-avatar-invalidation-delay)
+             nil
+             #'disco-room--avatar-flush-invalidations)))))
 
 (defun disco-room--avatar-run-due-retries ()
   "Start all avatar retries whose backoff period has elapsed."
   (setq disco-room--avatar-retry-timer nil)
-  (let ((now (float-time))
-        due)
-    (maphash
-     (lambda (cache-key failure)
-       (when (and (not (plist-get failure :permanent))
-                  (not (gethash cache-key disco-room--avatar-fetching))
-                  (<= (or (plist-get failure :retry-at) 0) now))
-         (push (cons cache-key failure) due)))
-     disco-room--avatar-failures)
-    (dolist (item due)
-      (let ((cache-key (car item))
-            (failure (cdr item)))
-        (disco-room--start-avatar-fetch
-         cache-key
-         (plist-get failure :url)
-         (plist-get failure :cache-base))))
-    (disco-room--avatar-schedule-next-retry)))
+  (unless disco-room--session-cache-reset-in-progress
+    (let ((now (float-time))
+          due)
+      (maphash
+       (lambda (cache-key failure)
+         (when (and (not (plist-get failure :permanent))
+                    (not (gethash cache-key disco-room--avatar-fetching))
+                    (<= (or (plist-get failure :retry-at) 0) now))
+           (push (cons cache-key failure) due)))
+       disco-room--avatar-failures)
+      (dolist (item due)
+        (let ((cache-key (car item))
+              (failure (cdr item)))
+          (disco-room--start-avatar-fetch
+           cache-key
+           (plist-get failure :url)
+           (plist-get failure :cache-base))))
+      (disco-room--avatar-schedule-next-retry))))
 
 (defun disco-room--avatar-schedule-next-retry ()
   "Schedule the earliest pending transient avatar retry."
@@ -3227,7 +3334,8 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
                     (or (null next-at) (< retry-at next-at)))
            (setq next-at retry-at))))
      disco-room--avatar-failures)
-    (when next-at
+    (when (and next-at
+               (not disco-room--session-cache-reset-in-progress))
       (setq disco-room--avatar-retry-timer
             (run-at-time
              (max 0.05 (- next-at (float-time)))
@@ -3287,20 +3395,90 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
 
 (defun disco-room--avatar-reset-fetch-state ()
   "Cancel avatar work and clear transient fetch bookkeeping."
-  (cl-incf disco-room--avatar-fetch-generation)
-  (when disco-room--avatar-plz-queue
-    (ignore-errors (plz-clear disco-room--avatar-plz-queue)))
-  (setq disco-room--avatar-plz-queue nil
-        disco-room--avatar-plz-queue-limit nil)
-  (when (timerp disco-room--avatar-retry-timer)
-    (cancel-timer disco-room--avatar-retry-timer))
-  (when (timerp disco-room--avatar-invalidation-timer)
-    (cancel-timer disco-room--avatar-invalidation-timer))
-  (setq disco-room--avatar-retry-timer nil
-        disco-room--avatar-invalidation-timer nil)
-  (clrhash disco-room--avatar-pending-invalidations)
+  (let ((disco-room--session-cache-reset-in-progress t)
+        (queue disco-room--avatar-plz-queue)
+        (retry-timer disco-room--avatar-retry-timer)
+        (invalidation-timer disco-room--avatar-invalidation-timer))
+    ;; Revoke callback authority and all globally discoverable owners before a
+    ;; cancellation sentinel or timer hook gets a chance to run synchronously.
+    (cl-incf disco-room--avatar-fetch-generation)
+    (setq disco-room--avatar-plz-queue nil
+          disco-room--avatar-plz-queue-limit nil
+          disco-room--avatar-retry-timer nil
+          disco-room--avatar-invalidation-timer nil)
+    (unwind-protect
+        (disco-room--run-session-cleanup-actions
+         (list
+          (lambda ()
+            (when queue
+              (condition-case nil
+                  (plz-clear queue)
+                ((error quit) nil))))
+          (lambda ()
+            (when (timerp retry-timer)
+              (condition-case nil
+                  (cancel-timer retry-timer)
+                ((error quit) nil))))
+          (lambda ()
+            (when (timerp invalidation-timer)
+              (condition-case nil
+                  (cancel-timer invalidation-timer)
+                ((error quit) nil))))))
+      (clrhash disco-room--avatar-pending-invalidations)
+      (clrhash disco-room--avatar-fetching)
+      (clrhash disco-room--avatar-failures))))
+
+(defun disco-room--reset-forward-guild-icon-state ()
+  "Revoke forwarded guild icon work and clear its account-scoped caches."
+  (let ((disco-room--session-cache-reset-in-progress t)
+        processes)
+    ;; Generation is the revocation boundary.  Keep the owner table intact
+    ;; until processes have been collected and cancellation has run, but old
+    ;; callbacks are already inert before the first process is touched.
+    (cl-incf disco-room--forward-guild-icon-fetch-generation)
+    (maphash
+     (lambda (_cache-key owner)
+       (when-let* ((process (and (listp owner)
+                                 (plist-get owner :process))))
+         (push process processes)))
+     disco-room--forward-guild-icon-fetching)
+    (unwind-protect
+        (disco-room--cancel-icon-processes processes)
+      (clrhash disco-room--forward-guild-icon-fetching)
+      (clrhash disco-room--forward-guild-icon-image-cache))))
+
+(defun disco-room--clear-session-cache-memory ()
+  "Clear account-scoped room cache bookkeeping without running callbacks."
+  (setq disco-room--avatar-fetch-budget nil
+        disco-room--avatar-plz-queue nil
+        disco-room--avatar-plz-queue-limit nil
+        disco-room--avatar-retry-timer nil
+        disco-room--avatar-invalidation-timer nil
+        disco-room--preview-buffer nil
+        disco-room-draft-history-search-history nil
+        disco-room-search-inplace-history nil)
+  (clrhash disco-room--avatar-image-cache)
+  (clrhash disco-room--avatar-round-image-cache)
   (clrhash disco-room--avatar-fetching)
-  (clrhash disco-room--avatar-failures))
+  (clrhash disco-room--avatar-failures)
+  (clrhash disco-room--avatar-pending-invalidations)
+  (clrhash disco-room--forward-guild-icon-fetching)
+  (clrhash disco-room--forward-guild-icon-image-cache))
+
+(defun disco-room-reset-session-cache-state ()
+  "Destructively clear account-scoped room media state without redrawing.
+
+The reset revokes avatar queues, timers, and callbacks before cancellation,
+then retires exact forwarded-icon process owners.  No Appkit invalidation is
+requested; a future account session builds projections from fresh state."
+  (let ((disco-room--session-cache-reset-in-progress t))
+    (unwind-protect
+        (disco-room--run-session-cleanup-actions
+         (list #'disco-room--avatar-reset-fetch-state
+               #'disco-room--reset-forward-guild-icon-state))
+      ;; Repeat the destructive clears after cancellation hooks: even an
+      ;; instrumented hook which mutates these globals cannot retain old data.
+      (disco-room--clear-session-cache-memory))))
 
 (defun disco-room-clear-avatar-cache ()
   "Clear in-memory avatar cache and rerender all room buffers."
@@ -3324,12 +3502,13 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
 
 (defun disco-room--refresh-open-rooms ()
   "Request geometry projection for all open room timelines."
-  (dolist (buf (buffer-list))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (when (and (eq major-mode 'disco-room-mode)
-                   (appkit-view-live-p (appkit-current-view)))
-          (appkit-request-sync (appkit-current-view) :part 'geometry))))))
+  (unless disco-room--session-cache-reset-in-progress
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (eq major-mode 'disco-room-mode)
+                     (appkit-view-live-p (appkit-current-view)))
+            (appkit-request-sync (appkit-current-view) :part 'geometry)))))))
 
 (defun disco-room--refresh-timeline-layout ()
   "Refresh every projected row after buffer display geometry changes."
@@ -3338,15 +3517,16 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
 
 (defun disco-room--sync-resource-changes-in-open-rooms (resources)
   "Synchronize open room rows depending on opaque RESOURCES."
-  (let ((resources (delete-dups (delq nil (copy-sequence resources)))))
-    (when resources
+  (unless disco-room--session-cache-reset-in-progress
+    (let ((resources (delete-dups (delq nil (copy-sequence resources)))))
+      (when resources
       (dolist (buf (buffer-list))
         (when (buffer-live-p buf)
           (with-current-buffer buf
             (when (and (eq major-mode 'disco-room-mode)
                        (appkit-view-live-p (appkit-current-view)))
               (let ((view (appkit-current-view)))
-                (appkit-request-sync view :resources resources)))))))))
+                  (appkit-request-sync view :resources resources))))))))))
 
 (defun disco-room--handle-media-rerender (kind key)
   "Apply media state change KIND for KEY to dependent timeline rows."
@@ -3415,7 +3595,8 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
 
 (defun disco-room--start-avatar-fetch (cache-key url cache-base)
   "Start asynchronous avatar fetch for CACHE-KEY from URL using CACHE-BASE."
-  (unless (or (not (appkit-media-url-present-p url))
+  (unless (or disco-room--session-cache-reset-in-progress
+              (not (appkit-media-url-present-p url))
               (not (stringp cache-base))
               (gethash cache-key disco-room--avatar-fetching)
               (gethash cache-key disco-room--avatar-image-cache)
@@ -3438,7 +3619,8 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
               :noquery t
               :then
               (lambda (data)
-                (when (= generation disco-room--avatar-fetch-generation)
+                (when (and (not disco-room--session-cache-reset-in-progress)
+                           (= generation disco-room--avatar-fetch-generation))
                   (condition-case decode-error
                       (let* ((raw-bytes
                               (appkit-media-normalize-image-bytes
@@ -3472,7 +3654,8 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
                       (error-message-string decode-error) t)))))
               :else
               (lambda (fetch-error)
-                (when (= generation disco-room--avatar-fetch-generation)
+                (when (and (not disco-room--session-cache-reset-in-progress)
+                           (= generation disco-room--avatar-fetch-generation))
                   (let ((status
                          (disco-room--plz-error-http-status fetch-error)))
                     (disco-room--avatar-record-failure
@@ -3482,7 +3665,8 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
                      nil status)))))
             (plz-run queue))
         (error
-         (when (= generation disco-room--avatar-fetch-generation)
+         (when (and (not disco-room--session-cache-reset-in-progress)
+                    (= generation disco-room--avatar-fetch-generation))
            (disco-room--avatar-record-failure
             cache-key url cache-base
             (disco-room--async-error-message err) t)))))))
@@ -4296,7 +4480,7 @@ messages; everything else is a system event shown as a centered divider."
   "Return copy-ready visible text for MSG, or nil.
 
 This keeps message-copy semantics close to room rendering while avoiding room
-UI affordances such as timestamps, reaction rows and attachment cards." 
+UI affordances such as timestamps, reaction rows and attachment cards."
   (let* ((message-id (alist-get 'id msg))
          (system-content (disco-room--message-system-content msg))
          (raw-content (and (listp msg) (alist-get 'content msg)))
@@ -4396,6 +4580,18 @@ This may return nil when a staged empty selection exists."
   "Return non-nil when non-nil user ids LEFT and RIGHT are equal."
   (and left right
        (equal (format "%s" left) (format "%s" right))))
+
+(defun disco-room--event-self-p (event)
+  "Return frozen current-user identity for reaction/poll EVENT.
+
+New Gateway events carry `:self-p' because queued events can outlive the READY
+session that supplied `disco-gateway-current-user-id'.  The fallback keeps
+directly constructed legacy events and tests compatible."
+  (if (plist-member event :self-p)
+      (and (plist-get event :self-p) t)
+    (disco-room--same-user-id-p
+     (disco-gateway-current-user-id)
+     (plist-get event :user-id))))
 
 (defun disco-room--poll-selection-key (answer-ids)
   "Return canonical set-like key for poll ANSWER-IDS."
@@ -4534,19 +4730,18 @@ Staged selection takes precedence over committed vote state."
         (setf (alist-get 'poll updated nil 'remove) poll)
         updated))))
 
-(defun disco-room--message-with-poll-vote-delta (msg answer-id addp user-id)
+(defun disco-room--message-with-poll-vote-delta (msg answer-id addp self-p)
   "Return MSG copy updated with one poll vote delta.
 
-ANSWER-ID is the poll answer receiving update. ADDP non-nil means add vote;
-otherwise remove. USER-ID is used to set `me_voted' when event is for self."
+ANSWER-ID is the poll answer receiving update.  ADDP non-nil means add vote;
+otherwise remove.  SELF-P non-nil makes the own-vote transition idempotent."
   (let* ((updated (copy-tree msg))
          (poll (copy-tree (disco-msg-poll msg))))
     (if (not (and (listp poll) (integerp answer-id)))
         updated
       (let* ((results (copy-tree (or (disco-msg-poll-results poll) '())))
              (counts (copy-tree (or (alist-get 'answer_counts results) '())))
-             (self-id (disco-gateway-current-user-id))
-             (is-self (disco-room--same-user-id-p self-id user-id))
+             (is-self (and self-p t))
              (existing (seq-find (lambda (it)
                                    (equal (alist-get 'id it) answer-id))
                                  counts))
@@ -4597,9 +4792,7 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                            (string-match-p "\\`[0-9]+\\'" raw-answer-id))
                       (string-to-number raw-answer-id))
                      (t nil)))
-         (user-id (plist-get event :user-id))
-         (self-id (disco-gateway-current-user-id))
-         (is-self (disco-room--same-user-id-p self-id user-id))
+         (is-self (disco-room--event-self-p event))
          (applied
           (and (integerp answer-id)
                (pcase event-type
@@ -4607,12 +4800,14 @@ otherwise remove. USER-ID is used to set `me_voted' when event is for self."
                   (disco-room--update-message-locally
                    message-id
                    (lambda (msg)
-                     (disco-room--message-with-poll-vote-delta msg answer-id t user-id))))
+                     (disco-room--message-with-poll-vote-delta
+                      msg answer-id t is-self))))
                  ('message-poll-vote-remove
                   (disco-room--update-message-locally
                    message-id
                    (lambda (msg)
-                     (disco-room--message-with-poll-vote-delta msg answer-id nil user-id))))
+                     (disco-room--message-with-poll-vote-delta
+                      msg answer-id nil is-self))))
                  (_ nil)))))
     (when (and applied is-self)
       ;; A multi-select request can produce several Gateway events.  Keep the
@@ -4821,6 +5016,13 @@ Custom emoji identity is its id, independent of a later name change."
     (remhash (disco-room--reaction-op-key message-id emoji)
              disco-room--reaction-ops)))
 
+(defun disco-room--forget-message-async-state (message-id)
+  "Discard drafts and operation owners belonging to deleted MESSAGE-ID."
+  (disco-room--poll-clear-draft-selection message-id)
+  (when (hash-table-p disco-room--poll-vote-ops)
+    (remhash message-id disco-room--poll-vote-ops))
+  (disco-room--reaction-ops-clear-message message-id))
+
 (defun disco-room--reaction-matches-input-p (reaction emoji)
   "Return non-nil when REACTION matches EMOJI input string."
   (let* ((spec (disco-room--parse-reaction-input emoji))
@@ -4955,9 +5157,7 @@ Return non-nil when a local message update was applied."
   (let* ((event-type (plist-get event :type))
          (message-id (plist-get event :message-id))
          (emoji-input (disco-room--event-emoji->input (plist-get event :emoji)))
-         (is-self (disco-room--same-user-id-p
-                   (disco-gateway-current-user-id)
-                   (plist-get event :user-id))))
+         (is-self (disco-room--event-self-p event)))
     (pcase event-type
       ('message-reaction-add
        (let ((applied
@@ -5691,6 +5891,12 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
      (t
       (when (eq event-type 'message-create)
         (disco-room--observe-live-create message-id))
+      (when (eq event-type 'message-delete)
+        ;; The canonical message is already gone when the room consumes this
+        ;; event.  Retire controller owners too, so late REST callbacks are
+        ;; inert and an unreachable staged poll draft cannot leak for the
+        ;; remainder of the view lifetime.
+        (disco-room--forget-message-async-state message-id))
       (if (disco-room--msg-filter-active-p)
           (progn
             ;; A search result list is a separate projection, but Gateway
@@ -6720,6 +6926,25 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
         (disco-room--set-draft picked)
         (message "disco: loaded draft history match"))))))
 
+(defun disco-room--owned-preview-buffer ()
+  "Return the explicitly owned composer preview buffer, creating it if needed."
+  (or (and (buffer-live-p disco-room--preview-buffer)
+           (buffer-local-value 'disco-room--preview-buffer-owner-p
+                               disco-room--preview-buffer)
+           disco-room--preview-buffer)
+      (let* ((named (get-buffer disco-room--preview-buffer-name))
+             (buffer
+              (if (and (buffer-live-p named)
+                       (buffer-local-value
+                        'disco-room--preview-buffer-owner-p named))
+                  named
+                ;; A display-name collision never transfers ownership of an
+                ;; ordinary user buffer to Disco.
+                (generate-new-buffer disco-room--preview-buffer-name))))
+        (with-current-buffer buffer
+          (setq-local disco-room--preview-buffer-owner-p t))
+        (setq disco-room--preview-buffer buffer))))
+
 (defun disco-room-input-preview ()
   "Show parsed preview of the current composer input."
   (interactive)
@@ -6727,7 +6952,7 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
          (parsed (disco-room--parse-draft-input draft))
          (content (string-trim-right (or (plist-get parsed :content) "")))
          (attachments (or (plist-get parsed :attachments) '()))
-         (buf (get-buffer-create "*disco-room-preview*"))
+         (buf (disco-room--owned-preview-buffer))
          (mode-label (pcase (plist-get (appkit-chatbuf-aux-state) :aux-type)
                        ('edit "edit")
                        ('reply "reply")
@@ -6748,7 +6973,8 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
           (dolist (attachment attachments)
             (insert (format "- %s\n"
                             (disco-room--attachment-label attachment "[file]")))))
-        (special-mode)))
+        (special-mode)
+        (setq-local disco-room--preview-buffer-owner-p t)))
     (display-buffer buf)
     (message "disco: opened composer preview")))
 
@@ -8386,7 +8612,7 @@ its same-mode buffer survives."
   (disco-room--update-context-mode))
 
 (defun disco-room-open (channel-id channel-name)
-  "Open room for CHANNEL-ID with CHANNEL-NAME."
+  "Open room for CHANNEL-ID with CHANNEL-NAME and return its actual buffer."
   (let* ((app (disco-runtime-app))
          (view-id (list 'room channel-id))
          (existing (appkit-view-for-id app view-id))
@@ -8416,7 +8642,8 @@ its same-mode buffer survives."
         (disco-room-refresh)))
     (pop-to-buffer buf)
     (with-current-buffer buf
-      (disco-room--on-window-size-change))))
+      (disco-room--on-window-size-change))
+    buf))
 
 (provide 'disco-room)
 

@@ -59,6 +59,8 @@
 (defvar disco-root--activity-icon-slot-width)
 (defvar disco-root--guild-icon-fetching)
 (defvar disco-root--guild-icon-image-cache)
+(defvar disco-root--guild-icon-fetch-generation)
+(defvar disco-root--session-cache-reset-in-progress)
 (defvar disco-root--extra-info-provider-error-cache)
 (defvar disco-root-extra-info-functions)
 (defvar disco-root-default-layout)
@@ -629,44 +631,124 @@ Exclude the current user when its ID is known."
 (defun disco-root--guild-icon-rendering-available-p ()
   "Return non-nil when inline guild icons can be rendered."
   (and disco-root-show-guild-icons
+       (not disco-root--session-cache-reset-in-progress)
        (display-images-p)
        (image-type-available-p 'png)
        (fboundp 'plz)))
 
 (defun disco-root--rerender-open-root-buffers ()
   "Invalidate live root projections after guild icon updates."
-  (dolist (buffer (buffer-list))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when (eq major-mode 'disco-root-mode)
-          (disco-root-view--queue-live-update nil t nil))))))
+  (unless disco-root--session-cache-reset-in-progress
+    (dolist (buffer (buffer-list))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (eq major-mode 'disco-root-mode)
+            (disco-root-view--queue-live-update nil t nil)))))))
+
+(defun disco-root-view--guild-icon-owner-current-p (cache-key owner)
+  "Return non-nil when OWNER still owns CACHE-KEY in this account session."
+  (and (not disco-root--session-cache-reset-in-progress)
+       (= (or (plist-get owner :generation) -1)
+          disco-root--guild-icon-fetch-generation)
+       (eq owner (gethash cache-key disco-root--guild-icon-fetching))))
+
+(defun disco-root-view--cancel-guild-icon-process (process)
+  "Cancel PROCESS when live, isolating ordinary cancellation failures."
+  (when process
+    (condition-case nil
+        (when (process-live-p process)
+          (delete-process process))
+      ((error quit) nil))))
+
+(defun disco-root-view--cancel-guild-icon-processes (processes)
+  "Cancel PROCESSES while guaranteeing every remaining cancellation attempt."
+  (let ((remaining processes))
+    (unwind-protect
+        (while remaining
+          (disco-root-view--cancel-guild-icon-process (pop remaining)))
+      (when remaining
+        (disco-root-view--cancel-guild-icon-processes remaining)))))
+
+(defun disco-root-view--guild-icon-finish (cache-key owner image)
+  "Publish IMAGE for CACHE-KEY when OWNER remains exact and current."
+  (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
+    (puthash cache-key
+             (if (disco-root--guild-icon-image-valid-p image) image :missing)
+             disco-root--guild-icon-image-cache)
+    (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-root--guild-icon-fetching)
+      (when (and (not disco-root--session-cache-reset-in-progress)
+                 (= (plist-get owner :generation)
+                    disco-root--guild-icon-fetch-generation))
+        (disco-root--rerender-open-root-buffers)))))
+
+(defun disco-root-view--guild-icon-fail (cache-key owner)
+  "Publish a missing icon for CACHE-KEY only when OWNER remains current."
+  (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
+    (puthash cache-key :missing disco-root--guild-icon-image-cache)
+    (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-root--guild-icon-fetching))))
 
 (defun disco-root--start-guild-icon-fetch (cache-key url)
   "Start asynchronous guild icon fetch for CACHE-KEY from URL."
-  (unless (or (gethash cache-key disco-root--guild-icon-fetching)
+  (unless (or disco-root--session-cache-reset-in-progress
+              (gethash cache-key disco-root--guild-icon-fetching)
               (gethash cache-key disco-root--guild-icon-image-cache))
-    (puthash cache-key t disco-root--guild-icon-fetching)
-    (plz 'get url
-         :as 'binary
-         :headers '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
-         :then (lambda (bytes)
-                 (let ((image
-                        (ignore-errors
-                          (create-image bytes 'png t
-                                        :width disco-root-guild-icon-size
-                                        :height disco-root-guild-icon-size
-                                        :ascent 'center))))
-                   (puthash cache-key
-                            (if (disco-root--guild-icon-image-valid-p image)
-                                image
-                              :missing)
-                            disco-root--guild-icon-image-cache)
-                   (remhash cache-key disco-root--guild-icon-fetching)
-                   (disco-root--rerender-open-root-buffers)))
-         :else (lambda (_err)
-                 (puthash cache-key :missing disco-root--guild-icon-image-cache)
-                 (remhash cache-key disco-root--guild-icon-fetching))))
+    (let* ((generation disco-root--guild-icon-fetch-generation)
+           (owner (list :generation generation :process nil))
+           process
+           returned-p)
+      (puthash cache-key owner disco-root--guild-icon-fetching)
+      (unwind-protect
+          (progn
+            (setq process
+                  (plz 'get url
+                       :as 'binary
+                       :headers
+                       '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
+                       :then
+                       (lambda (bytes)
+                         (when (disco-root-view--guild-icon-owner-current-p
+                                cache-key owner)
+                           (let ((image
+                                  (ignore-errors
+                                    (create-image
+                                     bytes 'png t
+                                     :width disco-root-guild-icon-size
+                                     :height disco-root-guild-icon-size
+                                     :ascent 'center))))
+                             (disco-root-view--guild-icon-finish
+                              cache-key owner image))))
+                       :else
+                       (lambda (_err)
+                         (disco-root-view--guild-icon-fail
+                          cache-key owner))))
+            (setq returned-p t))
+        (cond
+         ((and returned-p
+               (disco-root-view--guild-icon-owner-current-p cache-key owner))
+          (setf (plist-get owner :process) process))
+         ((disco-root-view--guild-icon-owner-current-p cache-key owner)
+          (remhash cache-key disco-root--guild-icon-fetching))
+         (returned-p
+          (disco-root-view--cancel-guild-icon-process process))))))
   nil)
+
+(defun disco-root-view--reset-guild-icon-cache-state ()
+  "Revoke root guild icon work and clear its account-scoped caches."
+  (let ((disco-root--session-cache-reset-in-progress t)
+        processes)
+    (cl-incf disco-root--guild-icon-fetch-generation)
+    (maphash
+     (lambda (_cache-key owner)
+       (when-let* ((process (and (listp owner)
+                                 (plist-get owner :process))))
+         (push process processes)))
+     disco-root--guild-icon-fetching)
+    (unwind-protect
+        (disco-root-view--cancel-guild-icon-processes processes)
+      (clrhash disco-root--guild-icon-fetching)
+      (clrhash disco-root--guild-icon-image-cache))))
 
 (defun disco-root--guild-icon-image (guild)
   "Return image object for GUILD icon when available, otherwise nil.

@@ -165,6 +165,51 @@
           (kill-buffer buffer))
         (disco-runtime-stop)))))
 
+(ert-deftest disco-room-cross-channel-jump-uses-renamed-view-buffer ()
+  (let ((disco-runtime--app nil)
+        target-buffer
+        queued
+        synced
+        (renamed-name (generate-new-buffer-name "*disco-renamed-target*")))
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _args) buffer))
+              ((symbol-function 'disco-room--attach-live-updates) #'ignore)
+              ((symbol-function 'disco-room-refresh) #'ignore)
+              ((symbol-function 'disco-room--on-window-size-change) #'ignore)
+              ((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (progn
+            (disco-state-reset)
+            (disco-state-upsert-channel
+             '((id . "jump-source") (type . 1) (name . "source")))
+            (disco-state-upsert-channel
+             '((id . "jump-target") (type . 1) (name . "target")))
+            (setq target-buffer (disco-room-open "jump-target" "target"))
+            (should (buffer-live-p target-buffer))
+            (with-current-buffer target-buffer
+              (rename-buffer renamed-name t))
+            ;; Reopening the Appkit identity returns the actual reused buffer,
+            ;; independent of its display name.
+            (should (eq target-buffer
+                        (disco-room-open "jump-target" "target")))
+            (with-temp-buffer
+              (disco-room-mode)
+              (setq-local disco-room--channel-id "jump-source")
+              (cl-letf (((symbol-function 'disco-room--queue-jump)
+                         (lambda (message-id view)
+                           (setq queued
+                                 (list (current-buffer) message-id view))))
+                        ((symbol-function 'appkit-sync-invalidations)
+                         (lambda (view) (setq synced view))))
+                (disco-room-jump-to-message "message-42" "jump-target")))
+            (should (eq target-buffer (nth 0 queued)))
+            (should (equal "message-42" (nth 1 queued)))
+            (should (eq (nth 2 queued) synced))
+            (should (equal renamed-name (buffer-name target-buffer))))
+        (when (buffer-live-p target-buffer)
+          (kill-buffer target-buffer))
+        (disco-runtime-stop)))))
+
 (ert-deftest disco-room-history-callback-cannot-land-in-replacement-view ()
   (let ((disco-runtime--app nil)
         success-callback)
@@ -562,6 +607,52 @@
               (should (= 0 requests))))
         (disco-runtime-stop)))))
 
+(ert-deftest disco-room-queued-reaction-echo-keeps-frozen-self-identity ()
+  (let ((disco-runtime--app nil)
+        (disco-gateway--current-user-id "self")
+        emitted)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "reaction-queued-self")
+            ;; This is the state after the matching REST success.
+            (disco-state-put-messages
+             "reaction-queued-self"
+             '(((id . "m1")
+                (channel_id . "reaction-queued-self")
+                (reactions . (((count . 1)
+                               (me . t)
+                               (emoji . ((name . "wave")
+                                         (id . nil)))))))))
+            (let ((view (disco-room--ensure-view))
+                  (op-token
+                   (disco-room--reaction-op-begin "m1" "wave" t)))
+              (cl-letf (((symbol-function 'disco-gateway--emit)
+                         (lambda (event) (setq emitted event))))
+                (disco-gateway--dispatch-message-reaction-add
+                 '((channel_id . "reaction-queued-self")
+                   (message_id . "m1")
+                   (user_id . "self")
+                   (emoji . ((name . "wave"))))))
+              (should (eq t (plist-get emitted :self-p)))
+              (appkit-view-enqueue-event view emitted)
+              (appkit-request-sync view :part 'timeline)
+              ;; Disconnect clears the session identity before Appkit consumes
+              ;; the already queued echo.
+              (setq disco-gateway--current-user-id nil)
+              (cl-letf (((symbol-function 'disco-room-render) #'ignore))
+                (appkit-sync-invalidations view))
+              (should-not
+               (disco-room--reaction-op-current-p
+                "m1" "wave" op-token)))
+            (let ((reaction
+                   (car (disco-msg-reactions
+                         (disco-room--message-by-id "m1")))))
+              (should (= 1 (disco-msg-reaction-count reaction)))
+              (should (disco-msg-reaction-selected-p reaction))))
+        (disco-runtime-stop)))))
+
 (ert-deftest disco-room-other-user-reaction-delta-preserves-own-selection ()
   (with-temp-buffer
     (disco-room-mode)
@@ -711,6 +802,48 @@
               (should (equal '(1) (disco-msg-poll-voted-answer-ids poll)))
               (should-not (disco-room--poll-draft-selection-present-p "p1"))
               (should (= 0 requests))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-queued-poll-echo-keeps-frozen-self-identity ()
+  (let ((disco-runtime--app nil)
+        (disco-gateway--current-user-id "self")
+        emitted)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "poll-queued-self")
+            ;; This is the state after the matching REST success.
+            (disco-state-put-messages
+             "poll-queued-self"
+             (list
+              (disco-room--message-with-poll-vote-selection
+               (disco-room-test-poll-message "poll-queued-self")
+               '(1))))
+            (disco-room--poll-set-draft-selection "p1" '(1))
+            (let ((view (disco-room--ensure-view))
+                  (op-token (disco-room--poll-vote-op-begin "p1" '(1))))
+              (cl-letf (((symbol-function 'disco-gateway--emit)
+                         (lambda (event) (setq emitted event))))
+                (disco-gateway--dispatch-message-poll-vote-add
+                 '((channel_id . "poll-queued-self")
+                   (message_id . "p1")
+                   (user_id . "self")
+                   (answer_id . 1))))
+              (should (eq t (plist-get emitted :self-p)))
+              (appkit-view-enqueue-event view emitted)
+              (appkit-request-sync view :part 'timeline)
+              (setq disco-gateway--current-user-id nil)
+              (cl-letf (((symbol-function 'disco-room-render) #'ignore))
+                (appkit-sync-invalidations view))
+              (should-not
+               (disco-room--poll-vote-op-current-p "p1" op-token))
+              (should-not
+               (disco-room--poll-draft-selection-present-p "p1")))
+            (let ((poll (disco-msg-poll (disco-room--message-by-id "p1"))))
+              (should (= 1 (disco-msg-poll-answer-count poll 1)))
+              (should (equal '(1)
+                             (disco-msg-poll-voted-answer-ids poll)))))
         (disco-runtime-stop)))))
 
 (ert-deftest disco-room-stale-poll-rest-success-cannot-overwrite-newer-op ()
@@ -1506,6 +1639,33 @@
        (equal "2026-03-04T02:00:00.000000+00:00"
               (disco-state-channel-last-read-pin-timestamp "chan"))))))
 
+(ert-deftest disco-room-pins-ack-success-uses-timezone-aware-state-merge ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chan")
+       (type . 0)
+       (last_pin_timestamp . "2026-03-04T01:30:00Z")))
+    ;; 02:00 +01:00 is 01:00Z, so the channel pin at 01:30Z is newer even
+    ;; though its timestamp is lexically smaller.
+    (disco-state-apply-channel-pins-ack
+     "chan" "2026-03-04T02:00:00+01:00")
+    (setq-local disco-room--channel-id "chan")
+    (let (success-callback)
+      (cl-letf (((symbol-function 'disco-api-ack-channel-pins-async)
+                 (lambda (_channel-id &rest args)
+                   (setq success-callback (plist-get args :on-success))))
+                ((symbol-function 'disco-room--callback-active-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-ack-channel-pins)
+        (should (functionp success-callback))
+        (funcall success-callback nil))
+      (should
+       (equal "2026-03-04T01:30:00Z"
+              (disco-state-channel-last-read-pin-timestamp "chan"))))))
+
 (ert-deftest disco-room-handle-gateway-pin-events-refresh-current-frame ()
   (with-temp-buffer
     (let ((disco-room--channel-id "chan")
@@ -1610,8 +1770,12 @@
     (disco-room-render)
     (should (plist-get (appkit-chat-timeline-context "m2")
                        :compact))
+    (disco-room--poll-set-draft-selection "m1" '(1))
     (let ((ewoc (appkit-chat-timeline-ewoc))
           (node-m2 (appkit-chat-timeline-node "m2"))
+          (poll-token (disco-room--poll-vote-op-begin "m1" '(1)))
+          (reaction-token
+           (disco-room--reaction-op-begin "m1" "wave" t))
           render-called)
       (disco-state-put-messages
        "chat"
@@ -1635,6 +1799,10 @@
       (should (equal '("m2") (appkit-chat-timeline-keys)))
       (should-not (plist-get (appkit-chat-timeline-context "m2")
                              :compact))
+      (should-not (disco-room--poll-draft-selection-present-p "m1"))
+      (should-not (disco-room--poll-vote-op-current-p "m1" poll-token))
+      (should-not
+       (disco-room--reaction-op-current-p "m1" "wave" reaction-token))
       (should (string-match-p "alice" (buffer-string))))))
 
 (ert-deftest disco-room-handle-gateway-message-update-refreshes-dependent-reply-preview ()
@@ -4622,6 +4790,185 @@
           (disco-room--on-window-size-change)
           (should (eq view (car request)))
           (should (eq 'geometry (plist-get (cdr request) :part))))))))
+
+(ert-deftest disco-room-session-cache-reset-revokes-icon-callbacks-without-sync ()
+  (let ((disco-room--session-cache-reset-in-progress nil)
+        (disco-room--avatar-fetch-generation 2)
+        (disco-room--forward-guild-icon-fetch-generation 4)
+        (disco-room--avatar-image-cache (make-hash-table :test #'equal))
+        (disco-room--avatar-round-image-cache (make-hash-table :test #'equal))
+        (disco-room--avatar-fetching (make-hash-table :test #'equal))
+        (disco-room--avatar-failures (make-hash-table :test #'equal))
+        (disco-room--avatar-pending-invalidations
+         (make-hash-table :test #'equal))
+        (disco-room--forward-guild-icon-image-cache
+         (make-hash-table :test #'equal))
+        (disco-room--forward-guild-icon-fetching
+         (make-hash-table :test #'equal))
+        (disco-room--avatar-plz-queue nil)
+        (disco-room--avatar-plz-queue-limit nil)
+        (disco-room--avatar-retry-timer nil)
+        (disco-room--avatar-invalidation-timer nil)
+        (disco-room-draft-history-search-history
+         '("OLD_ACCOUNT_SECRET-draft"))
+        (disco-room-search-inplace-history
+         '("OLD_ACCOUNT_SECRET-search"))
+        then-callback
+        else-callback
+        canceled
+        (plz-calls 0)
+        (sync-count 0))
+    (puthash "avatar-secret" "OLD_ACCOUNT_SECRET-image"
+             disco-room--avatar-image-cache)
+    (puthash "round-secret" "OLD_ACCOUNT_SECRET-round"
+             disco-room--avatar-round-image-cache)
+    (puthash "failure-secret"
+             '(:url "https://OLD_ACCOUNT_SECRET.invalid/avatar.png")
+             disco-room--avatar-failures)
+    (puthash "pending-secret" t
+             disco-room--avatar-pending-invalidations)
+    (puthash "old-icon" "https://OLD_ACCOUNT_SECRET.invalid/icon.png"
+             disco-room--forward-guild-icon-image-cache)
+    (cl-letf (((symbol-function 'plz)
+               (lambda (_method _url &rest args)
+                 (cl-incf plz-calls)
+                 (setq then-callback (plist-get args :then)
+                       else-callback (plist-get args :else))
+                 'old-icon-process))
+              ((symbol-function 'process-live-p)
+               (lambda (process) (eq process 'old-icon-process)))
+              ((symbol-function 'delete-process)
+               (lambda (process)
+                 (setq canceled process)
+                 ;; Cancellation can run sentinels synchronously.  Both the
+                 ;; old callback and an attempted successor must stay inert.
+                 (funcall then-callback "OLD_ACCOUNT_SECRET-bytes")
+                 (disco-room--start-forward-guild-icon-fetch
+                  "reentrant-icon" "new-guild"
+                  "https://OLD_ACCOUNT_SECRET.invalid/reentrant.png")))
+              ((symbol-function 'create-image)
+               (lambda (&rest _args) :image))
+              ((symbol-function 'disco-room--forward-guild-icon-image-valid-p)
+               (lambda (image) (eq image :image)))
+              ((symbol-function 'disco-room--sync-resource-changes-in-open-rooms)
+               (lambda (&rest _args) (cl-incf sync-count)))
+              ((symbol-function 'disco-room--refresh-open-rooms)
+               (lambda () (ert-fail "session reset requested a redraw"))))
+      (disco-room--start-forward-guild-icon-fetch
+       "live-icon" "old-guild"
+       "https://OLD_ACCOUNT_SECRET.invalid/live.png")
+      (should (= 1 plz-calls))
+      (should (eq 'old-icon-process
+                  (plist-get
+                   (gethash "live-icon"
+                            disco-room--forward-guild-icon-fetching)
+                   :process)))
+      (disco-room-reset-session-cache-state)
+      (should (eq 'old-icon-process canceled))
+      (should (= 1 plz-calls))
+      (should (= 0 sync-count))
+      (dolist (table (list disco-room--avatar-image-cache
+                           disco-room--avatar-round-image-cache
+                           disco-room--avatar-fetching
+                           disco-room--avatar-failures
+                           disco-room--avatar-pending-invalidations
+                           disco-room--forward-guild-icon-image-cache
+                           disco-room--forward-guild-icon-fetching))
+        (should (= 0 (hash-table-count table))))
+      (should-not disco-room-draft-history-search-history)
+      (should-not disco-room-search-inplace-history)
+      ;; A response already queued by plz remains harmless after reset too.
+      (funcall then-callback "OLD_ACCOUNT_SECRET-late-bytes")
+      (funcall else-callback '(:message "OLD_ACCOUNT_SECRET-late-error"))
+      (should (= 0 sync-count))
+      (should (= 0 (hash-table-count
+                    disco-room--forward-guild-icon-image-cache))))))
+
+(ert-deftest disco-room-session-cache-reset-clears-after-cancel-failures ()
+  (dolist (failure '(error quit throw))
+    (let ((disco-room--forward-guild-icon-fetch-generation 1)
+          (disco-room--forward-guild-icon-image-cache
+           (make-hash-table :test #'equal))
+          (disco-room--forward-guild-icon-fetching
+           (make-hash-table :test #'equal))
+          (disco-room--avatar-image-cache (make-hash-table :test #'equal))
+          (disco-room--avatar-round-image-cache (make-hash-table :test #'equal))
+          (disco-room--avatar-fetching (make-hash-table :test #'equal))
+          (disco-room--avatar-failures (make-hash-table :test #'equal))
+          (disco-room--avatar-pending-invalidations
+           (make-hash-table :test #'equal))
+          (disco-room--avatar-plz-queue nil)
+          (disco-room--avatar-retry-timer nil)
+          (disco-room--avatar-invalidation-timer nil))
+      (puthash "secret" "OLD_ACCOUNT_SECRET"
+               disco-room--forward-guild-icon-image-cache)
+      (puthash "secret" (list :generation 1 :process 'process)
+               disco-room--forward-guild-icon-fetching)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+                ((symbol-function 'delete-process)
+                 (lambda (_process)
+                   (pcase failure
+                     ('error (error "cancel failed"))
+                     ('quit (signal 'quit nil))
+                     ('throw (throw 'cancel-escape :escaped))))))
+        (let ((result
+               (catch 'cancel-escape
+                 (disco-room-reset-session-cache-state)
+                 :returned)))
+          (if (eq failure 'throw)
+              (should (eq result :escaped))
+            (should (eq result :returned))))
+        (should (= 0 (hash-table-count
+                      disco-room--forward-guild-icon-image-cache)))
+        (should (= 0 (hash-table-count
+                      disco-room--forward-guild-icon-fetching)))))))
+
+(ert-deftest disco-room-icon-process-cancel-drain-is-stack-safe ()
+  (let ((max-lisp-eval-depth 800)
+        (canceled 0))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'delete-process)
+               (lambda (_process) (cl-incf canceled))))
+      (disco-room--cancel-icon-processes (number-sequence 1 2000)))
+    (should (= 2000 canceled)))
+  (let (canceled)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'delete-process)
+               (lambda (process)
+                 (push process canceled)
+                 (throw 'cancel-escape process))))
+      (should (eq 'third
+                  (catch 'cancel-escape
+                    (disco-room--cancel-icon-processes
+                     '(escape second third))
+                    :returned))))
+    (should (equal '(third second escape) canceled))))
+
+(ert-deftest disco-room-preview-name-collision-preserves-ordinary-buffer ()
+  (let* ((disco-room--preview-buffer nil)
+         (disco-room--preview-buffer-name
+          (generate-new-buffer-name "*disco-room-preview-collision*"))
+         (ordinary (get-buffer-create disco-room--preview-buffer-name))
+         owned)
+    (unwind-protect
+        (progn
+          (with-current-buffer ordinary
+            (insert "UNRELATED_PREVIEW_SENTINEL"))
+          (setq owned (disco-room--owned-preview-buffer))
+          (should (buffer-live-p owned))
+          (should-not (eq ordinary owned))
+          (should (buffer-local-value
+                   'disco-room--preview-buffer-owner-p owned))
+          (with-current-buffer owned
+            (special-mode)
+            (rename-buffer "*renamed-owned-room-preview*" t))
+          (should (eq owned (disco-room--owned-preview-buffer)))
+          (with-current-buffer ordinary
+            (should (equal "UNRELATED_PREVIEW_SENTINEL" (buffer-string)))))
+      (when (buffer-live-p owned)
+        (kill-buffer owned))
+      (when (buffer-live-p ordinary)
+        (kill-buffer ordinary)))))
 
 (provide 'disco-room-test)
 

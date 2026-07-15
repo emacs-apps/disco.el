@@ -40,6 +40,9 @@
 
 (autoload 'disco-reset-session-state "disco" nil t)
 
+(declare-function disco-root-view--reset-guild-icon-cache-state
+                  "disco-root-view" ())
+
 (defconst disco-root-buffer-name "*disco*"
   "Main root buffer name.")
 
@@ -144,6 +147,17 @@ Each entry is (SECTION-SYMBOL . BOOLEAN).")
 
 (defvar-local disco-root--debug-log-verbose nil
   "Non-nil when verbose root debug logging is enabled in this buffer.")
+
+(defvar-local disco-root--debug-log-owner-p nil
+  "Non-nil when this buffer is a Disco root debug-log projection.")
+
+(put 'disco-root--debug-log-owner-p 'permanent-local t)
+
+(defvar disco-root--debug-log-buffer nil
+  "Live Disco-owned root debug buffer, including after a user rename.")
+
+(defvar disco-root--debug-log-configured-name nil
+  "Configured debug-log name used when the current owner was selected.")
 
 (defvar disco-root-search-history nil
   "Minibuffer history for root search queries.")
@@ -381,7 +395,32 @@ fragments are joined and appended to the row label."
 Values are image objects or the symbol `:missing'.")
 
 (defvar disco-root--guild-icon-fetching (make-hash-table :test #'equal)
-  "Global set of guild icon cache keys currently being fetched.")
+  "Guild icon request owners keyed by icon cache key.
+
+Each owner is a unique plist containing its generation and exact `plz'
+process, so late callbacks cannot affect a replacement account session.")
+
+(defvar disco-root--guild-icon-fetch-generation 0
+  "Generation used to revoke root guild icon request callbacks.")
+
+(defvar disco-root--session-cache-reset-in-progress nil
+  "Non-nil while account-scoped root cache state is being retired.")
+
+(defun disco-root--clear-session-cache-memory ()
+  "Clear account-scoped root cache bookkeeping without running callbacks."
+  (setq disco-root-search-history nil)
+  (clrhash disco-root--guild-icon-fetching)
+  (clrhash disco-root--guild-icon-image-cache)
+  (clrhash disco-root--extra-info-provider-error-cache))
+
+(defun disco-root-reset-session-cache-state ()
+  "Destructively clear account-scoped root caches without redrawing."
+  (let ((disco-root--session-cache-reset-in-progress t))
+    (unwind-protect
+        (disco-root-view--reset-guild-icon-cache-state)
+      ;; A cancellation sentinel may mutate globals synchronously.  Clear a
+      ;; second time without ever asking Appkit to rebuild a retired view.
+      (disco-root--clear-session-cache-memory))))
 
 (defvar disco-root--window-size-hook-installed nil
   "Non-nil once root auto-fill window-size hook has been installed.")
@@ -2273,10 +2312,39 @@ buffer without CHANNEL, use the channel at point."
        (or disco-root--debug-log-verbose
            disco-root-debug-log-verbose)))
 
+(defun disco-root--owned-debug-log-buffer ()
+  "Return the explicitly owned root debug buffer, creating it if needed."
+  (or (and (buffer-live-p disco-root--debug-log-buffer)
+           (buffer-local-value 'disco-root--debug-log-owner-p
+                               disco-root--debug-log-buffer)
+           (equal disco-root--debug-log-configured-name
+                  disco-root-debug-log-buffer-name)
+           disco-root--debug-log-buffer)
+      (let* ((named (get-buffer disco-root-debug-log-buffer-name))
+             (buffer
+              (if (and (buffer-live-p named)
+                       (buffer-local-value
+                        'disco-root--debug-log-owner-p named))
+                  named
+                ;; Never commandeer an unrelated buffer merely because the
+                ;; configurable debug name collides with it.
+                (generate-new-buffer disco-root-debug-log-buffer-name))))
+        (with-current-buffer buffer
+          (setq-local disco-root--debug-log-owner-p t))
+        (setq disco-root--debug-log-buffer buffer
+              disco-root--debug-log-configured-name
+              disco-root-debug-log-buffer-name)
+        buffer)))
+
+(defun disco-root-reset-debug-log-owner ()
+  "Forget the retired session's root debug-buffer reference."
+  (setq disco-root--debug-log-buffer nil
+        disco-root--debug-log-configured-name nil))
+
 (defun disco-root--debug-log (format-string &rest args)
   "Append one debug entry formatted with FORMAT-STRING and ARGS."
   (when (disco-root--debug-log-enabled-p)
-    (let ((buf (get-buffer-create disco-root-debug-log-buffer-name))
+    (let ((buf (disco-root--owned-debug-log-buffer))
           (message-log-max nil))
       (with-current-buffer buf
         (let ((inhibit-read-only t)
@@ -2284,6 +2352,7 @@ buffer without CHANNEL, use the channel at point."
           (goto-char (point-max))
           (unless (derived-mode-p 'special-mode)
             (special-mode))
+          (setq-local disco-root--debug-log-owner-p t)
           (insert (format-time-string "%Y-%m-%d %H:%M:%S"))
           (insert " ")
           (insert (apply #'format format-string args))
@@ -2355,12 +2424,12 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
 (defun disco-root-debug-log-open ()
   "Open the root debug log buffer."
   (interactive)
-  (pop-to-buffer (get-buffer-create disco-root-debug-log-buffer-name)))
+  (pop-to-buffer (disco-root--owned-debug-log-buffer)))
 
 (defun disco-root-debug-log-clear ()
   "Clear the root debug log buffer."
   (interactive)
-  (with-current-buffer (get-buffer-create disco-root-debug-log-buffer-name)
+  (with-current-buffer (disco-root--owned-debug-log-buffer)
     (let ((inhibit-read-only t))
       (erase-buffer)))
   (message "disco: root debug log cleared"))

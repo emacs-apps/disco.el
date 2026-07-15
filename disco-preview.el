@@ -82,16 +82,21 @@
   (setq disco-preview--timer nil
         disco-preview--timer-deadline nil))
 
-(defun disco-preview-reset ()
-  "Reset all preview request lifecycle state."
-  (cl-incf disco-preview--generation)
-  (disco-preview--cancel-scheduled-pass)
+(defun disco-preview--clear-session-data ()
+  "Clear preview request state without invoking lifecycle cancellation."
   (clrhash disco-preview--pending-by-guild)
   (clrhash disco-preview--requested-message-id-by-channel)
   (clrhash disco-preview--in-flight-by-guild)
   (clrhash disco-preview--blocked-until-by-guild)
-  (setq disco-preview--pending-private nil)
-  (setq disco-preview--in-flight-private nil))
+  (setq disco-preview--pending-private nil
+        disco-preview--in-flight-private nil
+        disco-preview--flushing-private nil))
+
+(defun disco-preview-reset ()
+  "Reset all preview request lifecycle state."
+  (cl-incf disco-preview--generation)
+  (disco-preview--cancel-scheduled-pass)
+  (disco-preview--clear-session-data))
 
 (defun disco-preview--pending-p ()
   "Return non-nil when at least one guild has queued channel IDs."

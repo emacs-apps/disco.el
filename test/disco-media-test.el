@@ -155,6 +155,8 @@
          (make-hash-table :test #'equal))
         (disco-media--attachment-preview-fetching
          (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-owner-table
+         (make-hash-table :test #'equal))
         (disco-media--attachment-preview-fetch-budget nil)
         captured)
     (cl-letf (((symbol-function 'appkit-media-start-video-preview)
@@ -274,6 +276,8 @@
          (make-hash-table :test #'equal))
         (disco-media--attachment-preview-image-cache
          (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-owner-table
+         (make-hash-table :test #'equal))
         captured-resource
         captured-base)
     (cl-letf (((symbol-function 'appkit-media-cache-image-resource-async)
@@ -293,6 +297,8 @@
 (ert-deftest disco-media-attachment-download-uses-shared-transfer-runtime ()
   (let ((tmpdir (make-temp-file "disco-media-transfer" t))
         (disco-media--attachment-download-state-table
+         (make-hash-table :test #'equal))
+        (disco-media--attachment-download-owner-table
          (make-hash-table :test #'equal))
         captured-resource
         captured-target)
@@ -325,6 +331,8 @@
 (ert-deftest disco-media-attachment-download-preserves-shared-error-text ()
   (let ((tmpdir (make-temp-file "disco-media-transfer-error" t))
         (disco-media--attachment-download-state-table
+         (make-hash-table :test #'equal))
+        (disco-media--attachment-download-owner-table
          (make-hash-table :test #'equal)))
     (unwind-protect
         (let* ((disco-media-download-directory tmpdir)
@@ -413,6 +421,302 @@
            (lambda (kind key) (setq received (cons kind key)))))
       (disco-media--notify-state-updated 'preview "preview-key")
       (should (equal '(preview . "preview-key") received)))))
+
+(ert-deftest disco-media-reset-session-state-clears-account-memory-and-processes ()
+  (let* ((secret "OLD_ACCOUNT_SECRET")
+         (old-url "https://old.example.invalid/OLD_ACCOUNT_SECRET")
+         (owned-buffer (generate-new-buffer " *disco-owned-audio*"))
+         (foreign-buffer (get-buffer-create " *disco-audio-player*"))
+         (process (make-pipe-process :name "disco-test-owned-audio"
+                                     :buffer owned-buffer :noquery t))
+         (owner (list :generation 7 :key old-url))
+         (disco-media--generation 7)
+         (disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
+         (disco-media--attachment-preview-fetching (make-hash-table :test #'equal))
+         (disco-media--attachment-preview-owner-table (make-hash-table :test #'equal))
+         (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+         (disco-media--attachment-download-owner-table (make-hash-table :test #'equal))
+         (disco-media--attachment-audio-state-table (make-hash-table :test #'equal))
+         (disco-media--attachment-waveform-image-cache (make-hash-table :test #'equal))
+         (disco-media--attachment-placeholder-image-cache (make-hash-table :test #'equal))
+         (disco-media--attachment-decorated-preview-cache (make-hash-table :test #'equal))
+         (disco-media--attachment-preview-fetch-budget 3)
+         (disco-media--attachment-audio-current-process process)
+         (disco-media--attachment-audio-current-owner owner))
+    (unwind-protect
+        (progn
+          (with-current-buffer owned-buffer (insert secret))
+          (with-current-buffer foreign-buffer
+            (erase-buffer)
+            (insert "FOREIGN-CONTENT"))
+          (set-process-plist
+           process
+           (list :attachment-key old-url
+                 :disco-media-generation 7
+                 :disco-media-owner owner
+                 :disco-media-owned-buffer owned-buffer))
+          (set-process-sentinel process #'ignore)
+          ;; Hostile reassignment must not transfer ownership of this buffer.
+          (set-process-buffer process foreign-buffer)
+          (puthash old-url (list :generation 7 :transfer :preview-transfer)
+                   disco-media--attachment-preview-owner-table)
+          (puthash old-url t disco-media--attachment-preview-fetching)
+          (puthash old-url secret disco-media--attachment-preview-image-cache)
+          (puthash old-url owner disco-media--attachment-download-owner-table)
+          (puthash old-url (list :owner owner :transfer :download-transfer
+                                 :path old-url)
+                   disco-media--attachment-download-state-table)
+          (puthash old-url (list :owner owner :process process
+                                 :buffer owned-buffer :source old-url)
+                   disco-media--attachment-audio-state-table)
+          (dolist (table (list disco-media--attachment-waveform-image-cache
+                               disco-media--attachment-placeholder-image-cache
+                               disco-media--attachment-decorated-preview-cache))
+            (puthash old-url secret table))
+          (cl-letf (((symbol-function 'appkit-media-cancel-transfer) #'ignore)
+                    ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
+                    ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore))
+            (disco-media-reset-session-state))
+          (should-not (process-live-p process))
+          (should-not (buffer-live-p owned-buffer))
+          (should (buffer-live-p foreign-buffer))
+          (should (equal "FOREIGN-CONTENT"
+                         (with-current-buffer foreign-buffer (buffer-string))))
+          (dolist (table (list disco-media--attachment-preview-image-cache
+                               disco-media--attachment-preview-fetching
+                               disco-media--attachment-preview-owner-table
+                               disco-media--attachment-download-state-table
+                               disco-media--attachment-download-owner-table
+                               disco-media--attachment-audio-state-table
+                               disco-media--attachment-waveform-image-cache
+                               disco-media--attachment-placeholder-image-cache
+                               disco-media--attachment-decorated-preview-cache))
+            (should (= 0 (hash-table-count table))))
+          (should-not disco-media--attachment-preview-fetch-budget)
+          (should-not disco-media--attachment-audio-current-process)
+          (should-not disco-media--attachment-audio-current-owner)
+          (should-not (string-match-p secret (prin1-to-string (process-plist process)))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p owned-buffer) (kill-buffer owned-buffer))
+      (when (buffer-live-p foreign-buffer) (kill-buffer foreign-buffer)))))
+
+(ert-deftest disco-media-reset-before-constructor-return-cancels-returned-handles ()
+  (let ((disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-fetching (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-owner-table (make-hash-table :test #'equal))
+        (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+        (disco-media--attachment-download-owner-table (make-hash-table :test #'equal))
+        canceled)
+    (cl-letf (((symbol-function 'appkit-media-cancel-transfer)
+               (lambda (transfer) (push transfer canceled)))
+              ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
+              ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore)
+              ((symbol-function 'appkit-media-cache-image-resource-async)
+               (lambda (&rest _arguments)
+                 (disco-media-reset-session-state)
+                 :returned-preview))
+              ((symbol-function 'appkit-media-copy-or-download-resource-async)
+               (lambda (&rest _arguments)
+                 (disco-media-reset-session-state)
+                 :returned-download))
+              ((symbol-function 'message) #'ignore))
+      (disco-media--start-attachment-preview-fetch
+       "old-preview" "https://old.invalid/image" "/tmp/old-preview")
+      (disco-media-start-attachment-download
+       '((id . "old-download") (filename . "old.bin")
+         (url . "https://old.invalid/file")))
+      (should (memq :returned-preview canceled))
+      (should (memq :returned-download canceled))
+      (should (= 0 (hash-table-count disco-media--attachment-preview-fetching)))
+      (should (= 0 (hash-table-count disco-media--attachment-download-state-table))))))
+
+(ert-deftest disco-media-late-callbacks-after-reset-do-not-refill-or-rerender ()
+  (let ((disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-fetching (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-owner-table (make-hash-table :test #'equal))
+        (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+        (disco-media--attachment-download-owner-table (make-hash-table :test #'equal))
+        preview-success download-success (rerenders 0) opened succeeded)
+    (let ((disco-media-rerender-function
+           (lambda (&rest _arguments) (cl-incf rerenders))))
+      (cl-letf (((symbol-function 'appkit-media-cache-image-resource-async)
+                 (lambda (_resource _base success _error &rest _arguments)
+                   (setq preview-success success)
+                   :preview))
+                ((symbol-function 'appkit-media-copy-or-download-resource-async)
+                 (lambda (_resource _target success _error)
+                   (setq download-success success)
+                   :download))
+                ((symbol-function 'appkit-media-cancel-transfer) #'ignore)
+                ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
+                ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore)
+                ((symbol-function 'appkit-media-open-file)
+                 (lambda (_path) (setq opened t)))
+                ((symbol-function 'message) #'ignore))
+        (disco-media--start-attachment-preview-fetch
+         "old" "https://old.invalid/image" "/tmp/old")
+        (disco-media-start-attachment-download
+         '((id . "old") (filename . "old.bin")
+           (url . "https://old.invalid/file"))
+         t (lambda (_path) (setq succeeded t)))
+        (setq rerenders 0)
+        (disco-media-reset-session-state)
+        (funcall preview-success "/tmp/nonexistent-old-image")
+        (funcall download-success "/tmp/nonexistent-old-download")
+        (should (= 0 rerenders))
+        (should-not opened)
+        (should-not succeeded)
+        (should (= 0 (hash-table-count disco-media--attachment-preview-image-cache)))
+        (should (= 0 (hash-table-count disco-media--attachment-download-state-table)))))))
+
+(ert-deftest disco-media-inline-audio-uses-owned-buffer-not-same-name-buffer ()
+  (let* ((foreign (get-buffer-create " *disco-audio-player*"))
+         (disco-media-audio-player-command "fake-player")
+         (disco-media--attachment-audio-state-table (make-hash-table :test #'equal))
+         (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+         process owned)
+    (unwind-protect
+        (progn
+          (with-current-buffer foreign (erase-buffer) (insert "FOREIGN"))
+          (cl-letf (((symbol-function 'appkit-media-command-arguments)
+                     (lambda (_command) '("fake-player")))
+                    ((symbol-function 'disco-media-audio-inline-playback-available-p)
+                     (lambda () t))
+                    ((symbol-function 'start-process)
+                     (lambda (_name buffer _program &rest _arguments)
+                       (make-pipe-process :name "disco-test-inline-start"
+                                          :buffer buffer :noquery t)))
+                    ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore))
+            (setq process
+                  (disco-media--start-inline-audio-player
+                   '((id . "voice")) "/tmp/voice.ogg"))
+            (setq owned (plist-get (process-plist process)
+                                   :disco-media-owned-buffer))
+            (should (buffer-live-p owned))
+            (should-not (eq owned foreign))
+            (disco-media-reset-session-state))
+          (should (buffer-live-p foreign))
+          (should (equal "FOREIGN" (with-current-buffer foreign (buffer-string))))
+          (should-not (buffer-live-p owned)))
+      (when (and (processp process) (process-live-p process))
+        (delete-process process))
+      (when (buffer-live-p owned) (kill-buffer owned))
+      (when (buffer-live-p foreign) (kill-buffer foreign)))))
+
+(ert-deftest disco-media-save-as-transfers-are-reset-owned-and-late-callbacks-stale ()
+  (let ((disco-media--attachment-export-owners nil)
+        (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+        callbacks
+        canceled
+        (messages 0))
+    (cl-letf (((symbol-function 'appkit-media-copy-or-download-resource-async)
+               (lambda (_resource target success error)
+                 (push (list success error) callbacks)
+                 (intern (concat ":transfer-" target))))
+              ((symbol-function 'appkit-media-cancel-transfer)
+               (lambda (transfer) (push transfer canceled)))
+              ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
+              ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore)
+              ((symbol-function 'message)
+               (lambda (&rest _arguments) (cl-incf messages))))
+      (disco-media-download-attachment
+       '((id . "save-1") (filename . "one.bin")
+         (url . "https://old.invalid/OLD_ACCOUNT_SECRET-one"))
+       "/tmp/save-one")
+      (disco-media-download-attachment
+       '((id . "save-2") (filename . "two.bin")
+         (url . "https://old.invalid/OLD_ACCOUNT_SECRET-two"))
+       "/tmp/save-two")
+      (should (= 2 (length disco-media--attachment-export-owners)))
+      (disco-media-reset-session-state)
+      (should-not disco-media--attachment-export-owners)
+      (should (= 2 (length canceled)))
+      (setq messages 0)
+      (dolist (pair callbacks)
+        (funcall (car pair) "/tmp/late-success")
+        (funcall (cadr pair) "late error"))
+      (should (= 0 messages)))))
+
+(ert-deftest disco-media-save-as-reset-before-return-cancels-returned-transfer ()
+  (let ((disco-media--attachment-export-owners nil)
+        (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+        canceled)
+    (cl-letf (((symbol-function 'appkit-media-copy-or-download-resource-async)
+               (lambda (&rest _arguments)
+                 (disco-media-reset-session-state)
+                 :returned-save-as))
+              ((symbol-function 'appkit-media-cancel-transfer)
+               (lambda (transfer) (push transfer canceled)))
+              ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
+              ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore))
+      (should-not
+       (disco-media-download-attachment
+        '((id . "save") (filename . "old.bin")
+          (url . "https://old.invalid/OLD_ACCOUNT_SECRET"))
+        "/tmp/save-old"))
+      (should (equal '(:returned-save-as) canceled))
+      (should-not disco-media--attachment-export-owners))))
+
+(ert-deftest disco-media-external-audio-process-is-stopped-by-session-reset ()
+  (let ((disco-media-audio-player-command "/bin/sh -c")
+        (disco-media--attachment-external-audio-owners nil)
+        (disco-media--attachment-preview-image-cache (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-fetching (make-hash-table :test #'equal))
+        (disco-media--attachment-preview-owner-table (make-hash-table :test #'equal))
+        (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
+        (disco-media--attachment-download-owner-table (make-hash-table :test #'equal))
+        (disco-media--attachment-audio-state-table (make-hash-table :test #'equal))
+        process)
+    (unwind-protect
+        (cl-letf (((symbol-function 'appkit-media-command-arguments)
+                   (lambda (_command) '("/bin/sh" "-c")))
+                  ((symbol-function 'appkit-media-command-runnable-p)
+                   (lambda (_command) t))
+                  ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
+                  ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore))
+          (should
+           (disco-media--start-external-audio-player
+            "sleep 30 # OLD_ACCOUNT_SECRET"))
+          (setq process
+                (plist-get (car disco-media--attachment-external-audio-owners)
+                           :process))
+          (should (process-live-p process))
+          (should (string-match-p
+                   "OLD_ACCOUNT_SECRET" (prin1-to-string (process-command process))))
+          (disco-media-reset-session-state)
+          (should-not (process-live-p process))
+          (should-not disco-media--attachment-external-audio-owners)
+          (should-not (process-plist process)))
+      (when (and (processp process) (process-live-p process))
+        (delete-process process)))))
+
+(ert-deftest disco-media-external-audio-reset-before-process-return-compensates ()
+  (let ((disco-media-audio-player-command "fake-player")
+        (disco-media--attachment-external-audio-owners nil)
+        process)
+    (unwind-protect
+        (cl-letf (((symbol-function 'appkit-media-command-arguments)
+                   (lambda (_command) '("fake-player")))
+                  ((symbol-function 'appkit-media-command-runnable-p)
+                   (lambda (_command) t))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest _arguments)
+                     (setq process
+                           (make-pipe-process
+                            :name "disco-external-reset-before-return"
+                            :buffer nil :noquery t))
+                     (disco-media-reset-session-state)
+                     process))
+                  ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
+                  ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore))
+          (should-not
+           (disco-media--start-external-audio-player
+            "OLD_ACCOUNT_SECRET"))
+          (should (processp process))
+          (should-not (process-live-p process))
+          (should-not disco-media--attachment-external-audio-owners))
+      (when (and (processp process) (process-live-p process))
+        (delete-process process)))))
 
 (provide 'disco-media-test)
 

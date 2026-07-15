@@ -53,6 +53,20 @@ hydration throughput while still honoring rate-limit backoff."
 (defvar disco-http--plz-queue-limit nil
   "Last applied `disco-http-queue-limit' for queue reinitialization.")
 
+(defvar disco-http--generation 0
+  "Generation revoking callbacks from an earlier account session.")
+
+(defvar disco-http--reset-in-progress nil
+  "Non-nil while account-owned HTTP work is being destructively reset.")
+
+(defvar disco-http--direct-request-owners nil
+  "Exact owners for asynchronous requests made outside the shared queue.")
+
+(defun disco-http--assert-session-available ()
+  "Reject new HTTP work while destructive session reset is active."
+  (when disco-http--reset-in-progress
+    (error "Disco HTTP session is unavailable during reset")))
+
 (defun disco-http--method-symbol (method)
   "Convert METHOD string into plz method symbol."
   (intern (downcase method)))
@@ -140,6 +154,7 @@ ERR may be a raw `plz-error' object or a condition-case tuple like
 
 (defun disco-http--ensure-queue ()
   "Return active plz queue, creating or reinitializing when needed."
+  (disco-http--assert-session-available)
   (when (or (null disco-http--plz-queue)
             (not (equal disco-http--plz-queue-limit disco-http-queue-limit)))
     (setq disco-http--plz-queue (make-plz-queue :limit (max 1 disco-http-queue-limit)))
@@ -192,30 +207,67 @@ synchronous API contract."
        (message "disco-http: callback failed: %s"
                 (error-message-string err))))))
 
+(defun disco-http--direct-owner-current-p (owner)
+  "Return non-nil when direct request OWNER belongs to this session."
+  (and (not disco-http--reset-in-progress)
+       (= (plist-get owner :generation) disco-http--generation)
+       (memq owner disco-http--direct-request-owners)))
+
+(defun disco-http--retire-direct-owner (owner)
+  "Forget exact direct request OWNER."
+  (setq disco-http--direct-request-owners
+        (delq owner disco-http--direct-request-owners)))
+
+(defun disco-http--cancel-direct-process (process)
+  "Cancel direct plz PROCESS without publishing lifecycle errors."
+  (when (and (processp process) (process-live-p process))
+    (condition-case nil
+        (delete-process process)
+      ((error quit) nil))))
+
 (defun disco-http--request-plz-async (method url headers body timeout on-success on-error &optional body-type)
   "Execute one asynchronous HTTP request with plz."
-  (condition-case err
-      (plz (disco-http--method-symbol method) url
-        :headers headers
-        :body body
-        :body-type (or body-type 'text)
-        :as 'response
-        :timeout timeout
-        :connect-timeout timeout
-        :then (lambda (response)
-                (disco-http--call-callback
-                 on-success
-                 (disco-http--response->plist response)))
-        :else (lambda (request-error)
-                (disco-http--call-callback
-                 on-error
-                 (disco-http--error->plist request-error))))
-    (error
-     (disco-http--call-callback on-error (disco-http--error->plist err)))))
+  (let ((owner (list :generation disco-http--generation :process nil)))
+    ;; Reserve exact ownership before `plz': a test double or process sentinel
+    ;; may synchronously reset the account before the constructor returns.
+    (push owner disco-http--direct-request-owners)
+    (condition-case err
+        (let ((process
+               (plz (disco-http--method-symbol method) url
+                 :headers headers
+                 :body body
+                 :body-type (or body-type 'text)
+                 :as 'response
+                 :timeout timeout
+                 :connect-timeout timeout
+                 :then
+                 (lambda (response)
+                   (when (disco-http--direct-owner-current-p owner)
+                     (disco-http--retire-direct-owner owner)
+                     (disco-http--call-callback
+                      on-success
+                      (disco-http--response->plist response))))
+                 :else
+                 (lambda (request-error)
+                   (when (disco-http--direct-owner-current-p owner)
+                     (disco-http--retire-direct-owner owner)
+                     (disco-http--call-callback
+                      on-error
+                      (disco-http--error->plist request-error)))))))
+          (if (disco-http--direct-owner-current-p owner)
+              (setf (plist-get owner :process) process)
+            (disco-http--cancel-direct-process process))
+          process)
+      (error
+       (when (disco-http--direct-owner-current-p owner)
+         (disco-http--retire-direct-owner owner)
+         (disco-http--call-callback
+          on-error (disco-http--error->plist err)))))))
 
 (defun disco-http--request-plz-queued-async (method url headers body timeout on-success on-error &optional body-type)
   "Execute one asynchronous request via the shared plz queue."
-  (let ((queue (disco-http--ensure-queue)))
+  (let ((queue (disco-http--ensure-queue))
+        (generation disco-http--generation))
     (plz-queue
       queue
       (disco-http--method-symbol method)
@@ -227,13 +279,19 @@ synchronous API contract."
       :timeout timeout
       :connect-timeout timeout
       :then (lambda (response)
-              (disco-http--call-callback
-               on-success
-               (disco-http--response->plist response)))
+              (when (and (not disco-http--reset-in-progress)
+                         (= generation disco-http--generation)
+                         (eq queue disco-http--plz-queue))
+                (disco-http--call-callback
+                 on-success
+                 (disco-http--response->plist response))))
       :else (lambda (request-error)
-              (disco-http--call-callback
-               on-error
-               (disco-http--error->plist request-error))))
+              (when (and (not disco-http--reset-in-progress)
+                         (= generation disco-http--generation)
+                         (eq queue disco-http--plz-queue))
+                (disco-http--call-callback
+                 on-error
+                 (disco-http--error->plist request-error)))))
     (plz-run queue)))
 
 (defun disco-http-queue-stats ()
@@ -260,17 +318,37 @@ synchronous API contract."
     (message "disco-http queue: enabled=%s limit=%s active=%s pending=%s outstanding=%s"
              enabled limit active pending outstanding)))
 
+(defun disco-http--clear-queue-state ()
+  "Forget HTTP queue bookkeeping without invoking queue cancellation."
+  (setq disco-http--plz-queue nil
+        disco-http--plz-queue-limit nil
+        disco-http--direct-request-owners nil))
+
 (defun disco-http-reset-queue-state ()
-  "Reset local HTTP queue bookkeeping state." 
-  (when disco-http--plz-queue
-    (ignore-errors (plz-clear disco-http--plz-queue)))
-  (setq disco-http--plz-queue nil)
-  (setq disco-http--plz-queue-limit nil))
+  "Revoke and cancel HTTP work owned by the retired account session."
+  (let ((queue disco-http--plz-queue)
+        (owners disco-http--direct-request-owners)
+        (disco-http--reset-in-progress t))
+    ;; Revoke exact ownership before cancellation because `plz-clear' invokes
+    ;; pending error callbacks synchronously.
+    (cl-incf disco-http--generation)
+    (disco-http--clear-queue-state)
+    (unwind-protect
+        (progn
+          (when queue
+            (condition-case nil
+                (plz-clear queue)
+              ((error quit) nil)))
+          (dolist (owner owners)
+            (disco-http--cancel-direct-process
+             (plist-get owner :process))))
+      (disco-http--clear-queue-state))))
 
 (cl-defun disco-http-request (&key method url headers body timeout body-type)
   "Execute HTTP request and return plist with :status :body :headers.
 
 METHOD is uppercase string (for example: GET)."
+  (disco-http--assert-session-available)
   (if (not disco-http-serialize-requests)
       (disco-http--request-plz method url headers body timeout body-type)
     (disco-http--request-plz-queued method url headers body timeout body-type)))
@@ -280,6 +358,7 @@ METHOD is uppercase string (for example: GET)."
 
 ON-SUCCESS and ON-ERROR are called with a normalized response plist
 containing keys `:status', `:body', and `:headers'."
+  (disco-http--assert-session-available)
   (if (not disco-http-serialize-requests)
       (disco-http--request-plz-async method url headers body timeout on-success on-error body-type)
     (disco-http--request-plz-queued-async method url headers body timeout on-success on-error body-type)))
