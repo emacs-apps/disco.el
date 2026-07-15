@@ -165,6 +165,58 @@
           (kill-buffer buffer))
         (disco-runtime-stop)))))
 
+(ert-deftest disco-room-video-action-cannot-rebind-to-replacement-app ()
+  (let ((disco-runtime--app nil)
+        (disco-room-use-rich-attachment-cards t)
+        (disco-media-show-previews nil)
+        old-app
+        replacement-app
+        play-action
+        played-owner)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore)
+              ((symbol-function 'appkit-media-play-video-url)
+               (lambda (_url _label &rest options)
+                 (setq played-owner (plist-get options :owner))
+                 :player)))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "video-owner")
+            (disco-state-put-messages
+             "video-owner"
+             '(((id . "m-video")
+                (channel_id . "video-owner")
+                (content . "")
+                (attachments
+                 . (((id . "a-video")
+                     (filename . "clip.mp4")
+                     (content_type . "video/mp4")
+                     (url . "https://example.invalid/clip.mp4")))))))
+            (disco-room-test-establish-latest-window "video-owner")
+            (disco-room-render)
+            (let ((old-view (appkit-current-view)))
+              (setq old-app (appkit-view-app old-view))
+              (goto-char (point-min))
+              (search-forward "clip.mp4")
+              (setq play-action
+                    (plist-get
+                     (get-text-property
+                      (match-beginning 0) appkit-media-card-context-property)
+                     :open-action))
+              (should (functionp play-action))
+              (appkit-stop-app old-app)
+              (should-not (appkit-app-live-p old-app))
+              (setq replacement-app (disco-runtime-app))
+              (should (appkit-app-live-p replacement-app))
+              (should-not (eq old-app replacement-app))
+              (should (equal (appkit-app-id old-app)
+                             (appkit-app-id replacement-app)))
+              (funcall play-action)
+              (should (eq old-app played-owner))
+              (should-not (eq replacement-app played-owner))))
+        (when (appkit-app-live-p replacement-app)
+          (appkit-stop-app replacement-app))))))
+
 (ert-deftest disco-room-cross-channel-jump-uses-renamed-view-buffer ()
   (let ((disco-runtime--app nil)
         target-buffer

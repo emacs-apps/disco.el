@@ -3898,8 +3898,11 @@ Returns empty string when no avatar is available."
       (appkit-chat-avatar-prefixes
        nil fallback :pixel-size base-size))))
 
-(cl-defun disco-room--insert-attachment-card (attachment &key message-id spoiler-hidden)
-  "Insert one typed rich attachment block for ATTACHMENT object."
+(cl-defun disco-room--insert-attachment-card
+    (attachment &key message-id spoiler-hidden owner)
+  "Insert one typed rich attachment block for ATTACHMENT object.
+
+OWNER is the exact Appkit app captured by video playback actions."
   (let ((toggle-action (and spoiler-hidden
                             (stringp message-id)
                             (lambda ()
@@ -3924,7 +3927,8 @@ Returns empty string when no avatar is available."
         :action-face 'disco-room-attachment-card-action
         :show-url disco-room-show-attachment-urls
         :spoiler-hidden spoiler-hidden
-        :spoiler-toggle-action toggle-action))
+        :spoiler-toggle-action toggle-action
+        :owner owner))
       ('audio
        (disco-ins-insert-attachment-audio
         attachment
@@ -3951,9 +3955,12 @@ Returns empty string when no avatar is available."
 
 An exact card context property wins before this function is called; this is
 only the message-level fallback used by the shared media transient protocol."
-  (when-let* ((message (ignore-errors (disco-room--message-at-point)))
+  (when-let* ((view (appkit-current-view))
+              (_ (appkit-view-live-p view))
+              (owner (appkit-view-app view))
+              (message (ignore-errors (disco-room--message-at-point)))
               (attachment (car (disco-room--message-effective-attachments message))))
-    (disco-media-attachment-card-context attachment)))
+    (disco-media-attachment-card-context attachment owner)))
 
 (defun disco-room--normalize-list-sequence (value)
   "Normalize VALUE into a list, preserving list/vector elements."
@@ -4504,10 +4511,11 @@ UI affordances such as timestamps, reaction rows and attachment cards."
   "Return one-line attachment summary string for ATTACHMENT object."
   (disco-media-attachment-summary attachment))
 
-(defun disco-room--insert-message-attachments (msg &optional prefix)
+(defun disco-room--insert-message-attachments (msg &optional prefix owner)
   "Insert attachment detail lines for MSG.
 
-PREFIX can be a fixed prefix string or mutable prefix-state."
+PREFIX can be a fixed prefix string or mutable prefix-state.  OWNER is the
+exact Appkit app captured by video playback actions."
   (when disco-room-show-attachments
     (let* ((message-id (alist-get 'id msg))
            (reveal-spoilers (disco-room--message-spoilers-revealed-p message-id)))
@@ -4519,7 +4527,8 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
               (disco-room--insert-attachment-card
                attachment
                :message-id message-id
-               :spoiler-hidden spoiler-hidden)
+               :spoiler-hidden spoiler-hidden
+               :owner owner)
             (if spoiler-hidden
                 (disco-ins-insert-attachment-spoiler-placeholder
                  attachment
@@ -4538,10 +4547,11 @@ PREFIX can be a fixed prefix string or mutable prefix-state."
                :summary-face 'disco-room-message-meta
                :url-face 'shadow))))))))
 
-(defun disco-room--insert-message-embeds (msg)
-  "Insert embed detail lines for MSG."
+(defun disco-room--insert-message-embeds (msg &optional owner)
+  "Insert embed detail lines for MSG with exact Appkit OWNER."
   (disco-embed-insert-message-embeds
-   (disco-room--message-with-effective-embeds msg)))
+   (disco-room--message-with-effective-embeds msg)
+   owner))
 
 (defun disco-room--poll-draft-selection (message-id)
   "Return staged poll selection list for MESSAGE-ID.
@@ -5276,8 +5286,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                      (disco-room-jump-to-message ref-id ref-channel))
            :help-echo "Open forwarded source"))))))
 
-(defun disco-room--insert-message (msg context)
-  "Insert one message MSG using projected render CONTEXT."
+(defun disco-room--insert-message (msg context &optional owner)
+  "Insert one message MSG using projected render CONTEXT and Appkit OWNER."
   (if (disco-room--message-system-divider-p msg)
       (disco-room--insert-system-divider-message msg context)
     (let* ((compact (disco-util-json-true-p (plist-get context :compact)))
@@ -5400,8 +5410,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                              target-thread-id
                              (or target-thread-name target-thread-id))))
              :help-echo "Open starter thread for this message")))
-        (disco-room--insert-message-attachments msg section-prefix-state)
-        (disco-room--insert-message-embeds msg)
+        (disco-room--insert-message-attachments msg section-prefix-state owner)
+        (disco-room--insert-message-embeds msg owner)
         (disco-room--insert-message-poll msg))
       (when disco-room-show-reactions
         (disco-ins-insert-reaction-line
@@ -5428,9 +5438,13 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--ewoc-printer (row)
   "EWOC pretty-printer for one projected room ROW."
-  (disco-room--insert-message
-   (appkit-chat-timeline-row-payload row)
-   (or (appkit-chat-timeline-row-context row) '())))
+  (let ((view (appkit-current-view)))
+    (unless (appkit-view-live-p view)
+      (error "disco: cannot render media actions without an exact live view"))
+    (disco-room--insert-message
+     (appkit-chat-timeline-row-payload row)
+     (or (appkit-chat-timeline-row-context row) '())
+     (appkit-view-app view))))
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."

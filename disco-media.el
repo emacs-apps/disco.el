@@ -1081,8 +1081,11 @@ with direct callers; asynchronous entrypoints always provide an exact owner."
       (remhash cache-key disco-media--attachment-preview-owner-table))
     (disco-media--notify-state-updated 'preview cache-key)))
 
-(cl-defun disco-media-open-discord-resource (resource &optional kind cache-key)
-  "Adapt and open Discord RESOURCE through the shared media runtime."
+(cl-defun disco-media-open-discord-resource
+    (resource &optional kind cache-key &key owner)
+  "Adapt and open Discord RESOURCE through the shared media runtime.
+
+OWNER is the exact Appkit app or view that owns external video playback."
   (appkit-media-open-resource
    (appkit-media-resource-create
     :file (alist-get 'file resource)
@@ -1092,7 +1095,8 @@ with direct callers; asynchronous entrypoints always provide an exact owner."
    :kind kind
    :cache-key cache-key
    :cache-directory disco-media-preview-cache-directory
-   :client-label "disco"))
+   :client-label "disco"
+   :owner owner))
 
 (defun disco-media--attachment-appkit-resource (attachment &optional file)
   "Return canonical appkit resource for Discord ATTACHMENT and local FILE."
@@ -1756,16 +1760,18 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
       (user-error "disco: attachment file is not downloaded yet"))
     (appkit-media-open-file path)))
 
-(defun disco-media-play-attachment-video (attachment)
-  "Play ATTACHMENT video preferring local file when available."
+(defun disco-media-play-attachment-video (attachment &optional owner)
+  "Play ATTACHMENT video preferring local file when available.
+
+OWNER is the exact Appkit app or view that owns the external player."
   (let* ((entry (disco-media-attachment-download-state attachment))
          (path (plist-get entry :path))
          (url (disco-media-attachment-download-url attachment)))
     (cond
      ((and (stringp path) (file-exists-p path))
-      (appkit-media-play-video-file path "disco"))
+      (appkit-media-play-video-file path "disco" :owner owner))
      ((appkit-media-url-present-p url)
-      (appkit-media-play-video-url url "disco"))
+      (appkit-media-play-video-url url "disco" :owner owner))
      (t
       (user-error "disco: video attachment has no playable source")))))
 
@@ -2194,14 +2200,16 @@ When TARGET-PATH is nil, prompt interactively for destination path."
             (retire)
             (cancel-returned)))))))
 
-(defun disco-media-open-attachment (attachment)
-  "Open or play ATTACHMENT according to its media kind."
+(defun disco-media-open-attachment (attachment &optional owner)
+  "Open or play ATTACHMENT according to its media kind.
+
+OWNER is forwarded only to Appkit operations that can launch a video player."
   (let* ((kind (disco-media-attachment-kind attachment))
          (state (disco-media-attachment-download-state attachment))
          (path (plist-get state :path))
          (url (disco-media-attachment-download-url attachment)))
     (pcase kind
-      ('video (disco-media-play-attachment-video attachment))
+      ('video (disco-media-play-attachment-video attachment owner))
       ('audio (disco-media-play-attachment-audio attachment))
       ('photo
        (disco-media-open-discord-resource
@@ -2221,8 +2229,10 @@ When TARGET-PATH is nil, prompt interactively for destination path."
         (t
          (user-error "disco: attachment has no openable source")))))))
 
-(defun disco-media-attachment-card-context (attachment)
-  "Return shared media card context adapted from Discord ATTACHMENT."
+(defun disco-media-attachment-card-context (attachment &optional owner)
+  "Return shared media card context adapted from Discord ATTACHMENT.
+
+OWNER is captured exactly by the card's open/play action."
   (let* ((state (disco-media-attachment-download-state attachment))
          (status (plist-get state :status))
          (path (plist-get state :path))
@@ -2235,7 +2245,7 @@ When TARGET-PATH is nil, prompt interactively for destination path."
      :title (disco-media-attachment-display-name attachment)
      :open-action (when (or has-local has-url)
                     (lambda ()
-                      (disco-media-open-attachment attachment)))
+                      (disco-media-open-attachment attachment owner)))
      :download-action (when (and has-url
                                  (not (memq status '(downloading downloaded))))
                         (lambda ()

@@ -395,6 +395,49 @@
          (url . "https://example.invalid/voice.ogg")))
       (should (equal "/tmp/voice.ogg" started-source)))))
 
+(ert-deftest disco-media-video-playback-forwards-exact-app-owner ()
+  (let ((owner (list 'exact-disco-app))
+        (video-file (make-temp-file "disco-media-owner" nil ".mp4"))
+        local-owner
+        remote-owner)
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+                     (lambda (_attachment)
+                       `(:status downloaded :path ,video-file)))
+                    ((symbol-function 'appkit-media-play-video-file)
+                     (lambda (_path _label &rest options)
+                       (setq local-owner (plist-get options :owner)))))
+            (disco-media-play-attachment-video
+             '((filename . "local.mp4")) owner))
+          (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+                     (lambda (_attachment)
+                       '(:status not-downloaded :path nil)))
+                    ((symbol-function 'appkit-media-play-video-url)
+                     (lambda (_url _label &rest options)
+                       (setq remote-owner (plist-get options :owner)))))
+            (disco-media-play-attachment-video
+             '((filename . "remote.mp4")
+               (url . "https://example.invalid/remote.mp4"))
+             owner))
+          (should (eq owner local-owner))
+          (should (eq owner remote-owner)))
+      (ignore-errors (delete-file video-file)))))
+
+(ert-deftest disco-media-resource-adapter-forwards-video-owner ()
+  (let ((owner (list 'exact-disco-app))
+        forwarded-owner
+        forwarded-kind)
+    (cl-letf (((symbol-function 'appkit-media-open-resource)
+               (lambda (_resource &rest options)
+                 (setq forwarded-owner (plist-get options :owner)
+                       forwarded-kind (plist-get options :kind)))))
+      (disco-media-open-discord-resource
+       '((url . "https://example.invalid/video.mp4"))
+       'video nil :owner owner))
+    (should (eq owner forwarded-owner))
+    (should (eq 'video forwarded-kind))))
+
 (ert-deftest disco-media-open-photo-attachment-uses-original-not-proxy-url ()
   "The CDN proxy remains preview-only when opening a Discord image."
   (let (opened-arguments)

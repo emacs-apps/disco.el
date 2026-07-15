@@ -189,12 +189,12 @@ only meaningful transfer state remains inline."
    :prefix (or prefix "    ")
    :face face))
 
-(cl-defun disco-ins-insert-attachment-preview-block (attachment &key prefix face
-                                                                kind required)
+(cl-defun disco-ins-insert-attachment-preview-block
+    (attachment &key prefix face kind required owner)
   "Insert preview block for ATTACHMENT when available.
 
 When REQUIRED is non-nil, insert a placeholder line when preview output cannot
-be shown yet."
+be shown yet.  OWNER is captured by an external video playback action."
   (let* ((kind (or kind (disco-media-attachment-kind attachment)))
          (video-p (eq kind 'video))
          (preview-source (disco-media-attachment-preview-image attachment))
@@ -240,7 +240,7 @@ be shown yet."
                   (appkit-media-insert-image-slices
                    preview
                    (lambda ()
-                     (disco-media-open-attachment attachment))
+                     (disco-media-open-attachment attachment owner))
                    nil
                    (or (alist-get 'description attachment)
                        (if video-p "[video]" "[image]"))
@@ -358,19 +358,19 @@ be shown yet."
             :action (lambda () (disco-media-open-attachment attachment))
             :help-echo "Open image in Emacs")))))))
 
-(cl-defun disco-ins-insert-attachment-video (attachment &key prefix border-face
-                                                        title-face meta-face
-                                                        action-face show-url
-                                                        spoiler-hidden
-                                                        spoiler-toggle-action)
-  "Insert one video-style attachment block for ATTACHMENT."
+(cl-defun disco-ins-insert-attachment-video
+    (attachment &key prefix border-face title-face meta-face action-face
+                show-url spoiler-hidden spoiler-toggle-action owner)
+  "Insert one video-style attachment block for ATTACHMENT.
+
+OWNER is the exact Appkit app or view captured by every play action."
   (let* ((name (disco-media-attachment-display-name attachment))
          (details (delq nil (list (disco-media-attachment-dimensions-label attachment)
                                   (disco-media-attachment-size-label attachment)
                                   (disco-media-attachment-duration-label attachment)
                                   (when (disco-media-attachment-ephemeral-p attachment)
                                     "ephemeral"))))
-         (context (disco-media-attachment-card-context attachment)))
+         (context (disco-media-attachment-card-context attachment owner)))
     (when spoiler-hidden
       (setq context (plist-put context :open-action nil)))
     (appkit-chat-ins-insert-media-card
@@ -395,7 +395,8 @@ be shown yet."
             :button-face action-face
             :toggle-action spoiler-toggle-action)
          (disco-ins-insert-attachment-preview-block
-          attachment :prefix prefix-state :face meta-face :kind 'video :required t)
+          attachment :prefix prefix-state :face meta-face :kind 'video :required t
+          :owner owner)
          (disco-ins-insert-attachment-caption-line
           (alist-get 'description attachment) :prefix prefix-state :face meta-face)
          (when show-url
@@ -403,7 +404,7 @@ be shown yet."
             (disco-media-attachment-download-url attachment)
             :prefix prefix-state
             :face 'shadow
-            :action (lambda () (disco-media-open-attachment attachment))
+            :action (lambda () (disco-media-open-attachment attachment owner))
             :help-echo "Play video")))))))
 
 (defun disco-ins--attachment-audio-tag (attachment)

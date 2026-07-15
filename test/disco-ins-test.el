@@ -236,7 +236,9 @@
 
 (ert-deftest disco-ins-insert-attachment-video-uses-card-as-play-action ()
   (let ((video-file (make-temp-file "disco-ins-video" nil ".mp4"))
+        (owner (list 'exact-disco-app))
         played
+        played-owner
         decorated
         preview-action
         preview-help)
@@ -261,8 +263,9 @@
                              preview-help help)
                        (insert "[video-preview]")))
                     ((symbol-function 'disco-media-play-attachment-video)
-                     (lambda (_attachment)
-                       (setq played t))))
+                     (lambda (_attachment &optional received-owner)
+                       (setq played t
+                             played-owner received-owner))))
             (disco-ins-insert-attachment-video
              '((filename . "clip.mp4")
                (size . 8192)
@@ -272,7 +275,8 @@
              :prefix "    "
              :title-face 'bold
              :meta-face 'shadow
-             :action-face 'link)
+             :action-face 'link
+             :owner owner)
             (should (eq :fake-preview decorated))
             (should (string-match-p (regexp-quote "[video] clip.mp4") (buffer-string)))
             (should (string-match-p (regexp-quote "[video-preview]") (buffer-string)))
@@ -280,11 +284,14 @@
             (goto-char (point-min))
             (appkit-media-card-call-action 'open)
             (should played)
+            (should (eq owner played-owner))
             (should (functionp preview-action))
             (should (string-match-p "Play video" preview-help))
-            (setq played nil)
+            (setq played nil
+                  played-owner nil)
             (funcall preview-action)
-            (should played)))
+            (should played)
+            (should (eq owner played-owner))))
       (ignore-errors (delete-file video-file)))))
 
 (ert-deftest disco-ins-insert-attachment-transfer-line-renders-status-only ()

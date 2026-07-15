@@ -174,6 +174,65 @@
             (button-activate button))
           (should (equal url (alist-get 'url opened-resource))))))))
 
+(ert-deftest disco-embed-insert-card-threads-exact-video-owner ()
+  (let ((owner (list 'exact-disco-app))
+        captured-owners)
+    (with-temp-buffer
+      (let ((disco-embed-show-urls t))
+        (cl-letf (((symbol-function 'disco-embed--add-url-properties)
+                   (lambda (_start _end _url _kind &optional received-owner)
+                     (push received-owner captured-owners)))
+                  ((symbol-function 'disco-embed--insert-preview-row)
+                   (lambda (&rest arguments)
+                     (push (car (last arguments)) captured-owners)))
+                  ((symbol-function 'disco-embed--insert-action-row)
+                   (lambda (&rest arguments)
+                     (push (car (last arguments)) captured-owners))))
+          (disco-embed-insert-card
+           '((id . "m-video"))
+           '((type . "video")
+             (title . "clip")
+             (url . "https://example.invalid/watch")
+             (video . ((url . "https://example.invalid/clip.mp4"))))
+           1 owner))))
+    (should (>= (length captured-owners) 3))
+    (should (seq-every-p (lambda (captured) (eq owner captured))
+                         captured-owners))))
+
+(ert-deftest disco-embed-video-properties-and-actions-capture-exact-owner ()
+  (let ((owner (list 'exact-disco-app))
+        property-owner
+        main-action-owner
+        play-action-owner
+        play-action)
+    (with-temp-buffer
+      (insert "video")
+      (cl-letf (((symbol-function 'appkit-media-add-play-video-properties)
+                 (lambda (_start _end _url _label &rest options)
+                   (setq property-owner (plist-get options :owner))))
+                ((symbol-function 'appkit-media-play-video-url)
+                 (lambda (_url _label &rest options)
+                   (if play-action
+                       (setq play-action-owner (plist-get options :owner))
+                     (setq main-action-owner (plist-get options :owner)))))
+                ((symbol-function 'disco-embed--insert-action-button)
+                 (lambda (label callback _help)
+                   (when (equal label "[Play]")
+                     (setq play-action callback))
+                   (insert label))))
+        (disco-embed--add-url-properties
+         (point-min) (point-max) "https://example.invalid/clip.mp4" 'video owner)
+        (funcall (car (disco-embed--url-action
+                       "https://example.invalid/main.mp4" 'video owner)))
+        (disco-embed--insert-action-row
+         nil 'page nil "https://example.invalid/extra.mp4"
+         nil nil nil nil "" owner)
+        (should (functionp play-action))
+        (funcall play-action)))
+    (should (eq owner property-owner))
+    (should (eq owner main-action-owner))
+    (should (eq owner play-action-owner))))
+
 (ert-deftest disco-embed-message-preview-cache-keys-cover-media-and-author-icon ()
   (let* ((msg
           '((id . "m1")

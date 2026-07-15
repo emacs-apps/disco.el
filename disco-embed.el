@@ -850,8 +850,10 @@ Return non-nil when anything was inserted."
 
 (defun disco-embed--insert-preview-row
     (msg embed embed-index media-kind media-url media-source-url
-         video-url video-source-url prefix-str)
-  "Insert media preview row for EMBED in MSG."
+         video-url video-source-url prefix-str &optional owner)
+  "Insert media preview row for EMBED in MSG.
+
+OWNER is captured exactly by external video playback properties."
   (let* ((preview-rendering-available
           (and disco-embed-show-image-previews
                (appkit-media-inline-image-rendering-available-p)))
@@ -950,7 +952,8 @@ Return non-nil when anything was inserted."
                        slice-start
                        (point)
                        play-video-url
-                       "disco")))
+                       "disco"
+                       :owner owner)))
                 (error
                  (insert (if video-preview-p
                              "[video preview unavailable]"
@@ -993,11 +996,14 @@ in-Emacs media behavior."
     'image)
    (t 'page)))
 
-(defun disco-embed--add-url-properties (start end url kind)
-  "Make URL between START and END interactive according to KIND."
+(defun disco-embed--add-url-properties (start end url kind &optional owner)
+  "Make URL between START and END interactive according to KIND.
+
+OWNER is captured exactly when KIND launches an external video player."
   (pcase kind
     ('video
-     (appkit-media-add-play-video-properties start end url "disco"))
+     (appkit-media-add-play-video-properties
+      start end url "disco" :owner owner))
     ('image
      (appkit-media-add-open-image-properties
       start end `((url . ,url))
@@ -1006,11 +1012,14 @@ in-Emacs media behavior."
     (_
      (appkit-media-add-open-url-properties start end url))))
 
-(defun disco-embed--url-action (url kind)
-  "Return callback and help text for opening URL according to KIND."
+(defun disco-embed--url-action (url kind &optional owner)
+  "Return callback and help text for opening URL according to KIND.
+
+OWNER is captured exactly when KIND launches an external video player."
   (pcase kind
     ('video
-     (list (lambda () (appkit-media-play-video-url url "disco"))
+     (list (lambda ()
+             (appkit-media-play-video-url url "disco" :owner owner))
            "Play embed video"))
     ('image
      (list (lambda ()
@@ -1021,12 +1030,15 @@ in-Emacs media behavior."
 
 (defun disco-embed--insert-action-row
     (main-url main-url-kind media-url video-url author-url provider-url
-              author-icon-url embed prefix-str)
-  "Insert compact action buttons row for one embed."
+              author-icon-url embed prefix-str &optional owner)
+  "Insert compact action buttons row for one embed.
+
+OWNER is captured exactly by all external video playback actions."
   (let ((actions '())
         (media-kind (car (disco-embed--media-entry embed))))
     (when (appkit-media-url-present-p main-url)
-      (let ((main-action (disco-embed--url-action main-url main-url-kind)))
+      (let ((main-action
+             (disco-embed--url-action main-url main-url-kind owner)))
         (push (list "[Open]" (car main-action) (cadr main-action)) actions))
       (push (list "[Copy]"
                   (lambda ()
@@ -1037,7 +1049,9 @@ in-Emacs media behavior."
     (when (and (appkit-media-url-present-p video-url)
                (not (equal video-url main-url)))
       (push (list "[Play]"
-                  (lambda () (appkit-media-play-video-url video-url "disco"))
+                  (lambda ()
+                    (appkit-media-play-video-url
+                     video-url "disco" :owner owner))
                   "Play embed video")
             actions))
     (when (and (memq media-kind '(image thumbnail))
@@ -1088,8 +1102,10 @@ in-Emacs media behavior."
          (point)
          (disco-embed--background-face embed))))))
 
-(defun disco-embed-insert-card (msg embed embed-index)
-  "Insert one telega-inspired rich embed card for EMBED from MSG."
+(defun disco-embed-insert-card (msg embed embed-index &optional owner)
+  "Insert one telega-inspired rich embed card for EMBED from MSG.
+
+OWNER is the exact Appkit app or view captured by video actions."
   (let* ((summary (disco-embed--summary embed))
          (meta-fallback (disco-embed--meta-line embed))
          (description (disco-embed--description-line embed))
@@ -1155,7 +1171,7 @@ in-Emacs media behavior."
       (insert summary)
       (when (appkit-media-url-present-p main-url)
         (disco-embed--add-url-properties
-         title-start (point) main-url main-url-kind))
+         title-start (point) main-url main-url-kind owner))
       (insert "\n")
       (appkit-ui-apply-line-prefix title-start (point) prefix-str)
       (appkit-ui-append-face title-start (point) title-face))
@@ -1182,7 +1198,7 @@ in-Emacs media behavior."
     (when media-entry
       (disco-embed--insert-preview-row
        msg embed embed-index media-kind media-url media-source-url
-       video-url video-source-url prefix-str))
+       video-url video-source-url prefix-str owner))
     (dolist (field fields)
       (disco-embed--insert-field-row field embed prefix-str))
     (when footer-line
@@ -1199,7 +1215,8 @@ in-Emacs media behavior."
      provider-url
      (or author-icon-source-url author-icon-url)
      embed
-     prefix-str)
+     prefix-str
+     owner)
     (when disco-embed-show-urls
       (let ((raw-media-url (or media-source-url media-url))
             (raw-video-url (or video-source-url video-url))
@@ -1226,12 +1243,15 @@ in-Emacs media behavior."
                         (equal raw-url raw-media-url))
                    (equal raw-url raw-icon-url))
                'image)
-              (t 'page)))
+              (t 'page))
+             owner)
             (appkit-ui-apply-line-prefix url-start (point) prefix-str)
             (appkit-ui-append-face url-start (point) shadow-face))))))))
 
-(defun disco-embed-insert-message-embeds (msg)
-  "Insert embed detail lines for MSG."
+(defun disco-embed-insert-message-embeds (msg &optional owner)
+  "Insert embed detail lines for MSG.
+
+OWNER is the exact Appkit app or view captured by video actions."
   (when disco-embed-show-embeds
     (let ((embed-index 0)
           (embeds (disco-embed--normalize-embeds (alist-get 'embeds msg))))
@@ -1244,7 +1264,7 @@ in-Emacs media behavior."
                     (funcall 'disco-room--message-spoilers-revealed-p
                              (alist-get 'id msg)))))
           (if disco-embed-use-rich-cards
-              (disco-embed-insert-card msg embed embed-index)
+              (disco-embed-insert-card msg embed embed-index owner)
             (let* ((prefix-source (or appkit-ui-card-indent-prefix-state
                                       (or appkit-ui-card-indent-prefix "    ")))
                    (line-start (point))
