@@ -32,6 +32,7 @@
 (require 'disco-typing)
 (require 'disco-markdown)
 (require 'disco-media)
+(require 'disco-avatar)
 (require 'disco-embed)
 (require 'appkit-view)
 (require 'disco-api)
@@ -152,32 +153,6 @@ This is a search boundary, not the remote/latest protocol frontier.")
     "Yay you made it, %s!"]
   "Rendered templates for USER_JOIN system messages (type 7).")
 
-(defvar disco-room--avatar-image-cache (make-hash-table :test #'equal)
-  "Global successful avatar image cache keyed by avatar cache key.")
-
-(defvar disco-room--avatar-fetching (make-hash-table :test #'equal)
-  "Global set of avatar cache keys currently being fetched.")
-
-(defvar disco-room--avatar-failures (make-hash-table :test #'equal)
-  "Avatar failure state keyed by avatar cache key.
-
-Each value is a plist containing retry timing, attempt count, source URL, and
-the last readable error.  Permanent HTTP failures are retained until the
-avatar cache is explicitly cleared.")
-
-(defvar disco-room--avatar-retry-timer nil
-  "Timer for the next due avatar retry.")
-
-(defvar disco-room--avatar-invalidation-timer nil
-  "Timer used to coalesce timeline invalidations after avatar fetches.")
-
-(defvar disco-room--avatar-pending-invalidations
-  (make-hash-table :test #'equal)
-  "Avatar cache keys awaiting targeted timeline invalidation.")
-
-(defvar disco-room--avatar-fetch-generation 0
-  "Generation used to ignore callbacks from canceled avatar fetch batches.")
-
 (defvar disco-room--session-cache-reset-in-progress nil
   "Non-nil while account-scoped room media state is being retired.
 
@@ -199,19 +174,6 @@ process, so a late callback cannot retire or overwrite a replacement request.")
 
 (defvar disco-room--forward-guild-icon-fetch-generation 0
   "Generation used to revoke forwarded guild icon request callbacks.")
-
-(defvar disco-room--avatar-fetch-budget nil
-  "Dynamic cap for number of avatar fetches started in current render pass.")
-
-(defvar disco-room--avatar-plz-queue nil
-  "Shared plz queue used for asynchronous avatar downloads.")
-
-(defvar disco-room--avatar-plz-queue-limit nil
-  "Last applied queue limit for `disco-room--avatar-plz-queue'.")
-
-(defconst disco-room--avatar-cache-extensions
-  '("webp" "png" "jpg" "jpeg" "gif" "img")
-  "Preferred avatar cache file extension candidates.")
 
 (defvar disco-room-draft-history-search-history nil
   "Minibuffer history for room draft-history searches.")
@@ -275,18 +237,6 @@ forwarded as raw `allowed_mentions' object."
   :type 'boolean
   :group 'disco)
 
-(defcustom disco-room-show-avatar-images t
-  "When non-nil, render author avatars as inline images when possible.
-
-When image rendering is unavailable, room falls back to text placeholders."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-avatar-image-size 28
-  "Pixel size used for inline avatar images in room timeline."
-  :type 'integer
-  :group 'disco)
-
 (defcustom disco-room-avatar-round-images t
   "When non-nil, render room avatars using circular clipping when available."
   :type 'boolean
@@ -324,42 +274,6 @@ telega's avatar sizing approach."
 This mirrors telega's gap workaround and keeps slice seams stable."
   :type 'boolean
   :group 'disco)
-
-(defcustom disco-room-avatar-cache-directory
-  (locate-user-emacs-file "disco-avatar-cache/")
-  "Directory used to cache downloaded avatar images."
-  :type 'directory
-  :group 'disco)
-
-
-(defcustom disco-room-avatar-max-fetches-per-render nil
-  "Maximum avatar fetches started during one room render pass.
-
-When nil, avatar fetches are uncapped per render pass
-(queue concurrency still applies)."
-  :type '(choice
-          (const :tag "No per-render cap" nil)
-          integer)
-  :group 'disco)
-
-
-(defcustom disco-room-avatar-fetch-concurrency 6
-  "Maximum concurrent avatar downloads in plz queue."
-  :type 'integer
-  :group 'disco)
-
-(defcustom disco-room-avatar-retry-delays '(1 3 10 30 120)
-  "Backoff delays in seconds for transient avatar fetch failures.
-
-After all entries are used, the final delay remains the retry ceiling."
-  :type '(repeat number)
-  :group 'disco)
-
-(defcustom disco-room-avatar-invalidation-delay 0.05
-  "Seconds used to coalesce timeline invalidation after avatar downloads."
-  :type 'number
-  :group 'disco)
-
 
 (defcustom disco-room-show-attachments t
   "When non-nil, render attachment details under each message."
@@ -3172,261 +3086,10 @@ source message, not the synthetic starter row itself."
         (insert-image image fallback)
       (insert fallback))))
 
-(defun disco-room--image-rendering-available-p ()
-  "Return non-nil when avatar images can be shown in current frame."
-  (and disco-room-show-avatar-images
-       (appkit-media-inline-image-rendering-available-p)))
-
-(defun disco-room--author-avatar-hash (msg)
-  "Extract Discord avatar hash string from MSG author, or nil."
+(defun disco-room--avatar-user (msg)
+  "Return MSG's effective Discord author user alist, or nil."
   (let ((author (disco-room--message-effective-author msg)))
-    (and (listp author) (alist-get 'avatar author))))
-
-(defun disco-room--author-default-avatar-index (msg)
-  "Return Discord default avatar index for MSG author."
-  (let* ((author (disco-room--message-effective-author msg))
-         (user-id (and (listp author) (alist-get 'id author)))
-         (discriminator (and (listp author) (alist-get 'discriminator author))))
-    (cond
-     ((and discriminator
-           (stringp discriminator)
-           (not (string= discriminator "0")))
-      (mod (string-to-number discriminator) 5))
-     ((and user-id (string-match-p "\\`[0-9]+\\'" user-id))
-      ;; Modern Discord default avatar buckets derive from user snowflake.
-      (mod (ash (string-to-number user-id) -22) 6))
-     (t 0))))
-
-(defun disco-room--avatar-url (msg)
-  "Return avatar CDN URL for MSG author."
-  (let* ((user-id (disco-room--message-author-id msg))
-         (avatar-hash (disco-room--author-avatar-hash msg)))
-    (cond
-     ((and user-id avatar-hash)
-      (format "https://cdn.discordapp.com/avatars/%s/%s.png?size=64"
-              user-id avatar-hash))
-     (user-id
-      (format "https://cdn.discordapp.com/embed/avatars/%d.png"
-              (disco-room--author-default-avatar-index msg)))
-     (t nil))))
-
-(defun disco-room--avatar-cache-key (msg)
-  "Build stable avatar cache key for MSG author and avatar size."
-  (let* ((user-id (disco-room--message-author-id msg))
-         (avatar-hash (disco-room--author-avatar-hash msg))
-         (default-index (disco-room--author-default-avatar-index msg)))
-    (when user-id
-      (format "%s:%s:%s"
-              user-id
-              (or avatar-hash (format "default-%d" default-index))
-              disco-room-avatar-image-size))))
-
-(defun disco-room--avatar-cache-file-base (cache-key)
-  "Return avatar cache file base path for CACHE-KEY (without extension)."
-  (expand-file-name (md5 cache-key) disco-room-avatar-cache-directory))
-
-(defun disco-room--avatar-cache-file (cache-key extension)
-  "Return avatar cache file path for CACHE-KEY and EXTENSION."
-  (format "%s.%s"
-          (disco-room--avatar-cache-file-base cache-key)
-          extension))
-
-(defun disco-room--avatar-cache-existing-file (cache-key)
-  "Return an existing cached avatar path for CACHE-KEY, or nil."
-  (seq-find #'file-exists-p
-            (mapcar (lambda (ext)
-                      (disco-room--avatar-cache-file cache-key ext))
-                    disco-room--avatar-cache-extensions)))
-
-(defun disco-room--avatar-ensure-queue ()
-  "Return active queue for avatar fetches.
-
-Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
-  (let ((limit (max 1 disco-room-avatar-fetch-concurrency)))
-    (when (or (null disco-room--avatar-plz-queue)
-              (not (equal disco-room--avatar-plz-queue-limit limit)))
-      (setq disco-room--avatar-plz-queue (make-plz-queue :limit limit))
-      (setq disco-room--avatar-plz-queue-limit limit))
-    disco-room--avatar-plz-queue))
-
-(defun disco-room--avatar-delete-stale-cache-files (cache-base)
-  "Delete stale cached avatar files for CACHE-BASE."
-  (dolist (ext disco-room--avatar-cache-extensions)
-    (let ((old-file (format "%s.%s" cache-base ext)))
-      (when (file-exists-p old-file)
-        (ignore-errors (delete-file old-file))))))
-
-(defun disco-room--avatar-retry-delay (attempts)
-  "Return retry delay in seconds for ATTEMPTS transient failures."
-  (let ((delays (seq-filter #'numberp disco-room-avatar-retry-delays)))
-    (if delays
-        (max 0.05
-             (float
-              (nth (min (max 0 (1- attempts))
-                        (1- (length delays)))
-                   delays)))
-      30.0)))
-
-(defun disco-room--avatar-transient-http-status-p (status)
-  "Return non-nil when HTTP STATUS should be retried."
-  (or (not (integerp status))
-      (<= status 0)
-      (memq status '(408 425 429))
-      (>= status 500)))
-
-(defun disco-room--avatar-flush-invalidations ()
-  "Invalidate only timeline rows depending on newly cached avatars."
-  (setq disco-room--avatar-invalidation-timer nil)
-  (let (cache-keys)
-    (maphash (lambda (cache-key _value) (push cache-key cache-keys))
-             disco-room--avatar-pending-invalidations)
-    (clrhash disco-room--avatar-pending-invalidations)
-    (when (and cache-keys
-               (not disco-room--session-cache-reset-in-progress))
-      (disco-room--sync-resource-changes-in-open-rooms
-       (mapcar (lambda (cache-key) (list :avatar cache-key)) cache-keys)))))
-
-(defun disco-room--avatar-schedule-invalidation (cache-key)
-  "Coalesce targeted timeline invalidation for avatar CACHE-KEY."
-  (unless disco-room--session-cache-reset-in-progress
-    (puthash cache-key t disco-room--avatar-pending-invalidations)
-    (unless (timerp disco-room--avatar-invalidation-timer)
-      (setq disco-room--avatar-invalidation-timer
-            (run-at-time
-             (max 0.0 disco-room-avatar-invalidation-delay)
-             nil
-             #'disco-room--avatar-flush-invalidations)))))
-
-(defun disco-room--avatar-run-due-retries ()
-  "Start all avatar retries whose backoff period has elapsed."
-  (setq disco-room--avatar-retry-timer nil)
-  (unless disco-room--session-cache-reset-in-progress
-    (let ((now (float-time))
-          due)
-      (maphash
-       (lambda (cache-key failure)
-         (when (and (not (plist-get failure :permanent))
-                    (not (gethash cache-key disco-room--avatar-fetching))
-                    (<= (or (plist-get failure :retry-at) 0) now))
-           (push (cons cache-key failure) due)))
-       disco-room--avatar-failures)
-      (dolist (item due)
-        (let ((cache-key (car item))
-              (failure (cdr item)))
-          (disco-room--start-avatar-fetch
-           cache-key
-           (plist-get failure :url)
-           (plist-get failure :cache-base))))
-      (disco-room--avatar-schedule-next-retry))))
-
-(defun disco-room--avatar-schedule-next-retry ()
-  "Schedule the earliest pending transient avatar retry."
-  (when (timerp disco-room--avatar-retry-timer)
-    (cancel-timer disco-room--avatar-retry-timer))
-  (setq disco-room--avatar-retry-timer nil)
-  (let ((next-at nil))
-    (maphash
-     (lambda (cache-key failure)
-       (let ((retry-at (plist-get failure :retry-at)))
-         (when (and (numberp retry-at)
-                    (not (plist-get failure :permanent))
-                    (not (gethash cache-key disco-room--avatar-fetching))
-                    (or (null next-at) (< retry-at next-at)))
-           (setq next-at retry-at))))
-     disco-room--avatar-failures)
-    (when (and next-at
-               (not disco-room--session-cache-reset-in-progress))
-      (setq disco-room--avatar-retry-timer
-            (run-at-time
-             (max 0.05 (- next-at (float-time)))
-             nil
-             #'disco-room--avatar-run-due-retries)))))
-
-(defun disco-room--avatar-complete-fetch (cache-key image)
-  "Record a successful avatar IMAGE fetch for CACHE-KEY."
-  (puthash cache-key image disco-room--avatar-image-cache)
-  (remhash cache-key disco-room--avatar-failures)
-  (remhash cache-key disco-room--avatar-fetching)
-  (disco-room--avatar-schedule-next-retry)
-  (disco-room--avatar-schedule-invalidation cache-key))
-
-(defun disco-room--avatar-record-failure
-    (cache-key url cache-base reason retry-p &optional target-file status)
-  "Record an avatar failure and schedule a retry when RETRY-P is non-nil."
-  (when (and target-file (file-exists-p target-file))
-    (ignore-errors (delete-file target-file)))
-  (let* ((previous (gethash cache-key disco-room--avatar-failures))
-         (attempts (1+ (or (plist-get previous :attempts) 0)))
-         (delay (and retry-p (disco-room--avatar-retry-delay attempts)))
-         (failure (list :attempts attempts
-                        :reason reason
-                        :status status
-                        :url url
-                        :cache-base cache-base
-                        :permanent (not retry-p)
-                        :retry-at (and delay (+ (float-time) delay)))))
-    (puthash cache-key failure disco-room--avatar-failures)
-    (remhash cache-key disco-room--avatar-fetching)
-    (message "disco: avatar %s failed: %s%s"
-             (substring (md5 cache-key) 0 8)
-             reason
-             (if delay (format "; retrying in %.1fs" delay) ""))
-    (disco-room--avatar-schedule-next-retry)
-    failure))
-
-(defun disco-room--avatar-image-from-file (file)
-  "Create inline avatar image from FILE, or nil when unsupported."
-  (let ((image
-         (ignore-errors
-           (create-image file nil nil
-                         :width disco-room-avatar-image-size
-                         :height disco-room-avatar-image-size
-                         :ascent 'center))))
-    (unless (appkit-media-image-object-valid-p image)
-      (when (image-type-available-p 'imagemagick)
-        (setq image
-              (ignore-errors
-                (create-image file 'imagemagick nil
-                              :width disco-room-avatar-image-size
-                              :height disco-room-avatar-image-size
-                              :ascent 'center)))))
-    (when (appkit-media-image-object-valid-p image)
-      image)))
-
-(defun disco-room--avatar-reset-fetch-state ()
-  "Cancel avatar work and clear transient fetch bookkeeping."
-  (let ((disco-room--session-cache-reset-in-progress t)
-        (queue disco-room--avatar-plz-queue)
-        (retry-timer disco-room--avatar-retry-timer)
-        (invalidation-timer disco-room--avatar-invalidation-timer))
-    ;; Revoke callback authority and all globally discoverable owners before a
-    ;; cancellation sentinel or timer hook gets a chance to run synchronously.
-    (cl-incf disco-room--avatar-fetch-generation)
-    (setq disco-room--avatar-plz-queue nil
-          disco-room--avatar-plz-queue-limit nil
-          disco-room--avatar-retry-timer nil
-          disco-room--avatar-invalidation-timer nil)
-    (unwind-protect
-        (disco-room--run-session-cleanup-actions
-         (list
-          (lambda ()
-            (when queue
-              (condition-case nil
-                  (plz-clear queue)
-                ((error quit) nil))))
-          (lambda ()
-            (when (timerp retry-timer)
-              (condition-case nil
-                  (cancel-timer retry-timer)
-                ((error quit) nil))))
-          (lambda ()
-            (when (timerp invalidation-timer)
-              (condition-case nil
-                  (cancel-timer invalidation-timer)
-                ((error quit) nil))))))
-      (clrhash disco-room--avatar-pending-invalidations)
-      (clrhash disco-room--avatar-fetching)
-      (clrhash disco-room--avatar-failures))))
+    (and (listp author) author)))
 
 (defun disco-room--reset-forward-guild-icon-state ()
   "Revoke forwarded guild icon work and clear its account-scoped caches."
@@ -3449,56 +3112,25 @@ Queue is recreated when `disco-room-avatar-fetch-concurrency' changes."
 
 (defun disco-room--clear-session-cache-memory ()
   "Clear account-scoped room cache bookkeeping without running callbacks."
-  (setq disco-room--avatar-fetch-budget nil
-        disco-room--avatar-plz-queue nil
-        disco-room--avatar-plz-queue-limit nil
-        disco-room--avatar-retry-timer nil
-        disco-room--avatar-invalidation-timer nil
-        disco-room--preview-buffer nil
+  (setq disco-room--preview-buffer nil
         disco-room-draft-history-search-history nil
         disco-room-search-inplace-history nil)
-  (clrhash disco-room--avatar-image-cache)
   (clrhash disco-room--avatar-round-image-cache)
-  (clrhash disco-room--avatar-fetching)
-  (clrhash disco-room--avatar-failures)
-  (clrhash disco-room--avatar-pending-invalidations)
   (clrhash disco-room--forward-guild-icon-fetching)
   (clrhash disco-room--forward-guild-icon-image-cache))
 
 (defun disco-room-reset-session-cache-state ()
   "Destructively clear account-scoped room media state without redrawing.
 
-The reset revokes avatar queues, timers, and callbacks before cancellation,
-then retires exact forwarded-icon process owners.  No Appkit invalidation is
-requested; a future account session builds projections from fresh state."
+Shared user avatars are retired independently by `disco-avatar'.  This reset
+owns only room presentation caches and exact forwarded-icon process owners.
+No Appkit invalidation is requested."
   (let ((disco-room--session-cache-reset-in-progress t))
     (unwind-protect
-        (disco-room--run-session-cleanup-actions
-         (list #'disco-room--avatar-reset-fetch-state
-               #'disco-room--reset-forward-guild-icon-state))
+        (disco-room--reset-forward-guild-icon-state)
       ;; Repeat the destructive clears after cancellation hooks: even an
       ;; instrumented hook which mutates these globals cannot retain old data.
       (disco-room--clear-session-cache-memory))))
-
-(defun disco-room-clear-avatar-cache ()
-  "Clear in-memory avatar cache and rerender all room buffers."
-  (interactive)
-  (disco-room--avatar-reset-fetch-state)
-  (clrhash disco-room--avatar-image-cache)
-  (clrhash disco-room--avatar-round-image-cache)
-  (disco-room--refresh-open-rooms)
-  (message "disco: avatar cache cleared"))
-
-(defun disco-room-refetch-avatars ()
-  "Drop avatar caches (memory + disk) and refetch in open room buffers."
-  (interactive)
-  (disco-room--avatar-reset-fetch-state)
-  (clrhash disco-room--avatar-image-cache)
-  (clrhash disco-room--avatar-round-image-cache)
-  (when (file-directory-p disco-room-avatar-cache-directory)
-    (delete-directory disco-room-avatar-cache-directory t))
-  (disco-room--refresh-open-rooms)
-  (message "disco: avatar cache reset; refetching"))
 
 (defun disco-room--refresh-open-rooms ()
   "Request geometry projection for all open room timelines."
@@ -3527,6 +3159,15 @@ requested; a future account session builds projections from fresh state."
                        (appkit-view-live-p (appkit-current-view)))
               (let ((view (appkit-current-view)))
                   (appkit-request-sync view :resources resources))))))))))
+
+(defun disco-room--handle-avatar-resources-updated (resources)
+  "Synchronize room rows depending on changed avatar RESOURCES."
+  (when (and resources
+             (not disco-room--session-cache-reset-in-progress))
+    (disco-room--sync-resource-changes-in-open-rooms resources)))
+
+(add-hook 'disco-avatar-resources-updated-hook
+          #'disco-room--handle-avatar-resources-updated)
 
 (defun disco-room--handle-media-rerender (kind key)
   "Apply media state change KIND for KEY to dependent timeline rows."
@@ -3593,133 +3234,14 @@ requested; a future account session builds projections from fresh state."
 
 (setq disco-media-rerender-function #'disco-room--handle-media-rerender)
 
-(defun disco-room--start-avatar-fetch (cache-key url cache-base)
-  "Start asynchronous avatar fetch for CACHE-KEY from URL using CACHE-BASE."
-  (unless (or disco-room--session-cache-reset-in-progress
-              (not (appkit-media-url-present-p url))
-              (not (stringp cache-base))
-              (gethash cache-key disco-room--avatar-fetching)
-              (gethash cache-key disco-room--avatar-image-cache)
-              (and (numberp disco-room--avatar-fetch-budget)
-                   (<= disco-room--avatar-fetch-budget 0)))
-    (when (numberp disco-room--avatar-fetch-budget)
-      (cl-decf disco-room--avatar-fetch-budget))
-    (puthash cache-key t disco-room--avatar-fetching)
-    (let ((queue (disco-room--avatar-ensure-queue))
-          (generation disco-room--avatar-fetch-generation)
-          (headers '(("Accept" . "image/png,image/webp,image/*;q=0.8,*/*;q=0.1"))))
-      (condition-case err
-          (progn
-            (plz-queue
-              queue
-              'get
-              url
-              :headers headers
-              :as 'binary
-              :noquery t
-              :then
-              (lambda (data)
-                (when (and (not disco-room--session-cache-reset-in-progress)
-                           (= generation disco-room--avatar-fetch-generation))
-                  (condition-case decode-error
-                      (let* ((raw-bytes
-                              (appkit-media-normalize-image-bytes
-                               (if (multibyte-string-p data)
-                                   (encode-coding-string data 'binary)
-                                 data)))
-                             (extension
-                              (appkit-media-bytes-to-extension raw-bytes "img"))
-                             (target-file
-                              (format "%s.%s" cache-base extension))
-                             image)
-                        (disco-room--avatar-delete-stale-cache-files cache-base)
-                        (make-directory (file-name-directory target-file) t)
-                        (with-temp-buffer
-                          (set-buffer-multibyte nil)
-                          (insert raw-bytes)
-                          (let ((coding-system-for-write 'binary))
-                            (write-region
-                             (point-min) (point-max) target-file nil 'silent)))
-                        (setq image
-                              (disco-room--avatar-image-from-file target-file))
-                        (if image
-                            (disco-room--avatar-complete-fetch cache-key image)
-                          (disco-room--avatar-record-failure
-                           cache-key url cache-base
-                           "response was not a renderable image"
-                           t target-file)))
-                    (error
-                     (disco-room--avatar-record-failure
-                      cache-key url cache-base
-                      (error-message-string decode-error) t)))))
-              :else
-              (lambda (fetch-error)
-                (when (and (not disco-room--session-cache-reset-in-progress)
-                           (= generation disco-room--avatar-fetch-generation))
-                  (let ((status
-                         (disco-room--plz-error-http-status fetch-error)))
-                    (disco-room--avatar-record-failure
-                     cache-key url cache-base
-                     (disco-room--async-error-message fetch-error)
-                     (disco-room--avatar-transient-http-status-p status)
-                     nil status)))))
-            (plz-run queue))
-        (error
-         (when (and (not disco-room--session-cache-reset-in-progress)
-                    (= generation disco-room--avatar-fetch-generation))
-           (disco-room--avatar-record-failure
-            cache-key url cache-base
-            (disco-room--async-error-message err) t)))))))
-
-(defun disco-room--avatar-image (msg)
-  "Return avatar image object for MSG when ready, otherwise nil.
-
-If needed, schedule async fetch and fall back to text placeholder."
-  (when (disco-room--image-rendering-available-p)
-    (let* ((cache-key (disco-room--avatar-cache-key msg))
-           (cached (and cache-key
-                        (gethash cache-key disco-room--avatar-image-cache))))
-      (cond
-       ((null cache-key)
-        nil)
-       ((appkit-media-image-object-valid-p cached)
-        cached)
-       (t
-        (when cached
-          (remhash cache-key disco-room--avatar-image-cache))
-        (let* ((url (disco-room--avatar-url msg))
-               (cache-base (disco-room--avatar-cache-file-base cache-key))
-               (cache-file
-                (disco-room--avatar-cache-existing-file cache-key))
-               (file-image
-                (and cache-file
-                     (disco-room--avatar-image-from-file cache-file)))
-               (failure (gethash cache-key disco-room--avatar-failures)))
-          (cond
-           (file-image
-            (puthash cache-key file-image disco-room--avatar-image-cache)
-            (remhash cache-key disco-room--avatar-failures)
-            file-image)
-           ((plist-get failure :permanent)
-            nil)
-           ((and (numberp (plist-get failure :retry-at))
-                 (> (plist-get failure :retry-at) (float-time)))
-            nil)
-           ((appkit-media-url-present-p url)
-            (when cache-file
-              (ignore-errors (delete-file cache-file)))
-            (disco-room--start-avatar-fetch cache-key url cache-base)
-            nil)
-           (t nil))))))))
-
 (defun disco-room--avatar-display-size ()
   "Return full avatar size in pixels for two-line avatar rendering.
 
-`disco-room-avatar-image-size' is interpreted as baseline size ratio where
+`disco-avatar-image-size' is interpreted as baseline size ratio where
 `28' maps to exactly two text lines at current scale."
   (let* ((line-height (appkit-chat-avatar-line-pixel-height))
          (base-target (* 2 line-height))
-         (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0)))
+         (size-factor (/ (float (max 1 disco-avatar-image-size)) 28.0)))
     (max 8 (round (* base-target size-factor)))))
 
 (defun disco-room--avatar-factors (&optional cheight)
@@ -3755,7 +3277,7 @@ render text correctly."
 (defun disco-room--avatar-svg-geometry (cheight)
   "Return derived round-avatar geometry for CHEIGHT text lines."
   (let* ((line-height (appkit-chat-avatar-line-pixel-height))
-         (size-factor (/ (float (max 1 disco-room-avatar-image-size)) 28.0))
+         (size-factor (/ (float (max 1 disco-avatar-image-size)) 28.0))
          (round-scale (max 0.1 disco-room-avatar-round-size-factor))
          (factors (disco-room--avatar-factors cheight))
          (cfactor (or (car factors) 0.8))
@@ -3848,20 +3370,19 @@ typically 2."
 
 (defun disco-room--avatar-one-line-image (msg)
   "Return avatar image sized for one text line for MSG, or nil."
-  (when (disco-room--image-rendering-available-p)
-    (let* ((cache-key (disco-room--avatar-cache-key msg))
-           (cache-file (and cache-key
-                            (disco-room--avatar-cache-existing-file cache-key)))
+  (when-let* ((user (disco-room--avatar-user msg)))
+    (let* ((raw-image (disco-avatar-image user))
+           (cache-file (and (appkit-media-image-object-valid-p raw-image)
+                            (disco-avatar-cached-file user)))
            (svg-avatar (and disco-room-avatar-round-images
                             cache-file
                             (disco-room--avatar--create-svg
                              cache-file 1))))
       (if (appkit-media-image-object-valid-p svg-avatar)
           svg-avatar
-        (let ((raw-image (disco-room--avatar-image msg)))
-          (when (appkit-media-image-object-valid-p raw-image)
-            (let ((line-height (appkit-chat-avatar-line-pixel-height)))
-              (appkit-chat-avatar-resize-image raw-image line-height))))))))
+        (when (appkit-media-image-object-valid-p raw-image)
+          (let ((line-height (appkit-chat-avatar-line-pixel-height)))
+            (appkit-chat-avatar-resize-image raw-image line-height)))))))
 
 (defun disco-room--avatar-one-line-string (msg)
   "Return propertized string showing one-line inline avatar for MSG.
@@ -3875,7 +3396,8 @@ Returns empty string when no avatar is available."
 
 (defun disco-room--avatar-prefixes (msg)
   "Return avatar-aware prefixes plist for MSG header/body lines."
-  (let* ((image (disco-room--avatar-image msg))
+  (let* ((user (disco-room--avatar-user msg))
+         (image (and user (disco-avatar-image user)))
          (fallback (disco-room--avatar-placeholder msg))
          (base-size (disco-room--avatar-display-size)))
     (if (appkit-media-image-object-valid-p image)
@@ -3883,9 +3405,7 @@ Returns empty string when no avatar is available."
                                (max 8 (round (* base-size
                                                 (max 0.1 disco-room-avatar-round-size-factor))))
                              base-size))
-               (cache-key (disco-room--avatar-cache-key msg))
-               (cache-file (and cache-key
-                                (disco-room--avatar-cache-existing-file cache-key)))
+               (cache-file (and user (disco-avatar-cached-file user)))
                (svg-avatar (and disco-room-avatar-round-images
                                 cache-file
                                 (disco-room--avatar--create-svg
@@ -5775,8 +5295,9 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
   (let ((reference-id (disco-msg-reference-id msg))
         (reference-channel-id (disco-msg-reference-channel-id msg))
         dependencies)
-    (when-let* ((avatar-key (disco-room--avatar-cache-key msg)))
-      (push (list :avatar avatar-key) dependencies))
+    (when-let* ((user (disco-room--avatar-user msg))
+                (resource (disco-avatar-resource-key user)))
+      (push resource dependencies))
     (when (and (stringp reference-id)
                (disco-room--message-reference-targets-current-room-p msg)
                (or (disco-msg-reply-type-p msg)
@@ -5952,9 +5473,6 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
          (messages (disco-room--display-messages))
          (draft (disco-room--current-draft))
          (initial-p (not (appkit-chat-timeline-live-p)))
-         (disco-room--avatar-fetch-budget
-          (when (numberp disco-room-avatar-max-fetches-per-render)
-            (max 0 disco-room-avatar-max-fetches-per-render)))
          (preview-fetch-budget
           (when (numberp disco-media-preview-max-fetches-per-render)
             (max 0 disco-media-preview-max-fetches-per-render))))
@@ -8468,7 +7986,7 @@ _MSG is ignored because the transient resolves availability from point."
     ("/" "Structured search..." disco-room-search-channel)
     ("f" "Filter search" disco-room-filter-search)
     ("F" "Cancel filter" disco-room-filter-cancel)
-    ("v" "Refetch avatars" disco-room-refetch-avatars)
+    ("v" "Refetch avatars" disco-avatar-refetch)
     ("H" "HTTP queue" disco-http-describe-queue)
     ("R" "Rate limits" disco-api-describe-rate-limits)
     ("G" "Gateway status" disco-gateway-describe-status)]
@@ -8539,7 +8057,7 @@ _MSG is ignored because the transient resolves availability from point."
     (define-key map (kbd "C-c C-t u") #'disco-room-set-thread-muted)
     (define-key map (kbd "C-c C-j") #'disco-room-join-thread)
     (define-key map (kbd "C-c C-l") #'disco-room-leave-thread)
-    (define-key map (kbd "C-c M-v") #'disco-room-refetch-avatars)
+    (define-key map (kbd "C-c M-v") #'disco-avatar-refetch)
     (define-key map (kbd "C-c ?") #'disco-room-transient)
     map)
   "Keymap for `disco-room-mode'.")

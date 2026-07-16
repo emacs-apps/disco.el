@@ -397,15 +397,62 @@
               beginning-of-line)
             appkit-chat-completion-functions))))
 
-(ert-deftest disco-company-session-cache-reset-clears-rounded-avatars ()
-  (let ((disco-company--rounded-avatar-cache
-         (make-hash-table :test #'equal)))
-    (puthash "https://OLD_ACCOUNT_SECRET.invalid/avatar.png"
-             "OLD_ACCOUNT_SECRET-image"
-             disco-company--rounded-avatar-cache)
-    (disco-company-reset-session-cache-state)
-    (should (= 0 (hash-table-count
-                  disco-company--rounded-avatar-cache)))))
+(ert-deftest disco-company-user-avatar-uses-shared-user-api-directly ()
+  (let ((candidate
+         '(:user-id "123" :username "alice" :global-name "Alice"
+           :avatar-hash "avatar-hash" :discriminator "4321"))
+        received-user
+        received-size)
+    (cl-letf (((symbol-function 'disco-avatar-rounded-image)
+               (lambda (user pixel-size)
+                 (setq received-user user
+                       received-size pixel-size)
+                 :rounded-avatar)))
+      (should (eq :rounded-avatar
+                  (disco-company--completion-user-avatar-image candidate 19)))
+      (should (= 19 received-size))
+      (should (equal "123" (alist-get 'id received-user)))
+      (should (equal "avatar-hash" (alist-get 'avatar received-user)))
+      (should (equal "4321" (alist-get 'discriminator received-user)))
+      (should (equal "alice" (alist-get 'username received-user)))
+      (should (equal "Alice" (alist-get 'global_name received-user))))))
+
+(ert-deftest disco-company-user-candidates-preserve-default-avatar-discriminator ()
+  (unwind-protect
+      (progn
+        (disco-state-reset)
+        (disco-state-apply-guild-members-chunk
+         "g1"
+         '(((nick . "Member")
+            (user . ((id . "100") (username . "member")
+                     (discriminator . "1234"))))))
+        (disco-state-put-messages
+         "c1"
+         '(((id . "m1")
+            (author . ((id . "200") (username . "author")
+                       (discriminator . "4321"))))))
+        (let* ((disco-room--guild-id "g1")
+               (disco-room--channel-id "c1")
+               (candidates (disco-company--completion-user-candidates))
+               (member (seq-find (lambda (candidate)
+                                   (equal "100"
+                                          (plist-get candidate :user-id)))
+                                 candidates))
+               (author (seq-find (lambda (candidate)
+                                   (equal "200"
+                                          (plist-get candidate :user-id)))
+                                 candidates)))
+          (should (equal "1234" (plist-get member :discriminator)))
+          (should (equal "4321" (plist-get author :discriminator)))
+          (should (equal "1234"
+                         (alist-get
+                          'discriminator
+                          (disco-company--completion-avatar-user member))))
+          (should (equal "4321"
+                         (alist-get
+                          'discriminator
+                          (disco-company--completion-avatar-user author))))))
+    (disco-state-reset)))
 
 (provide 'disco-company-test)
 

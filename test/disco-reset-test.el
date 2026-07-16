@@ -569,25 +569,29 @@
          (disco-media--attachment-audio-current-owner nil)
          (disco-media--generation 10)
          (disco-media--reset-in-progress nil)
-         (disco-room--avatar-image-cache (make-hash-table :test #'equal))
-         (disco-room--avatar-fetching (make-hash-table :test #'equal))
-         (disco-room--avatar-failures (make-hash-table :test #'equal))
-         (disco-room--avatar-pending-invalidations
+         (disco-avatar--image-cache (make-hash-table :test #'equal))
+         (disco-avatar--rounded-image-cache
           (make-hash-table :test #'equal))
+         (disco-avatar--fetching (make-hash-table :test #'equal))
+         (disco-avatar--failures (make-hash-table :test #'equal))
+         (disco-avatar--known-keys (make-hash-table :test #'equal))
+         (disco-avatar--pending-resource-updates
+          (make-hash-table :test #'equal))
+         (disco-avatar--fetch-generation 20)
+         (disco-avatar--reset-in-progress nil)
+         (disco-avatar--retry-timer nil)
+         (disco-avatar--resource-update-timer nil)
+         (disco-avatar--plz-queue nil)
+         (disco-avatar--plz-queue-limit nil)
+         (disco-avatar--plz-queues nil)
          (disco-room--avatar-round-image-cache
           (make-hash-table :test #'equal))
          (disco-room--forward-guild-icon-image-cache
           (make-hash-table :test #'equal))
          (disco-room--forward-guild-icon-fetching
           (make-hash-table :test #'equal))
-         (disco-room--avatar-fetch-generation 20)
          (disco-room--forward-guild-icon-fetch-generation 30)
          (disco-room--session-cache-reset-in-progress nil)
-         (disco-room--avatar-retry-timer nil)
-         (disco-room--avatar-invalidation-timer nil)
-         (disco-room--avatar-plz-queue nil)
-         (disco-room--avatar-plz-queue-limit nil)
-         (disco-room--avatar-fetch-budget 2)
          (disco-room-draft-history-search-history (list secret))
          (disco-room-search-inplace-history (list old-url))
          (disco-root--guild-icon-image-cache
@@ -601,8 +605,6 @@
          (disco-root-search-history (list secret old-url))
          (disco-root--debug-log-buffer nil)
          (disco-root--debug-log-configured-name nil)
-         (disco-company--rounded-avatar-cache
-          (make-hash-table :test #'equal))
          (redraw-count 0)
          (buffer (generate-new-buffer " *disco-cache-reset-reentry*"))
          late-buffer
@@ -631,17 +633,18 @@
                 disco-media--attachment-waveform-image-cache
                 disco-media--attachment-placeholder-image-cache
                 disco-media--attachment-decorated-preview-cache
-                disco-room--avatar-image-cache
-                disco-room--avatar-fetching
-                disco-room--avatar-failures
-                disco-room--avatar-pending-invalidations
+                disco-avatar--image-cache
+                disco-avatar--rounded-image-cache
+                disco-avatar--fetching
+                disco-avatar--failures
+                disco-avatar--known-keys
+                disco-avatar--pending-resource-updates
                 disco-room--avatar-round-image-cache
                 disco-room--forward-guild-icon-image-cache
                 disco-room--forward-guild-icon-fetching
                 disco-root--guild-icon-image-cache
                 disco-root--guild-icon-fetching
-                disco-root--extra-info-provider-error-cache
-                disco-company--rounded-avatar-cache)))
+                disco-root--extra-info-provider-error-cache)))
     (unwind-protect
         (progn
           (puthash old-url secret disco-markdown--cache)
@@ -661,11 +664,14 @@
                                disco-media--attachment-placeholder-image-cache
                                disco-media--attachment-decorated-preview-cache))
             (puthash old-url secret table))
-          (puthash old-url secret disco-room--avatar-image-cache)
-          (puthash old-url t disco-room--avatar-fetching)
+          (puthash old-url secret disco-avatar--image-cache)
+          (puthash old-url t disco-avatar--rounded-image-cache)
+          (puthash old-url t disco-avatar--fetching)
           (puthash old-url (list :url old-url :reason secret)
-                   disco-room--avatar-failures)
-          (puthash old-url t disco-room--avatar-pending-invalidations)
+                   disco-avatar--failures)
+          (puthash old-url t disco-avatar--known-keys)
+          (puthash (list :avatar old-url) t
+                   disco-avatar--pending-resource-updates)
           (puthash old-url secret disco-room--avatar-round-image-cache)
           (puthash old-url secret
                    disco-room--forward-guild-icon-image-cache)
@@ -676,7 +682,6 @@
                    disco-root--guild-icon-fetching)
           (puthash 'old-provider secret
                    disco-root--extra-info-provider-error-cache)
-          (puthash old-url secret disco-company--rounded-avatar-cache)
           (with-current-buffer buffer
             (special-mode)
             (setq-local disco-room--preview-buffer-owner-p t)
@@ -696,9 +701,9 @@
                (puthash old-url (list :error secret)
                         disco-media--attachment-download-state-table)
                (puthash old-url (list :url old-url :reason secret)
-                        disco-room--avatar-failures)
+                        disco-avatar--failures)
                (puthash old-url secret disco-root--guild-icon-image-cache)
-               (puthash old-url secret disco-company--rounded-avatar-cache))
+               (puthash old-url secret disco-avatar--rounded-image-cache))
              nil t))
           (let ((disco-media-rerender-function
                  (lambda (&rest _) (cl-incf redraw-count)))
@@ -780,7 +785,6 @@
           (should-not disco-media--attachment-preview-fetch-budget)
           (should-not disco-media--attachment-audio-current-process)
           (should-not disco-media--attachment-audio-current-owner)
-          (should-not disco-room--avatar-fetch-budget)
           (should-not disco-room-draft-history-search-history)
           (should-not disco-room-search-inplace-history)
           (should-not disco-root-search-history)

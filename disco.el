@@ -30,6 +30,7 @@
 (require 'disco-preview)
 (require 'disco-markdown)
 (require 'disco-media)
+(require 'disco-avatar)
 (require 'disco-company)
 (require 'disco-room)
 (require 'disco-root)
@@ -351,9 +352,9 @@ nonlocal transfer, the remaining privacy cleanup still runs while unwinding."
   "Clear account-scoped memory without hooks, cancellation, or rendering."
   (disco-notifications--clear-session-data)
   (disco-media--clear-session-memory)
+  (disco-avatar--clear-session-memory)
   (disco-room--clear-session-cache-memory)
   (disco-root--clear-session-cache-memory)
-  (disco-company-reset-session-cache-state)
   (disco-markdown-reset-session-state)
   (disco-preview--clear-session-data)
   (disco-directory-reset)
@@ -394,6 +395,7 @@ cannot leave another old-account projection visible."
          ;; only while their own reset function is on the stack.
          (disco-notifications--reset-in-progress t)
          (disco-media--reset-in-progress t)
+         (disco-avatar--reset-in-progress t)
          (disco-api--reset-in-progress t)
          (disco-http--reset-in-progress t)
          (disco-gateway--reset-in-progress t)
@@ -410,9 +412,9 @@ cannot leave another old-account projection visible."
         #'disco--drain-default-apps
         #'disco-notifications-reset-session-state
         #'disco-media-reset-session-state
+        #'disco-avatar-reset-session-state
         #'disco-room-reset-session-cache-state
         #'disco-root-reset-session-cache-state
-        #'disco-company-reset-session-cache-state
         #'disco-markdown-reset-session-state
         #'disco-preview-reset
         #'disco-directory-reset
@@ -431,6 +433,7 @@ cannot leave another old-account projection visible."
         ;; resets.  Any cancellation callback writes are destroyed by the
         ;; final pure memory sweep while every reset barrier remains raised.
         #'disco-media-reset-session-state
+        #'disco-avatar-reset-session-state
         #'disco-room-reset-session-cache-state
         #'disco-root-reset-session-cache-state
         #'disco-api-reset-rate-limit-state
