@@ -102,7 +102,7 @@
      (with-temp-buffer
        (disco-channel-directory-mode)
        (setq disco-channel-directory--guild-id "g1")
-       (cl-letf (((symbol-function 'disco-permission-channel-viewable-p)
+       (cl-letf (((symbol-function 'disco-state-channel-viewable-p)
                   (lambda (&rest _args) t)))
          ,@body))))
 
@@ -600,8 +600,10 @@
   (disco-state-set-guilds '(((id . "g1") (name . "Guild One"))))
   (disco-state-seed-guild-channels
    "g1"
-   '(((id . "visible") (guild_id . "g1") (name . "visible") (type . 0))
-     ((id . "hidden") (guild_id . "g1") (name . "hidden") (type . 0))))
+   `(((id . "visible") (guild_id . "g1") (name . "visible")
+      (type . 0) (flags . 0))
+     ((id . "hidden") (guild_id . "g1") (name . "hidden") (type . 0)
+      (flags . ,disco-channel-flag-obfuscated))))
   (unwind-protect
       (with-temp-buffer
         (disco-channel-directory-mode)
@@ -629,6 +631,35 @@
                     (mapcar
                      #'disco-channel-directory-test--entry-id
                      (disco-channel-directory-test--project-loaded)))))))
+    (disco-state-reset)
+    (disco-directory-reset)))
+
+(ert-deftest disco-channel-directory-gateway-hidden-overrides-rest-visibility ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-channel-directory-mode)
+        (setq disco-channel-directory--guild-id "g1")
+        (disco-state-set-guilds '(((id . "g1") (name . "Guild One"))))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "c1") (guild_id . "g1") (name . "general")
+            (type . 0) (permissions . "1024"))))
+        (should
+         (member "c1"
+                 (mapcar #'disco-channel-directory-test--entry-id
+                         (disco-channel-directory-test--project-loaded))))
+        ;; A full Gateway channel update is newer than the cached REST
+        ;; permission snapshot.  The carried `permissions' field must not make
+        ;; this obfuscated channel visible again.
+        (disco-state-upsert-gateway-channel
+         `((id . "c1") (guild_id . "g1") (name . "general")
+           (type . 0) (flags . ,disco-channel-flag-obfuscated)))
+        (should-not
+         (member "c1"
+                 (mapcar #'disco-channel-directory-test--entry-id
+                         (disco-channel-directory-test--project-loaded)))))
     (disco-state-reset)
     (disco-directory-reset)))
 
@@ -720,6 +751,20 @@
           (should
            (equal '((guild-channel-snapshot "g1"))
                   (appkit-invalidations-resource-keys pending))))
+        (disco-channel-directory--handle-gateway-event
+         '(:type channel-sync :guild-id "g1"
+           :channels (((id . "c3") (guild_id . "g1"))))
+         view)
+        (let ((pending (appkit-invalidations-take
+                        (appkit-view-invalidations view))))
+          (should (appkit-invalidations-structure-p pending))
+          (should
+           (equal (list
+                   (disco-channel-directory-test--channel-key "c3"))
+                  (appkit-invalidations-entry-keys pending)))
+          (should
+           (equal '((guild-channel-snapshot "g1"))
+                  (appkit-invalidations-resource-keys pending))))
         (disco-channel-directory--handle-directory-event
          '(:type parent-threads-loaded :guild-id "g1"
            :parent-id "c2" :channel-id "t1")
@@ -733,7 +778,7 @@
                   (sort (copy-sequence
                          (appkit-invalidations-entry-keys pending))
                         #'disco-channel-directory-test--key<))))
-        (should (= 3 (length requests)))
+        (should (= 4 (length requests)))
         (should (seq-every-p (lambda (request) (eq view (car request)))
                              requests))
         (should (zerop mutations))))))

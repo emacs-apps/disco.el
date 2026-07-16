@@ -292,18 +292,30 @@
                           (disco-company--completion-user-candidates))))))
     (disco-state-reset)))
 
-(ert-deftest disco-company-channel-capf-inserts-channel-mention ()
+(ert-deftest disco-company-channel-capf-offers-only-viewable-channel-mentions ()
   (unwind-protect
       (progn
         (disco-state-reset)
-        (disco-state-put-channels
-         "g1"
-         '(((id . "channel-1")
-            (guild_id . "g1")
-            (type . 0)
-            (name . "general"))))
+        (disco-state-upsert-gateway-channel
+         '((id . "channel-visible")
+           (guild_id . "g1")
+           (type . 0)
+           (name . "general")
+           (flags . 0)))
+        (disco-state-upsert-gateway-channel
+         `((id . "channel-obfuscated")
+           (guild_id . "g1")
+           (type . 0)
+           (name . "secret")
+           (flags . ,disco-channel-flag-obfuscated)))
+        (let ((disco-room--guild-id "g1"))
+          (should
+           (equal '("#general")
+                  (mapcar (lambda (candidate)
+                            (plist-get candidate :label))
+                          (disco-company--completion-channel-candidates)))))
         (disco-company-test--complete
-         "#gen" "#general" "<#channel-1> "))
+         "#gen" "#general" "<#channel-visible> "))
     (disco-state-reset)))
 
 (ert-deftest disco-company-custom-emoji-capf-inserts-discord-syntax ()

@@ -663,7 +663,7 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
 
 (defconst disco-channel-directory--structural-gateway-events
   '(guild-create guild-update guild-delete guild-sync
-    channel-create channel-update channel-delete
+    channel-create channel-update channel-delete channel-sync
     user-guild-settings-update
     thread-create thread-update thread-delete thread-list-sync)
   "Gateway event types that may change directory membership or ordering.")
@@ -686,7 +686,8 @@ VIEW defaults to the current buffer's Appkit view."
              view
              :channel-ids channel-ids
              :structure structure-p
-             :hydrate (memq type '(guild-sync channel-create channel-update)))))))))
+             :hydrate (memq type '(guild-sync guild-create guild-update
+                                   channel-create channel-update channel-sync)))))))))
 
 (defun disco-channel-directory--handle-directory-event (event &optional view)
   "Queue Appkit invalidations for one relevant directory lifecycle EVENT.

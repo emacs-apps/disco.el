@@ -240,21 +240,6 @@ This matches common REST failures such as HTTP 403 with Discord error code
               (or (equal code 50001)
                   (equal message "Missing Access"))))))
 
-(cl-defun disco-permission-channel-viewable-p (channel &optional (unknown-value t))
-  "Return non-nil when CHANNEL should be treated as visible.
-
-For guild channels this checks `view-channel'. Private channels and channels
-without guild context are treated as visible. UNKNOWN-VALUE is used when
-computed permissions are missing or unparsable."
-  (let ((guild-id (and (listp channel) (alist-get 'guild_id channel))))
-    (cond
-     ((disco-channel-private-p channel)
-      t)
-     ((null guild-id)
-      t)
-     (t
-      (disco-permission-channel-has-p channel 'view-channel unknown-value)))))
-
 (provide 'disco-permission)
 
 ;;; disco-permission.el ends here

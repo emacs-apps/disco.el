@@ -26,6 +26,7 @@
 (defconst disco-client-mode-line--count-event-types
   '(ready guild-sync guild-create guild-delete user-guild-settings-update
     channel-create channel-update channel-delete channel-update-partial
+    channel-sync
     channel-unread-update passive-update-v1 passive-update-v2
     channel-pins-update channel-pins-ack last-messages
     message-create message-delete message-ack
@@ -48,17 +49,19 @@
   "Return (KNOWN-UNREAD-MESSAGES . MENTIONS) for current Discord state.
 
 KNOWN-UNREAD-MESSAGES is a local-cache lower bound and excludes muted
-channels.  MENTIONS is the exact sum of read-state `mention_count' values and
-therefore remains visible for muted channels."
+channels.  MENTIONS is the sum of read-state `mention_count' values for known
+visible channels and therefore remains visible for muted channels."
   (let ((unread-messages 0)
         (mentions 0))
     (dolist (channel (disco-state-channels))
-      (let ((mention-count
-             (disco-state-channel-unread-mention-count (alist-get 'id channel))))
-        (cl-incf mentions mention-count)
-        (unless (disco-state-channel-muted-p channel)
-          (cl-incf unread-messages
-                   (disco-state-channel-known-unread-message-count channel)))))
+      (when (disco-state-channel-viewable-p channel nil)
+        (let ((mention-count
+               (disco-state-channel-unread-mention-count
+                (alist-get 'id channel))))
+          (cl-incf mentions mention-count)
+          (unless (disco-state-channel-muted-p channel)
+            (cl-incf unread-messages
+                     (disco-state-channel-known-unread-message-count channel))))))
     (cons unread-messages mentions)))
 
 (defun disco-client-mode-line-open-root ()

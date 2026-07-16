@@ -18,7 +18,6 @@
 (require 'disco-channel-type)
 (require 'disco-directory)
 (require 'disco-msg)
-(require 'disco-permission)
 (require 'disco-state)
 (require 'disco-thread)
 
@@ -226,7 +225,7 @@ GROUP-ID and THREAD-PARENT-ID are raw Discord/synthetic identifiers."
   "Return non-nil when CHANNEL may be shown in a guild directory."
   (and (alist-get 'id channel)
        (disco-channel-root-visible-p channel)
-       (disco-permission-channel-viewable-p channel t)))
+       (disco-state-channel-viewable-p channel nil)))
 
 (defun disco-guild-directory--filter-active-p (context)
   "Return non-nil when CONTEXT has an active lens."
@@ -582,7 +581,7 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
             (lambda (channel)
               (and (alist-get 'id channel)
                    (disco-guild-directory-category-p channel)
-                   (disco-permission-channel-viewable-p channel t)))
+                   (disco-state-channel-viewable-p channel nil)))
             channels)))
          (parents
           (disco-guild-directory--sort-channels

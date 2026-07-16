@@ -771,6 +771,10 @@ PROPS is appended as additional plist metadata."
   (let ((type (and (listp channel) (alist-get 'type channel))))
     (and (listp channel)
          (not (eq type 4))
+         ;; Gateway channel snapshots explicitly mark channels the current
+         ;; user cannot view as OBFUSCATED.  Do not expose those names in a
+         ;; composer merely because they remain in the local guild cache.
+         (disco-state-channel-viewable-p channel nil)
          (disco-company--completion-string-present-p (alist-get 'name channel))
          (disco-company--normalize-id (alist-get 'id channel)))))
 

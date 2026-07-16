@@ -435,8 +435,9 @@ process, so late callbacks cannot affect a replacement account session.")
 (defun disco-root--live-event-p (event-type)
   "Return non-nil when EVENT-TYPE should trigger root updates."
   (memq event-type
-        '(message-create message-ack
+        '(ready message-create message-ack
           channel-create channel-update channel-delete channel-update-partial
+          channel-sync
           channel-unread-update passive-update-v1 passive-update-v2
           channel-pins-update channel-pins-ack
           channel-statuses channel-info channel-member-count-update
@@ -451,7 +452,7 @@ process, so late callbacks cannot affect a replacement account session.")
 (defun disco-root--live-event-structural-p (event-type)
   "Return non-nil when EVENT-TYPE requires a full root reconcile."
   (memq event-type
-        '(channel-create channel-update channel-delete
+        '(channel-create channel-update channel-delete channel-sync
           guild-create guild-update guild-delete guild-sync
           user-guild-settings-update
           thread-create thread-update thread-delete thread-list-sync)))
@@ -459,7 +460,7 @@ process, so late callbacks cannot affect a replacement account session.")
 (defun disco-root--live-event-header-p (event-type)
   "Return non-nil when EVENT-TYPE affects root header state only."
   (memq event-type
-        '(guild-feature-ack user-non-channel-ack notification-center-items-ack
+        '(ready guild-feature-ack user-non-channel-ack notification-center-items-ack
           sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
 
 (defun disco-root-set-layout (layout)
@@ -569,7 +570,9 @@ Live window points remain independent and are restored by `appkit-position'."
 (defun disco-root--search-domain-candidates ()
   "Return completion candidates for root search domains."
   (append
-   (when-let* ((channel-domain (disco-root--search-current-channel-domain)))
+   (when-let* ((channel-domain (disco-root--search-current-channel-domain))
+               (channel (disco-root--search-domain-channel-object channel-domain))
+               ((disco-state-channel-viewable-p channel nil)))
      (list (cons (format "Channel: %s"
                          (disco-root--search-domain-label channel-domain))
                  channel-domain)))
@@ -664,7 +667,8 @@ Live window points remain independent and are restored by `appkit-position'."
   (let ((seen (make-hash-table :test #'equal))
         result)
     (dolist (channel (disco-root--search-domain-channel-objects domain))
-      (when (and (disco-channel-searchable-p channel)
+      (when (and (disco-state-channel-viewable-p channel nil)
+                 (disco-channel-searchable-p channel)
                  (alist-get 'id channel))
         (let* ((channel-id (alist-get 'id channel))
                (name (disco-root--channel-display-name channel))
@@ -2983,6 +2987,8 @@ When HEADER-P is non-nil, the root header is invalidated too."
   "Apply one gateway EVENT to root buffer view."
   (let ((event-type (plist-get event :type)))
     (when (disco-root--live-event-p event-type)
+      (when (eq event-type 'ready)
+        (setq disco-root--refresh-in-flight nil))
       (let ((channel-ids (disco-gateway-event-channel-ids event))
             (structural (disco-root--live-event-structural-p event-type))
             (header (disco-root--live-event-header-p event-type)))

@@ -516,7 +516,7 @@ This prevents noisy permission errors for sources that require elevated access."
 (defun disco-root--displayable-channel-p (channel)
   "Return non-nil when CHANNEL should appear in root buffer."
   (and (disco-channel-root-visible-p channel)
-       (disco-permission-channel-viewable-p channel nil)))
+       (disco-state-channel-viewable-p channel nil)))
 
 (defun disco-root--openable-channel-p (channel)
   "Return non-nil when CHANNEL has a supported open action."
@@ -1927,7 +1927,7 @@ Higher score means channel should appear earlier in activity mode."
              (guild-name (or (alist-get 'name guild) guild-id "unknown-guild")))
         (dolist (channel (disco-state-guild-channels guild-id))
           (when (and (disco-root--thread-parent-channel-p channel)
-                     (disco-permission-channel-viewable-p channel t))
+                     (disco-state-channel-viewable-p channel nil))
             (push (cons (format "%s / %s (%s)"
                                 guild-name
                                 (disco-root--channel-label channel)

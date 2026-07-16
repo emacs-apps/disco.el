@@ -28,21 +28,133 @@
     (vector (list 'down-mouse-1 posn)
             (list 'mouse-1 posn))))
 
-(ert-deftest disco-root-displayable-channel-requires-resolved-view-permission ()
-  (should
-   (disco-root--displayable-channel-p
-    '((id . "dm") (type . 1))))
-  (should-not
-   (disco-root--displayable-channel-p
-    '((id . "unknown") (guild_id . "g1") (type . 0))))
-  (should-not
-   (disco-root--displayable-channel-p
-    '((id . "hidden") (guild_id . "g1") (type . 0)
-      (permissions . "0"))))
-  (should
-   (disco-root--displayable-channel-p
-    '((id . "visible") (guild_id . "g1") (type . 0)
-      (permissions . "1024")))))
+(ert-deftest disco-root-displayable-channel-requires-authoritative-access ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (should
+         (disco-root--displayable-channel-p
+          '((id . "dm") (type . 1))))
+        (should-not
+         (disco-root--displayable-channel-p
+          '((id . "unknown") (guild_id . "g1") (type . 0))))
+        (should-not
+         (disco-root--displayable-channel-p
+          '((id . "hidden") (guild_id . "g1") (type . 0)
+            (permissions . "0"))))
+        (should
+         (disco-root--displayable-channel-p
+          '((id . "visible") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
+        (disco-state-upsert-gateway-channel
+         '((id . "gateway-visible") (guild_id . "g1")
+           (type . 0) (flags . 0)))
+        (disco-state-upsert-gateway-channel
+         `((id . "gateway-hidden") (guild_id . "g1")
+           (type . 0) (flags . ,disco-channel-flag-obfuscated)))
+        (should
+         (disco-root--displayable-channel-p
+          (disco-state-channel "gateway-visible")))
+        (should-not
+         (disco-root--displayable-channel-p
+          (disco-state-channel "gateway-hidden"))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-unread-does-not-depend-on-expanding-guild-directory ()
+  (disco-state-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-root-mode)
+        (let ((surface (disco-root--ensure-tree-directory-surface)))
+          (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+          (disco-state-apply-ready-read-state-entry
+           '((id . "gateway-unread") (last_message_id . "100")))
+          (disco-state-apply-ready-read-state-entry
+           '((id . "gateway-hidden-unread") (last_message_id . "100")))
+          (disco-state-seed-guild-channels
+           "g1"
+           `(((id . "gateway-unread") (type . 0) (flags . 0)
+              (name . "updates") (last_message_id . "101"))
+             ((id . "gateway-hidden-unread") (type . 0)
+              (flags . ,disco-channel-flag-obfuscated)
+              (name . "secret") (last_message_id . "102"))))
+          (cl-letf (((symbol-function 'disco-directory-load-guild-async)
+                     (lambda (&rest _args)
+                       (ert-fail "Unread projection loaded a collapsed guild"))))
+            (should-not (disco-root--tree-guild-expanded-p surface "g1"))
+            (should
+             (equal '("gateway-unread")
+                    (mapcar
+                     (lambda (channel) (alist-get 'id channel))
+                     (disco-root--collect-visible-unread-channels))))
+            (should
+             (seq-find
+              (lambda (entry)
+                (equal '(root unread channel "gateway-unread")
+                       (appkit-directory-entry-key entry)))
+              (disco-root--tree-layout-entries surface)))
+            (should-not (disco-root--tree-guild-expanded-p surface "g1")))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-ready-event-projects-unread-before-guild-expansion ()
+  (let ((disco-gateway--session-generation 0)
+        (disco-gateway-event-hook nil))
+    (disco-state-reset)
+    (unwind-protect
+        (with-temp-buffer
+          (disco-root-mode)
+          (let ((surface (disco-root--ensure-tree-directory-surface))
+                queued-events)
+            (setq disco-root--refresh-in-flight t)
+            (add-hook 'disco-gateway-event-hook
+                      (lambda (event)
+                        (push (plist-get event :type) queued-events)
+                        (disco-root--handle-gateway-event event)))
+            (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                       (lambda (_channel-ids &optional structural-p _header-p)
+                         (when structural-p
+                           (push 'structural queued-events))))
+                      ((symbol-function
+                        'disco-gateway--subscribe-watched-guild-channels)
+                       #'ignore)
+                      ((symbol-function 'disco-gateway--reset-reconnect-backoff)
+                       #'ignore)
+                      ((symbol-function 'disco-directory-load-guild-async)
+                       (lambda (&rest _args)
+                         (ert-fail "READY unread projection hydrated a guild")))
+                      ((symbol-function 'message) #'ignore))
+              (disco-gateway--dispatch-ready
+               `((session_id . "session")
+                 (user . ((id . "self")))
+                 (read_state
+                  . [((id . "visible") (last_message_id . "100"))
+                     ((id . "hidden") (last_message_id . "100"))])
+                 (guilds
+                  . [((id . "g1") (name . "Guild")
+                      (channels
+                       . [((id . "visible") (type . 0) (flags . 0)
+                           (name . "updates") (last_message_id . "101"))
+                          ((id . "hidden") (type . 0)
+                           (flags . ,disco-channel-flag-obfuscated)
+                           (name . "secret") (last_message_id . "102"))]))])))
+              (should (memq 'guild-sync queued-events))
+              (should (memq 'structural queued-events))
+              (should-not disco-root--refresh-in-flight)
+              (should-not (disco-root--tree-guild-expanded-p surface "g1"))
+              (let ((entries (disco-root--tree-layout-entries surface)))
+                (should
+                 (seq-find
+                  (lambda (entry)
+                    (equal '(root unread channel "visible")
+                           (appkit-directory-entry-key entry)))
+                  entries))
+                (should-not
+                 (seq-find
+                  (lambda (entry)
+                    (equal '(root unread channel "hidden")
+                           (appkit-directory-entry-key entry)))
+                  entries))))))
+      (disco-state-reset))))
 
 (ert-deftest disco-root-activity-candidates-exclude-unresolved-and-hidden-channels ()
   (let ((disco-root-activity-include-threads nil))
@@ -61,6 +173,22 @@
        (equal '("visible")
               (mapcar (lambda (channel) (alist-get 'id channel))
                       (disco-root--collect-activity-candidates)))))))
+
+(ert-deftest disco-root-thread-parent-candidates-honor-latest-gateway-access ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "forum") (guild_id . "g1") (name . "Forum")
+            (type . 15) (permissions . "1024"))))
+        (should (= 1 (length (disco-root--thread-parent-candidates))))
+        (disco-state-upsert-gateway-channel
+         `((id . "forum") (guild_id . "g1") (name . "Forum")
+           (type . 15) (flags . ,disco-channel-flag-obfuscated)))
+        (should-not (disco-root--thread-parent-candidates)))
+    (disco-state-reset)))
 
 (ert-deftest disco-root-visible-guild-unread-total-excludes-inaccessible-channels ()
   (let ((disco-root--view-mode 'all)
@@ -1024,7 +1152,7 @@
                 ((symbol-function 'disco-state-channel)
                  (lambda (channel-id)
                    (and (equal channel-id "cat") category)))
-                ((symbol-function 'disco-permission-channel-viewable-p)
+                ((symbol-function 'disco-state-channel-viewable-p)
                  (lambda (&rest _args) t))
                 ((symbol-function 'disco-state-channel-has-unread-p)
                  (lambda (_channel) nil))
@@ -2307,15 +2435,45 @@
           (should (equal "forum1" opened))))
     (disco-state-reset)))
 
-(ert-deftest disco-root-search-channel-candidates-skip-unsearchable-types ()
+(ert-deftest disco-root-search-channel-candidates-only-offer-viewable-searchable-channels ()
   (disco-state-reset)
   (unwind-protect
       (progn
-        (disco-state-upsert-channel '((id . "text1") (guild_id . "g1") (type . 0) (name . "chat")))
-        (disco-state-upsert-channel '((id . "dir1") (guild_id . "g1") (type . 14) (name . "Directory")))
+        (disco-state-upsert-gateway-channel
+         '((id . "text1") (guild_id . "g1") (type . 0)
+           (name . "chat") (flags . 0)))
+        (disco-state-upsert-gateway-channel
+         `((id . "hidden1") (guild_id . "g1") (type . 0)
+           (name . "secret") (flags . ,disco-channel-flag-obfuscated)))
+        (disco-state-upsert-gateway-channel
+         '((id . "dir1") (guild_id . "g1") (type . 14)
+           (name . "Directory") (flags . 0)))
         (let ((candidates (disco-root--search-channel-candidates '(:kind guild :id "g1"))))
           (should (member '("chat" . "text1") candidates))
+          (should-not (member '("secret" . "hidden1") candidates))
           (should-not (member '("Directory" . "dir1") candidates))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-search-domain-candidates-hide-obfuscated-current-channel ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-gateway-channel
+         '((id . "visible") (guild_id . "g1") (type . 0)
+           (name . "general") (flags . 0)))
+        (disco-state-upsert-gateway-channel
+         `((id . "obfuscated") (guild_id . "g1") (type . 0)
+           (name . "secret") (flags . ,disco-channel-flag-obfuscated)))
+        (cl-letf (((symbol-function 'disco-root--search-current-channel-domain)
+                   (lambda () '(:kind channel :id "visible" :guild-id "g1"
+                                         :label "general"))))
+          (should
+           (assoc "Channel: general" (disco-root--search-domain-candidates))))
+        (cl-letf (((symbol-function 'disco-root--search-current-channel-domain)
+                   (lambda () '(:kind channel :id "obfuscated" :guild-id "g1"
+                                         :label "secret"))))
+          (should-not
+           (assoc "Channel: secret" (disco-root--search-domain-candidates)))))
     (disco-state-reset)))
 
 (ert-deftest disco-root-activity-secondary-label-uses-directory-placeholder ()
