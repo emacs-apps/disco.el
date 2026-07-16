@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'disco-channel-type)
+(require 'disco-permission)
 (require 'disco-read-state)
 (require 'disco-util)
 
@@ -28,6 +29,22 @@
 
 (defvar disco-state--channels-by-id (make-hash-table :test #'equal)
   "Hash table channel-id -> channel object.")
+
+(defvar disco-state--gateway-channel-access-by-id
+  (make-hash-table :test #'equal)
+  "Hash table channel-id -> native Gateway access proof.
+
+Values are `visible' or `hidden'.  Gateway visibility is deliberately separate
+from the channel object: it is not a computed Discord permission bitfield and
+must never be represented by `permissions'.")
+
+(defvar disco-state--computed-channel-access-by-id
+  (make-hash-table :test #'equal)
+  "Hash table channel-id -> REST computed `view-channel' decision.
+
+Native Gateway evidence has priority over this secondary source.  Keeping the
+sources separate prevents a delayed REST response from overriding a newer
+obfuscation decision in the same Gateway session.")
 
 (defvar disco-state--private-channels nil
   "List of private DM-like channels as channel objects.")
@@ -192,6 +209,8 @@
   (clrhash disco-state--channels-by-guild)
   (clrhash disco-state--guild-channels-loaded)
   (clrhash disco-state--channels-by-id)
+  (clrhash disco-state--gateway-channel-access-by-id)
+  (clrhash disco-state--computed-channel-access-by-id)
   (clrhash disco-state--threads-by-parent)
   (clrhash disco-state--thread-ids-by-guild)
   (clrhash disco-state--messages-by-channel)
@@ -221,6 +240,50 @@
   (disco-state-clear-session-data)
   (run-hooks 'disco-state-reset-hook))
 
+(defun disco-state--without-channel-permissions (channel)
+  "Return a copy of CHANNEL without cached computed permissions."
+  (when (listp channel)
+    (assq-delete-all 'permissions (copy-tree channel))))
+
+(defun disco-state--strip-permissions-from-channel-table (table)
+  "Remove cached computed permissions from every channel list in TABLE."
+  (let (updates)
+    (maphash
+     (lambda (key channels)
+       (push (cons key
+                   (mapcar #'disco-state--without-channel-permissions channels))
+             updates))
+     table)
+    (dolist (update updates)
+      (puthash (car update) (cdr update) table))))
+
+(defun disco-state-begin-gateway-session ()
+  "Retire permission evidence owned by the previous Gateway session.
+
+Keep structural channel indexes and message history intact so the UI can
+remain stable while the new READY snapshot is ingested.  Gateway visibility,
+REST-computed visibility, cached computed permission bitfields, and directory
+loaded markers are session-relative and are therefore cleared atomically."
+  (clrhash disco-state--gateway-channel-access-by-id)
+  (clrhash disco-state--computed-channel-access-by-id)
+  (clrhash disco-state--guild-channels-loaded)
+  (let (updates)
+    (maphash
+     (lambda (channel-id channel)
+       (push (cons channel-id
+                   (disco-state--without-channel-permissions channel))
+             updates))
+     disco-state--channels-by-id)
+    (dolist (update updates)
+      (puthash (car update) (cdr update) disco-state--channels-by-id)))
+  (disco-state--strip-permissions-from-channel-table
+   disco-state--channels-by-guild)
+  (disco-state--strip-permissions-from-channel-table
+   disco-state--threads-by-parent)
+  (setq disco-state--private-channels
+        (mapcar #'disco-state--without-channel-permissions
+                disco-state--private-channels)))
+
 (defun disco-state-channel-thread-p (channel)
   "Return non-nil when CHANNEL is a thread channel."
   (disco-channel-thread-p channel))
@@ -228,6 +291,64 @@
 (defun disco-state-private-channel-p (channel)
   "Return non-nil when CHANNEL is a private DM-like channel."
   (disco-channel-private-p channel))
+
+(defun disco-state-channel-access (channel-id)
+  "Return the authoritative access decision for CHANNEL-ID.
+
+The result is `visible', `hidden', or nil when no evidence has been observed.
+Native Gateway visibility takes priority over REST computed permissions."
+  (let ((channel-id (disco-state--normalize-id channel-id)))
+    (or (gethash channel-id disco-state--gateway-channel-access-by-id)
+        (gethash channel-id disco-state--computed-channel-access-by-id))))
+
+(defun disco-state--record-gateway-channel-access (channel)
+  "Record authoritative Gateway access evidence carried by CHANNEL."
+  (let ((channel-id (disco-state--normalize-id (alist-get 'id channel)))
+        (guild-id (disco-state--normalize-id (alist-get 'guild_id channel))))
+    (when (and channel-id guild-id)
+      (let ((access (if (disco-channel-obfuscated-p channel)
+                        'hidden
+                      'visible)))
+        (puthash channel-id access
+                 disco-state--gateway-channel-access-by-id)
+        access))))
+
+(defun disco-state--record-computed-channel-access (channel)
+  "Record CHANNEL's latest computed `view-channel' decision.
+
+Remove any older REST proof when the supposedly resolved object has no
+parseable computed permissions, so stale evidence cannot masquerade as the
+new source."
+  (let ((channel-id (disco-state--normalize-id (alist-get 'id channel))))
+    (when channel-id
+      (if (disco-permission-channel-known-p channel)
+          (puthash channel-id
+                   (if (disco-permission-channel-has-p
+                        channel 'view-channel nil)
+                       'visible
+                     'hidden)
+                   disco-state--computed-channel-access-by-id)
+        (remhash channel-id disco-state--computed-channel-access-by-id)))))
+
+(defun disco-state-channel-viewable-p (channel unknown-value)
+  "Return whether CHANNEL is viewable by the current user.
+
+Native Gateway visibility is authoritative when available.  Otherwise use the
+latest REST decision or a computed `permissions' field carried by CHANNEL.
+Return UNKNOWN-VALUE when no source can decide.  Callers must choose
+UNKNOWN-VALUE explicitly.  Only explicitly private channels are viewable
+without guild context; malformed guild-like objects remain unknown."
+  (let ((guild-id (and (listp channel) (alist-get 'guild_id channel)))
+        (access (and (listp channel)
+                     (disco-state-channel-access (alist-get 'id channel)))))
+    (cond
+     ((disco-state-private-channel-p channel) t)
+     ((null guild-id) unknown-value)
+     ((eq access 'visible) t)
+     ((eq access 'hidden) nil)
+     ((disco-permission-channel-known-p channel)
+      (disco-permission-channel-has-p channel 'view-channel nil))
+     (t unknown-value))))
 
 (defun disco-state-thread-only-parent-channel-p (channel)
   "Return non-nil when CHANNEL is a thread-only parent channel."
@@ -530,6 +651,8 @@ whether every channel carries authoritative computed permissions."
   (dolist (channel channels)
     (let ((channel-id (alist-get 'id channel)))
       (when channel-id
+        (when resolved-p
+          (disco-state--record-computed-channel-access channel))
         (puthash channel-id channel disco-state--channels-by-id)
         (when (disco-state-channel-thread-p channel)
           (disco-state--index-thread-channel channel)
@@ -553,25 +676,46 @@ Use `disco-state-seed-guild-channels' for Gateway snapshots, whose channel
 objects do not contain computed permissions for the current user."
   (disco-state--put-guild-channel-snapshot guild-id channels t))
 
-(defun disco-state--carry-channel-permissions (channel)
-  "Carry stable computed permissions from the cached copy of CHANNEL.
+(defun disco-state--channel-permission-context-changed-p (old channel)
+  "Return non-nil when OLD and CHANNEL have different permission contexts."
+  (and old
+       (or (not (equal (alist-get 'guild_id old)
+                       (alist-get 'guild_id channel)))
+           (not (equal (alist-get 'type old) (alist-get 'type channel)))
+           (not (equal (alist-get 'parent_id old)
+                       (alist-get 'parent_id channel)))
+           (not (equal (alist-get 'permission_overwrites old)
+                       (alist-get 'permission_overwrites channel))))))
 
-Gateway channel objects omit the REST-only `permissions' field.  It remains
-valid across updates that leave the channel's permission context unchanged."
+(defun disco-state--prepare-channel-permissions
+    (channel &optional discard-cached-permissions)
+  "Prepare CHANNEL and synchronize its computed access evidence.
+
+Carry a still-valid cached `permissions' field.  Explicit permissions replace
+the computed decision; DISCARD-CACHED-PERMISSIONS or a changed permission
+context retires it."
   (let* ((channel-id (disco-state--normalize-id (alist-get 'id channel)))
-         (old (and channel-id (gethash channel-id disco-state--channels-by-id))))
-    (if (or (assq 'permissions channel)
-            (not (assq 'permissions old))
-            (not (equal (alist-get 'type old) (alist-get 'type channel)))
-            (not (equal (alist-get 'parent_id old)
-                        (alist-get 'parent_id channel)))
-            (not (equal (alist-get 'permission_overwrites old)
-                        (alist-get 'permission_overwrites channel))))
-        channel
-      (let ((merged (copy-tree channel)))
-        (setf (alist-get 'permissions merged)
-              (alist-get 'permissions old))
-        merged))))
+         (old (and channel-id (gethash channel-id disco-state--channels-by-id)))
+         (explicit-permissions-p (and (assq 'permissions channel) t))
+         (permission-context-changed-p
+          (disco-state--channel-permission-context-changed-p old channel))
+         (prepared
+          (if (or discard-cached-permissions
+                  explicit-permissions-p
+                  (not (assq 'permissions old))
+                  permission-context-changed-p)
+              channel
+            (let ((merged (copy-tree channel)))
+              (setf (alist-get 'permissions merged)
+                    (alist-get 'permissions old))
+              merged))))
+    (when channel-id
+      (cond
+       (explicit-permissions-p
+        (disco-state--record-computed-channel-access prepared))
+       ((or discard-cached-permissions permission-context-changed-p)
+        (remhash channel-id disco-state--computed-channel-access-by-id))))
+    prepared))
 
 (defun disco-state-seed-guild-channels (guild-id channels)
   "Seed GUILD-ID with provisional Gateway CHANNELS.
@@ -580,10 +724,19 @@ Gateway snapshots are structurally complete but lack the current user's
 computed channel permissions.  Cache them for identity and ordering without
 claiming that the directory is ready to render.  Previously resolved
 permissions are carried only while their permission context is unchanged."
-  (disco-state--put-guild-channel-snapshot
-   guild-id
-   (mapcar #'disco-state--carry-channel-permissions channels)
-   nil))
+  (let ((canonical-channels
+         (delq nil
+               (mapcar (lambda (channel)
+                         (disco-state--channel-in-guild
+                          channel
+                          (disco-state--normalize-id guild-id)))
+                       channels))))
+    (dolist (channel canonical-channels)
+      (disco-state--record-gateway-channel-access channel))
+    (disco-state--put-guild-channel-snapshot
+     guild-id
+     (mapcar #'disco-state--prepare-channel-permissions canonical-channels)
+     nil)))
 
 (defun disco-state-guild-channels (guild-id)
   "Return channels for GUILD-ID."
@@ -685,12 +838,20 @@ Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
           (push thread threads))))
     (nreverse threads)))
 
-(defun disco-state-upsert-channel (channel)
-  "Insert or update one CHANNEL object in all indexes."
-  (let* ((channel (disco-state--carry-channel-permissions channel))
-         (channel-id (alist-get 'id channel))
-         (guild-id (alist-get 'guild_id channel))
-         (old (and channel-id (gethash channel-id disco-state--channels-by-id))))
+(defun disco-state-upsert-channel (channel &optional discard-cached-permissions)
+  "Insert or update one access-neutral CHANNEL object in all indexes.
+
+This generic path preserves the current access proof.  Full Gateway channel
+objects must use `disco-state-upsert-gateway-channel'; permission-resolved REST
+directory snapshots must use `disco-state-put-channels'.  Internal callers may
+set DISCARD-CACHED-PERMISSIONS when an external access transition invalidates
+the cached computed bitfield.  An explicit `permissions' field establishes a
+new computed access decision even on this generic path."
+  (let* ((channel-id (alist-get 'id channel))
+         (old (and channel-id (gethash channel-id disco-state--channels-by-id)))
+         (channel (disco-state--prepare-channel-permissions
+                   channel discard-cached-permissions))
+         (guild-id (alist-get 'guild_id channel)))
     (when (and old
                (disco-state-private-channel-p old)
                (not (disco-state-private-channel-p channel)))
@@ -727,8 +888,29 @@ Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
         (when (numberp thread-member-count)
           (disco-state-set-thread-member-count channel-id thread-member-count))))))
 
+(defun disco-state-upsert-gateway-channel (channel &optional guild-id)
+  "Insert or update one complete CHANNEL object received from Gateway.
+
+Record Gateway access independently before updating the ordinary channel
+indexes.  GUILD-ID canonically supplies the owner for nested Gateway channel
+snapshots that omit `guild_id'.  Partial unread/update payloads must use the
+access-neutral `disco-state-upsert-channel' path instead."
+  (let ((canonical
+         (if guild-id
+             (disco-state--channel-in-guild
+              channel (disco-state--normalize-id guild-id))
+           (copy-tree channel))))
+    (let* ((channel-id (alist-get 'id canonical))
+           (old-access (disco-state-channel-access channel-id))
+           (new-access
+            (disco-state--record-gateway-channel-access canonical)))
+      (disco-state-upsert-channel
+       canonical
+       (and old-access new-access (not (eq old-access new-access)))))))
+
 (defun disco-state-delete-channel (channel-id)
   "Delete channel CHANNEL-ID from indexes."
+  (setq channel-id (disco-state--normalize-id channel-id))
   (let ((channel (gethash channel-id disco-state--channels-by-id)))
     (when channel
       (let ((guild-id (alist-get 'guild_id channel)))
@@ -748,6 +930,8 @@ Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
       (remhash channel-id disco-state--channels-by-id)
       (remhash channel-id disco-state--messages-by-channel)
       (disco-state--delete-read-state disco-read-state-type-channel channel-id)))
+  (remhash channel-id disco-state--gateway-channel-access-by-id)
+  (remhash channel-id disco-state--computed-channel-access-by-id)
   (let ((voice-state-keys
          (copy-sequence (or (gethash channel-id disco-state--voice-state-keys-by-channel)
                             '()))))
@@ -759,11 +943,10 @@ Values follow Discord: 0 all messages, 1 mentions only, and 2 none."
   (remhash channel-id disco-state--channel-member-counts-by-channel)
   (remhash channel-id disco-state--voice-state-keys-by-channel))
 
-(defun disco-state-sync-threads (guild-id parent-channel-ids threads)
-  "Sync active THREADS for GUILD-ID.
+(defun disco-state--sync-threads (guild-id parent-channel-ids threads upsert)
+  "Sync active THREADS for GUILD-ID using UPSERT.
 
-If PARENT-CHANNEL-IDS is nil, replace all known threads for that guild.
-Otherwise, replace threads only under the provided parent IDs."
+PARENT-CHANNEL-IDS limits replacement to the named parents when non-nil."
   (setq guild-id (disco-state--normalize-id guild-id))
   (setq threads
         (delq nil
@@ -780,7 +963,23 @@ Otherwise, replace threads only under the provided parent IDs."
                        (member parent-id target-parents)))
           (disco-state-delete-channel thread-id))))
     (dolist (thread threads)
-      (disco-state-upsert-channel thread))))
+      (funcall upsert thread))))
+
+(defun disco-state-sync-threads (guild-id parent-channel-ids threads)
+  "Sync active THREADS for GUILD-ID.
+
+If PARENT-CHANNEL-IDS is nil, replace all known threads for that guild.
+Otherwise, replace threads only under the provided parent IDs."
+  (disco-state--sync-threads
+   guild-id parent-channel-ids threads #'disco-state-upsert-channel))
+
+(defun disco-state-sync-gateway-threads (guild-id parent-channel-ids threads)
+  "Sync server-confirmed Gateway THREADS for GUILD-ID.
+
+Replacement follows `disco-state-sync-threads'.  Every supplied thread also
+updates its native Gateway channel access proof."
+  (disco-state--sync-threads
+   guild-id parent-channel-ids threads #'disco-state-upsert-gateway-channel))
 
 (defun disco-state-put-messages (channel-id messages)
   "Store MESSAGES list for CHANNEL-ID."

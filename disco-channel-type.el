@@ -8,6 +8,12 @@
 
 ;;; Code:
 
+(defconst disco-channel-flag-obfuscated (ash 1 17)
+  "Discord channel flag `OBFUSCATED'.
+
+Discord uses this flag on the limited channel objects included by the
+`CHANNEL_OBFUSCATION' Gateway capability.")
+
 (defconst disco-channel-type-spec-alist
   '((0 :name "text"
        :root-visible t
@@ -159,6 +165,16 @@
 (defun disco-channel-inspect-note (channel-or-type)
   "Return inspector note string for CHANNEL-OR-TYPE, or nil."
   (disco-channel-type-get channel-or-type :inspect-note))
+
+(defun disco-channel-obfuscated-p (channel)
+  "Return non-nil when CHANNEL explicitly carries `OBFUSCATED'.
+
+Only a non-negative integer `flags' value is accepted.  In particular, a
+missing or malformed field is not evidence that a channel is obfuscated."
+  (let ((flags (and (listp channel) (alist-get 'flags channel))))
+    (and (integerp flags)
+         (>= flags 0)
+         (not (zerop (logand flags disco-channel-flag-obfuscated))))))
 
 (provide 'disco-channel-type)
 

@@ -11,7 +11,9 @@
 ;; - `disco-gateway-unwatch-channel'
 ;; - `disco-gateway-watch-global'
 ;; - `disco-gateway-unwatch-global'
+;; - `disco-gateway-session-generation'
 ;; - `disco-gateway-request-last-messages'
+;; - `disco-gateway-request-guild-channel-sync'
 ;; - `disco-gateway-request-guild-members'
 ;; - `disco-gateway-request-channel-statuses'
 ;; - `disco-gateway-request-channel-member-count'
@@ -49,7 +51,7 @@ Event schema:
   `guild-member-remove' `guild-emojis-update'
   `guild-role-create' `guild-role-update' `guild-role-delete'
   `channel-create' `channel-update' `channel-delete'
-  `channel-update-partial' `channel-unread-update'
+  `channel-update-partial' `channel-unread-update' `channel-sync'
   `channel-pins-update' `channel-pins-ack'
   `channel-statuses' `channel-info' `channel-member-count-update'
   `passive-update-v1' `passive-update-v2'
@@ -95,7 +97,8 @@ Event schema:
 - :read-state-type integer for guild/user feature ACK events
 - :resource-id string for guild/user feature ACK events
 - :entity-id string for guild/user feature ACK events and notification-center ack
-- :channels list for passive-update-v1
+- :channels list for passive-update-v1 and channel-sync
+- :integrity-check server integrity marker for channel-sync
 - :updated-channels list for passive-update-v2
 - :threads list for thread-list-sync
 - :thread-member thread member object for thread-member-update
@@ -126,6 +129,16 @@ Event schema:
 
 (defvar disco-gateway--connection-generation 0
   "Generation owning the current Gateway connection lifecycle.")
+
+(defvar disco-gateway--session-generation 0
+  "Monotonic generation identifying the latest READY session.
+
+Unlike the transport generation, this value survives RESUMED reconnects and
+changes only when Discord establishes a new logical Gateway session.")
+
+(defun disco-gateway-session-generation ()
+  "Return the generation of the latest logical Gateway session."
+  disco-gateway--session-generation)
 
 (defvar disco-gateway--connection-owner nil
   "Exact owner plist for the current or pending Gateway connection.")
@@ -181,6 +194,13 @@ Event schema:
 
 (defconst disco-gateway--capability-passive-guild-update-v2 (ash 1 14)
   "Gateway capability bit for PASSIVE_GUILD_UPDATE_V2.")
+
+(defconst disco-gateway--capability-channel-obfuscation (ash 1 15)
+  "Gateway capability bit for CHANNEL_OBFUSCATION.
+
+This capability is a protocol requirement for disco.el.  Discord can then
+publish obfuscated placeholders for inaccessible channels instead of making
+channel presence depend on an eager REST directory request.")
 
 (defvar disco-gateway--zlib-stream-buffer ""
   "Accumulated compressed bytes for current gateway connection.")
@@ -354,6 +374,57 @@ CHANNEL-IDS is limited to 100 IDs per request by Discord."
        34
        `((guild_id . ,normalized-guild-id)
          (channel_ids . ,normalized-channel-ids))))))
+
+(defun disco-gateway--normalize-request-id (value)
+  "Normalize outbound Gateway identifier VALUE, or return nil.
+
+Only non-empty strings and integer identifiers are accepted.  In particular,
+symbols and arbitrary printable Lisp objects are not silently stringified."
+  (let ((normalized
+         (cond
+          ((stringp value) (string-trim value))
+          ((integerp value) (number-to-string value))
+          (t nil))))
+    (and normalized
+         (not (string-empty-p normalized))
+         normalized)))
+
+(defun disco-gateway--normalize-request-id-list (values)
+  "Normalize and de-duplicate outbound Gateway identifier VALUES.
+
+Preserve first-seen order.  Signal `user-error' rather than silently dropping
+an invalid member, because a partial channel resync request has different
+semantics from the request the caller supplied."
+  (unless (or (listp values) (vectorp values))
+    (user-error "disco: channel ids must be a list or vector"))
+  (let (result)
+    (dolist (value (if (vectorp values) (append values nil) values))
+      (let ((normalized (disco-gateway--normalize-request-id value)))
+        (unless normalized
+          (user-error "disco: channel id is empty or invalid"))
+        (unless (member normalized result)
+          (push normalized result))))
+    (nreverse result)))
+
+(defun disco-gateway-request-guild-channel-sync
+    (guild-id obfuscated-channel-ids)
+  "Request resync of OBFUSCATED-CHANNEL-IDS in GUILD-ID via Gateway op 38.
+
+Discord answers with CHANNEL_SYNC containing only channels the current user
+can now view.  An omitted requested ID remains obfuscated; this function does
+not manufacture a channel object or infer a synthetic response for it."
+  (let ((normalized-guild-id
+         (disco-gateway--normalize-request-id guild-id)))
+    (unless normalized-guild-id
+      (user-error "disco: guild id is required for channel sync"))
+    (let ((normalized-channel-ids
+           (disco-gateway--normalize-request-id-list obfuscated-channel-ids)))
+      (unless normalized-channel-ids
+        (user-error "disco: at least one obfuscated channel id is required"))
+      (disco-gateway--send-op
+       38
+       `((guild_id . ,normalized-guild-id)
+         (obfuscated_channel_ids . ,normalized-channel-ids))))))
 
 (cl-defun disco-gateway-request-guild-members
     (guild-id &key query limit presences user-ids nonce)
@@ -1007,9 +1078,15 @@ This shape follows Discord gateway identify expectations."
     (device . "disco.el")))
 
 (defun disco-gateway--effective-identify-capabilities ()
-  "Return effective capabilities bitmask for Identify payload, or nil."
-  (let ((capabilities (and (integerp disco-gateway-identify-capabilities)
-                           disco-gateway-identify-capabilities)))
+  "Return the effective capabilities bitmask for the Identify payload.
+
+`CHANNEL_OBFUSCATION' is an unconditional protocol requirement.  Optional
+capabilities extend that baseline; they cannot disable it."
+  (let ((capabilities
+         (logior (or (and (integerp disco-gateway-identify-capabilities)
+                          disco-gateway-identify-capabilities)
+                     0)
+                 disco-gateway--capability-channel-obfuscation)))
     (when disco-gateway-enable-passive-guild-update-v2
       (setq capabilities
             (logior (or capabilities 0)
@@ -1176,44 +1253,51 @@ Discord Ready may deliver some fields as versioned structures
   (disco-state-set-private-channels
    (disco-gateway--versioned-entries private-channels)))
 
+(defun disco-gateway--ingest-guild-snapshot (guild)
+  "Ingest explicitly present collection snapshots from GUILD.
+
+Gateway guild objects vary between complete and compact forms.  An omitted
+field therefore means that no new snapshot was delivered, not that the
+corresponding collection became empty.  Gateway channels carry native access
+evidence independently of REST-computed permissions; active threads are
+independent entities and are merged into their channel indexes."
+  (let ((guild-id (alist-get 'id guild)))
+    (when guild-id
+      (when (assq 'channels guild)
+        (disco-state-seed-guild-channels
+         guild-id
+         (disco-gateway--versioned-entries (alist-get 'channels guild))))
+      (when (assq 'threads guild)
+        (dolist (thread
+                 (disco-gateway--versioned-entries
+                  (alist-get 'threads guild)))
+          (disco-state-upsert-gateway-channel thread guild-id)))
+      (when (assq 'emojis guild)
+        (disco-state-set-guild-emojis
+         guild-id
+         (disco-gateway--versioned-entries (alist-get 'emojis guild))))
+      (when (assq 'roles guild)
+        (disco-state-set-guild-roles
+         guild-id
+         (disco-gateway--versioned-entries (alist-get 'roles guild))))
+      (when (or (assq 'members guild)
+                (assq 'presences guild))
+        (disco-state-apply-guild-members-chunk
+         guild-id
+         (and (assq 'members guild)
+              (disco-gateway--versioned-entries
+               (alist-get 'members guild)))
+         (and (assq 'presences guild)
+              (disco-gateway--versioned-entries
+               (alist-get 'presences guild))))))))
+
 (defun disco-gateway--ingest-ready-guilds (guilds)
   "Ingest Ready GUILDS payload into local guild/channel state."
   (let ((ready-guilds (cl-remove-if-not #'listp
                                         (disco-gateway--versioned-entries guilds))))
     (disco-state-set-guilds ready-guilds)
     (dolist (guild ready-guilds)
-      (let* ((guild-id (alist-get 'id guild))
-             (has-channels (assq 'channels guild))
-             (has-threads (assq 'threads guild))
-             (has-emojis (assq 'emojis guild))
-             (has-roles (assq 'roles guild))
-             (has-members (assq 'members guild))
-             (channels (and has-channels
-                            (disco-gateway--versioned-entries
-                             (alist-get 'channels guild))))
-             (threads (and has-threads
-                           (disco-gateway--versioned-entries
-                            (alist-get 'threads guild))))
-             (emojis (and has-emojis (alist-get 'emojis guild)))
-             (roles (and has-roles (alist-get 'roles guild)))
-             (members (and has-members
-                           (disco-gateway--versioned-entries
-                            (alist-get 'members guild))))
-             (presences (and (assq 'presences guild)
-                             (disco-gateway--versioned-entries
-                              (alist-get 'presences guild)))))
-        (when (and guild-id has-emojis)
-          (disco-state-set-guild-emojis guild-id emojis))
-        (when (and guild-id has-roles)
-          (disco-state-set-guild-roles guild-id roles))
-        (when (and guild-id has-members)
-          (disco-state-apply-guild-members-chunk
-           guild-id members presences))
-        (when (and guild-id has-channels)
-          (disco-state-seed-guild-channels guild-id channels))
-        (when has-threads
-          (dolist (thread threads)
-            (disco-state-upsert-channel thread)))))
+      (disco-gateway--ingest-guild-snapshot guild))
     (disco-gateway--emit
      (list :type 'guild-sync
            :source 'ready
@@ -1224,7 +1308,7 @@ Discord Ready may deliver some fields as versioned structures
   "Upsert CHANNEL and emit EVENT-TYPE.
 
 CHANNEL watchers are also re-subscribed using Gateway opcode 14."
-  (disco-state-upsert-channel channel)
+  (disco-state-upsert-gateway-channel channel)
   (let ((channel-id (alist-get 'id channel)))
     (when (and channel-id (disco-gateway--channel-watched-p channel-id))
       (disco-gateway--maybe-subscribe-watched-channel channel-id t)))
@@ -1296,6 +1380,8 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
 
 (defun disco-gateway--dispatch-ready (payload)
   "Handle READY dispatch PAYLOAD."
+  (cl-incf disco-gateway--session-generation)
+  (disco-state-begin-gateway-session)
   (setq disco-gateway--session-id (alist-get 'session_id payload))
   (setq disco-gateway--resume-url (alist-get 'resume_gateway_url payload))
   (let ((ready-user (alist-get 'user payload)))
@@ -1327,26 +1413,13 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
 (defun disco-gateway--dispatch-guild-create (payload)
   "Handle GUILD_CREATE dispatch PAYLOAD."
   (disco-state-upsert-guild payload)
-  (let ((guild-id (alist-get 'id payload)))
-    (when (and guild-id (assq 'emojis payload))
-      (disco-state-set-guild-emojis guild-id (alist-get 'emojis payload)))
-    (when (and guild-id (assq 'roles payload))
-      (disco-state-set-guild-roles guild-id (alist-get 'roles payload)))
-    (when (and guild-id (assq 'members payload))
-      (disco-state-apply-guild-members-chunk
-       guild-id
-       (disco-gateway--versioned-entries (alist-get 'members payload))
-       (disco-gateway--versioned-entries (alist-get 'presences payload)))))
+  (disco-gateway--ingest-guild-snapshot payload)
   (disco-gateway--emit-guild-event 'guild-create payload))
 
 (defun disco-gateway--dispatch-guild-update (payload)
   "Handle GUILD_UPDATE dispatch PAYLOAD."
   (disco-state-upsert-guild payload)
-  (let ((guild-id (alist-get 'id payload)))
-    (when (and guild-id (assq 'emojis payload))
-      (disco-state-set-guild-emojis guild-id (alist-get 'emojis payload)))
-    (when (and guild-id (assq 'roles payload))
-      (disco-state-set-guild-roles guild-id (alist-get 'roles payload))))
+  (disco-gateway--ingest-guild-snapshot payload)
   (disco-gateway--emit-guild-event 'guild-update payload))
 
 (defun disco-gateway--dispatch-guild-emojis-update (payload)
@@ -1469,6 +1542,34 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
      (list :type 'channel-unread-update
            :guild-id guild-id
            :channel-unread-updates channel-unread-updates))))
+
+(defun disco-gateway--dispatch-channel-sync (payload)
+  "Handle CHANNEL_SYNC dispatch PAYLOAD.
+
+The enclosing guild is canonical for returned channel objects.  Discord may
+omit requested obfuscated channels that remain inaccessible; only the actual
+response entries are upserted and emitted."
+  (when-let* ((guild-id
+               (disco-gateway--normalize-request-id
+                (alist-get 'guild_id payload))))
+    (let ((channels
+           (delq nil
+                 (mapcar
+                  (lambda (channel)
+                    (when (listp channel)
+                      (let ((canonical (copy-tree channel)))
+                        (setf (alist-get 'guild_id canonical) guild-id)
+                        canonical)))
+                  (disco-gateway--versioned-entries
+                   (alist-get 'channels payload)))))
+          (integrity-check (alist-get 'integrity_check payload)))
+      (dolist (channel channels)
+        (disco-state-upsert-gateway-channel channel guild-id))
+      (disco-gateway--emit
+       (list :type 'channel-sync
+             :guild-id guild-id
+             :channels channels
+             :integrity-check integrity-check)))))
 
 (defun disco-gateway--channel-unread-channel-ids (updates)
   "Extract channel IDs from channel unread UPDATES list."
@@ -1870,7 +1971,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
         (channel-ids (alist-get 'channel_ids payload))
         (threads (alist-get 'threads payload)))
     (when guild-id
-      (disco-state-sync-threads guild-id channel-ids (or threads '()))
+      (disco-state-sync-gateway-threads guild-id channel-ids (or threads '()))
       (disco-gateway--emit
        (list :type 'thread-list-sync
              :guild-id guild-id
@@ -1966,6 +2067,7 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
     ("CHANNEL_DELETE" . disco-gateway--dispatch-channel-delete)
     ("CHANNEL_UPDATE_PARTIAL" . disco-gateway--dispatch-channel-update-partial)
     ("CHANNEL_UNREAD_UPDATE" . disco-gateway--dispatch-channel-unread-update)
+    ("CHANNEL_SYNC" . disco-gateway--dispatch-channel-sync)
     ("CHANNEL_STATUSES" . disco-gateway--dispatch-channel-statuses)
     ("CHANNEL_INFO" . disco-gateway--dispatch-channel-info)
     ("CHANNEL_MEMBER_COUNT_UPDATE" . disco-gateway--dispatch-channel-member-count-update)

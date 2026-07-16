@@ -5,7 +5,7 @@
 
 (require 'disco-gateway)
 
-(ert-deftest disco-gateway-identify-payload-includes-passive-v2-capability-by-default ()
+(ert-deftest disco-gateway-identify-payload-includes-native-unread-capabilities-by-default ()
   (let ((disco-gateway-identify-capabilities nil)
         (disco-gateway-enable-passive-guild-update-v2 t)
         (disco-gateway-identify-intents nil)
@@ -14,9 +14,9 @@
                (lambda () "tok")))
       (let* ((payload (disco-gateway--identify-payload))
              (capabilities (alist-get 'capabilities payload)))
-        (should (= capabilities (ash 1 14)))))))
+        (should (= capabilities (logior (ash 1 14) (ash 1 15))))))))
 
-(ert-deftest disco-gateway-identify-payload-merges-custom-and-passive-capabilities ()
+(ert-deftest disco-gateway-identify-payload-merges-custom-and-native-capabilities ()
   (let ((disco-gateway-identify-capabilities (ash 1 2))
         (disco-gateway-enable-passive-guild-update-v2 t)
         (disco-gateway-identify-intents nil)
@@ -25,9 +25,10 @@
                (lambda () "tok")))
       (let* ((payload (disco-gateway--identify-payload))
              (capabilities (alist-get 'capabilities payload)))
-        (should (= capabilities (logior (ash 1 2) (ash 1 14))))))))
+        (should (= capabilities
+                   (logior (ash 1 2) (ash 1 14) (ash 1 15))))))))
 
-(ert-deftest disco-gateway-identify-payload-omits-capabilities-when-passive-v2-disabled ()
+(ert-deftest disco-gateway-identify-payload-keeps-channel-obfuscation-when-passive-v2-disabled ()
   (let ((disco-gateway-identify-capabilities nil)
         (disco-gateway-enable-passive-guild-update-v2 nil)
         (disco-gateway-identify-intents nil)
@@ -35,7 +36,24 @@
     (cl-letf (((symbol-function 'disco-current-token)
                (lambda () "tok")))
       (let ((payload (disco-gateway--identify-payload)))
-        (should-not (assq 'capabilities payload))))))
+        (should (= (alist-get 'capabilities payload) (ash 1 15)))))))
+
+(ert-deftest disco-gateway-ready-advances-logical-session-generation ()
+  (disco-state-reset)
+  (let ((disco-gateway--session-generation 7))
+    (cl-letf (((symbol-function 'disco-gateway--subscribe-watched-guild-channels)
+               #'ignore)
+              ((symbol-function 'disco-gateway--reset-reconnect-backoff)
+               #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (disco-gateway--dispatch-ready
+       '((session_id . "session")
+         (user . ((id . "self")))
+         (guilds . [])))
+      (should (= 8 (disco-gateway-session-generation)))
+      (disco-gateway--dispatch-resumed nil)
+      (should (= 8 (disco-gateway-session-generation)))))
+  (disco-state-reset))
 
 (ert-deftest disco-gateway-dispatch-message-create-passes-current-user-id ()
   (let (captured)
@@ -405,6 +423,86 @@
                        :channel-ids ("c2" "v2"))
                      emitted)))))
 
+(ert-deftest disco-gateway-dispatch-channel-sync-upserts-only-returned-channels ()
+  (let (upserts emitted)
+    (cl-letf (((symbol-function 'disco-state-upsert-gateway-channel)
+               (lambda (channel &optional guild-id)
+                 (push (list channel guild-id) upserts)))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-channel-sync
+       '((guild_id . "g1")
+         ;; An op38 request may have contained additional IDs.  Their omission
+         ;; is meaningful and must not produce fabricated channel objects.
+         (channels . (((id . "c1") (type . 0))))
+         (integrity_check . "ok")))
+      (setq upserts (nreverse upserts))
+      (should (= 1 (length upserts)))
+      (let ((channel (car (car upserts))))
+        (should (equal "c1" (alist-get 'id channel)))
+        (should (equal "g1" (alist-get 'guild_id channel))))
+      (should (equal "g1" (cadr (car upserts))))
+      (should (eq 'channel-sync (plist-get emitted :type)))
+      (should (equal "g1" (plist-get emitted :guild-id)))
+      (should (equal "ok" (plist-get emitted :integrity-check)))
+      (should (= 1 (length (plist-get emitted :channels))))
+      (should (equal "c1"
+                     (alist-get 'id (car (plist-get emitted :channels))))))))
+
+(ert-deftest disco-gateway-channel-sync-event-extractors-cover-response-scope ()
+  (should
+   (equal '("c1" "c2")
+          (disco-gateway-event-channel-ids
+           '(:type channel-sync
+             :guild-id "g1"
+             :channels (((id . "c1") (guild_id . "g1"))
+                        ((id . "c2") (guild_id . "g1")))))))
+  (should
+   (equal '("g1")
+          (disco-gateway-event-guild-ids
+           '(:type channel-sync
+             :guild-id "g1"
+             :channels (((id . "c1") (guild_id . "g1"))))))))
+
+(ert-deftest disco-gateway-channel-update-uses-gateway-specific-upsert ()
+  (let (upserted emitted)
+    (cl-letf (((symbol-function 'disco-state-upsert-gateway-channel)
+               (lambda (channel &optional guild-id)
+                 (setq upserted (list channel guild-id))))
+              ((symbol-function 'disco-gateway--channel-watched-p)
+               (lambda (_channel-id) nil))
+              ((symbol-function 'disco-gateway--emit-channel-event)
+               (lambda (type channel)
+                 (setq emitted (list type channel)))))
+      (let ((channel '((id . "c1") (guild_id . "g1") (type . 0))))
+        (disco-gateway--dispatch-channel-update channel)
+        (should (equal (list channel nil) upserted))
+        (should (equal (list 'channel-update channel) emitted))))))
+
+(ert-deftest disco-gateway-thread-list-sync-uses-gateway-specific-batch ()
+  (let (synced emitted)
+    (cl-letf (((symbol-function 'disco-state-sync-gateway-threads)
+               (lambda (guild-id parent-channel-ids threads)
+                 (setq synced (list guild-id parent-channel-ids threads))))
+              ((symbol-function 'disco-gateway--emit)
+               (lambda (event)
+                 (setq emitted event))))
+      (disco-gateway--dispatch-thread-list-sync
+       '((guild_id . "g1")
+         (channel_ids . ("forum1"))
+         (threads . (((id . "thread1") (parent_id . "forum1"))))))
+      (should
+       (equal '("g1" ("forum1")
+                (((id . "thread1") (parent_id . "forum1"))))
+              synced))
+      (should
+       (equal '(:type thread-list-sync
+                :guild-id "g1"
+                :channel-ids ("forum1")
+                :threads (((id . "thread1") (parent_id . "forum1"))))
+              emitted)))))
+
 (ert-deftest disco-gateway-dispatch-user-update-applies-state-and-user-id ()
   (let ((applied nil))
     (setq disco-gateway--current-user-id nil)
@@ -447,6 +545,35 @@
                        ((guild_id . "guild1")
                         (fields "status" "voice_start_time")))
                      captured)))))
+
+(ert-deftest disco-gateway-request-guild-channel-sync-sends-strict-deduplicated-op38 ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-gateway--send-op)
+               (lambda (op data)
+                 (setq captured (list op data))
+                 t)))
+      (should
+       (disco-gateway-request-guild-channel-sync
+        " 123 " [456 "456" " 789 "]))
+      (should
+       (equal '(38
+                ((guild_id . "123")
+                 (obfuscated_channel_ids "456" "789")))
+              captured)))))
+
+(ert-deftest disco-gateway-request-guild-channel-sync-rejects-incomplete-identities ()
+  (cl-letf (((symbol-function 'disco-gateway--send-op)
+             (lambda (&rest _args)
+               (ert-fail "malformed channel sync request was sent"))))
+    (should-error
+     (disco-gateway-request-guild-channel-sync " " '("456"))
+     :type 'user-error)
+    (should-error
+     (disco-gateway-request-guild-channel-sync "123" nil)
+     :type 'user-error)
+    (should-error
+     (disco-gateway-request-guild-channel-sync "123" '("456" invalid))
+     :type 'user-error)))
 
 (ert-deftest disco-gateway-request-guild-members-sends-op8 ()
   (let (captured)
@@ -768,7 +895,9 @@
 
 (ert-deftest disco-gateway-dispatch-ready-emits-after-state-ingestion ()
   (let (order emitted)
-    (cl-letf (((symbol-function 'disco-gateway--ingest-ready-read-states)
+    (cl-letf (((symbol-function 'disco-state-begin-gateway-session)
+               (lambda () (push 'session-boundary order)))
+              ((symbol-function 'disco-gateway--ingest-ready-read-states)
                (lambda (_value) (push 'read-state order)))
               ((symbol-function 'disco-gateway--ingest-ready-guilds)
                (lambda (_value) (push 'guilds order)))
@@ -791,8 +920,66 @@
          (guilds . nil)
          (private_channels . nil)))
       (should (equal '(:type ready :user-id "me") emitted))
-      (should (equal '(read-state settings guilds private-channels subscribe backoff emit)
+      (should (equal '(session-boundary read-state settings guilds private-channels
+                       subscribe backoff emit)
                      (nreverse order))))))
+
+(ert-deftest disco-gateway-ready-retires-old-access-before-ingesting-channels ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((disco-gateway--session-generation 0))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "c1") (guild_id . "g1") (type . 0)
+            (permissions . "0"))))
+        (cl-letf (((symbol-function 'disco-gateway--subscribe-watched-guild-channels)
+                   #'ignore)
+                  ((symbol-function 'disco-gateway--reset-reconnect-backoff)
+                   #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (disco-gateway--dispatch-ready
+           '((session_id . "new-session")
+             (user . ((id . "self")))
+             (guilds . [((id . "g1")
+                         (channels . [((id . "c1") (type . 0))]))]))))
+        (should (= 1 (disco-gateway-session-generation)))
+        (should (eq 'visible (disco-state-channel-access "c1")))
+        (should-not (assq 'permissions (disco-state-channel "c1")))
+        (should-not (disco-state-guild-channels-loaded-p "g1")))
+    (disco-state-reset)))
+
+(ert-deftest disco-gateway-compact-ready-cannot-leak-old-access-into-rest ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((disco-gateway--session-generation 0))
+        (disco-state-upsert-gateway-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "c1") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
+        (cl-letf (((symbol-function 'disco-gateway--subscribe-watched-guild-channels)
+                   #'ignore)
+                  ((symbol-function 'disco-gateway--reset-reconnect-backoff)
+                   #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          ;; Compact READY keeps the structural channel cache but contributes
+          ;; no visibility evidence for c1 in the new session.
+          (disco-gateway--dispatch-ready
+           '((session_id . "new-session")
+             (user . ((id . "self")))
+             (guilds . [((id . "g1") (name . "Guild"))]))))
+        (should-not (disco-state-channel-access "c1"))
+        (should-not (assq 'permissions (disco-state-channel "c1")))
+
+        (disco-state-put-channels
+         "g1"
+         '(((id . "c1") (guild_id . "g1") (type . 0)
+            (permissions . "0"))))
+        (should (eq 'hidden (disco-state-channel-access "c1")))
+        (should-not (disco-state-channel-viewable-p
+                     (disco-state-channel "c1") t)))
+    (disco-state-reset)))
 
 (ert-deftest disco-gateway-ready-channel-snapshot-seeds-unresolved-guild ()
   (disco-state-reset)
@@ -802,6 +989,57 @@
   (should-not (disco-state-guild-channels-loaded-p "g1"))
   (should (equal "c1"
                  (alist-get 'id (car (disco-state-guild-channels "g1"))))))
+
+(ert-deftest disco-gateway-guild-create-seeds-explicit-channels-and-threads ()
+  (disco-state-reset)
+  (cl-letf (((symbol-function 'disco-gateway--emit-guild-event)
+             (lambda (&rest _args) nil)))
+    (disco-gateway--dispatch-guild-create
+     '((id . "g1")
+       (channels . [((id . "c1") (guild_id . "g1") (type . 0))])
+       (threads . [((id . "t1")
+                    (parent_id . "c1")
+                    (type . 11))]))))
+  ;; Gateway snapshots establish native visibility without claiming the
+  ;; REST-computed action permissions tracked by the directory cache.
+  (should-not (disco-state-guild-channels-loaded-p "g1"))
+  (should (equal "c1" (alist-get 'id (disco-state-channel "c1"))))
+  (should (equal "t1" (alist-get 'id (disco-state-channel "t1"))))
+  (should (equal "g1" (alist-get 'guild_id (disco-state-channel "t1"))))
+  (should (equal '("t1")
+                 (mapcar (lambda (thread) (alist-get 'id thread))
+                         (disco-state-parent-threads "c1")))))
+
+(ert-deftest disco-gateway-compact-guild-create-preserves-associated-snapshots ()
+  (disco-state-reset)
+  (cl-letf (((symbol-function 'disco-gateway--emit-guild-event)
+             (lambda (&rest _args) nil)))
+    (disco-gateway--dispatch-guild-create
+     '((id . "g1")
+       (channels . [((id . "c1") (guild_id . "g1") (type . 0))])
+       (threads . [((id . "t1")
+                    (guild_id . "g1")
+                    (parent_id . "c1")
+                    (type . 11))])
+       (emojis . [((id . "e1") (name . "wave"))])
+       (roles . [((id . "r1") (name . "Admin"))])
+       (members . [((nick . "Alice")
+                    (user (id . "u1") (username . "alice")))])
+       (presences . [((user (id . "u1")) (status . "online"))])))
+    ;; A later compact GUILD_CREATE carries no replacement snapshots.
+    (disco-gateway--dispatch-guild-create
+     '((id . "g1") (name . "Renamed"))))
+  (should (disco-state-channel "c1"))
+  (should (disco-state-channel "t1"))
+  (should (equal "wave"
+                 (alist-get 'name (car (disco-state-guild-emojis "g1")))))
+  (should (equal "Admin"
+                 (alist-get 'name (car (disco-state-guild-roles "g1")))))
+  (should (equal "Alice"
+                 (alist-get 'nick
+                            (disco-state-guild-member "g1" "u1"))))
+  (should (equal "online"
+                 (alist-get 'status (disco-state-presence "u1" "g1")))))
 
 (ert-deftest disco-gateway-guild-emoji-snapshots-only-change-when-explicit ()
   (disco-state-reset)

@@ -196,9 +196,10 @@ When nil, omit intents from Identify payload."
   :group 'disco)
 
 (defcustom disco-gateway-identify-capabilities nil
-  "Optional capabilities bitmask sent in Identify payload.
+  "Additional capabilities bitmask sent in Identify payload.
 
-When nil, omit capabilities from Identify payload."
+disco.el always enables the protocol capabilities required by its state model;
+this option only adds capabilities to that baseline."
   :type '(choice (const :tag "Unset" nil) integer)
   :group 'disco)
 

@@ -823,7 +823,175 @@
         (should (equal "1024"
                        (alist-get 'permissions
                                   (disco-state-channel "visible"))))
+        (should (eq 'visible
+                    (gethash "visible"
+                             disco-state--computed-channel-access-by-id)))
         (should (disco-state-channel "thread")))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-gateway-seed-retires-changed-computed-context ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-put-channels
+         "g1"
+         '(((id . "c1") (guild_id . "g1") (type . 0)
+            (parent_id . "old") (permission_overwrites . nil)
+            (permissions . "1024"))))
+        (should (eq 'visible
+                    (gethash "c1"
+                             disco-state--computed-channel-access-by-id)))
+        (disco-state-seed-guild-channels
+         "g1"
+         '(((id . "c1") (type . 0) (parent_id . "new")
+            (permission_overwrites . nil))))
+        (should-not (assq 'permissions (disco-state-channel "c1")))
+        (should-not (gethash "c1"
+                             disco-state--computed-channel-access-by-id)))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-gateway-channel-seed-records-access-without-permissions ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-seed-guild-channels
+         "g1"
+         `(((id . "visible") (type . 0))
+           ((id . "hidden") (type . 0)
+            (flags . ,disco-channel-flag-obfuscated))))
+        (should (eq 'visible
+                    (disco-state-channel-access "visible")))
+        (should (eq 'hidden
+                    (disco-state-channel-access "hidden")))
+        (should-not (assq 'permissions (disco-state-channel "visible")))
+        (should-not (assq 'permissions (disco-state-channel "hidden")))
+        (should (disco-state-channel-viewable-p
+                 (disco-state-channel "visible") nil))
+        (should-not (disco-state-channel-viewable-p
+                     (disco-state-channel "hidden") t)))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-gateway-channel-upsert-records-nested-channel-access ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-gateway-channel
+         '((id . "thread") (parent_id . "parent") (type . 11))
+         "g1")
+        (should (equal "g1"
+                       (alist-get 'guild_id
+                                  (disco-state-channel "thread"))))
+        (should (eq 'visible
+                    (disco-state-channel-access "thread"))))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-gateway-thread-sync-records-and-replaces-access ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-sync-gateway-threads
+         "g1" nil
+         '(((id . "old-thread") (parent_id . "parent") (type . 11))))
+        (should (eq 'visible (disco-state-channel-access "old-thread")))
+        (disco-state-sync-gateway-threads
+         "g1" nil
+         `(((id . "hidden-thread") (parent_id . "parent") (type . 11)
+            (flags . ,disco-channel-flag-obfuscated))))
+        (should-not (disco-state-channel "old-thread"))
+        (should-not (disco-state-channel-access "old-thread"))
+        (should (eq 'hidden
+                    (disco-state-channel-access "hidden-thread"))))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-channel-viewable-prioritizes-native-gateway-access ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        ;; A delayed REST snapshot cannot override native obfuscation evidence.
+        (disco-state-upsert-gateway-channel
+         `((id . "gateway-hidden") (guild_id . "g1") (type . 0)
+           (flags . ,disco-channel-flag-obfuscated)))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "gateway-hidden") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
+        (should (equal "1024"
+                       (alist-get 'permissions
+                                  (disco-state-channel "gateway-hidden"))))
+        (should-not (disco-state-channel-viewable-p
+                     (disco-state-channel "gateway-hidden") t))
+
+        ;; A native visibility transition invalidates stale action permissions.
+        (disco-state-put-channels
+         "g1"
+         '(((id . "gateway-visible") (guild_id . "g1") (type . 0)
+            (permissions . "0"))))
+        (should-not (disco-state-channel-viewable-p
+                     (disco-state-channel "gateway-visible") t))
+        (disco-state-upsert-gateway-channel
+         '((id . "gateway-visible") (guild_id . "g1") (type . 0)))
+        (should (disco-state-channel-viewable-p
+                 (disco-state-channel "gateway-visible") nil))
+        (should-not
+         (assq 'permissions (disco-state-channel "gateway-visible")))
+        (should-not (disco-state-guild-channels-loaded-p "g1"))
+
+        (disco-state-put-channels
+         "g1"
+         '(((id . "becomes-hidden") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
+        (disco-state-upsert-gateway-channel
+         `((id . "becomes-hidden") (guild_id . "g1") (type . 0)
+           (flags . ,disco-channel-flag-obfuscated)))
+        (should-not (disco-state-channel-viewable-p
+                     (disco-state-channel "becomes-hidden") t))
+        (should-not
+         (assq 'permissions (disco-state-channel "becomes-hidden")))
+        (should-not (disco-state-guild-channels-loaded-p "g1")))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-channel-viewable-keeps-unknown-and-private-distinct ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((unknown '((id . "unknown") (guild_id . "g1") (type . 0)))
+            (orphan '((id . "orphan") (type . 0)))
+            (private '((id . "dm") (type . 1))))
+        (disco-state-upsert-channel unknown)
+        (should-not (disco-state-channel-viewable-p unknown nil))
+        (should (disco-state-channel-viewable-p unknown t))
+        (should-not (disco-state-channel-viewable-p orphan nil))
+        (should (disco-state-channel-viewable-p orphan t))
+        (should (disco-state-channel-viewable-p private nil)))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-channel-viewable-uses-computed-permission-without-proof ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (should
+         (disco-state-channel-viewable-p
+          '((id . "visible") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))
+          nil))
+        (should-not
+         (disco-state-channel-viewable-p
+          '((id . "hidden") (guild_id . "g1") (type . 0)
+            (permissions . "0"))
+          t)))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-gateway-channel-access-clears-on-delete-and-reset ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-gateway-channel
+         '((id . "deleted") (guild_id . "g1") (type . 0)))
+        (disco-state-delete-channel "deleted")
+        (should-not (disco-state-channel-access "deleted"))
+        (disco-state-upsert-gateway-channel
+         '((id . "reset") (guild_id . "g1") (type . 0)))
+        (disco-state-reset)
+        (should-not (disco-state-channel-access "reset")))
     (disco-state-reset)))
 
 (ert-deftest disco-state-channel-upsert-invalidates-changed-permission-context ()
@@ -847,7 +1015,65 @@
            (parent_id . "cat")
            (permission_overwrites . (((id . "g1") (deny . "1024"))))))
         (should-not (disco-state-guild-channels-loaded-p "g1"))
-        (should-not (assq 'permissions (disco-state-channel "c1"))))
+        (should-not (assq 'permissions (disco-state-channel "c1")))
+        (should-not (disco-state-channel-access "c1")))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-channel-upsert-keeps-computed-access-in-sync ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)
+           (permission_overwrites . nil) (permissions . "1024")))
+        (should (eq 'visible (disco-state-channel-access "c1")))
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)
+           (permission_overwrites . nil) (permissions . "0")))
+        (should (eq 'hidden (disco-state-channel-access "c1")))
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)
+           (permission_overwrites . nil))
+         t)
+        (should-not (assq 'permissions (disco-state-channel "c1")))
+        (should-not (disco-state-channel-access "c1")))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-begin-gateway-session-retires-access-evidence-only ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-guild '((id . "g1") (name . "Guild")))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "c1") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
+        (disco-state-upsert-gateway-channel
+         '((id . "t1") (guild_id . "g1") (parent_id . "c1")
+           (type . 11) (permissions . "1024")))
+        (disco-state-put-messages
+         "c1" '(((id . "m1") (channel_id . "c1") (content . "kept"))))
+        (should (disco-state-guild-channels-loaded-p "g1"))
+        (should (disco-state-channel-access "c1"))
+        (should (disco-state-channel-access "t1"))
+
+        (disco-state-begin-gateway-session)
+
+        (should (equal "Guild"
+                       (alist-get 'name (car (disco-state-guilds)))))
+        (should (disco-state-channel "c1"))
+        (should (disco-state-channel "t1"))
+        (should (equal "m1"
+                       (alist-get 'id (car (disco-state-messages "c1")))))
+        (should-not (assq 'permissions (disco-state-channel "c1")))
+        (should-not (assq 'permissions (disco-state-channel "t1")))
+        (should-not (assq 'permissions
+                          (car (disco-state-guild-channels "g1"))))
+        (should-not (assq 'permissions
+                          (car (disco-state-parent-threads "c1"))))
+        (should-not (disco-state-channel-access "c1"))
+        (should-not (disco-state-channel-access "t1"))
+        (should-not (disco-state-guild-channels-loaded-p "g1")))
     (disco-state-reset)))
 
 (ert-deftest disco-state-guild-snapshots-canonicalize-channel-ownership ()
