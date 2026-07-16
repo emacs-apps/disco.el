@@ -3033,7 +3033,6 @@ When HEADER-P is non-nil, the root header is invalidated too."
               (plist-get event :guild-id)
               (disco-root--async-error-message (plist-get event :error))))
     ((or 'parent-threads-loading
-         'parent-threads-page
          'parent-threads-loaded
          'parent-threads-error)
      ;; Parent-thread callbacks only publish state already owned by

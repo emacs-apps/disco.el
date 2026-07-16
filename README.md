@@ -153,10 +153,11 @@ built-in home/activity layouts, return an `items` view spec instead:
 ## Thread Commands
 
 - Root buffer: `A` opens archived thread browser for a selected parent channel.
-- Guild directory: `RET`/`TAB` on forum/media folds active posts inline; first
-  expansion lazily fetches every `/channels/{id}/threads/search`
-  (`archived=false`) page. Post rows consistently preview the returned starter
-  message; unhydrated posts remain under the parent loading state.
+- Guild directory: `RET`/`TAB` on forum/media folds active posts inline. The
+  first expansion fetches one `/channels/{id}/threads/search`
+  (`archived=false`) page; `Load more active posts` advances one page at a
+  time. A failed page keeps the committed posts and exact cursor available for
+  retry. Post rows consistently preview the returned starter message.
 - Guild directory: `g` on a forum/media row refreshes only that parent; `A` on
   a parent or child post opens the parent's paginated archived-thread browser.
 - Threads beneath ordinary text channels are opened from messages, references,

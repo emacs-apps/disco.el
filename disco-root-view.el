@@ -811,10 +811,16 @@ Starts asynchronous fetch when cache miss occurs."
   (= (alist-get 'type channel) 4))
 
 (defun disco-root--thread-count-under-parent (channel)
-  "Return number of indexed active threads under CHANNEL."
+  "Return the indexed viewable active-thread count under CHANNEL.
+
+This count is for ordinary text and announcement channels.  Forum/media
+pagination reports its own exact loaded/total progress below the parent row."
   (length
-   (seq-remove #'disco-thread-archived-p
-               (disco-state-parent-threads (alist-get 'id channel)))))
+   (seq-filter
+    (lambda (thread)
+      (and (not (disco-thread-archived-p thread))
+           (disco-state-channel-viewable-p thread nil)))
+    (disco-state-parent-threads (alist-get 'id channel)))))
 
 (defun disco-root--normalize-extra-info-value (value)
   "Normalize one provider VALUE into a flat list of non-empty strings."
@@ -1044,9 +1050,6 @@ Starts asynchronous fetch when cache miss occurs."
 (defun disco-root--activity-secondary-placeholder (channel)
   "Return non-message placeholder preview for CHANNEL, or nil."
   (pcase (disco-channel-open-mode channel)
-    ('thread-directory
-     (let ((count (disco-root--thread-count-under-parent channel)))
-       (format "%d active post%s" count (if (= count 1) "" "s"))))
     ('inspect
      (format "(%s view)" (disco-channel-type-name channel)))
     (_ nil)))
@@ -1435,18 +1438,15 @@ SCOPE is a symbol describing where the row is rendered."
                              (format " (%s)" tags))
                            state-suffix
                            trail-suffix)))
-                ((or 0 5 15 16)
+                ((or 0 5)
                  (let* ((thread-count (disco-root--thread-count-under-parent channel))
                         (suffix (if (> thread-count 0)
                                     (format " (%d threads)" thread-count)
                                   "")))
-                   (pcase channel-type
-                     ((or 0 5)
-                      (format "#  %s%s%s%s" name suffix state-suffix trail-suffix))
-                     (15
-                      (format "▤  %s%s%s%s" name suffix state-suffix trail-suffix))
-                     (16
-                      (format "▦  %s%s%s%s" name suffix state-suffix trail-suffix)))))
+                   (format "#  %s%s%s%s"
+                           name suffix state-suffix trail-suffix)))
+                (15 (format "▤  %s%s%s" name state-suffix trail-suffix))
+                (16 (format "▦  %s%s%s" name state-suffix trail-suffix))
                 (2 (format "◉  %s%s%s" name state-suffix trail-suffix))
                 (13 (format "◆  %s%s%s" name state-suffix trail-suffix))
                 (14 (format "◇  %s%s%s" name state-suffix trail-suffix))
@@ -2699,25 +2699,52 @@ layout retains fall-forward navigation."
 
 (defun disco-root--tree-item-inserter (_surface entry)
   "Render one rich channel occurrence from composite root ENTRY."
-  (let* ((channel (appkit-directory-entry-payload entry))
-         (root-kind
-          (plist-get (appkit-directory-entry-properties entry)
-                     disco-root-directory-row-kind-property))
-         (scope
-          (pcase root-kind
-            ('unread-channel 'unread)
-            ('dm-channel 'dm)
-            (_ (if (disco-state-channel-thread-p channel)
-                   'parent-thread
-                 'directory)))))
-    (disco-root--insert-activity-channel-line channel 0 scope)))
+  (pcase (disco-guild-directory-entry-row-kind entry)
+    ((or 'parent-threads-load
+         'parent-threads-load-more
+         'parent-threads-retry)
+     (insert (or (appkit-directory-entry-label entry) "") "\n"))
+    (_
+     (let* ((channel (appkit-directory-entry-payload entry))
+            (root-kind
+             (plist-get (appkit-directory-entry-properties entry)
+                        disco-root-directory-row-kind-property))
+            (scope
+             (pcase root-kind
+               ('unread-channel 'unread)
+               ('dm-channel 'dm)
+               (_ (if (disco-state-channel-thread-p channel)
+                      'parent-thread
+                    'directory)))))
+       (disco-root--insert-activity-channel-line channel 0 scope)))))
 
 (defun disco-root--tree-activate-item (_surface entry)
   "Open the exact non-fold composite root channel ENTRY."
-  (let ((channel-id (alist-get 'id (appkit-directory-entry-payload entry))))
-    (unless channel-id
-      (user-error "disco: directory row has no channel"))
-    (disco-root--open-channel channel-id)))
+  (let ((parent-id
+         (disco-guild-directory-entry-thread-parent-id entry)))
+    (pcase (disco-guild-directory-entry-row-kind entry)
+      ('parent-threads-load
+       (disco-directory-load-parent-threads-async parent-id))
+      ('parent-threads-load-more
+       (disco-directory-load-more-parent-threads-async parent-id))
+      ('parent-threads-retry
+       (disco-directory-retry-parent-threads-async parent-id))
+      (_
+       (let* ((channel (appkit-directory-entry-payload entry))
+              (channel-id (alist-get 'id channel))
+              (scoped-thread-p
+               (and (disco-state-channel-thread-p channel)
+                    parent-id
+                    (disco-directory-parent-thread-viewable-p
+                     parent-id channel))))
+         (unless channel-id
+           (user-error "disco: directory row has no channel"))
+         (when (and (disco-state-channel-thread-p channel)
+                    parent-id
+                    (not scoped-thread-p))
+           (user-error "disco: thread %s is not viewable below %s"
+                       channel-id parent-id))
+         (disco-root--open-channel channel-id))))))
 
 (defun disco-root--tree-fold-changed (_surface entry expanded-p)
   "Apply composite root fold change for ENTRY with EXPANDED-P."

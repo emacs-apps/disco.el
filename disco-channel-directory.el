@@ -201,19 +201,46 @@
       disco-channel-directory--fill-column
       (max 40 (- (window-width) disco-channel-directory-margin-columns))))
 
-(defun disco-channel-directory--insert-channel (_surface entry)
-  "Insert Appkit channel ENTRY as one responsive row."
-  (let* ((channel (appkit-directory-entry-payload entry))
-         (scope (if (disco-state-channel-thread-p channel)
-                    'parent-thread
-                  'directory)))
-    (disco-root--insert-activity-channel-line
-     channel 0 scope disco-channel-directory--fill-column)))
+(defun disco-channel-directory--insert-item (_surface entry)
+  "Insert one responsive Appkit directory item ENTRY."
+  (pcase (disco-guild-directory-entry-row-kind entry)
+    ((or 'parent-threads-load
+         'parent-threads-load-more
+         'parent-threads-retry)
+     (insert (or (appkit-directory-entry-label entry) "") "\n"))
+    (_
+     (let* ((channel (appkit-directory-entry-payload entry))
+            (scope (if (disco-state-channel-thread-p channel)
+                       'parent-thread
+                     'directory)))
+       (disco-root--insert-activity-channel-line
+        channel 0 scope disco-channel-directory--fill-column)))))
 
-(defun disco-channel-directory--activate-channel (_surface entry)
-  "Open the Discord channel carried by Appkit directory ENTRY."
-  (disco-root--open-channel
-   (alist-get 'id (appkit-directory-entry-payload entry))))
+(defun disco-channel-directory--activate-item (_surface entry)
+  "Activate the channel or pagination action carried by ENTRY."
+  (let ((parent-id
+         (disco-guild-directory-entry-thread-parent-id entry)))
+    (pcase (disco-guild-directory-entry-row-kind entry)
+      ('parent-threads-load
+       (disco-directory-load-parent-threads-async parent-id))
+      ('parent-threads-load-more
+       (disco-directory-load-more-parent-threads-async parent-id))
+      ('parent-threads-retry
+       (disco-directory-retry-parent-threads-async parent-id))
+      (_
+       (let* ((channel (appkit-directory-entry-payload entry))
+              (channel-id (alist-get 'id channel))
+              (scoped-thread-p
+               (and (disco-state-channel-thread-p channel)
+                    parent-id
+                    (disco-directory-parent-thread-viewable-p
+                     parent-id channel))))
+         (when (and (disco-state-channel-thread-p channel)
+                    parent-id
+                    (not scoped-thread-p))
+           (user-error "Disco: thread %s is not viewable below %s"
+                       channel-id parent-id))
+         (disco-root--open-channel channel-id))))))
 
 (defun disco-channel-directory--fold-changed (_surface entry expanded-p)
   "Apply an Appkit fold change for ENTRY with EXPANDED-P."
@@ -869,8 +896,8 @@ VIEW defaults to the current buffer's Appkit view."
   (appkit-directory-initialize)
   (appkit-directory-configure
    (appkit-directory-surface)
-   :item-inserter #'disco-channel-directory--insert-channel
-   :activate-function #'disco-channel-directory--activate-channel
+   :item-inserter #'disco-channel-directory--insert-item
+   :activate-function #'disco-channel-directory--activate-item
    :fold-function #'disco-channel-directory--fold-changed)
   (disco-channel-directory--ensure-window-size-hook)
   (add-hook 'window-buffer-change-functions
@@ -941,6 +968,8 @@ VIEW defaults to the current buffer's Appkit view."
     (unless (and parent (disco-channel-forum-or-media-p parent))
       (user-error "Disco: channel %s is not a forum or media channel"
                   parent-channel-id))
+    (unless (disco-state-channel-viewable-p parent nil)
+      (user-error "Disco: channel %s is not viewable" parent-id))
     (unless guild-id
       (user-error "Disco: channel %s has no guild context" parent-id))
     (let ((buffer (disco-channel-directory-open guild-id)))

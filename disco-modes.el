@@ -35,7 +35,7 @@
 
 (defconst disco-client-mode-line--directory-count-event-types
   '(index-loaded guild-loaded guild-enriched
-    parent-threads-page parent-threads-loaded)
+    parent-threads-loaded)
   "Directory events which replace or extend the indexed channel set.")
 
 (defcustom disco-client-mode-line-format

@@ -42,10 +42,15 @@
          (disco-root--displayable-channel-p
           '((id . "hidden") (guild_id . "g1") (type . 0)
             (permissions . "0"))))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "hidden") (guild_id . "g1") (type . 0)
+            (permissions . "0"))
+           ((id . "visible") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
         (should
          (disco-root--displayable-channel-p
-          '((id . "visible") (guild_id . "g1") (type . 0)
-            (permissions . "1024"))))
+          (disco-state-channel "visible")))
         (disco-state-upsert-gateway-channel
          '((id . "gateway-visible") (guild_id . "g1")
            (type . 0) (flags . 0)))
@@ -157,22 +162,22 @@
       (disco-state-reset))))
 
 (ert-deftest disco-root-activity-candidates-exclude-unresolved-and-hidden-channels ()
-  (let ((disco-root-activity-include-threads nil))
-    (cl-letf (((symbol-function 'disco-state-private-channels) #'ignore)
-              ((symbol-function 'disco-state-guilds)
-               (lambda () '(((id . "g1")))))
-              ((symbol-function 'disco-state-guild-channels)
-               (lambda (_guild-id)
-                 '(((id . "unknown") (guild_id . "g1") (type . 0))
-                   ((id . "hidden") (guild_id . "g1") (type . 0)
-                    (permissions . "0"))
-                   ((id . "visible") (guild_id . "g1") (type . 0)
-                    (permissions . "1024")))))
-              ((symbol-function 'disco-state-guild-threads) #'ignore))
-      (should
-       (equal '("visible")
-              (mapcar (lambda (channel) (alist-get 'id channel))
-                      (disco-root--collect-activity-candidates)))))))
+  (disco-state-reset)
+  (unwind-protect
+      (let ((disco-root-activity-include-threads nil))
+        (disco-state-set-guilds '(((id . "g1"))))
+        (disco-state-put-channels
+         "g1"
+         '(((id . "unknown") (guild_id . "g1") (type . 0))
+           ((id . "hidden") (guild_id . "g1") (type . 0)
+            (permissions . "0"))
+           ((id . "visible") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
+        (should
+         (equal '("visible")
+                (mapcar (lambda (channel) (alist-get 'id channel))
+                        (disco-root--collect-activity-candidates)))))
+    (disco-state-reset)))
 
 (ert-deftest disco-root-thread-parent-candidates-honor-latest-gateway-access ()
   (disco-state-reset)
@@ -191,24 +196,27 @@
     (disco-state-reset)))
 
 (ert-deftest disco-root-visible-guild-unread-total-excludes-inaccessible-channels ()
-  (let ((disco-root--view-mode 'all)
-        counted)
-    (cl-letf (((symbol-function 'disco-state-guild-channels)
-               (lambda (_guild-id)
-                 '(((id . "unknown") (guild_id . "g1") (type . 0))
-                   ((id . "hidden") (guild_id . "g1") (type . 0)
-                    (permissions . "0"))
-                   ((id . "visible") (guild_id . "g1") (type . 0)
-                    (permissions . "1024")))))
-              ((symbol-function 'disco-state-guild-threads) #'ignore)
-              ((symbol-function 'disco-state-channels-unread-total)
-               (lambda (channels)
-                 (setq counted
-                       (mapcar (lambda (channel) (alist-get 'id channel))
-                               channels))
-                 7)))
-      (should (= 7 (disco-root--guild-unread-total "g1" t)))
-      (should (equal '("visible") counted)))))
+  (disco-state-reset)
+  (unwind-protect
+      (let ((disco-root--view-mode 'all)
+            counted)
+        (disco-state-put-channels
+         "g1"
+         '(((id . "unknown") (guild_id . "g1") (type . 0))
+           ((id . "hidden") (guild_id . "g1") (type . 0)
+            (permissions . "0"))
+           ((id . "visible") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))))
+        (cl-letf (((symbol-function 'disco-state-guild-threads) #'ignore)
+                  ((symbol-function 'disco-state-channels-unread-total)
+                   (lambda (channels)
+                     (setq counted
+                           (mapcar (lambda (channel) (alist-get 'id channel))
+                                   channels))
+                     7)))
+          (should (= 7 (disco-root--guild-unread-total "g1" t)))
+          (should (equal '("visible") counted))))
+    (disco-state-reset)))
 
 (ert-deftest disco-root-mode-uses-persistent-header-without-key-cheat-sheet ()
   (with-temp-buffer
@@ -447,13 +455,12 @@
                  (lambda (&rest _args)
                    (ert-fail "directory callback retried a parent load"))))
         (dolist (type '(parent-threads-loading
-                        parent-threads-page
                         parent-threads-loaded
                         parent-threads-error))
           (disco-root--handle-directory-event
            (list :type type :guild-id "g1" :parent-id "forum"
                  :error '(:message "failed"))))
-        (should (= 4 (length queued)))
+        (should (= 3 (length queued)))
         (dolist (update queued)
           (should (equal '(("forum") t nil) update)))))))
 
@@ -1215,6 +1222,32 @@
            surface (entry 'thread-parent "forum-2") nil)
           (should (equal '("forum-1") loaded-parents))
           (should (= 3 rendered)))))))
+
+(ert-deftest disco-root-tree-parent-page-actions-dispatch-exactly ()
+  (let ((parent '((id . "forum") (guild_id . "g1") (type . 15)))
+        calls)
+    (cl-letf (((symbol-function 'disco-directory-load-parent-threads-async)
+               (lambda (parent-id &rest _args)
+                 (push (list 'load parent-id) calls)))
+              ((symbol-function
+                'disco-directory-load-more-parent-threads-async)
+               (lambda (parent-id) (push (list 'more parent-id) calls)))
+              ((symbol-function
+                'disco-directory-retry-parent-threads-async)
+               (lambda (parent-id) (push (list 'retry parent-id) calls))))
+      (dolist (kind '(parent-threads-load
+                      parent-threads-load-more
+                      parent-threads-retry))
+        (disco-root--tree-activate-item
+         nil
+         (appkit-directory-entry-create
+          :key kind :role 'item :section-key '(root guild "g1")
+          :item-p t :payload parent
+          :properties
+          (list disco-guild-directory-row-kind-property kind
+                disco-guild-directory-thread-parent-id-property "forum"))))
+      (should (equal '((retry "forum") (more "forum") (load "forum"))
+                     calls)))))
 
 (ert-deftest disco-root-tree-dirty-channel-refreshes-every-visible-occurrence ()
   (with-temp-buffer
@@ -2376,7 +2409,8 @@
   (disco-state-reset)
   (unwind-protect
       (let (opened)
-        (disco-state-upsert-channel '((id . "voice1") (type . 2) (name . "Voice")))
+        (disco-state-upsert-gateway-channel
+         '((id . "voice1") (guild_id . "g1") (type . 2) (name . "Voice")))
         (cl-letf (((symbol-function 'disco-room-open)
                    (lambda (channel-id channel-name)
                      (setq opened (list channel-id channel-name))))
@@ -2393,7 +2427,7 @@
   (let (opened-buffer)
     (unwind-protect
         (progn
-          (disco-state-upsert-channel
+          (disco-state-upsert-gateway-channel
            '((id . "dir1")
              (type . 14)
              (guild_id . "g1")
@@ -2423,7 +2457,7 @@
   (disco-state-reset)
   (unwind-protect
       (let (opened)
-        (disco-state-upsert-channel
+        (disco-state-upsert-gateway-channel
          '((id . "forum1") (guild_id . "g1") (type . 15) (name . "Ideas")))
         (cl-letf (((symbol-function
                     'disco-channel-directory-open-thread-parent)
@@ -2433,6 +2467,57 @@
                      (ert-fail "forum channels cannot open message timelines"))))
           (disco-root--open-channel "forum1")
           (should (equal "forum1" opened))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-text-thread-count-keeps-canonical-state-owner ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-gateway-channel
+         '((id . "text") (guild_id . "g1") (type . 0)))
+        (disco-state-upsert-gateway-channel
+         '((id . "active") (guild_id . "g1") (parent_id . "text")
+           (type . 11) (thread_metadata . ((archived . :false)))))
+        (disco-state-upsert-gateway-channel
+         '((id . "archived") (guild_id . "g1") (parent_id . "text")
+           (type . 11) (thread_metadata . ((archived . t)))))
+        (disco-state-upsert-gateway-channel
+         `((id . "hidden") (guild_id . "g1") (parent_id . "text")
+           (type . 11) (flags . ,disco-channel-flag-obfuscated)
+           (thread_metadata . ((archived . :false)))))
+        ;; Forum directory snapshots do not own ordinary text/news threads.
+        (puthash "text"
+                 '(:status loaded :thread-ids nil :total 0)
+                 disco-directory--parent-thread-state)
+        (should (= 1
+                   (disco-root--thread-count-under-parent
+                    (disco-state-channel "text")))))
+    (disco-directory-reset)
+    (disco-state-reset)))
+
+(ert-deftest disco-root-forum-label-does-not-present-page-size-as-total ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-gateway-channel
+         '((id . "forum") (guild_id . "g1") (type . 15)
+           (name . "support")))
+        (disco-state-upsert-channel
+         '((id . "loaded-post") (guild_id . "g1")
+           (parent_id . "forum") (type . 11)))
+        (puthash "forum"
+                 '(:status loaded :thread-ids ("loaded-post")
+                   :next-cursor "older" :total 545)
+                 disco-directory--parent-thread-state)
+        (let ((label
+               (substring-no-properties
+                (disco-root--channel-label
+                 (disco-state-channel "forum") 'directory))))
+          (should (string-match-p "support" label))
+          (should-not (string-match-p "threads" label))))
+    (disco-directory-reset)
     (disco-state-reset)))
 
 (ert-deftest disco-root-search-channel-candidates-only-offer-viewable-searchable-channels ()
@@ -2555,26 +2640,17 @@
                channel nil 'directory)))
       (should queued))))
 
-(ert-deftest disco-root-forum-preview-is-active-post-count-without-message-fetch ()
-  (disco-state-reset)
-  (unwind-protect
-      (let ((forum '((id . "forum") (guild_id . "g1")
-                     (type . 15) (name . "Ideas")))
-            queued)
-        (disco-state-upsert-channel forum)
-        (disco-state-upsert-channel
-         '((id . "active") (guild_id . "g1") (parent_id . "forum")
-           (type . 11) (thread_metadata . ((archived . :false)))))
-        (disco-state-upsert-channel
-         '((id . "archived") (guild_id . "g1") (parent_id . "forum")
-           (type . 11) (thread_metadata . ((archived . t)))))
-        (cl-letf (((symbol-function 'disco-preview-request-channel)
-                   (lambda (_channel) (setq queued t))))
-          (should (equal "1 active post"
-                         (disco-root--activity-preview-line
-                          forum nil 'directory)))
-          (should-not queued)))
-    (disco-state-reset)))
+(ert-deftest disco-root-forum-preview-keeps-message-oriented-preview ()
+  (let ((forum '((id . "forum") (guild_id . "g1")
+                 (type . 15) (name . "Ideas"))))
+    (cl-letf (((symbol-function 'disco-msg-channel-preview-line)
+               (lambda (_channel) "latest forum activity"))
+              ((symbol-function 'disco-preview-request-channel)
+               (lambda (_channel)
+                 (ert-fail "available forum preview requested hydration"))))
+      (should (equal "latest forum activity"
+                     (disco-root--activity-preview-line
+                      forum nil 'directory))))))
 
 (ert-deftest disco-root-parent-thread-preview-shows-unavailable-state ()
   (with-temp-buffer

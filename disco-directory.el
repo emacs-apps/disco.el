@@ -2,9 +2,9 @@
 
 ;;; Commentary:
 
-;; Owns REST request lifecycles for the guild/DM index and per-guild channel
-;; snapshots.  Views consume state and directory events; they never issue these
-;; requests directly.
+;; Owns REST request lifecycles for the guild/DM index, per-guild channels, and
+;; parent-scoped thread pages.  Surface controllers start requests; projectors
+;; only consume state and directory events.
 
 ;;; Code:
 
@@ -37,13 +37,17 @@
   "Monotonic request token for parent-scoped active-thread searches.")
 
 (defvar disco-directory--parent-thread-state (make-hash-table :test #'equal)
-  "Hash table parent-channel-id -> active-thread request state plist.")
+  "Hash table parent-channel-id -> active-thread lifecycle state.")
 
 (defconst disco-directory--parent-thread-page-limit 25
   "Maximum page size accepted by Discord's thread-search endpoint.")
 
 (defconst disco-directory--parent-thread-index-retries 3
   "Number of delayed retries for an unavailable Discord search index.")
+
+(defun disco-directory--normalize-id (value)
+  "Return VALUE as a string ID, or nil."
+  (and value (format "%s" value)))
 
 (defun disco-directory--settle-index-request (request status errors)
   "Settle REQUEST once with STATUS and endpoint ERRORS.
@@ -142,109 +146,177 @@ The result is `loading', `error', `loaded', or `unloaded'."
                   (if (= (length unresolved) 1) "" "s")))))
 
 (defun disco-directory-parent-threads-state (parent-channel-id)
-  "Return active-thread request state for PARENT-CHANNEL-ID.
+  "Return active-thread lifecycle state for PARENT-CHANNEL-ID.
 
-The returned plist has a `:status' value of `unloaded', `loading', `loaded',
-or `error'.  Loading state may also expose `:loaded-count', `:total', and
-`:phase'.  Loaded and loading states expose `:starter-unavailable-ids' for
-threads whose original post was omitted by Discord.  Error state exposes the
-original `:error' payload."
+The committed `:thread-ids' and `:next-cursor' remain present while a refresh
+or append request is loading or has failed.  No table entry means `unloaded'."
   (disco-directory--sync-gateway-session)
   (or (gethash (format "%s" parent-channel-id)
                disco-directory--parent-thread-state)
-      '(:status unloaded :loaded-count 0)))
+      '(:status unloaded)))
 
-(defun disco-directory-parent-threads-status (parent-channel-id)
-  "Return active-thread request status for PARENT-CHANNEL-ID."
-  (plist-get (disco-directory-parent-threads-state parent-channel-id) :status))
+(defun disco-directory-parent-threads (parent-channel-id)
+  "Return PARENT-CHANNEL-ID's ordered active-thread snapshot.
 
-(defun disco-directory-parent-thread-starter-unavailable-p
-    (parent-channel-id thread-id)
-  "Return non-nil when THREAD-ID under PARENT-CHANNEL-ID has no starter.
+Only IDs in the directory request snapshot are considered.  In particular,
+stale threads in the global parent index cannot turn an authoritative empty
+snapshot into a non-empty one."
+  (delq nil
+        (mapcar #'disco-state-channel
+                (plist-get
+                 (disco-directory-parent-threads-state parent-channel-id)
+                 :thread-ids))))
 
-This state is authoritative only after Discord returned the thread in a search
-page without its corresponding `first_messages' entry."
-  (member (format "%s" thread-id)
-          (plist-get
-           (disco-directory-parent-threads-state parent-channel-id)
-           :starter-unavailable-ids)))
+(defun disco-directory-parent-thread-viewable-p
+    (parent-channel-id thread-or-id)
+  "Return non-nil when THREAD-OR-ID is authorized by PARENT-CHANNEL-ID's page.
 
-(defun disco-directory--parent-thread-request-active-p (parent-id token)
-  "Return non-nil when TOKEN still owns PARENT-ID's active request."
-  (let ((state (gethash parent-id disco-directory--parent-thread-state)))
-    (and (eq (plist-get state :status) 'loading)
-         (= (or (plist-get state :session-generation) -1)
-            (disco-gateway-session-generation))
-         (= (or (plist-get state :token) -1) token)
-         (disco-state-channel parent-id)
-         (disco-directory--guild-known-p (plist-get state :guild-id)))))
+Endpoint inclusion is scoped to the committed parent snapshot.  It supplies
+the unknown-thread decision only; canonical Gateway hidden evidence and an
+inaccessible or mismatched parent still deny the thread."
+  (disco-directory--sync-gateway-session)
+  (let* ((parent-id (disco-directory--normalize-id parent-channel-id))
+         (thread-id
+          (disco-directory--normalize-id
+           (if (listp thread-or-id)
+               (alist-get 'id thread-or-id)
+             thread-or-id)))
+         (state
+          (and parent-id
+               (gethash parent-id disco-directory--parent-thread-state)))
+         (thread (and thread-id (disco-state-channel thread-id)))
+         (parent (and parent-id (disco-state-channel parent-id))))
+    (and parent-id thread-id
+         (member thread-id (plist-get state :thread-ids))
+         thread parent
+         (disco-state-channel-thread-p thread)
+         (equal parent-id
+                (disco-directory--normalize-id
+                 (alist-get 'parent_id thread)))
+         (equal (disco-directory--normalize-id (alist-get 'guild_id parent))
+                (disco-directory--normalize-id (alist-get 'guild_id thread)))
+         (disco-state-channel-viewable-p parent nil)
+         (disco-state-channel-viewable-p thread t))))
 
-(defun disco-directory--put-parent-thread-state (parent-id state event-type)
-  "Store PARENT-ID request STATE and emit EVENT-TYPE."
-  (puthash parent-id state disco-directory--parent-thread-state)
-  (disco-directory--emit
-   event-type
-   :guild-id (plist-get state :guild-id)
-   :parent-id parent-id
-   :state state))
+(defun disco-directory--parent-thread-request-state (parent-id token)
+  "Return TOKEN's current, valid request state for PARENT-ID.
 
-(defun disco-directory--merge-thread-results (existing new-threads)
-  "Append NEW-THREADS to EXISTING while deduplicating channel IDs."
+If TOKEN still owns the request but its guild or parent context changed, drop
+the state.  Gateway and index events already own the corresponding view
+reprojection; the stale REST response must only stop being `loading'."
+  (disco-directory--sync-gateway-session)
+  (let* ((state (gethash parent-id disco-directory--parent-thread-state))
+         (guild-id (plist-get state :guild-id))
+         (parent (disco-state-channel parent-id))
+         (current-p
+          (and (eq (plist-get state :status) 'loading)
+               (= (or (plist-get state :token) -1) token))))
+    (when current-p
+      (if (and parent
+               (disco-channel-thread-parent-p parent)
+               (equal (disco-directory--normalize-id
+                       (alist-get 'guild_id parent))
+                      guild-id)
+               (disco-directory--guild-known-p guild-id)
+               (disco-state-channel-viewable-p parent nil))
+          state
+        (remhash parent-id disco-directory--parent-thread-state)
+        nil))))
+
+(defun disco-directory--emit-parent-thread-state (parent-id event-type)
+  "Emit EVENT-TYPE for PARENT-ID's current directory lifecycle."
+  (let ((state (disco-directory-parent-threads-state parent-id)))
+    (disco-directory--emit
+     event-type
+     :guild-id (plist-get state :guild-id)
+     :parent-id parent-id)))
+
+(defun disco-directory--merge-thread-ids (existing new-threads)
+  "Append NEW-THREADS' IDs to EXISTING while preserving response order."
   (let ((seen (make-hash-table :test #'equal))
         merged)
-    (dolist (thread (append existing new-threads))
+    (dolist (thread-id existing)
+      (setq thread-id (format "%s" thread-id))
+      (unless (gethash thread-id seen)
+        (puthash thread-id t seen)
+        (push thread-id merged)))
+    (dolist (thread new-threads)
       (when-let* ((thread-id (alist-get 'id thread)))
         (setq thread-id (format "%s" thread-id))
         (unless (gethash thread-id seen)
           (puthash thread-id t seen)
-          (push thread merged))))
+          (push thread-id merged))))
     (nreverse merged)))
 
-(defun disco-directory--ingest-thread-search-page
-    (guild-id threads first-messages)
-  "Store one GUILD-ID thread-search page of THREADS and FIRST-MESSAGES."
+(defun disco-directory--canonical-thread-search-page
+    (parent-id guild-id result)
+  "Validate and canonicalize RESULT for PARENT-ID in GUILD-ID.
+
+Return a plist containing `:threads', `:first-messages', `:has-more', and
+`:total'.  No state is mutated.  A cross-parent, cross-guild, malformed, or
+non-thread entity is a protocol error rather than permission evidence."
+  (unless (and (listp result) (assq 'threads result))
+    (error "Disco: thread-search response has no thread collection"))
+  (let ((raw-threads (alist-get 'threads result))
+        (raw-messages (or (alist-get 'first_messages result) '()))
+        (total (alist-get 'total_results result))
+        (thread-id-set (make-hash-table :test #'equal))
+        threads messages)
+    (unless (listp raw-threads)
+      (error "Disco: thread-search thread collection is malformed"))
+    (unless (listp raw-messages)
+      (error "Disco: thread-search starter collection is malformed"))
+    (when (and total (not (and (integerp total) (>= total 0))))
+      (error "Disco: thread-search total is malformed"))
+    (dolist (thread raw-threads)
+      (let* ((thread-id
+              (disco-directory--normalize-id
+               (and (listp thread) (alist-get 'id thread))))
+             (thread-parent-id
+              (disco-directory--normalize-id
+               (and (listp thread) (alist-get 'parent_id thread))))
+             (thread-guild-id
+              (disco-directory--normalize-id
+               (and (listp thread) (alist-get 'guild_id thread)))))
+        (unless (and thread-id
+                     (equal parent-id thread-parent-id)
+                     (or (null thread-guild-id)
+                         (equal guild-id thread-guild-id))
+                     (disco-state-channel-thread-p thread))
+          (error "Disco: thread-search returned an invalid thread identity"))
+        (unless (gethash thread-id thread-id-set)
+          (puthash thread-id t thread-id-set)
+          (let ((canonical (copy-tree thread)))
+            (setf (alist-get 'guild_id canonical) guild-id)
+            (push canonical threads)))))
+    (dolist (message raw-messages)
+      (let* ((message-id
+              (disco-directory--normalize-id
+               (and (listp message) (alist-get 'id message))))
+             (channel-id
+              (disco-directory--normalize-id
+               (and (listp message) (alist-get 'channel_id message))))
+             (message-guild-id
+              (disco-directory--normalize-id
+               (and (listp message) (alist-get 'guild_id message)))))
+        (unless (and message-id channel-id (gethash channel-id thread-id-set)
+                     (or (null message-guild-id)
+                         (equal guild-id message-guild-id)))
+          (error "Disco: thread-search returned an invalid starter identity"))
+        (push (copy-tree message) messages)))
+    (list :threads (nreverse threads)
+          :first-messages (nreverse messages)
+          :has-more (and (disco-util-json-true-p
+                          (alist-get 'has_more result))
+                         t)
+          :total total)))
+
+(defun disco-directory--ingest-thread-search-page (threads first-messages)
+  "Store one fully validated page of THREADS and FIRST-MESSAGES."
   (dolist (thread threads)
-    (let ((stored (copy-tree thread)))
-      (setf (alist-get 'guild_id stored) guild-id)
-      (disco-state-upsert-channel stored)))
+    (disco-state-upsert-channel thread))
   (dolist (message first-messages)
-    (when-let* ((channel-id (alist-get 'channel_id message)))
-      (disco-state-upsert-message channel-id message))))
-
-(defun disco-directory--missing-thread-starter-ids (threads)
-  "Return IDs of THREADS whose starter messages are not cached."
-  (delq nil
-        (mapcar
-         (lambda (thread)
-           (unless (disco-thread-starter-message thread)
-             (and (alist-get 'id thread)
-                  (format "%s" (alist-get 'id thread)))))
-         threads)))
-
-(defun disco-directory--merge-starter-unavailable-ids (existing threads)
-  "Update unavailable starter IDs in EXISTING from one page of THREADS."
-  (let ((page-ids
-         (delq nil
-               (mapcar (lambda (thread)
-                         (when-let* ((thread-id (alist-get 'id thread)))
-                           (format "%s" thread-id)))
-                       threads))))
-    (delete-dups
-     (append
-      (seq-remove (lambda (thread-id) (member thread-id page-ids)) existing)
-      (disco-directory--missing-thread-starter-ids threads)))))
-
-(defun disco-directory--parent-thread-previews-complete-p (parent-id)
-  "Return non-nil when every active thread below PARENT-ID is resolved."
-  (let ((unavailable-ids
-         (plist-get (disco-directory-parent-threads-state parent-id)
-                    :starter-unavailable-ids)))
-    (seq-every-p
-     (lambda (thread)
-       (or (disco-thread-archived-p thread)
-           (disco-thread-starter-message thread)
-           (member (format "%s" (alist-get 'id thread)) unavailable-ids)))
-     (disco-state-parent-threads parent-id))))
+    (disco-state-upsert-message (alist-get 'channel_id message) message)))
 
 (defun disco-directory--thread-search-retry-delay (result)
   "Return protocol retry delay in seconds for index-pending RESULT."
@@ -261,125 +333,126 @@ page without its corresponding `first_messages' entry."
   (and (listp result)
        (= (or (alist-get 'code result) 0) 110000)))
 
-(defun disco-directory--fail-parent-thread-request
-    (parent-id guild-id token error-value)
-  "Finish TOKEN for PARENT-ID in GUILD-ID with ERROR-VALUE."
-  (when (disco-directory--parent-thread-request-active-p parent-id token)
-    (disco-directory--put-parent-thread-state
-     parent-id
-     (list :status 'error
-           :guild-id guild-id
-           :session-generation (disco-gateway-session-generation)
-           :token token
-           :error error-value)
-     'parent-threads-error)))
+(defun disco-directory--fail-parent-thread-request (parent-id token error-value)
+  "Finish TOKEN for PARENT-ID with ERROR-VALUE without losing its snapshot."
+  (when-let* ((state
+               (disco-directory--parent-thread-request-state parent-id token)))
+    (setq state (copy-sequence state))
+    (setf (plist-get state :status) 'error
+          (plist-get state :phase) nil
+          (plist-get state :token) nil
+          (plist-get state :error) error-value)
+    (puthash parent-id state disco-directory--parent-thread-state)
+    (disco-directory--emit-parent-thread-state
+     parent-id 'parent-threads-error)))
 
 (defun disco-directory--load-parent-thread-page
-    (parent-id guild-id token max-id accumulated total
-               starter-unavailable-ids index-retries)
+    (parent-id guild-id token cursor index-retries)
   "Load one active-thread page for PARENT-ID owned by TOKEN.
 
-GUILD-ID owns the parent.  MAX-ID is the stable creation-time cursor,
-ACCUMULATED contains prior unique results, TOTAL is Discord's latest total
-count, STARTER-UNAVAILABLE-IDS records threads explicitly returned without an
-original post, and INDEX-RETRIES counts delayed index retries already attempted
-for this page."
+GUILD-ID owns the parent.  CURSOR is the stable creation-time cursor and
+INDEX-RETRIES counts delayed index retries already attempted for this page.
+Successful pages are committed independently; this function never drains the
+next page automatically."
   (disco-api-channel-search-threads-async
    parent-id
    :archived :false
    :sort-by 'creation-time
    :sort-order 'desc
    :limit disco-directory--parent-thread-page-limit
-   :max-id max-id
+   :max-id cursor
    :on-success
    (lambda (result)
-     (when (disco-directory--parent-thread-request-active-p parent-id token)
+     (when-let* ((state
+                  (disco-directory--parent-thread-request-state
+                   parent-id token)))
        (if (disco-directory--thread-search-index-pending-p result)
            (if (< index-retries disco-directory--parent-thread-index-retries)
                (let* ((delay
                        (disco-directory--thread-search-retry-delay result))
-                      (state
-                       (list :status 'loading
-                             :phase 'indexing
-                             :guild-id guild-id
-                             :session-generation
-                             (disco-gateway-session-generation)
-                             :token token
-                             :loaded-count (length accumulated)
-                             :total total
-                             :starter-unavailable-ids
-                             starter-unavailable-ids
-                             :retry-after delay)))
-                 (disco-directory--put-parent-thread-state
-                  parent-id state 'parent-threads-loading)
+                      (next-state (copy-sequence state)))
+                 (setf (plist-get next-state :phase) 'indexing)
+                 (puthash parent-id next-state
+                          disco-directory--parent-thread-state)
+                 (disco-directory--emit-parent-thread-state
+                  parent-id 'parent-threads-loading)
                  (run-at-time
                   delay nil
                   (lambda ()
-                    (when (disco-directory--parent-thread-request-active-p
+                    (when (disco-directory--parent-thread-request-state
                            parent-id token)
                       (disco-directory--load-parent-thread-page
-                       parent-id guild-id token max-id accumulated total
-                       starter-unavailable-ids (1+ index-retries))))))
+                       parent-id guild-id token cursor (1+ index-retries))))))
              (disco-directory--fail-parent-thread-request
-              parent-id guild-id token
+              parent-id token
               (list :status 202
                     :body result
                     :message (or (alist-get 'message result)
                                  "Thread search index is not available"))))
-         (let* ((page (or (alist-get 'threads result) '()))
-                (merged
-                 (disco-directory--merge-thread-results accumulated page))
-                (next-total (or total (alist-get 'total_results result)))
-                (has-more (disco-util-json-true-p
-                           (alist-get 'has_more result)))
-                (next-max-id
-                 (and page (alist-get 'id (car (last page))))))
-           (disco-directory--ingest-thread-search-page
-            guild-id page (or (alist-get 'first_messages result) '()))
-           (let ((next-starter-unavailable-ids
-                  (disco-directory--merge-starter-unavailable-ids
-                   starter-unavailable-ids page)))
-             (cond
-              ((and has-more
-                    (or (null next-max-id)
-                        (equal (format "%s" next-max-id) max-id)))
-               (disco-directory--fail-parent-thread-request
-                parent-id guild-id token
-                '(:message "Thread search returned no next creation-time cursor")))
-              (t
-               (disco-directory--put-parent-thread-state
-                parent-id
-                (list :status (if has-more 'loading 'loaded)
-                      :phase (and has-more 'fetching)
-                      :guild-id guild-id
-                      :session-generation
-                      (disco-gateway-session-generation)
-                      :token token
-                      :loaded-count (length merged)
-                      :total next-total
-                      :starter-unavailable-ids
-                      next-starter-unavailable-ids)
-                (if has-more 'parent-threads-page 'parent-threads-loaded))
-               (when has-more
-                 (disco-directory--load-parent-thread-page
-                  parent-id guild-id token (format "%s" next-max-id)
-                  merged next-total next-starter-unavailable-ids 0)))))))))
+         (condition-case err
+             (let* ((mode (plist-get state :mode))
+                    (validated
+                     (disco-directory--canonical-thread-search-page
+                      parent-id guild-id result))
+                    (page (plist-get validated :threads))
+                    (first-messages
+                     (plist-get validated :first-messages))
+                    (base-ids
+                     (and (eq mode 'append)
+                          (plist-get state :thread-ids)))
+                    (merged-ids
+                     (disco-directory--merge-thread-ids base-ids page))
+                    (next-total
+                     (if (eq mode 'append)
+                         (or (plist-get state :total)
+                             (plist-get validated :total))
+                       (plist-get validated :total)))
+                    (has-more (plist-get validated :has-more))
+                    (next-cursor
+                     (disco-directory--normalize-id
+                      (and page (alist-get 'id (car (last page)))))))
+               (if (and has-more
+                        (or (null next-cursor)
+                            (and cursor
+                                 (not (disco-state-snowflake<
+                                       next-cursor cursor)))))
+                   (disco-directory--fail-parent-thread-request
+                    parent-id token
+                    '(:kind invalid-thread-search-cursor
+                      :message
+                      "Thread search returned no next creation-time cursor"))
+                 ;; Validation above covers the entire page before either the
+                 ;; identity index or message cache is changed.
+                 (disco-directory--ingest-thread-search-page
+                  page first-messages)
+                 ;; Commit only after the complete page has passed identity
+                 ;; and cursor validation and has been ingested.  A replace
+                 ;; request therefore leaves the previous snapshot visible
+                 ;; until this point.
+                 (puthash
+                  parent-id
+                  (list :guild-id guild-id
+                        :status 'loaded
+                        :thread-ids merged-ids
+                        :next-cursor (and has-more next-cursor)
+                        :total next-total)
+                  disco-directory--parent-thread-state)
+                 (disco-directory--emit-parent-thread-state
+                  parent-id 'parent-threads-loaded)))
+           (error
+            (disco-directory--fail-parent-thread-request
+             parent-id token
+             (list :kind 'invalid-thread-search-response
+                   :message (error-message-string err))))))))
    :on-error
    (lambda (error-value)
      (disco-directory--fail-parent-thread-request
-      parent-id guild-id token error-value))))
+      parent-id token error-value))))
 
-(cl-defun disco-directory-load-parent-threads-async
-    (parent-channel-id &key force)
-  "Load every active thread under PARENT-CHANNEL-ID asynchronously.
-
-Search pages are fetched lazily only for the selected parent.  Concurrent
-loads are coalesced; FORCE supersedes an in-flight or completed request."
-  (disco-directory--sync-gateway-session)
-  (let* ((parent-id (format "%s" parent-channel-id))
-         (parent (disco-state-channel parent-id))
-         (guild-id (and parent (alist-get 'guild_id parent)))
-         (status (disco-directory-parent-threads-status parent-id)))
+(defun disco-directory--validate-parent-thread-load (parent-id)
+  "Return PARENT-ID's guild ID or signal why it cannot be searched."
+  (let* ((parent (disco-state-channel parent-id))
+         (guild-id (and parent (alist-get 'guild_id parent))))
     (unless parent
       (error "Disco: cannot load threads for unknown parent %s" parent-id))
     (unless (disco-channel-thread-parent-p parent)
@@ -387,29 +460,99 @@ loads are coalesced; FORCE supersedes an in-flight or completed request."
     (unless guild-id
       (error "Disco: parent channel %s has no guild context" parent-id))
     (setq guild-id (format "%s" guild-id))
+    (unless (disco-directory--guild-known-p guild-id)
+      (error "Disco: cannot load threads for departed guild %s" guild-id))
+    (unless (disco-state-channel-viewable-p parent nil)
+      (error "Disco: cannot load threads for inaccessible parent %s" parent-id))
+    guild-id))
+
+(defun disco-directory--start-parent-thread-page
+    (parent-id guild-id cursor mode)
+  "Start one PARENT-ID page in GUILD-ID at CURSOR.
+
+MODE is `replace' or `append'.  Committed snapshot fields remain in the same
+state plist until a successful response replaces them."
+  (unless (memq mode '(replace append))
+    (error "Disco: invalid parent-thread request mode %S" mode))
+  (let* ((token (cl-incf disco-directory--parent-thread-request-sequence))
+         (state
+          (copy-sequence
+           (or (gethash parent-id disco-directory--parent-thread-state)
+               (list :guild-id guild-id)))))
+    (setf (plist-get state :status) 'loading
+          (plist-get state :guild-id) guild-id
+          (plist-get state :token) token
+          (plist-get state :mode) mode
+          (plist-get state :phase) nil
+          (plist-get state :error) nil)
+    (puthash parent-id state disco-directory--parent-thread-state)
+    (disco-directory--emit-parent-thread-state
+     parent-id 'parent-threads-loading)
+    (disco-directory--load-parent-thread-page
+     parent-id guild-id token cursor 0)
+    'loading))
+
+(cl-defun disco-directory-load-parent-threads-async
+    (parent-channel-id &key force)
+  "Load the first active-thread page under PARENT-CHANNEL-ID asynchronously.
+
+Concurrent loads are coalesced.  FORCE supersedes an in-flight request and
+refreshes from the first page while retaining the committed snapshot until the
+replacement succeeds.  Use
+`disco-directory-load-more-parent-threads-async' for subsequent pages and
+`disco-directory-retry-parent-threads-async' after an error."
+  (disco-directory--sync-gateway-session)
+  (let* ((parent-id (format "%s" parent-channel-id))
+         (guild-id (disco-directory--validate-parent-thread-load parent-id))
+         (state (disco-directory-parent-threads-state parent-id))
+         (status (plist-get state :status)))
     (cond
      ((and (eq status 'loading) (not force))
       'loading)
-     ((and (eq status 'loaded)
-           (not force)
-           (disco-directory--parent-thread-previews-complete-p parent-id))
+     ((and (eq status 'loaded) (not force))
       'loaded)
+     ((and (eq status 'error) (not force))
+      'error)
      (t
-      (let* ((token (cl-incf disco-directory--parent-thread-request-sequence))
-             (state (list :status 'loading
-                          :phase 'fetching
-                          :guild-id guild-id
-                          :session-generation
-                          (disco-gateway-session-generation)
-                          :token token
-                          :loaded-count 0
-                          :total nil
-                          :starter-unavailable-ids nil)))
-        (disco-directory--put-parent-thread-state
-         parent-id state 'parent-threads-loading)
-        (disco-directory--load-parent-thread-page
-         parent-id guild-id token nil nil nil nil 0)
-        'loading)))))
+      (disco-directory--start-parent-thread-page
+       parent-id guild-id nil 'replace)))))
+
+(defun disco-directory-load-more-parent-threads-async (parent-channel-id)
+  "Load PARENT-CHANNEL-ID's next active-thread page explicitly."
+  (disco-directory--sync-gateway-session)
+  (let* ((parent-id (format "%s" parent-channel-id))
+         (guild-id (disco-directory--validate-parent-thread-load parent-id))
+         (state (disco-directory-parent-threads-state parent-id))
+         (status (plist-get state :status))
+         (cursor (plist-get state :next-cursor)))
+    (cond
+     ((eq status 'loading) 'loading)
+     ((eq status 'error) 'error)
+     ((not (eq status 'loaded)) 'unloaded)
+     ((null cursor) 'loaded)
+     (t
+      (disco-directory--start-parent-thread-page
+       parent-id guild-id cursor 'append)))))
+
+(defun disco-directory-retry-parent-threads-async (parent-channel-id)
+  "Retry PARENT-CHANNEL-ID's failed page from its exact saved cursor."
+  (disco-directory--sync-gateway-session)
+  (let* ((parent-id (format "%s" parent-channel-id))
+         (guild-id (disco-directory--validate-parent-thread-load parent-id))
+         (state (disco-directory-parent-threads-state parent-id)))
+    (if (not (eq (plist-get state :status) 'error))
+        (plist-get state :status)
+      (let* ((mode (plist-get state :mode))
+             (cursor (and (eq mode 'append)
+                          (plist-get state :next-cursor))))
+        (unless (memq mode '(replace append))
+          (error "Disco: failed parent-thread request has no retry mode for %s"
+                 parent-id))
+        (when (and (eq mode 'append) (null cursor))
+          (error "Disco: failed append request has no retry cursor for %s"
+                 parent-id))
+        (disco-directory--start-parent-thread-page
+         parent-id guild-id cursor mode)))))
 
 (defun disco-directory--guild-known-p (guild-id)
   "Return non-nil when GUILD-ID remains in the guild index."
@@ -536,7 +679,9 @@ GENERATION, REQUEST-EPOCH, and SESSION-GENERATION must all remain current."
                      (gethash guild-id disco-directory--guild-generation 0))
                   (disco-directory--guild-known-p guild-id))
          (dolist (thread (or (alist-get 'threads active) '()))
-           (disco-state-upsert-channel thread))
+           (let ((stored (copy-tree thread)))
+             (setf (alist-get 'guild_id stored) guild-id)
+             (disco-state-upsert-channel stored)))
          (disco-directory--emit 'guild-enriched :guild-id guild-id)))
      :on-error
      (lambda (error-value)
@@ -562,7 +707,7 @@ for the same guild are coalesced."
      ((and (eq status 'loaded) (not force))
       'loaded)
      ((not (disco-directory--guild-known-p guild-id))
-      (error "disco: cannot load unknown guild %s" guild-id))
+      (error "Disco: cannot load unknown guild %s" guild-id))
      (t
       (let ((generation
              (1+ (gethash guild-id disco-directory--guild-generation 0)))

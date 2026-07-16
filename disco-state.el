@@ -44,7 +44,8 @@ must never be represented by `permissions'.")
 
 Native Gateway evidence has priority over this secondary source.  Keeping the
 sources separate prevents a delayed REST response from overriding a newer
-obfuscation decision in the same Gateway session.")
+obfuscation decision in the same Gateway session.  Endpoint inclusion is not
+stored here as access evidence.")
 
 (defvar disco-state--private-channels nil
   "List of private DM-like channels as channel objects.")
@@ -296,7 +297,8 @@ loaded markers are session-relative and are therefore cleared atomically."
   "Return the authoritative access decision for CHANNEL-ID.
 
 The result is `visible', `hidden', or nil when no evidence has been observed.
-Native Gateway visibility takes priority over REST computed permissions."
+Native Gateway evidence is authoritative.  Otherwise use explicit computed
+permissions."
   (let ((channel-id (disco-state--normalize-id channel-id)))
     (or (gethash channel-id disco-state--gateway-channel-access-by-id)
         (gethash channel-id disco-state--computed-channel-access-by-id))))
@@ -1870,10 +1872,11 @@ ping and therefore contributes zero here."
   (disco-state-channel-unread-count (alist-get 'id channel)))
 
 (defun disco-state-parent-thread-unread-total (parent-channel-id)
-  "Return unread total aggregated from threads under PARENT-CHANNEL-ID."
+  "Return viewable thread unread total under PARENT-CHANNEL-ID."
   (let ((total 0))
     (dolist (thread (disco-state-parent-threads parent-channel-id))
-      (setq total (+ total (disco-state-channel-own-unread-count thread))))
+      (when (disco-state-channel-viewable-p thread nil)
+        (setq total (+ total (disco-state-channel-own-unread-count thread)))))
     total))
 
 (defun disco-state-channel-effective-unread-count (channel)
@@ -2009,10 +2012,13 @@ useful lower bound, not a protocol-provided exact total."
       (if (disco-state-channel-own-has-unread-p channel) 1 0))))
 
 (defun disco-state-channel-has-unread-p (channel)
-  "Return non-nil when CHANNEL has unread state, including child threads."
+  "Return non-nil when CHANNEL has unread state, including viewable threads."
   (or (disco-state-channel-own-has-unread-p channel)
-      (seq-some #'disco-state-channel-own-has-unread-p
-                (disco-state-parent-threads (alist-get 'id channel)))))
+      (seq-some
+       (lambda (thread)
+         (and (disco-state-channel-viewable-p thread nil)
+              (disco-state-channel-own-has-unread-p thread)))
+       (disco-state-parent-threads (alist-get 'id channel)))))
 
 (defun disco-state-channel-read-state-flags (channel-id)
   "Return calculated read-state flags integer for CHANNEL-ID."

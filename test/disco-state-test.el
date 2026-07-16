@@ -371,12 +371,12 @@
 
 (ert-deftest disco-state-channel-has-unread-p-uses-read-cursor-and-threads ()
   (disco-state-reset)
-  (disco-state-upsert-channel
+  (disco-state-upsert-gateway-channel
    '((id . "parent")
      (guild_id . "g")
      (type . 0)
      (last_message_id . "100")))
-  (disco-state-upsert-channel
+  (disco-state-upsert-gateway-channel
    '((id . "thread")
      (guild_id . "g")
      (parent_id . "parent")
@@ -390,10 +390,11 @@
 
 (ert-deftest disco-state-channel-effective-unread-count-includes-child-threads ()
   (disco-state-reset)
-  (disco-state-upsert-channel '((id . "parent") (guild_id . "g") (type . 0)))
-  (disco-state-upsert-channel
+  (disco-state-upsert-gateway-channel
+   '((id . "parent") (guild_id . "g") (type . 0)))
+  (disco-state-upsert-gateway-channel
    '((id . "t1") (guild_id . "g") (parent_id . "parent") (type . 11)))
-  (disco-state-upsert-channel
+  (disco-state-upsert-gateway-channel
    '((id . "t2") (guild_id . "g") (parent_id . "parent") (type . 11)))
   (disco-state-set-channel-unread "parent" 2)
   (disco-state-set-channel-unread "t1" 4)
@@ -978,6 +979,22 @@
           '((id . "hidden") (guild_id . "g1") (type . 0)
             (permissions . "0"))
           t)))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-hidden-thread-does-not-contribute-parent-unread ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-gateway-channel
+         '((id . "parent") (guild_id . "g1") (type . 15)))
+        (disco-state-upsert-gateway-channel
+         `((id . "hidden-thread") (guild_id . "g1")
+           (parent_id . "parent") (type . 11)
+           (flags . ,disco-channel-flag-obfuscated)))
+        (disco-state-set-channel-unread "hidden-thread" 7)
+        (should (= 0 (disco-state-parent-thread-unread-total "parent")))
+        (should-not
+         (disco-state-channel-has-unread-p (disco-state-channel "parent"))))
     (disco-state-reset)))
 
 (ert-deftest disco-state-gateway-channel-access-clears-on-delete-and-reset ()

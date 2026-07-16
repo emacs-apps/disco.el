@@ -274,48 +274,51 @@ but do not require the channel name to match."
        (downcase (disco-guild-directory-channel-name left))
        (downcase (disco-guild-directory-channel-name right))))))
 
-(defun disco-guild-directory--active-forum-posts (parent-id)
-  "Return sorted active forum/media posts beneath PARENT-ID."
+(defun disco-guild-directory--active-posts (parent-id)
+  "Return sorted viewable active posts in PARENT-ID's loaded snapshot."
   (sort
    (seq-filter
     (lambda (thread)
       (and (not (disco-thread-archived-p thread))
-           (disco-guild-directory-displayable-channel-p thread)))
-    (disco-state-parent-threads parent-id))
+           (disco-channel-root-visible-p thread)
+           (disco-directory-parent-thread-viewable-p parent-id thread)))
+    (disco-directory-parent-threads parent-id))
    #'disco-guild-directory--thread-before-p))
 
+(defun disco-guild-directory--thread-matches-lens-p
+    (context thread &optional ignore-name-filter)
+  "Return non-nil when already-viewable THREAD matches CONTEXT's lenses."
+  (and (or ignore-name-filter
+           (disco-guild-directory--name-matches-p context thread))
+       (or (not (disco-guild-directory-context-unread-only context))
+           (disco-state-channel-has-unread-p thread))))
+
 (defun disco-guild-directory--visible-forum-posts
-    (context channel &optional ignore-name-filter)
+    (context channel &optional ignore-name-filter active-posts)
   "Return CONTEXT's sorted visible active posts beneath forum/media CHANNEL.
 
 IGNORE-NAME-FILTER retains unread and permission lenses while showing every
-child name."
+child name.  ACTIVE-POSTS may provide the already filtered parent snapshot."
   (let ((ignore-name-filter
          (or ignore-name-filter
              (and (disco-guild-directory-context-filter context)
                   (disco-guild-directory--name-matches-p context channel)))))
-    (sort
-     (seq-filter
-      (lambda (thread)
-        (and (not (disco-thread-archived-p thread))
-             (or (disco-thread-starter-message thread)
-                 (disco-directory-parent-thread-starter-unavailable-p
-                  (alist-get 'id channel) (alist-get 'id thread)))
-             (disco-guild-directory--channel-matches-lens-p
-              context thread ignore-name-filter)))
-      (disco-state-parent-threads (alist-get 'id channel)))
-     #'disco-guild-directory--thread-before-p)))
+    (seq-filter
+     (lambda (thread)
+       (disco-guild-directory--thread-matches-lens-p
+        context thread ignore-name-filter))
+     (or active-posts
+         (disco-guild-directory--active-posts (alist-get 'id channel))))))
 
 (defun disco-guild-directory--channel-visible-p
     (context channel &optional ignore-name-filter)
   "Return non-nil when CHANNEL belongs in CONTEXT's current lens."
   (if (disco-channel-forum-or-media-p channel)
-      (or (and (disco-guild-directory-displayable-channel-p channel)
-               (or ignore-name-filter
-                   (disco-guild-directory--name-matches-p context channel))
-               (not (disco-guild-directory-context-unread-only context)))
-          (disco-guild-directory--visible-forum-posts
-           context channel ignore-name-filter))
+      (or (disco-guild-directory--channel-matches-lens-p
+           context channel ignore-name-filter)
+          (and (disco-guild-directory-displayable-channel-p channel)
+               (disco-guild-directory--visible-forum-posts
+                context channel ignore-name-filter)))
     (disco-guild-directory--channel-matches-lens-p
      context channel ignore-name-filter)))
 
@@ -402,22 +405,15 @@ child name."
     (dolist (channel channels total)
       (setq total
             (+ total
-               (if (disco-channel-forum-or-media-p channel)
-                   (+ (disco-state-channel-own-unread-count channel)
-                      (disco-guild-directory--children-unread-count
-                       (disco-guild-directory--active-forum-posts
-                        (alist-get 'id channel))))
-                 (disco-state-channel-effective-unread-count channel)))))))
+               (disco-state-channel-effective-unread-count channel))))))
 
 (defun disco-guild-directory--thread-parent-entry (context channel indent)
   "Return one expandable forum/media CHANNEL entry at INDENT in CONTEXT."
   (let* ((parent-id
           (disco-guild-directory--normalize-id (alist-get 'id channel)))
          (group-id (disco-guild-directory--channel-group-id channel))
-         (threads (disco-guild-directory--active-forum-posts parent-id))
          (state (disco-directory-parent-threads-state parent-id))
-         (unread-count
-          (disco-guild-directory--children-unread-count threads)))
+         (unread-count (disco-state-channel-effective-unread-count channel)))
     (appkit-directory-entry-create
      :key (disco-guild-directory-channel-key context parent-id)
      :role 'item
@@ -440,9 +436,9 @@ child name."
      :stamp (list (disco-guild-directory--channel-stamp channel)
                   (plist-get state :status)
                   (plist-get state :phase)
-                  (plist-get state :loaded-count)
+                  (length (plist-get state :thread-ids))
                   (plist-get state :total)
-                  (length threads))
+                  (plist-get state :next-cursor))
      :properties
      (append
       (disco-guild-directory--properties
@@ -490,6 +486,42 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
    (disco-guild-directory--properties
     context 'note nil thread-parent-id)))
 
+(defun disco-guild-directory--parent-action-entry
+    (context channel action label &optional face)
+  "Return an actionable pagination row for CHANNEL using ACTION and LABEL."
+  (let* ((parent-id
+          (disco-guild-directory--normalize-id (alist-get 'id channel)))
+         (group-id (disco-guild-directory--channel-group-id channel)))
+    (appkit-directory-entry-create
+     :key (disco-guild-directory-key
+           context 'parent-action parent-id)
+     :role 'item
+     :section-key (disco-guild-directory-context-section-key context)
+     :group-key (disco-guild-directory-group-key context group-id)
+     :item-p t
+     :label label
+     :face face
+     :mouse-face 'highlight
+     :indent (disco-guild-directory-context-thread-indent context)
+     :help-echo
+     (pcase action
+       ('parent-threads-load "Load the first page of active posts")
+       ('parent-threads-load-more "Load the next page of active posts")
+       ('parent-threads-retry "Retry the interrupted active-post page"))
+     :stamp (list action label)
+     :properties
+     (disco-guild-directory--properties
+      context action group-id parent-id))))
+
+(defun disco-guild-directory--pagination-progress (state)
+  "Return compact raw loaded/total pagination progress for STATE."
+  (let ((loaded (length (plist-get state :thread-ids)))
+        (total (plist-get state :total)))
+    (cond
+     ((numberp total) (format "%d/%d" loaded total))
+     ((> loaded 0) (number-to-string loaded))
+     (t nil))))
+
 (defun disco-guild-directory--async-error-message (err)
   "Return a user-facing message extracted from asynchronous ERR."
   (or (and (listp err) (plist-get err :message))
@@ -511,25 +543,30 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
                (expanded
                 (disco-guild-directory--thread-parent-expanded-p
                  context parent-id))
+               (active-posts
+                (disco-guild-directory--active-posts parent-id))
                (threads
                 (disco-guild-directory--visible-forum-posts
-                 context channel ignore-name-filter))
+                 context channel ignore-name-filter active-posts))
                (state (disco-directory-parent-threads-state parent-id))
                (status (plist-get state :status)))
           (push (disco-guild-directory--thread-parent-entry
                  context channel channel-indent)
                 entries)
           (when expanded
+            (dolist (thread threads)
+              (push (disco-guild-directory--channel-entry
+                     context thread thread-indent)
+                    entries))
             (pcase status
               ('unloaded
                (push
-                (disco-guild-directory--note-entry
-                 context (list 'parent-threads parent-id)
-                 "Active posts are not loaded." 'shadow thread-indent
-                 parent-id)
+                (disco-guild-directory--parent-action-entry
+                 context channel 'parent-threads-load
+                 "Load active posts" 'font-lock-keyword-face)
                 entries))
               ('loading
-               (let ((loaded (or (plist-get state :loaded-count) 0))
+               (let ((loaded (length (plist-get state :thread-ids)))
                      (total (plist-get state :total))
                      (phase (plist-get state :phase)))
                  (push
@@ -538,32 +575,51 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
                    (cond
                     ((eq phase 'indexing)
                      "Discord is indexing active posts…")
-                    ((and (numberp total) (> total 0))
-                     (format "Loading active posts… %d/%d" loaded total))
-                    ((> loaded 0) (format "Loading active posts… %d" loaded))
+                    ((and (numberp total) (> loaded 0))
+                     (format "Loading more active posts… %d/%d" loaded total))
+                    ((> loaded 0) (format "Loading more active posts… %d" loaded))
                     (t "Loading active posts…"))
                    'shadow thread-indent parent-id)
                   entries)))
               ('error
-               (push
-                (disco-guild-directory--note-entry
-                 context (list 'parent-threads parent-id)
-                 (format "Active post loading failed: %s"
-                         (disco-guild-directory--async-error-message
-                          (plist-get state :error)))
-                 'error thread-indent parent-id)
-                entries))
+               (let* ((progress
+                       (disco-guild-directory--pagination-progress state))
+                      (error-text
+                       (disco-guild-directory--async-error-message
+                        (plist-get state :error))))
+                 (push
+                  (disco-guild-directory--parent-action-entry
+                   context channel 'parent-threads-retry
+                   (format "Retry active post loading%s: %s"
+                           (if progress (format " (%s)" progress) "")
+                           error-text)
+                   'error)
+                  entries)))
               ('loaded
-               (unless threads
+               (cond
+                ((plist-get state :next-cursor)
+                 (let ((progress
+                        (disco-guild-directory--pagination-progress state)))
+                   (push
+                    (disco-guild-directory--parent-action-entry
+                     context channel 'parent-threads-load-more
+                     (if progress
+                         (format "Load more active posts (%s)" progress)
+                       "Load more active posts")
+                     'font-lock-keyword-face)
+                    entries)))
+                ((null threads)
                  (push
                   (disco-guild-directory--note-entry
                    context (list 'parent-threads parent-id)
-                   "No active posts." 'shadow thread-indent parent-id)
-                  entries))))
-            (dolist (thread threads)
-              (push (disco-guild-directory--channel-entry
-                     context thread thread-indent)
-                    entries))))
+                   (cond
+                    (active-posts
+                     "No active posts match the current directory lens.")
+                    ((disco-directory-parent-threads parent-id)
+                     "No viewable active posts in the loaded page.")
+                    (t "No active posts."))
+                   'shadow thread-indent parent-id)
+                  entries)))))))
       (push (disco-guild-directory--channel-entry
              context channel channel-indent)
             entries)))
