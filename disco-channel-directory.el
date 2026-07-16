@@ -23,6 +23,7 @@
 (require 'disco-customize)
 (require 'disco-directory)
 (require 'disco-gateway)
+(require 'disco-guild-directory)
 (require 'disco-msg)
 (require 'disco-permission)
 (require 'disco-root-view)
@@ -31,11 +32,6 @@
 (require 'disco-thread)
 
 (autoload 'disco-root-open "disco-root" nil t)
-
-(defface disco-channel-directory-category
-  '((t :inherit header-line :weight semi-bold :extend t))
-  "Face for category dividers in guild channel directories."
-  :group 'disco)
 
 (defface disco-channel-directory-filter
   '((t :inherit font-lock-keyword-face :weight semi-bold))
@@ -100,9 +96,6 @@
 (defvar-local disco-channel-directory--deferred-position-p nil
   "Non-nil when hidden updates require geometry-sensitive row reflow.")
 
-(defconst disco-channel-directory--uncategorized-group :uncategorized
-  "Synthetic group ID used for channels outside a category.")
-
 (defun disco-channel-directory--normalize-id (value)
   "Return VALUE as an ID string, or nil."
   (and value (format "%s" value)))
@@ -161,495 +154,37 @@
        :sync-function #'disco-channel-directory--sync-invalidations
        :parts '(frame entries))))))
 
-(defun disco-channel-directory--canonical-key (kind id)
-  "Return the stable directory key for KIND and ID."
-  (format "%s:%s" kind id))
+(defun disco-channel-directory--projection-context ()
+  "Return the shared projector context for the current standalone directory."
+  (let ((guild-id
+         (or disco-channel-directory--guild-id
+             (error "Disco: channel directory has no guild id"))))
+    (disco-guild-directory-context-create
+     :guild-id guild-id
+     :surface (appkit-directory-surface)
+     :namespace (list 'guild guild-id)
+     :section-key (list 'guild guild-id)
+     :group-indent 1
+     :channel-indent 2
+     :thread-indent 4
+     :filter disco-channel-directory--filter
+     :unread-only disco-channel-directory--unread-only)))
 
 (defun disco-channel-directory--entry-key-for-channel (channel-id)
-  "Return the stable directory key for CHANNEL-ID."
-  (disco-channel-directory--canonical-key 'channel channel-id))
+  "Return the standalone projector row key for CHANNEL-ID."
+  (disco-guild-directory-channel-key
+   (disco-channel-directory--projection-context) channel-id))
 
-(defun disco-channel-directory--entry-key-for-group (group-id)
-  "Return the stable directory key for GROUP-ID."
-  (disco-channel-directory--canonical-key 'group group-id))
-
-(defun disco-channel-directory--entry-key-for-note (note-id)
-  "Return the stable directory key for NOTE-ID."
-  (disco-channel-directory--canonical-key 'note note-id))
-
-(defun disco-channel-directory--channel-name (channel)
-  "Return CHANNEL's directory display name."
-  (or (alist-get 'name channel) "(unnamed channel)"))
-
-(defun disco-channel-directory--channel-position (channel)
-  "Return numeric Discord ordering position for CHANNEL."
-  (let ((position (alist-get 'position channel)))
-    (cond
-     ((integerp position) position)
-     ((and (stringp position)
-           (string-match-p "\\`[0-9]+\\'" position))
-      (string-to-number position))
-     (t most-positive-fixnum))))
-
-(defun disco-channel-directory--channel-before-p (left right)
-  "Return non-nil when LEFT belongs before RIGHT in a guild directory."
-  (let ((left-position (disco-channel-directory--channel-position left))
-        (right-position (disco-channel-directory--channel-position right)))
-    (if (= left-position right-position)
-        (let ((left-name (downcase (disco-channel-directory--channel-name left)))
-              (right-name (downcase (disco-channel-directory--channel-name right))))
-          (if (equal left-name right-name)
-              (string-lessp
-               (or (disco-channel-directory--normalize-id (alist-get 'id left)) "")
-               (or (disco-channel-directory--normalize-id (alist-get 'id right)) ""))
-            (string-lessp left-name right-name)))
-      (< left-position right-position))))
-
-(defun disco-channel-directory--sort-channels (channels)
-  "Return a Discord-position-sorted copy of CHANNELS."
-  (sort (copy-sequence (or channels '()))
-        #'disco-channel-directory--channel-before-p))
-
-(defun disco-channel-directory--category-p (channel)
-  "Return non-nil when CHANNEL is a category container."
-  (equal (alist-get 'type channel) 4))
-
-(defun disco-channel-directory--displayable-channel-p (channel)
-  "Return non-nil when CHANNEL may be shown in the directory."
-  (and (alist-get 'id channel)
-       (disco-channel-root-visible-p channel)
-       (disco-permission-channel-viewable-p channel t)))
-
-(defun disco-channel-directory--filter-active-p ()
-  "Return non-nil when a filter lens is active."
-  (or disco-channel-directory--filter
-      disco-channel-directory--unread-only))
-
-(defun disco-channel-directory--name-matches-p (channel)
-  "Return non-nil when CHANNEL matches the active text filter."
-  (or (null disco-channel-directory--filter)
-      (string-match-p
-       (regexp-quote disco-channel-directory--filter)
-       (downcase (disco-channel-directory--channel-name channel)))))
-
-(defun disco-channel-directory--channel-matches-lens-p
-    (channel &optional ignore-name-filter)
-  "Return non-nil when CHANNEL matches current directory lenses.
-
-When IGNORE-NAME-FILTER is non-nil, retain permission and unread filtering
-but do not require the channel name to match."
-  (and (disco-channel-directory--displayable-channel-p channel)
-       (or ignore-name-filter
-           (disco-channel-directory--name-matches-p channel))
-       (or (not disco-channel-directory--unread-only)
-           (disco-state-channel-has-unread-p channel))))
-
-(defun disco-channel-directory--group-expanded-p (group-id)
-  "Return non-nil when GROUP-ID should expose its children."
-  (appkit-directory-fold-expanded-p
-   (appkit-directory-surface)
-   (disco-channel-directory--entry-key-for-group group-id)
-   t
-   (disco-channel-directory--filter-active-p)))
-
-(defun disco-channel-directory--thread-before-p (left right)
-  "Return non-nil when thread LEFT should appear before RIGHT."
-  (let ((left-id (disco-channel-directory--normalize-id
-                  (or (alist-get 'last_message_id left)
-                      (alist-get 'id left))))
-        (right-id (disco-channel-directory--normalize-id
-                   (or (alist-get 'last_message_id right)
-                       (alist-get 'id right)))))
-    (cond
-     ((and left-id right-id (not (equal left-id right-id)))
-      (disco-state-snowflake< right-id left-id))
-     (t
-      (string-lessp (downcase (disco-channel-directory--channel-name left))
-                    (downcase (disco-channel-directory--channel-name right)))))))
-
-(defun disco-channel-directory--active-forum-posts (parent-id)
-  "Return sorted active forum/media posts beneath PARENT-ID."
-  (sort
-   (seq-filter
-    (lambda (thread)
-      (and (not (disco-thread-archived-p thread))
-           (disco-channel-directory--displayable-channel-p thread)))
-    (disco-state-parent-threads parent-id))
-   #'disco-channel-directory--thread-before-p))
-
-(defun disco-channel-directory--visible-forum-posts
-    (channel &optional ignore-name-filter)
-  "Return sorted visible active posts beneath forum/media CHANNEL.
-
-When IGNORE-NAME-FILTER is non-nil, retain unread and permission lenses while
-showing every child name."
-  (let ((ignore-name-filter
-         (or ignore-name-filter
-             (and disco-channel-directory--filter
-                  (disco-channel-directory--name-matches-p channel)))))
-    (sort
-     (seq-filter
-      (lambda (thread)
-        (and (not (disco-thread-archived-p thread))
-             (or (disco-thread-starter-message thread)
-                 (disco-directory-parent-thread-starter-unavailable-p
-                  (alist-get 'id channel)
-                  (alist-get 'id thread)))
-             (disco-channel-directory--channel-matches-lens-p
-              thread ignore-name-filter)))
-      (disco-state-parent-threads (alist-get 'id channel)))
-     #'disco-channel-directory--thread-before-p)))
-
-(defun disco-channel-directory--channel-visible-p
-    (channel &optional ignore-name-filter)
-  "Return non-nil when CHANNEL belongs in the current directory lens.
-
-IGNORE-NAME-FILTER has the same meaning as in
-`disco-channel-directory--channel-matches-lens-p'."
-  (if (disco-channel-forum-or-media-p channel)
-      (or (and (disco-channel-directory--displayable-channel-p channel)
-               (or ignore-name-filter
-                   (disco-channel-directory--name-matches-p channel))
-               (not disco-channel-directory--unread-only))
-          (disco-channel-directory--visible-forum-posts
-           channel ignore-name-filter))
-    (disco-channel-directory--channel-matches-lens-p
-     channel ignore-name-filter)))
-
-(defun disco-channel-directory--thread-parent-expanded-p (parent-id)
-  "Return non-nil when PARENT-ID should expose inline active threads."
-  (appkit-directory-fold-expanded-p
-   (appkit-directory-surface)
-   (list 'thread-parent
-         (disco-channel-directory--normalize-id parent-id))
-   nil
-   (disco-channel-directory--filter-active-p)))
-
-(defun disco-channel-directory--channel-stamp (channel)
-  "Return render-relevant state stamp for CHANNEL."
-  (let ((latest-message (disco-msg-channel-last-cached-message channel))
-        (starter-message
-         (and (disco-state-channel-thread-p channel)
-              (disco-thread-starter-message channel))))
-    (list (disco-state-channel-effective-unread-count channel)
-          (and (disco-state-channel-has-unread-p channel) t)
-          (alist-get 'last_message_id channel)
-          (and latest-message (sxhash-equal latest-message))
-          (and starter-message (sxhash-equal starter-message)))))
-
-(defun disco-channel-directory--channel-group-key (channel)
-  "Return the semantic directory group key owning CHANNEL."
-  (let* ((parent-id
-          (disco-channel-directory--normalize-id
-           (alist-get 'parent_id channel)))
-         (parent (and parent-id (disco-state-channel parent-id)))
-         (category-id
-          (if (and parent (disco-state-channel-thread-p channel))
-              (disco-channel-directory--normalize-id
-               (alist-get 'parent_id parent))
-            parent-id)))
-    (disco-channel-directory--entry-key-for-group
-     (or category-id disco-channel-directory--uncategorized-group))))
-
-(defun disco-channel-directory--channel-entry (channel indent)
-  "Return one directory entry for CHANNEL at INDENT."
-  (let ((channel-id
-         (disco-channel-directory--normalize-id (alist-get 'id channel))))
-    (appkit-directory-entry-create
-     :key (disco-channel-directory--entry-key-for-channel channel-id)
-     :role 'item
-     :section-key (list 'guild disco-channel-directory--guild-id)
-     :group-key (disco-channel-directory--channel-group-key channel)
-     :item-p t
-     :unread-p (disco-state-channel-has-unread-p channel)
-     :payload channel
-     :indent indent
-     :stamp (disco-channel-directory--channel-stamp channel)
-     :help-echo
-     (and (disco-root--openable-channel-p channel)
-          (disco-root--channel-open-help-echo channel))
-     :properties
-     (list 'disco-channel-directory-row-type 'channel))))
-
-(defun disco-channel-directory--thread-parent-entry (channel indent)
-  "Return one expandable forum/media CHANNEL entry at INDENT."
-  (let* ((parent-id
-          (disco-channel-directory--normalize-id (alist-get 'id channel)))
-         (threads (disco-channel-directory--active-forum-posts parent-id))
-         (state (disco-directory-parent-threads-state parent-id))
-         (unread-count
-          (disco-channel-directory--children-unread-count threads)))
-    (appkit-directory-entry-create
-     :key (disco-channel-directory--entry-key-for-channel parent-id)
-     :role 'item
-     :section-key (list 'guild disco-channel-directory--guild-id)
-     :group-key (disco-channel-directory--channel-group-key channel)
-     :item-p t
-     :unread-p (> unread-count 0)
-     :payload channel
-     :indent indent
-     :foldable-p t
-     :fold-key (list 'thread-parent parent-id)
-     :fold-default-expanded-p nil
-     :expanded-p (disco-channel-directory--thread-parent-expanded-p parent-id)
-     :fold-locked-reason
-     (and (disco-channel-directory--filter-active-p)
-          "Disco: clear directory lenses before folding active posts")
-     :help-echo
-     "RET/TAB toggles active posts; g refreshes; A opens archived posts"
-     :stamp (list (disco-channel-directory--channel-stamp channel)
-                  (plist-get state :status)
-                  (plist-get state :phase)
-                  (plist-get state :loaded-count)
-                  (plist-get state :total)
-                  (length threads))
-     :properties
-     (list 'disco-channel-directory-row-type 'thread-parent
-           'disco-channel-directory-thread-parent-id parent-id
-           'disco-unread-count unread-count
-           'disco-has-unread (> unread-count 0)))))
-
-(defun disco-channel-directory--group-entry (group-id title unread-count expanded)
-  "Return category GROUP-ID entry with TITLE, UNREAD-COUNT, and EXPANDED."
-  (let ((key (disco-channel-directory--entry-key-for-group group-id)))
-    (appkit-directory-entry-create
-     :key key
-     :role 'group
-     :section-key (list 'guild disco-channel-directory--guild-id)
-     :label title
-     :indent 1
-     :trailing (and (> unread-count 0) (format "  @%d" unread-count))
-     :face 'disco-channel-directory-category
-     :foldable-p t :fold-key key
-     :fold-default-expanded-p t :expanded-p expanded
-     :fold-locked-reason
-     (and (disco-channel-directory--filter-active-p)
-          "Disco: clear directory lenses before collapsing categories")
-     :help-echo "RET/TAB toggles this category"
-     :properties
-     (list 'disco-channel-directory-row-type 'group
-           'disco-channel-directory-group-id group-id))))
-
-(defun disco-channel-directory--note-entry (note-id text &optional face indent)
-  "Return one status NOTE-ID entry displaying TEXT with FACE at INDENT."
-  (appkit-directory-entry-create
-   :key (disco-channel-directory--entry-key-for-note note-id)
-   :role 'note
-   :section-key (list 'guild disco-channel-directory--guild-id)
-   :label text
-   :indent (or indent 2)
-   :face (or face 'shadow)
-   :properties (list 'disco-channel-directory-row-type 'note)))
-
-(defun disco-channel-directory--children-unread-count (channels)
-  "Return unread mention total represented by parent CHANNELS."
-  (let ((total 0))
-    (dolist (channel channels total)
-      (setq total
-            (+ total
-               (if (disco-channel-forum-or-media-p channel)
-                   (+ (disco-state-channel-own-unread-count channel)
-                      (disco-channel-directory--children-unread-count
-                       (disco-channel-directory--active-forum-posts
-                        (alist-get 'id channel))))
-                 (disco-state-channel-effective-unread-count channel)))))))
-
-(defun disco-channel-directory--prepend-channel-entries
-    (entries channel channel-indent post-indent &optional ignore-name-filter)
-  "Prepend CHANNEL and any visible forum posts to reverse ENTRIES.
-
-CHANNEL-INDENT and POST-INDENT control row indentation.  IGNORE-NAME-FILTER
-is forwarded when a matching category reveals its children.  Return the
-extended reverse accumulator."
-  (if (disco-channel-forum-or-media-p channel)
-      (let* ((parent-id
-              (disco-channel-directory--normalize-id (alist-get 'id channel)))
-             (expanded
-              (disco-channel-directory--thread-parent-expanded-p parent-id))
-             (threads
-              (disco-channel-directory--visible-forum-posts
-               channel ignore-name-filter))
-             (state (disco-directory-parent-threads-state parent-id))
-             (status (plist-get state :status)))
-        (push (disco-channel-directory--thread-parent-entry
-               channel channel-indent)
-              entries)
-        (when expanded
-          (pcase status
-            ('unloaded
-             (push
-              (disco-channel-directory--note-entry
-               (list 'parent-threads parent-id)
-               "Active posts are not loaded."
-               'shadow post-indent)
-              entries))
-            ('loading
-             (let ((loaded (or (plist-get state :loaded-count) 0))
-                   (total (plist-get state :total))
-                   (phase (plist-get state :phase)))
-               (push
-                (disco-channel-directory--note-entry
-                 (list 'parent-threads parent-id)
-                 (cond
-                  ((eq phase 'indexing)
-                   "Discord is indexing active posts…")
-                  ((and (numberp total) (> total 0))
-                   (format "Loading active posts… %d/%d" loaded total))
-                  ((> loaded 0)
-                   (format "Loading active posts… %d" loaded))
-                  (t "Loading active posts…"))
-                 'shadow post-indent)
-                entries)))
-            ('error
-             (push
-              (disco-channel-directory--note-entry
-               (list 'parent-threads parent-id)
-               (format "Active post loading failed: %s"
-                       (disco-root--async-error-message
-                        (plist-get state :error)))
-               'error post-indent)
-              entries))
-            ('loaded
-             (unless threads
-               (push
-                (disco-channel-directory--note-entry
-                 (list 'parent-threads parent-id)
-                 "No active posts."
-                 'shadow post-indent)
-                entries))))
-          (dolist (thread threads)
-            (push (disco-channel-directory--channel-entry thread post-indent)
-                  entries))))
-    (push (disco-channel-directory--channel-entry channel channel-indent)
-          entries))
-  entries)
-
-(defun disco-channel-directory--project-loaded-entries ()
-  "Project current guild state into ordered directory entries."
-  (let* ((channels
-          (or (disco-state-guild-channels disco-channel-directory--guild-id) '()))
-         (categories
-          (disco-channel-directory--sort-channels
-           (seq-filter (lambda (channel)
-                         (and (alist-get 'id channel)
-                              (disco-channel-directory--category-p channel)
-                              (disco-permission-channel-viewable-p channel t)))
-                       channels)))
-         (parents
-          (disco-channel-directory--sort-channels
-           (seq-filter
-            (lambda (channel)
-              (and (not (disco-channel-directory--category-p channel))
-                   (not (disco-state-channel-thread-p channel))
-                   (disco-channel-directory--displayable-channel-p channel)))
-            channels)))
-         (category-table (make-hash-table :test #'equal))
-         (children-by-category (make-hash-table :test #'equal))
-         uncategorized
-         entries)
-    (dolist (category categories)
-      (when-let* ((category-id
-                   (disco-channel-directory--normalize-id
-                    (alist-get 'id category))))
-        (puthash category-id category category-table)))
-    (dolist (channel parents)
-      (let ((parent-id
-             (disco-channel-directory--normalize-id
-              (alist-get 'parent_id channel))))
-        (if (and parent-id (gethash parent-id category-table))
-            (puthash parent-id
-                     (append (gethash parent-id children-by-category)
-                             (list channel))
-                     children-by-category)
-          (setq uncategorized (append uncategorized (list channel))))))
-    (let ((visible-uncategorized
-           (seq-filter
-            (lambda (channel)
-              (disco-channel-directory--channel-visible-p channel))
-            uncategorized)))
-      (when visible-uncategorized
-        (let* ((group-id disco-channel-directory--uncategorized-group)
-               (expanded (disco-channel-directory--group-expanded-p group-id)))
-          (push
-           (disco-channel-directory--group-entry
-            group-id
-            "Channels"
-            (disco-channel-directory--children-unread-count
-             visible-uncategorized)
-            expanded)
-           entries)
-          (when expanded
-            (dolist (channel visible-uncategorized)
-              (when (disco-channel-directory--channel-visible-p channel)
-                (setq entries
-                      (disco-channel-directory--prepend-channel-entries
-                       entries channel 2 4))))))))
-    (dolist (category categories)
-      (let* ((category-id
-              (disco-channel-directory--normalize-id (alist-get 'id category)))
-             (children (gethash category-id children-by-category))
-             (category-name-matches
-              (and disco-channel-directory--filter
-                   (disco-channel-directory--name-matches-p category)))
-             (visible-children
-             (seq-filter
-               (lambda (channel)
-                 (disco-channel-directory--channel-visible-p
-                  channel category-name-matches))
-               children))
-             (category-matches
-              (disco-channel-directory--name-matches-p category))
-             (visible-p
-              (or (not (disco-channel-directory--filter-active-p))
-                  category-matches
-                  visible-children)))
-        (when visible-p
-          (let ((expanded
-                 (disco-channel-directory--group-expanded-p category-id)))
-            (push
-             (disco-channel-directory--group-entry
-              category-id
-              (disco-channel-directory--channel-name category)
-              (disco-channel-directory--children-unread-count
-               visible-children)
-              expanded)
-             entries)
-            (when expanded
-              (dolist (channel visible-children)
-                (setq entries
-                      (disco-channel-directory--prepend-channel-entries
-                       entries channel 2 4 category-name-matches))))))))
-    (or (nreverse entries)
-        (list
-         (disco-channel-directory--note-entry
-          'empty
-          (if (disco-channel-directory--filter-active-p)
-              "No channels match the active directory lens."
-            "This guild has no visible channels."))))))
+(defun disco-channel-directory--entry-key-for-thread-parent (parent-id)
+  "Return the standalone projector fold key for forum/media PARENT-ID."
+  (disco-guild-directory-thread-parent-key
+   (disco-channel-directory--projection-context) parent-id))
 
 (defun disco-channel-directory--project-entries ()
-  "Return the current directory projection, including lifecycle state."
-  (let ((guild (disco-channel-directory--guild))
-        (status
-         (disco-directory-guild-status disco-channel-directory--guild-id)))
-    (cond
-     ((null guild)
-      (list (disco-channel-directory--note-entry
-             'missing-guild "This guild is no longer available." 'warning)))
-     ((and (eq status 'loading)
-           (not (disco-state-guild-channels-loaded-p
-                 disco-channel-directory--guild-id)))
-      (list (disco-channel-directory--note-entry
-             'loading "Loading channels…")))
-     ((eq status 'error)
-      (list (disco-channel-directory--note-entry
-             'load-error "Channel loading failed." 'error)))
-     ((not (disco-state-guild-channels-loaded-p
-            disco-channel-directory--guild-id))
-      (list (disco-channel-directory--note-entry
-             'unloaded "Channels have not been loaded.")))
-     (t
-      (disco-channel-directory--project-loaded-entries)))))
+  "Project lifecycle state through the shared guild projector."
+  (disco-guild-directory-project
+   (disco-channel-directory--projection-context)))
+
 
 (defun disco-channel-directory--usable-width ()
   "Return current usable directory width in columns."
@@ -682,13 +217,18 @@ extended reverse accumulator."
 
 (defun disco-channel-directory--fold-changed (_surface entry expanded-p)
   "Apply an Appkit fold change for ENTRY with EXPANDED-P."
-  (if-let* ((channel (appkit-directory-entry-payload entry)))
-      (let ((parent-id
-             (disco-channel-directory--normalize-id (alist-get 'id channel))))
-        (when expanded-p
-          (disco-directory-load-parent-threads-async parent-id))
-        (disco-channel-directory--invalidate-and-sync (list parent-id) t))
-    (disco-channel-directory--invalidate-and-sync nil t)))
+  (pcase (disco-guild-directory-entry-row-kind entry)
+    ('thread-parent
+     (let ((parent-id
+            (disco-guild-directory-entry-thread-parent-id entry)))
+       (when expanded-p
+         (disco-directory-load-parent-threads-async parent-id))
+       (disco-channel-directory--invalidate-and-sync (list parent-id) t)))
+    ('group
+     (disco-channel-directory--invalidate-and-sync nil t))
+    (_
+     (error "Disco: unsupported guild-directory fold row %S"
+            (disco-guild-directory-entry-row-kind entry)))))
 
 (defun disco-channel-directory--apply-entries (entries force-entry-keys)
   "Reconcile Appkit directory ENTRIES, redrawing FORCE-ENTRY-KEYS."
@@ -705,9 +245,9 @@ extended reverse accumulator."
           (and loaded-p
                (seq-filter
                 (lambda (channel)
-                  (and (not (disco-channel-directory--category-p channel))
+                  (and (not (disco-guild-directory-category-p channel))
                        (not (disco-state-channel-thread-p channel))
-                       (disco-channel-directory--displayable-channel-p channel)))
+                       (disco-guild-directory-displayable-channel-p channel)))
                 (disco-state-guild-channels
                  disco-channel-directory--guild-id))))
          (unread
@@ -994,7 +534,7 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
         (disco-channel-directory--normalize-id
          (or parent-id
              (disco-channel-directory--line-property
-              'disco-channel-directory-thread-parent-id))))
+              disco-guild-directory-thread-parent-id-property))))
   (let ((parent (and parent-id (disco-state-channel parent-id))))
     (unless (and parent (disco-channel-forum-or-media-p parent))
       (user-error "Disco: point is not on a forum or media channel"))
@@ -1071,15 +611,16 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
 (defun disco-channel-directory-refresh ()
   "Refresh the forum at point, or the current guild channel snapshot."
   (interactive)
-    (if-let* ((parent-id
+  (if-let* ((parent-id
              (disco-channel-directory--line-property
-              'disco-channel-directory-thread-parent-id)))
+              disco-guild-directory-thread-parent-id-property)))
       (progn
         (appkit-directory-set-fold-expanded
-         (appkit-directory-surface) (list 'thread-parent parent-id) t)
+         (appkit-directory-surface)
+         (disco-channel-directory--entry-key-for-thread-parent parent-id) t)
         (disco-directory-load-parent-threads-async parent-id :force t)
         (message "Disco: refreshing active posts in %s…"
-                 (disco-channel-directory--channel-name
+                 (disco-guild-directory-channel-name
                   (disco-state-channel parent-id))))
     (unless (disco-channel-directory--guild)
       (user-error "Disco: this guild is no longer available"))
@@ -1092,7 +633,7 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
   "Return a thread parent channel resolved from the current row."
   (let* ((parent-id
           (or (disco-channel-directory--line-property
-               'disco-channel-directory-thread-parent-id)
+               disco-guild-directory-thread-parent-id-property)
               (when-let* ((channel-id
                            (disco-channel-directory--line-property
                             'disco-channel-id))
@@ -1404,7 +945,8 @@ VIEW defaults to the current buffer's Appkit view."
     (let ((buffer (disco-channel-directory-open guild-id)))
       (with-current-buffer buffer
         (appkit-directory-set-fold-expanded
-         (appkit-directory-surface) (list 'thread-parent parent-id) t)
+         (appkit-directory-surface)
+         (disco-channel-directory--entry-key-for-thread-parent parent-id) t)
         (setq disco-channel-directory--pending-focus-channel-id parent-id)
         (disco-channel-directory--invalidate-and-sync (list parent-id) t)
         (disco-directory-load-parent-threads-async parent-id))

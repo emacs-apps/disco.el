@@ -10,16 +10,12 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'appkit-directory)
 (require 'appkit-view)
 
 (defcustom disco-root-default-layout 'tree
   "Default root layout symbol used when opening the root buffer."
   :type 'symbol
-  :group 'disco)
-
-(defcustom disco-root-tree-default-show-unread-section t
-  "When non-nil, the home layout shows its unread quick section by default."
-  :type 'boolean
   :group 'disco)
 
 (defcustom disco-root-tree-unread-section-limit 40
@@ -30,7 +26,7 @@ When nil, show all unread rows without truncation."
           (integer :tag "Limit"))
   :group 'disco)
 
-(defcustom disco-root-tree-default-expanded-sections '(unread private)
+(defcustom disco-root-tree-default-expanded-sections '(unread private guilds)
   "Root tree sections expanded when a root buffer is first created."
   :type '(set (const unread) (const private) (const guilds))
   :group 'disco)
@@ -56,6 +52,8 @@ Custom entries can override built-in layouts when NAME matches."
   entries
   entry-inserter
   list-spec
+  directory-surface
+  force-keys
   after-render)
 
 (cl-defstruct (disco-root-layout-entry
@@ -163,6 +161,22 @@ pipeline without re-declaring private hooks.  AFTER-RENDER runs afterward."
    :entry-inserter (or entry-inserter 'disco-root--ewoc-insert-entry)
    :after-render after-render))
 
+(cl-defun disco-root-layout-directory-view-spec-create
+    (surface entries &key force-keys after-render)
+  "Return one Appkit directory VIEW-SPEC for SURFACE and ENTRIES.
+
+FORCE-KEYS names retained directory rows whose rich renderers must run again.
+Unlike the legacy EWOC layouts, rendering this spec reconciles the existing
+surface without erasing its nodes or fold state."
+  (unless (appkit-directory-surface-p surface)
+    (error "Disco: root directory layout requires an Appkit surface"))
+  (disco-root-layout-view-spec-create
+   :kind 'directory
+   :entries entries
+   :directory-surface surface
+   :force-keys force-keys
+   :after-render after-render))
+
 (defun disco-root-layout-render-view-spec (view-spec)
   "Render VIEW-SPEC in current root buffer.
 
@@ -182,6 +196,12 @@ builder."
                       (disco-root-layout-view-spec-entry-inserter view-spec)))
            (dolist (entry (or (disco-root-layout-view-spec-entries view-spec) '()))
              (funcall entry-inserter entry))))
+        ('directory
+         (appkit-directory-reconcile
+          (or (disco-root-layout-view-spec-directory-surface view-spec)
+              (appkit-directory-surface))
+          (or (disco-root-layout-view-spec-entries view-spec) '())
+          :force-keys (disco-root-layout-view-spec-force-keys view-spec)))
         (_
          (error "Unknown root layout view spec kind: %S"
                 (disco-root-layout-view-spec-kind view-spec))))

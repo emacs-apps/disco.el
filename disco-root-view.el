@@ -16,6 +16,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'disco-util)
+(require 'disco-avatar)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-gateway)
@@ -25,11 +26,13 @@
 (require 'disco-room)
 (require 'disco-thread)
 (require 'appkit-ui)
+(require 'appkit-directory)
 (require 'appkit-view)
 (require 'appkit-invalidation)
 (require 'disco-runtime)
 (require 'disco-state)
 (require 'disco-root-layout)
+(require 'disco-guild-directory)
 
 (defvar disco-root--archived-parent-channel)
 (defvar disco-root--archived-before-cursors)
@@ -38,7 +41,6 @@
 (defvar disco-root--archived-last-errors)
 (defvar disco-root--archived-thread-sources)
 (defvar disco-root--inspect-channel)
-(defvar disco-root--tree-show-unread-section)
 (defvar disco-root--view-mode)
 (defvar disco-root--search-domain)
 (defvar disco-root--search-query-spec)
@@ -48,7 +50,9 @@
 (defvar disco-root--search-channel-table)
 (defvar disco-root--search-thread-table)
 (defvar disco-root--section-order)
-(defvar disco-root--section-expanded)
+(defvar disco-root--tree-fold-state)
+(defvar disco-root--tree-force-channel-ids)
+(defvar disco-root--tree-force-all-rows-p)
 (defvar disco-root--ewoc)
 (defvar disco-root--channel-node-table)
 (defvar disco-root--section-node-table)
@@ -77,12 +81,16 @@
 (defvar disco-root-week-start-day)
 (defvar disco-thread-archive-fetch-limit)
 
-(declare-function disco-root--ensure-section-state "disco-root" (&optional sections))
 (declare-function disco-root--section-expanded-p "disco-root" (section))
 (declare-function disco-root--toggle-node-at-point "disco-root" ())
+(declare-function disco-root-render "disco-root" ())
 (declare-function disco-channel-directory-open "disco-channel-directory" (guild-id))
 (declare-function disco-channel-directory-open-thread-parent
                   "disco-channel-directory" (parent-channel-id))
+
+(defconst disco-root-directory-row-kind-property
+  'disco-root-directory-row-kind
+  "Text property identifying root-owned composite directory rows.")
 
 (defvar disco-root-view-attach-live-updates-function nil
   "Function used by root view buffers to attach live updates.")
@@ -569,6 +577,23 @@ Exclude the current user when its ID is known."
                     (when (listp recipient)
                       (disco-root--recipient-display-name recipient)))
                   effective-recipients))))
+
+(defun disco-root--private-channel-avatar-user (channel)
+  "Return the other Discord user whose avatar represents private CHANNEL."
+  (when (disco-channel-direct-message-p (alist-get 'type channel))
+    (let* ((current-user-id
+            (and (fboundp 'disco-gateway-current-user-id)
+                 (disco-gateway-current-user-id)))
+           (recipients (seq-filter #'listp
+                                   (or (alist-get 'recipients channel) '())))
+           (other
+            (and current-user-id
+                 (seq-find
+                  (lambda (recipient)
+                    (not (equal (format "%s" (alist-get 'id recipient))
+                                (format "%s" current-user-id))))
+                  recipients))))
+      (or other (car recipients)))))
 
 (defun disco-root--private-channel-display-name (channel)
   "Return best display name for private CHANNEL."
@@ -1190,12 +1215,19 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
         (channel-type (alist-get 'type channel))
         (start (point)))
     (cond
-     ((and guild (eq scope 'activity))
+     ((and guild (memq scope '(activity unread)))
       (if disco-root-show-guild-icons
           (disco-root--insert-guild-icon guild)
         (insert (disco-root--guild-icon-fallback guild))))
      ((eq channel-type 1)
-      (insert "@"))
+      (let* ((user (disco-root--private-channel-avatar-user channel))
+             (image (and user
+                         (disco-avatar-rounded-image
+                          user disco-root-guild-icon-size)))
+             (display-image (and image (disco-root--scaled-image image))))
+        (if display-image
+            (insert-image display-image "@")
+          (insert "@"))))
      ((eq channel-type 3)
       (insert "◎"))
      ((disco-state-channel-thread-p channel)
@@ -2321,49 +2353,63 @@ SCOPE is forwarded to extra-info providers."
 (defun disco-root-button-forward (&optional n)
   "Move point to next channel row by N steps."
   (interactive "p")
-  (let ((steps (max 1 (or n 1)))
-        (positions (disco-root--channel-line-positions))
-        (cursor (line-beginning-position))
-        (ok t)
-        found)
-    (dotimes (_ steps)
-      (when ok
-        (setq found (disco-root--next-position-after positions cursor))
-        (if found
-            (setq cursor found)
-          (setq ok nil))))
-    (if (and ok found)
-        (goto-char found)
-      (message "disco: no next channel"))))
+  (if (and (eq major-mode 'disco-root-mode)
+           (eq disco-root--layout 'tree))
+      (dotimes (_ (max 1 (or n 1)))
+        (appkit-directory-next-item))
+    (let ((steps (max 1 (or n 1)))
+          (positions (disco-root--channel-line-positions))
+          (cursor (line-beginning-position))
+          (ok t)
+          found)
+      (dotimes (_ steps)
+        (when ok
+          (setq found (disco-root--next-position-after positions cursor))
+          (if found
+              (setq cursor found)
+            (setq ok nil))))
+      (if (and ok found)
+          (goto-char found)
+        (message "disco: no next channel")))))
 
 (defun disco-root-button-backward (&optional n)
   "Move point to previous channel row by N steps."
   (interactive "p")
-  (let ((steps (max 1 (or n 1)))
-        (positions (disco-root--channel-line-positions))
-        (cursor (line-beginning-position))
-        (ok t)
-        found)
-    (dotimes (_ steps)
-      (when ok
-        (setq found (disco-root--previous-position-before positions cursor))
-        (if found
-            (setq cursor found)
-          (setq ok nil))))
-    (if (and ok found)
-        (goto-char found)
-      (message "disco: no previous channel"))))
+  (if (and (eq major-mode 'disco-root-mode)
+           (eq disco-root--layout 'tree))
+      (dotimes (_ (max 1 (or n 1)))
+        (appkit-directory-previous-item))
+    (let ((steps (max 1 (or n 1)))
+          (positions (disco-root--channel-line-positions))
+          (cursor (line-beginning-position))
+          (ok t)
+          found)
+      (dotimes (_ steps)
+        (when ok
+          (setq found (disco-root--previous-position-before positions cursor))
+          (if found
+              (setq cursor found)
+            (setq ok nil))))
+      (if (and ok found)
+          (goto-char found)
+        (message "disco: no previous channel")))))
 
 (defun disco-root-open-at-point ()
   "Open or toggle the actionable row at point.
 
-Search layouts require point to be on the exact action button.  In other
-layouts, a non-actionable row falls forward to the next channel row."
+The composite tree delegates exact activation to its Appkit directory
+surface.  Search actions also require exact point; only the legacy activity
+layout retains fall-forward navigation."
   (interactive)
-  (if (eq disco-root--layout 'search)
-      (if (button-at (point))
-          (push-button (point))
-        (user-error "disco: no search action at point"))
+  (cond
+   ((and (eq major-mode 'disco-root-mode)
+         (eq disco-root--layout 'tree))
+    (appkit-directory-activate))
+   ((eq disco-root--layout 'search)
+    (if (button-at (point))
+        (push-button (point))
+      (user-error "disco: no search action at point")))
+   (t
     (let ((guild-id (disco-root--line-guild-id))
           (channel-id (disco-root--line-channel-id)))
       (cond
@@ -2382,29 +2428,35 @@ layouts, a non-actionable row falls forward to the next channel row."
                 (goto-char next)
                 (disco-root--open-channel
                  (disco-root--line-channel-id next)))
-            (user-error "disco: no openable channel at point"))))))))
+            (user-error "disco: no openable channel at point")))))))))
 
 (defun disco-root-next-unread ()
   "Jump to next channel row with unread state."
   (interactive)
-  (let* ((positions
-          (disco-root--channel-line-positions
-           (lambda (pos) (disco-root--line-has-unread-p pos))))
-         (origin (line-beginning-position))
-         (found (or (disco-root--next-position-after positions origin)
-                    (car positions))))
-    (if (and found (integerp found))
-        (goto-char found)
-      (message "disco: no unread channels"))))
+  (if (and (eq major-mode 'disco-root-mode)
+           (eq disco-root--layout 'tree))
+      (appkit-directory-next-unread)
+    (let* ((positions
+            (disco-root--channel-line-positions
+             (lambda (pos) (disco-root--line-has-unread-p pos))))
+           (origin (line-beginning-position))
+           (found (or (disco-root--next-position-after positions origin)
+                      (car positions))))
+      (if (and found (integerp found))
+          (goto-char found)
+        (message "disco: no unread channels")))))
 
 (defun disco-root-mouse-open-at-point (event)
   "Handle mouse EVENT by opening or toggling row at clicked point."
   (interactive "e")
-  (mouse-set-point event)
-  (if (eq disco-root--layout 'search)
-      (when (button-at (point))
-        (push-button (point)))
-    (disco-root-open-at-point)))
+  (if (and (eq major-mode 'disco-root-mode)
+           (eq disco-root--layout 'tree))
+      (appkit-directory-mouse-activate event)
+    (mouse-set-point event)
+    (if (eq disco-root--layout 'search)
+        (when (button-at (point))
+          (push-button (point)))
+      (disco-root-open-at-point))))
 
 (defun disco-root--clear-ewoc-state ()
   "Clear root EWOC and node indexes for non-EWOC layouts."
@@ -2418,75 +2470,307 @@ layouts, a non-actionable row falls forward to the next channel row."
   (disco-root--clear-ewoc-state)
   (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t)))
 
-(defun disco-root--tree-layout-entries ()
-  "Return EWOC entries for the root home layout."
-  (let* ((show-unread disco-root--tree-show-unread-section)
-         (unread-channels (and show-unread
-                               (disco-root--collect-visible-unread-channels)))
-         (unread-visible (and show-unread
-                              (disco-root--tree-unread-section-channels unread-channels)))
-         (unread-hidden (if (and show-unread unread-channels unread-visible)
-                            (- (length unread-channels)
-                               (length unread-visible))
-                          0))
+(defun disco-root--tree-section-key (section)
+  "Return the stable composite root key for SECTION."
+  (list 'root 'section
+        (if (eq section 'private) 'dm section)))
+
+(defun disco-root--tree-section-expanded-p (surface section)
+  "Return effective expansion state for root SECTION in SURFACE."
+  (appkit-directory-fold-expanded-p
+   surface
+   (disco-root--tree-section-key section)
+   (memq section disco-root-tree-default-expanded-sections)))
+
+(defun disco-root--tree-section-entry (surface section label count)
+  "Return foldable top-level SECTION with LABEL and COUNT in SURFACE."
+  (let* ((key (disco-root--tree-section-key section))
+         (expanded (disco-root--tree-section-expanded-p surface section)))
+    (appkit-directory-entry-create
+     :key key
+     :role 'section
+     :label label
+     :trailing (format "  %d" count)
+     :face 'disco-root-section-heading
+     :foldable-p t
+     :fold-key key
+     :fold-default-expanded-p
+     (and (memq section disco-root-tree-default-expanded-sections) t)
+     :expanded-p expanded
+     :help-echo "RET or TAB toggles this section"
+     :properties
+     (list disco-root-directory-row-kind-property 'section
+           'disco-root-row-type 'section
+           'disco-root-section section))))
+
+(defun disco-root--tree-channel-stamp (channel)
+  "Return render-sensitive presentation state for root CHANNEL."
+  (let ((message (disco-msg-channel-last-cached-message channel)))
+    (list (disco-state-channel-effective-unread-count channel)
+          (and (disco-state-channel-has-unread-p channel) t)
+          (alist-get 'last_message_id channel)
+          (and message (sxhash-equal message)))))
+
+(defun disco-root--tree-channel-entry (section channel)
+  "Return rich CHANNEL occurrence beneath root SECTION."
+  (let* ((channel-id (format "%s" (alist-get 'id channel)))
+         (dm-p (eq section 'private))
+         (section-key (disco-root--tree-section-key section)))
+    (appkit-directory-entry-create
+     :key (list 'root (if dm-p 'dm 'unread) 'channel channel-id)
+     :role 'item
+     :section-key section-key
+     :item-p t
+     :unread-p (and (disco-state-channel-has-unread-p channel) t)
+     :payload channel
+     :indent 2
+     :stamp (disco-root--tree-channel-stamp channel)
+     :help-echo (and (disco-root--openable-channel-p channel)
+                     (disco-root--channel-open-help-echo channel))
+     :properties
+     (list disco-root-directory-row-kind-property
+           (if dm-p 'dm-channel 'unread-channel)
+           'disco-root-row-type 'channel
+           'disco-channel-id channel-id))))
+
+(defun disco-root--tree-note-entry (section id label)
+  "Return passive root SECTION note ID displaying LABEL."
+  (appkit-directory-entry-create
+   :key (list 'root (if (eq section 'private) 'dm section) 'note id)
+   :role 'note
+   :section-key (disco-root--tree-section-key section)
+   :label label
+   :indent 2
+   :face 'shadow
+   :properties
+   (list disco-root-directory-row-kind-property 'note
+         'disco-root-row-type 'note)))
+
+(defun disco-root--tree-guild-key (guild-id)
+  "Return the stable root guild occurrence key for GUILD-ID."
+  (list 'root 'guild (format "%s" guild-id)))
+
+(defun disco-root--tree-guild-expanded-p (surface guild-id)
+  "Return non-nil when GUILD-ID is expanded in root SURFACE."
+  (appkit-directory-fold-expanded-p
+   surface (disco-root--tree-guild-key guild-id) nil))
+
+(defun disco-root--tree-guild-entry (surface guild)
+  "Return one foldable GUILD occurrence for root SURFACE."
+  (let* ((guild-id (format "%s" (alist-get 'id guild)))
+         (key (disco-root--tree-guild-key guild-id))
+         (unread-count (disco-root--guild-unread-total guild-id t)))
+    (appkit-directory-entry-create
+     :key key
+     :role 'group
+     :section-key (disco-root--tree-section-key 'guilds)
+     :label (disco-root--guild-label guild unread-count 'root)
+     :face (and (> unread-count 0) 'bold)
+     :indent 2
+     :foldable-p t
+     :fold-key key
+     :fold-default-expanded-p nil
+     :expanded-p (disco-root--tree-guild-expanded-p surface guild-id)
+     :payload guild
+     :stamp (list (alist-get 'name guild)
+                  (alist-get 'icon guild)
+                  unread-count
+                  (disco-directory-guild-status guild-id))
+     :help-echo "RET or TAB toggles this guild's channels"
+     :properties
+     (list disco-root-directory-row-kind-property 'guild
+           'disco-root-row-type 'guild
+           'disco-root-guild-id guild-id))))
+
+(defun disco-root--tree-guild-context (surface guild-id)
+  "Return shared guild projector context for GUILD-ID in root SURFACE."
+  (setq guild-id (format "%s" guild-id))
+  (disco-guild-directory-context-create
+   :guild-id guild-id
+   :surface surface
+   :namespace (list 'root 'guild guild-id)
+   :section-key (disco-root--tree-guild-key guild-id)
+   :group-indent 4
+   :channel-indent 6
+   :thread-indent 8))
+
+(defun disco-root--tree-project-guild (surface guild)
+  "Return GUILD row and lazily projected children in root SURFACE."
+  (let* ((guild-id (format "%s" (alist-get 'id guild)))
+         (entry (disco-root--tree-guild-entry surface guild)))
+    (if (not (appkit-directory-entry-expanded-p entry))
+        (list entry)
+      ;; Expansion, including a preserved expansion after reconnect, is the
+      ;; only ordinary root path that hydrates this guild snapshot.
+      (when (eq (disco-directory-guild-status guild-id) 'unloaded)
+        (disco-directory-load-guild-async guild-id))
+      (cons entry
+            (disco-guild-directory-project
+             (disco-root--tree-guild-context surface guild-id))))))
+
+(defun disco-root--tree-layout-entries (&optional surface)
+  "Return the visible flat entries for the composite root tree SURFACE."
+  (setq surface (or surface
+                    (appkit-directory-current-surface)
+                    (disco-root--ensure-tree-directory-surface)))
+  (let* ((unread-channels (disco-root--collect-visible-unread-channels))
+         (unread-visible
+          (disco-root--tree-unread-section-channels unread-channels))
+         (unread-hidden (- (length unread-channels)
+                           (length unread-visible)))
          (private-channels (disco-root--visible-private-channels))
          (guilds (or (disco-state-guilds) '()))
-         items)
-    (disco-root--ensure-section-state
-     (append (when show-unread '(unread))
-             '(private guilds)))
-    (when show-unread
-      (push (disco-root--entry-section 'unread "Unread" (length unread-channels))
-            items)
-      (when (disco-root--section-expanded-p 'unread)
+         entries)
+    (cl-labels ((emit (entry) (push entry entries))
+                (emit-all (items)
+                  (dolist (entry items) (push entry entries))))
+      ;; The three section rows are intentionally emitted in fixed historical
+      ;; order, regardless of whether a section currently has children.
+      (emit (disco-root--tree-section-entry
+             surface 'unread "Unread" (length unread-channels)))
+      (when (disco-root--tree-section-expanded-p surface 'unread)
         (if unread-visible
             (dolist (channel unread-visible)
-              (push (disco-root--entry-channel channel 2 'unread)
-                    items))
-          (push (disco-root--entry-text "  No unread channels"
-                                        '(tree unread empty))
-                items))
+              (emit (disco-root--tree-channel-entry 'unread channel)))
+          (emit (disco-root--tree-note-entry
+                 'unread 'empty "No unread channels")))
         (when (> unread-hidden 0)
-          (push (disco-root--entry-text
-                 (format "  %d more unread channels" unread-hidden)
-                 '(tree unread more))
-                items)))
-      (push (disco-root--entry-blank '(tree after-unread)) items))
-    (push (disco-root--entry-section
-           'private "Direct messages" (length private-channels))
-          items)
-    (when (disco-root--section-expanded-p 'private)
-      (if private-channels
-          (dolist (channel private-channels)
-            (push (disco-root--entry-channel channel 2 'private)
-                  items))
-        (push (disco-root--entry-text "  No direct messages"
-                                      '(tree private empty))
-              items)))
-    (push (disco-root--entry-blank '(tree after-private)) items)
-    (push (disco-root--entry-section 'guilds "Servers" (length guilds))
-          items)
-    (when (disco-root--section-expanded-p 'guilds)
-      (if (eq disco-root--view-mode 'dms)
-          (push (disco-root--entry-text "  Servers hidden by the DMs lens"
-                                        '(tree guilds hidden))
-                items)
-        (if guilds
-            (dolist (guild guilds)
-              (push (disco-root--entry-guild
-                     guild
-                     (disco-root--guild-unread-total
-                      (alist-get 'id guild) t))
-                    items))
-          (push (disco-root--entry-text "  No servers"
-                                        '(tree guilds empty))
-                items))))
-    (nreverse items)))
+          (emit (disco-root--tree-note-entry
+                 'unread 'more
+                 (format "%d more unread channels" unread-hidden)))))
+
+      (emit (disco-root--tree-section-entry
+             surface 'private "Direct messages" (length private-channels)))
+      (when (disco-root--tree-section-expanded-p surface 'private)
+        (if private-channels
+            (dolist (channel private-channels)
+              (emit (disco-root--tree-channel-entry 'private channel)))
+          (emit (disco-root--tree-note-entry
+                 'private 'empty "No direct messages"))))
+
+      (emit (disco-root--tree-section-entry
+             surface 'guilds "Guilds" (length guilds)))
+      (when (disco-root--tree-section-expanded-p surface 'guilds)
+        (cond
+         ((eq disco-root--view-mode 'dms)
+          (emit (disco-root--tree-note-entry
+                 'guilds 'hidden "Guilds hidden by the DMs lens")))
+         (guilds
+          (dolist (guild guilds)
+            (emit-all (disco-root--tree-project-guild surface guild))))
+         (t
+          (emit (disco-root--tree-note-entry
+                 'guilds 'empty "No guilds")))))
+      (nreverse entries))))
+
+(defun disco-root--tree-channel-occurrence-keys (entries channel-id)
+  "Return every visible occurrence key for CHANNEL-ID in ENTRIES."
+  (setq channel-id (and channel-id (format "%s" channel-id)))
+  (let (keys)
+    (dolist (entry entries (nreverse keys))
+      (let ((payload (appkit-directory-entry-payload entry)))
+        (when (and (listp payload)
+                   (equal channel-id
+                          (and (alist-get 'id payload)
+                               (format "%s" (alist-get 'id payload)))))
+          (push (appkit-directory-entry-key entry) keys))))))
+
+(defun disco-root--tree-force-keys (entries)
+  "Return retained ENTRIES that the next root tree reconcile must redraw."
+  (if disco-root--tree-force-all-rows-p
+      (mapcar #'appkit-directory-entry-key entries)
+    (let (keys)
+      (dolist (channel-id disco-root--tree-force-channel-ids)
+        (setq keys
+              (nconc (disco-root--tree-channel-occurrence-keys
+                      entries channel-id)
+                     keys)))
+      (delete-dups keys))))
+
+(defun disco-root--tree-entry-inserter (_surface entry)
+  "Render root-owned non-item directory ENTRY, returning non-nil if handled."
+  (when (eq (plist-get (appkit-directory-entry-properties entry)
+                       disco-root-directory-row-kind-property)
+            'guild)
+    (let ((guild (appkit-directory-entry-payload entry)))
+      (disco-root--insert-guild-icon guild)
+      (insert " " (or (appkit-directory-entry-label entry) "") "\n"))
+    t))
+
+(defun disco-root--tree-item-inserter (_surface entry)
+  "Render one rich channel occurrence from composite root ENTRY."
+  (let* ((channel (appkit-directory-entry-payload entry))
+         (root-kind
+          (plist-get (appkit-directory-entry-properties entry)
+                     disco-root-directory-row-kind-property))
+         (scope
+          (pcase root-kind
+            ('unread-channel 'unread)
+            ('dm-channel 'dm)
+            (_ (if (disco-state-channel-thread-p channel)
+                   'parent-thread
+                 'directory)))))
+    (disco-root--insert-activity-channel-line channel 0 scope)))
+
+(defun disco-root--tree-activate-item (_surface entry)
+  "Open the exact non-fold composite root channel ENTRY."
+  (let ((channel-id (alist-get 'id (appkit-directory-entry-payload entry))))
+    (unless channel-id
+      (user-error "disco: directory row has no channel"))
+    (disco-root--open-channel channel-id)))
+
+(defun disco-root--tree-fold-changed (_surface entry expanded-p)
+  "Apply composite root fold change for ENTRY with EXPANDED-P."
+  (let ((root-kind
+         (plist-get (appkit-directory-entry-properties entry)
+                    disco-root-directory-row-kind-property))
+        (guild-kind (disco-guild-directory-entry-row-kind entry)))
+    (cond
+     ((eq root-kind 'section)
+      (when-let* ((section
+                   (plist-get (appkit-directory-entry-properties entry)
+                              'disco-root-section)))
+        (disco-root--set-section-expanded section expanded-p)))
+     ((and (eq guild-kind 'thread-parent) expanded-p)
+      (when-let* ((parent-id
+                   (disco-guild-directory-entry-thread-parent-id entry)))
+        (disco-directory-load-parent-threads-async parent-id)))
+     ;; Category folds are pure projection changes.  Guild hydration happens
+     ;; below in `disco-root--tree-project-guild' only while expanded.
+     ((or (eq root-kind 'guild) (eq guild-kind 'group)) nil))
+    (disco-root-render)))
+
+(defun disco-root--ensure-tree-directory-surface ()
+  "Return the sole Appkit directory surface owned by the root tree layout."
+  (unless (hash-table-p disco-root--tree-fold-state)
+    (setq-local disco-root--tree-fold-state (make-hash-table :test #'equal)))
+  (let ((surface
+         (or (appkit-directory-current-surface)
+             (appkit-directory-initialize
+              :fold-state disco-root--tree-fold-state))))
+    (disco-root--clear-ewoc-state)
+    (appkit-directory-configure
+     surface
+     :entry-inserter #'disco-root--tree-entry-inserter
+     :item-inserter #'disco-root--tree-item-inserter
+     :activate-function #'disco-root--tree-activate-item
+     :fold-function #'disco-root--tree-fold-changed
+     :action-rows-p nil
+     :anchor-property appkit-directory-key-property)
+    surface))
+
+(defun disco-root--retire-tree-directory-surface ()
+  "Retire the current tree surface while preserving its independent folds."
+  (when-let* ((fold-state (appkit-directory-retire)))
+    (setq-local disco-root--tree-fold-state fold-state)))
 
 (defun disco-root--build-tree-layout-view-spec ()
-  "Return view spec for the root home layout."
-  (disco-root-layout-ewoc-entry-view-spec-create
-   (disco-root--tree-layout-entries)))
+  "Return a keyed Appkit directory view spec for the composite root tree."
+  (let* ((surface (disco-root--ensure-tree-directory-surface))
+         (entries (disco-root--tree-layout-entries surface)))
+    (disco-root-layout-directory-view-spec-create
+     surface entries
+     :force-keys (disco-root--tree-force-keys entries))))
 
 (defun disco-root--activity-layout-entries ()
   "Return EWOC layout entries for the activity-sorted channel list layout."

@@ -82,46 +82,6 @@
       (should (= 7 (disco-root--guild-unread-total "g1" t)))
       (should (equal '("visible") counted)))))
 
-(ert-deftest disco-root-ensure-guild-channel-permissions-loads-only-unresolved-guilds ()
-  (let (loaded)
-    (cl-letf (((symbol-function 'disco-state-guilds)
-               (lambda ()
-                 '(((id . "unresolved"))
-                   ((id . "loaded"))
-                   ((id . "failed"))
-                   ((id . "offline") (unavailable . t)))))
-              ((symbol-function 'disco-directory-guild-status)
-               (lambda (guild-id)
-                 (pcase guild-id
-                   ("unresolved" 'unloaded)
-                   ("loaded" 'loaded)
-                   ("failed" 'error)
-                   (_ 'unloaded))))
-              ((symbol-function 'disco-directory-load-guild-async)
-               (lambda (guild-id &rest _args)
-                 (push guild-id loaded)
-                 'loading)))
-      (should (= 1 (disco-root--ensure-guild-channel-permissions)))
-      (should (equal '("unresolved") loaded)))))
-
-(ert-deftest disco-root-guild-permission-hydration-respects-concurrency ()
-  (let ((disco-root-permission-hydration-concurrency 2)
-        loaded)
-    (cl-letf (((symbol-function 'disco-state-guilds)
-               (lambda ()
-                 '(((id . "loading"))
-                   ((id . "next"))
-                   ((id . "later")))))
-              ((symbol-function 'disco-directory-guild-status)
-               (lambda (guild-id)
-                 (if (equal guild-id "loading") 'loading 'unloaded)))
-              ((symbol-function 'disco-directory-load-guild-async)
-               (lambda (guild-id &rest _args)
-                 (push guild-id loaded)
-                 'loading)))
-      (should (= 1 (disco-root--ensure-guild-channel-permissions)))
-      (should (equal '("next") loaded)))))
-
 (ert-deftest disco-root-mode-uses-persistent-header-without-key-cheat-sheet ()
   (with-temp-buffer
     (disco-root-mode)
@@ -331,9 +291,7 @@
   (with-temp-buffer
     (disco-root-mode)
     (let (queued)
-      (cl-letf (((symbol-function 'disco-root--ensure-guild-channel-permissions)
-                 #'ignore)
-                ((symbol-function 'disco-root--queue-live-update)
+      (cl-letf (((symbol-function 'disco-root--queue-live-update)
                  (lambda (channel-ids &optional structural-p header-p)
                    (push (list channel-ids structural-p header-p) queued)))
                 ((symbol-function 'disco-root--render-preserving-position)
@@ -350,13 +308,53 @@
         (should (member '(nil t t) queued))
         (should (member '(("c2") nil nil) queued))))))
 
-(ert-deftest disco-root-tree-default-collapses-server-directory ()
-  (let ((disco-root-tree-default-expanded-sections '(unread private))
-        (disco-root--section-expanded nil))
-    (disco-root--ensure-section-state '(unread private guilds))
-    (should (disco-root--section-expanded-p 'unread))
-    (should (disco-root--section-expanded-p 'private))
-    (should-not (disco-root--section-expanded-p 'guilds))))
+(ert-deftest disco-root-directory-parent-thread-lifecycle-reconciles-state ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (queued)
+      (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                 (lambda (channel-ids &optional structural-p header-p)
+                   (push (list channel-ids structural-p header-p) queued)))
+                ((symbol-function 'disco-directory-load-parent-threads-async)
+                 (lambda (&rest _args)
+                   (ert-fail "directory callback retried a parent load"))))
+        (dolist (type '(parent-threads-loading
+                        parent-threads-page
+                        parent-threads-loaded
+                        parent-threads-error))
+          (disco-root--handle-directory-event
+           (list :type type :guild-id "g1" :parent-id "forum"
+                 :error '(:message "failed"))))
+        (should (= 4 (length queued)))
+        (dolist (update queued)
+          (should (equal '(("forum") t nil) update)))))))
+
+(ert-deftest disco-root-directory-guild-error-reconciles-without-retry ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (queued messages)
+      (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                 (lambda (channel-ids &optional structural-p header-p)
+                   (push (list channel-ids structural-p header-p) queued)))
+                ((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (&rest _args)
+                   (ert-fail "directory callback retried a guild load")))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (disco-root--handle-directory-event
+         '(:type guild-error :guild-id "g1" :error (:message "denied")))
+        (should (equal '((nil t nil)) queued))
+        (should (= 1 (length messages)))
+        (should (string-match-p "g1.*denied" (car messages)))))))
+
+(ert-deftest disco-root-tree-default-expands-sections-and-collapses-guilds ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((surface (disco-root--ensure-tree-directory-surface)))
+      (dolist (section '(unread private guilds))
+        (should (disco-root--tree-section-expanded-p surface section)))
+      (should-not (disco-root--tree-guild-expanded-p surface "g1")))))
 
 (ert-deftest disco-gateway-event-channel-ids-aggregates-and-dedupes ()
   (should
@@ -469,7 +467,8 @@
 (ert-deftest disco-root-sync-invalidations-patches-in-all-view ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((disco-root--view-mode 'all)
+    (let ((disco-root--layout 'activity)
+          (disco-root--view-mode 'all)
           patched
           heading-ids
           rendered)
@@ -796,7 +795,7 @@
         (disco-root--render-preserving-position)
         (should rendered)
         (should preserved)
-        (should (eq 'disco-root-entry-key anchor))
+        (should (eq appkit-directory-key-property anchor))
         (should updated)))))
 
 (ert-deftest disco-root-reflow-preserving-position-syncs-window-points ()
@@ -817,7 +816,7 @@
         (disco-root--reflow-preserving-position)
         (should reflowed)
         (should preserved)
-        (should (eq 'disco-root-entry-key anchor))
+        (should (eq appkit-directory-key-property anchor))
         (should updated)))))
 
 (ert-deftest disco-root-update-window-points-keeps-live-windows-independent ()
@@ -836,17 +835,19 @@
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--layout 'tree)
-          (disco-root--tree-show-unread-section t)
           requested)
+      (disco-root--ensure-tree-directory-surface)
       (let ((view (disco-root-test--current-live-view)))
         (cl-letf (((symbol-function 'appkit-request-sync)
                    (lambda (candidate &rest arguments)
                      (setq requested (cons candidate arguments))))
+                  ((symbol-function 'appkit-sync-invalidations) #'ignore)
                   ((symbol-function 'message) (lambda (&rest _args) nil)))
+          (should (disco-root--section-expanded-p 'unread))
           (disco-root-toggle-unread-lens)
           (should (eq view (car requested)))
           (should (plist-get (cdr requested) :structure))
-          (should-not disco-root--tree-show-unread-section))))))
+          (should-not (disco-root--section-expanded-p 'unread)))))))
 
 (ert-deftest disco-root-toggle-unread-lens-activity-toggles-filter ()
   (with-temp-buffer
@@ -862,48 +863,464 @@
         (disco-root-toggle-unread-lens)
         (should (eq disco-root--view-mode 'all))))))
 
-(ert-deftest disco-root-guild-row-opens-separate-channel-directory ()
+(ert-deftest disco-root-tree-collapsed-guild-does-not-project-or-load-children ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((inhibit-read-only t)
-          opened)
-      (appkit-view-insert-label-row
-       (disco-root--guild-label-row
-        '((id . "g1") (name . "Guild")) 0))
-      (should-not
-       (text-property-not-all (point-min) (point-max) 'mouse-face nil))
-      (goto-char (point-min))
-      (cl-letf (((symbol-function 'disco-channel-directory-open)
-                 (lambda (guild-id)
-                   (setq opened guild-id))))
-        (disco-root-open-at-point)
-        (should (equal "g1" opened))))))
+    (let ((surface (disco-root--ensure-tree-directory-surface))
+          projected
+          loaded)
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 #'ignore)
+                ((symbol-function 'disco-root--visible-private-channels)
+                 #'ignore)
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () '(((id . "g1") (name . "Guild")))))
+                ((symbol-function 'disco-root--guild-unread-total)
+                 (lambda (&rest _args) 0))
+                ((symbol-function 'disco-guild-directory-project)
+                 (lambda (_context) (setq projected t) nil))
+                ((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (&rest _args) (setq loaded t))))
+        (let ((entries (disco-root--tree-layout-entries surface)))
+          (should (seq-find
+                   (lambda (entry)
+                     (equal '(root guild "g1")
+                            (appkit-directory-entry-key entry)))
+                   entries))
+          (should-not projected)
+          (should-not loaded))))))
 
-(ert-deftest disco-root-tree-projects-guild-navigation-without-channel-children ()
+(ert-deftest disco-root-tree-projection-keeps-fixed-composite-order-and-keys ()
   (with-temp-buffer
     (disco-root-mode)
-    (disco-state-reset)
-    (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
-    (disco-state-put-channels
-     "g1"
-     '(((id . "cat") (guild_id . "g1") (name . "Category") (type . 4))
-       ((id . "c1") (guild_id . "g1") (parent_id . "cat")
-        (name . "general") (type . 0))))
-    (disco-root--set-section-expanded 'guilds t)
-    (let* ((disco-root--tree-show-unread-section nil)
-           (entries (disco-root--tree-layout-entries))
-           (guild-entries
+    (let* ((surface (disco-root--ensure-tree-directory-surface))
+           (unread '((id . "u1") (guild_id . "g1") (type . 0)
+                     (name . "updates")))
+           (dm '((id . "d1") (type . 1) (name . "Alice")))
+           (guild '((id . "g1") (name . "Guild"))))
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 (lambda () (list unread)))
+                ((symbol-function 'disco-root--visible-private-channels)
+                 (lambda () (list dm)))
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () (list guild)))
+                ((symbol-function 'disco-root--guild-unread-total)
+                 (lambda (&rest _args) 0))
+                ((symbol-function 'disco-directory-guild-status)
+                 (lambda (_guild-id) 'loaded)))
+        (let ((entries (disco-root--tree-layout-entries surface)))
+          (should
+           (equal
+            '((root section unread)
+              (root unread channel "u1")
+              (root section dm)
+              (root dm channel "d1")
+              (root section guilds)
+              (root guild "g1"))
+            (mapcar #'appkit-directory-entry-key entries)))
+          (should
+           (seq-every-p
+            #'appkit-directory-entry-expanded-p
             (seq-filter
              (lambda (entry)
-               (eq (disco-root-layout-entry-type entry) 'guild))
-             entries))
-           (channel-entries
-            (seq-filter
-             (lambda (entry)
-               (eq (disco-root-layout-entry-type entry) 'channel))
+               (eq (appkit-directory-entry-role entry) 'section))
              entries)))
-      (should (= 1 (length guild-entries)))
-      (should-not channel-entries))))
+          (should-not
+           (appkit-directory-entry-expanded-p (car (last entries)))))))))
+
+(ert-deftest disco-root-tree-expands-only-the-exact-guild ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let* ((surface (disco-root--ensure-tree-directory-surface))
+           (guilds '(((id . "g1") (name . "One"))
+                     ((id . "g2") (name . "Two"))))
+           loaded
+           projected)
+      (appkit-directory-set-fold-expanded surface '(root guild "g1") t)
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 #'ignore)
+                ((symbol-function 'disco-root--visible-private-channels)
+                 #'ignore)
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () guilds))
+                ((symbol-function 'disco-root--guild-unread-total)
+                 (lambda (&rest _args) 0))
+                ((symbol-function 'disco-directory-guild-status)
+                 (lambda (_guild-id) 'unloaded))
+                ((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (guild-id &rest _args)
+                   (push guild-id loaded)))
+                ((symbol-function 'disco-guild-directory-project)
+                 (lambda (context)
+                   (push (disco-guild-directory-context-guild-id context)
+                         projected)
+                   (should
+                    (equal '(root guild "g1")
+                           (disco-guild-directory-context-section-key
+                            context)))
+                   nil)))
+        (disco-root--tree-layout-entries surface)
+        (should (equal '("g1") loaded))
+        (should (equal '("g1") projected))))))
+
+(ert-deftest disco-root-tree-expanded-guild-projects-loading-lifecycle ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((surface (disco-root--ensure-tree-directory-surface))
+          (guild '((id . "g1") (name . "Guild"))))
+      (appkit-directory-set-fold-expanded surface '(root guild "g1") t)
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 #'ignore)
+                ((symbol-function 'disco-root--visible-private-channels)
+                 #'ignore)
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () (list guild)))
+                ((symbol-function 'disco-root--guild-unread-total)
+                 (lambda (&rest _args) 0))
+                ((symbol-function 'disco-directory-guild-status)
+                 (lambda (_guild-id) 'loading))
+                ((symbol-function 'disco-state-guild-channels-loaded-p)
+                 (lambda (_guild-id) nil))
+                ((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (&rest _args)
+                   (ert-fail "loading guild was requested again"))))
+        (let ((entries (disco-root--tree-layout-entries surface)))
+          (should
+           (seq-find
+            (lambda (entry)
+              (and (equal
+                    '(disco-guild-directory (root guild "g1") "g1"
+                                            note loading)
+                    (appkit-directory-entry-key entry))
+                   (equal "Loading channels…"
+                          (appkit-directory-entry-label entry))))
+            entries)))))))
+
+(ert-deftest disco-root-tree-expanded-guild-projects-loaded-channel-tree ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let* ((surface (disco-root--ensure-tree-directory-surface))
+           (guild '((id . "g1") (name . "Guild")))
+           (category '((id . "cat") (guild_id . "g1")
+                       (type . 4) (name . "General") (position . 0)))
+           (channel '((id . "c1") (guild_id . "g1")
+                      (parent_id . "cat") (type . 0)
+                      (name . "chat") (position . 1))))
+      (appkit-directory-set-fold-expanded surface '(root guild "g1") t)
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 #'ignore)
+                ((symbol-function 'disco-root--visible-private-channels)
+                 #'ignore)
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () (list guild)))
+                ((symbol-function 'disco-root--guild-unread-total)
+                 (lambda (&rest _args) 0))
+                ((symbol-function 'disco-directory-guild-status)
+                 (lambda (_guild-id) 'loaded))
+                ((symbol-function 'disco-state-guild-channels-loaded-p)
+                 (lambda (_guild-id) t))
+                ((symbol-function 'disco-state-guild-channels)
+                 (lambda (_guild-id) (list category channel)))
+                ((symbol-function 'disco-state-channel)
+                 (lambda (channel-id)
+                   (and (equal channel-id "cat") category)))
+                ((symbol-function 'disco-permission-channel-viewable-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'disco-state-channel-has-unread-p)
+                 (lambda (_channel) nil))
+                ((symbol-function 'disco-state-channel-effective-unread-count)
+                 (lambda (_channel) 0))
+                ((symbol-function 'disco-msg-channel-last-cached-message)
+                 (lambda (_channel) nil))
+                ((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (&rest _args)
+                   (ert-fail "loaded guild was requested again"))))
+        (let ((entries (disco-root--tree-layout-entries surface)))
+          (should
+           (seq-find
+            (lambda (entry)
+              (equal
+               '(disco-guild-directory (root guild "g1") "g1"
+                                       group "cat")
+               (appkit-directory-entry-key entry)))
+            entries))
+          (should
+           (seq-find
+            (lambda (entry)
+              (equal
+               '(disco-guild-directory (root guild "g1") "g1"
+                                       channel "c1")
+               (appkit-directory-entry-key entry)))
+            entries)))))))
+
+(ert-deftest disco-root-tree-fold-dispatches-category-and-forum-exactly ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((surface (disco-root--ensure-tree-directory-surface))
+          loaded-parents
+          (rendered 0))
+      (cl-labels
+          ((entry (kind &optional parent-id)
+             (appkit-directory-entry-create
+              :key (list 'shared kind (or parent-id "x"))
+              :role (if (eq kind 'group) 'group 'item)
+              :section-key '(root guild "g1")
+              :item-p (eq kind 'thread-parent)
+              :properties
+              (list disco-guild-directory-row-kind-property kind
+                    disco-guild-directory-thread-parent-id-property
+                    parent-id))))
+        (cl-letf (((symbol-function 'disco-directory-load-guild-async)
+                   (lambda (&rest _args)
+                     (ert-fail "category/forum fold loaded a guild")))
+                  ((symbol-function 'disco-directory-load-parent-threads-async)
+                   (lambda (parent-id &rest _args)
+                     (push parent-id loaded-parents)))
+                  ((symbol-function 'disco-root-render)
+                   (lambda () (cl-incf rendered))))
+          (disco-root--tree-fold-changed surface (entry 'group) nil)
+          (should-not loaded-parents)
+          (disco-root--tree-fold-changed
+           surface (entry 'thread-parent "forum-1") t)
+          (should (equal '("forum-1") loaded-parents))
+          (disco-root--tree-fold-changed
+           surface (entry 'thread-parent "forum-2") nil)
+          (should (equal '("forum-1") loaded-parents))
+          (should (= 3 rendered)))))))
+
+(ert-deftest disco-root-tree-dirty-channel-refreshes-every-visible-occurrence ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let* ((surface (disco-root--ensure-tree-directory-surface))
+           (channel '((id . "c1") (guild_id . "g1")
+                      (type . 0) (name . "chat")))
+           (guild '((id . "g1") (name . "Guild")))
+           (unread-p t))
+      (appkit-directory-set-fold-expanded surface '(root guild "g1") t)
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 (lambda () (and unread-p (list channel))))
+                ((symbol-function 'disco-root--visible-private-channels)
+                 #'ignore)
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () (list guild)))
+                ((symbol-function 'disco-root--guild-unread-total)
+                 (lambda (&rest _args) (if unread-p 1 0)))
+                ((symbol-function 'disco-directory-guild-status)
+                 (lambda (_guild-id) 'loaded))
+                ((symbol-function 'disco-guild-directory-project)
+                 (lambda (context)
+                   (list
+                    (appkit-directory-entry-create
+                     :key (disco-guild-directory-channel-key context "c1")
+                     :role 'item
+                     :section-key '(root guild "g1")
+                     :item-p t
+                     :payload channel)))))
+        (let* ((before (disco-root--tree-layout-entries surface))
+               (before-occurrences
+                (disco-root--tree-channel-occurrence-keys before "c1")))
+          (should
+           (equal
+            '((root unread channel "c1")
+              (disco-guild-directory (root guild "g1") "g1"
+                                      channel "c1"))
+            before-occurrences))
+          (let ((disco-root--tree-force-channel-ids '("c1")))
+            (should (equal before-occurrences
+                           (disco-root--tree-force-keys before))))
+          (setq unread-p nil)
+          (let* ((after (disco-root--tree-layout-entries surface))
+                 (after-occurrences
+                  (disco-root--tree-channel-occurrence-keys after "c1")))
+            (should
+             (equal
+              '((disco-guild-directory (root guild "g1") "g1"
+                                        channel "c1"))
+              after-occurrences))
+            (should-not
+             (seq-find
+              (lambda (entry)
+                (equal '(root unread channel "c1")
+                       (appkit-directory-entry-key entry)))
+              after))))))))
+
+(ert-deftest disco-root-tree-items-use-rich-renderer-with-scoped-context ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((channel '((id . "c1") (type . 1)))
+          calls
+          (inhibit-read-only t))
+      (cl-letf (((symbol-function 'disco-root--insert-activity-channel-line)
+                 (lambda (candidate indent &optional scope width)
+                   (push (list (alist-get 'id candidate) indent scope width)
+                         calls)
+                   (insert "rich\n"))))
+        (dolist (entry
+                 (list
+                  (appkit-directory-entry-create
+                   :key '(root unread channel "c1")
+                   :role 'item :section-key '(root section unread)
+                   :payload channel
+                   :properties
+                   (list disco-root-directory-row-kind-property
+                         'unread-channel))
+                  (appkit-directory-entry-create
+                   :key '(root dm channel "c1")
+                   :role 'item :section-key '(root section dm)
+                   :payload channel
+                   :properties
+                   (list disco-root-directory-row-kind-property 'dm-channel))
+                  (appkit-directory-entry-create
+                   :key '(shared channel "c1")
+                   :role 'item :section-key '(root guild "g1")
+                   :payload channel
+                   :properties
+                   (list disco-guild-directory-row-kind-property 'channel))))
+          (disco-root--tree-item-inserter nil entry))
+        (should
+         (equal '(("c1" 0 unread nil)
+                  ("c1" 0 dm nil)
+                  ("c1" 0 directory nil))
+                (nreverse calls)))))))
+
+(ert-deftest disco-root-tree-renders-without-buttons-or-whole-row-hover ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--view-mode 'all)
+          (dm '((id . "d1") (type . 1) (name . "Alice"))))
+      (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
+                 (lambda () (list dm)))
+                ((symbol-function 'disco-root--visible-private-channels)
+                 (lambda () (list dm)))
+                ((symbol-function 'disco-state-guilds) #'ignore)
+                ((symbol-function 'disco-root--insert-activity-channel-line)
+                 (lambda (&rest _args) (insert "rich\n"))))
+        (disco-root-layout-render-view-spec
+         (disco-root--build-tree-layout-view-spec))
+        (should-not (next-button (point-min) t))
+        (should-not
+         (text-property-not-all (point-min) (point-max) 'mouse-face nil))
+        (should-not
+         (appkit-directory-surface-action-rows-p
+          (appkit-directory-current-surface)))))))
+
+(ert-deftest disco-root-tree-layout-switch-rebuilds-surface-and-keeps-folds ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let* ((first (disco-root--ensure-tree-directory-surface))
+           (fold-key '(root guild "g1")))
+      (appkit-directory-set-fold-expanded first fold-key t)
+      (cl-letf (((symbol-function 'disco-root--refresh-header-line) #'ignore)
+                ((symbol-function 'disco-root--render-fill-column)
+                 (lambda (&optional _buffer) 80))
+                ((symbol-function 'disco-root--collect-activity-channels)
+                 #'ignore)
+                ((symbol-function 'disco-root--collect-visible-unread-channels)
+                 #'ignore)
+                ((symbol-function 'disco-root--visible-private-channels)
+                 #'ignore)
+                ((symbol-function 'disco-state-guilds) #'ignore))
+        (setq-local disco-root--layout 'activity)
+        (disco-root-render)
+        (should-not (appkit-directory-current-surface))
+        (setq-local disco-root--layout 'tree)
+        (disco-root-render)
+        (let ((second (appkit-directory-current-surface)))
+          (should (appkit-directory-surface-p second))
+          (should-not (eq first second))
+          (should (appkit-directory-fold-expanded-p
+                   second fold-key nil)))))))
+
+(ert-deftest disco-root-normal-lifecycle-never-sweeps-unexpanded-guilds ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let (queued)
+      (cl-letf (((symbol-function 'disco-directory-load-guild-async)
+                 (lambda (&rest _args)
+                   (ert-fail "ordinary root lifecycle swept a guild")))
+                ((symbol-function 'disco-root--queue-live-update)
+                 (lambda (&rest args) (push args queued))))
+        (disco-root--handle-gateway-event '(:type guild-create))
+        (disco-root--handle-directory-event '(:type index-loaded))
+        (disco-root--handle-directory-event
+         '(:type guild-loaded :guild-id "g1"))
+        (should (= 3 (length queued)))
+        (should-not (fboundp 'disco-root--ensure-guild-channel-permissions))))))
+
+(ert-deftest disco-root-default-layout-remains-composite-tree ()
+  (should (eq disco-root-default-layout 'tree))
+  (with-temp-buffer
+    (disco-root-mode)
+    (should (eq disco-root--layout 'tree))))
+
+(ert-deftest disco-root-unread-guild-channel-keeps-guild-icon-scope ()
+  (with-temp-buffer
+    (let ((channel '((id . "c1") (guild_id . "g1") (type . 0)))
+          (guild '((id . "g1") (name . "Guild")))
+          guild-icons)
+      (cl-letf (((symbol-function 'disco-root--guild-by-id)
+                 (lambda (_guild-id) guild))
+                ((symbol-function 'disco-root--insert-guild-icon)
+                 (lambda (candidate)
+                   (push (alist-get 'id candidate) guild-icons)
+                   (insert "G"))))
+        (disco-root--insert-activity-icon channel 'unread)
+        (should (equal '("g1") guild-icons))
+        (erase-buffer)
+        (disco-root--insert-activity-icon channel 'directory)
+        (should (equal "#" (buffer-string)))
+        (should (equal '("g1") guild-icons))))))
+
+(ert-deftest disco-root-dm-icon-uses-shared-rounded-avatar-api ()
+  (with-temp-buffer
+    (let* ((self '((id . "self") (avatar . "self-hash")))
+           (other '((id . "alice") (avatar . "alice-hash")))
+           (channel `((id . "dm1") (type . 1)
+                      (recipients . (,self ,other))))
+           requested-user
+           requested-size
+           inserted-image)
+      (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+                 (lambda () "self"))
+                ((symbol-function 'disco-avatar-rounded-image)
+                 (lambda (user size)
+                   (setq requested-user user
+                         requested-size size)
+                   'avatar-image))
+                ((symbol-function 'disco-root--scaled-image) #'identity)
+                ((symbol-function 'insert-image)
+                 (lambda (image &rest _args)
+                   (setq inserted-image image)
+                   (insert "A"))))
+        (disco-root--insert-activity-icon channel 'dm)
+        (should (equal other requested-user))
+        (should (= disco-root-guild-icon-size requested-size))
+        (should (eq 'avatar-image inserted-image))
+        (should (equal "A" (buffer-string)))))))
+
+(ert-deftest disco-root-avatar-resource-maps-to-all-private-channel-ids ()
+  (let* ((self '((id . "self") (avatar . "self-hash")))
+         (alice '((id . "alice") (avatar . "hash-a")))
+         (alice-other-avatar '((id . "alice") (avatar . "hash-b")))
+         (channels
+          `(((id . "dm1") (type . 1) (recipients . (,self ,alice)))
+            ((id . "dm2") (type . 1) (recipients . (,alice)))
+            ((id . "dm3") (type . 1)
+             (recipients . (,alice-other-avatar)))
+            ((id . "group") (type . 3) (recipients . (,alice)))))
+         queued)
+    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+               (lambda () "self"))
+              ((symbol-function 'disco-state-private-channels)
+               (lambda () channels))
+              ((symbol-function 'disco-root--queue-live-update)
+               (lambda (ids &rest _args) (setq queued ids))))
+      (let ((resource (disco-avatar-resource-key alice)))
+        (should (equal '("dm1" "dm2")
+                       (disco-root--avatar-resource-channel-ids
+                        (list resource))))
+        (disco-root--handle-avatar-resources-updated (list resource))
+        (should (equal '("dm1" "dm2") queued))))))
 
 (ert-deftest disco-root-refresh-index-is-lazy-unless-prefix-is-given ()
   (with-temp-buffer
@@ -984,11 +1401,10 @@
         (should (equal "c1"
                        (alist-get 'id (disco-root-layout-entry-channel first-entry))))))))
 
-(ert-deftest disco-root-build-tree-layout-view-spec-returns-ewoc-entry-view-spec ()
+(ert-deftest disco-root-build-tree-layout-view-spec-returns-directory-view-spec ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((disco-root--view-mode 'all)
-          (disco-root--tree-show-unread-section t))
+    (let ((disco-root--view-mode 'all))
       (cl-letf (((symbol-function 'disco-root--collect-visible-unread-channels)
                  (lambda () '(((id . "u1") (type . 0) (name . "updates")))))
                 ((symbol-function 'disco-root--tree-unread-section-channels)
@@ -996,25 +1412,27 @@
                 ((symbol-function 'disco-root--visible-private-channels)
                  (lambda () nil))
                 ((symbol-function 'disco-state-guilds)
-                 (lambda () nil))
-                ((symbol-function 'disco-root--ensure-section-state)
-                 (lambda (_sections) nil))
-                ((symbol-function 'disco-root--section-expanded-p)
-                 (lambda (_section) t)))
+                 (lambda () nil)))
         (let* ((view-spec (disco-root--build-tree-layout-view-spec))
-               (entries (disco-root-layout-view-spec-entries view-spec)))
+               (entries (disco-root-layout-view-spec-entries view-spec))
+               (first-entry (car entries))
+               (channel-entry
+                (seq-find
+                 (lambda (entry)
+                   (equal '(root unread channel "u1")
+                          (appkit-directory-entry-key entry)))
+                 entries)))
           (should (disco-root-layout-view-spec-p view-spec))
-          (should (eq 'entries (disco-root-layout-view-spec-kind view-spec)))
-          (should (eq 'section (disco-root-layout-entry-type (car entries))))
-          (should (equal 'unread (disco-root-layout-entry-section (car entries))))
-          (let ((channel-entry
-                 (seq-find (lambda (entry)
-                             (eq 'channel
-                                 (disco-root-layout-entry-type entry)))
-                           entries)))
-            (should channel-entry)
-            (should (eq 'unread
-                        (disco-root-layout-entry-scope channel-entry)))))))))
+          (should (eq 'directory
+                      (disco-root-layout-view-spec-kind view-spec)))
+          (should (eq (appkit-directory-current-surface)
+                      (disco-root-layout-view-spec-directory-surface view-spec)))
+          (should (eq 'section (appkit-directory-entry-role first-entry)))
+          (should (equal '(root section unread)
+                         (appkit-directory-entry-key first-entry)))
+          (should channel-entry)
+          (should (eq 'item (appkit-directory-entry-role channel-entry)))
+          (should-not (appkit-directory-entry-group-key channel-entry)))))))
 
 (ert-deftest disco-root-layout-render-view-spec-renders-ewoc-entries ()
   (with-temp-buffer
@@ -1079,7 +1497,8 @@
   (with-temp-buffer
     (disco-root-mode)
     (should (eq buffer-undo-list t))
-    (should-not switch-to-buffer-preserve-window-point)))
+    (should-not switch-to-buffer-preserve-window-point)
+    (should (eq 'tree disco-root--layout))))
 
 (ert-deftest disco-root-open-attaches-view-before-initial-sync ()
   (let ((disco-root-buffer-name " *disco-root-open-test*")
@@ -1114,8 +1533,6 @@
         second)
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'disco-root--attach-live-updates) #'ignore)
-              ((symbol-function 'disco-root--ensure-guild-channel-permissions)
-               #'ignore)
               ((symbol-function 'disco-root--render-preserving-position)
                (lambda () (cl-incf sync-count))))
       (unwind-protect
@@ -1128,7 +1545,7 @@
           (kill-buffer first))
         (disco-runtime-stop)))))
 
-(ert-deftest disco-root-fresh-view-resets-reused-buffer-controller-state ()
+(ert-deftest disco-root-fresh-view-preserves-presentation-and-resets-session-state ()
   (let ((disco-runtime--app nil)
         (disco-root-buffer-name " *disco-root-session-reuse-test*")
         (sync-count 0)
@@ -1137,8 +1554,6 @@
         first-view)
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'disco-root--attach-live-updates) #'ignore)
-              ((symbol-function 'disco-root--ensure-guild-channel-permissions)
-               #'ignore)
               ((symbol-function 'disco-root--render-preserving-position)
                (lambda () (cl-incf sync-count))))
       (unwind-protect
@@ -1146,7 +1561,17 @@
             (setq first (disco-root-open))
             (with-current-buffer first
               (setq first-view (appkit-current-view))
-              (setq-local disco-root--layout 'search)
+              (setq-local disco-root--layout 'tree)
+              (setq-local disco-root--sort-mode 'name)
+              (setq-local disco-root--view-mode 'dms)
+              (puthash '(root section unread) nil
+                       disco-root--tree-fold-state)
+              (puthash '(root section dm) t
+                       disco-root--tree-fold-state)
+              (puthash '(root section guilds) t
+                       disco-root--tree-fold-state)
+              (puthash '(root guild "g1") t
+                       disco-root--tree-fold-state)
               (setq-local disco-root--search-query "old")
               (setq-local disco-root--search-tabs '((messages :loading t))))
             (disco-runtime-stop)
@@ -1155,13 +1580,36 @@
             (should (eq first second))
             (with-current-buffer second
               (should-not (eq first-view (appkit-current-view)))
-              (should (eq disco-root-default-layout disco-root--layout))
+              (should (eq 'tree disco-root--layout))
+              (should (eq 'name disco-root--sort-mode))
+              (should (eq 'dms disco-root--view-mode))
+              (should-not
+               (gethash '(root section unread)
+                        disco-root--tree-fold-state))
+              (should
+               (gethash '(root section dm) disco-root--tree-fold-state))
+              (should
+               (gethash '(root section guilds)
+                        disco-root--tree-fold-state))
+              (should
+               (gethash '(root guild "g1") disco-root--tree-fold-state))
               (should-not disco-root--search-query)
               (should-not disco-root--search-tabs))
             (should (= 2 sync-count)))
         (when (buffer-live-p first)
           (kill-buffer first))
         (disco-runtime-stop)))))
+
+(ert-deftest disco-root-fresh-view-leaves-session-bound-search-layout ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (setq-local disco-root--layout 'search)
+    (setq-local disco-root--search-prev-layout 'activity)
+    (setq-local disco-root--search-query "old")
+    (disco-root--reset-session-controller-state)
+    (should (eq 'activity disco-root--layout))
+    (should-not disco-root--search-query)
+    (should-not disco-root--search-prev-layout)))
 
 (ert-deftest disco-root-open-at-point-jumps-to-search-message ()
   (with-temp-buffer
@@ -1274,23 +1722,34 @@
         (should-error (disco-root-open-at-point) :type 'user-error)
         (should-not jumped)))))
 
-(ert-deftest disco-root-open-at-point-keeps-non-search-fall-forward ()
+(ert-deftest disco-root-tree-open-on-blank-never-opens-next-item ()
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--layout 'tree)
-    (let ((inhibit-read-only t)
-          opened)
-      (insert "\n")
-      (let ((start (point)))
-        (insert "channel\n")
-        (add-text-properties start (point) '(disco-channel-id "c1")))
+    (let* ((surface (disco-root--ensure-tree-directory-surface))
+           (channel '((id . "c1") (type . 1) (name . "DM")))
+           opened)
+      (appkit-directory-configure
+       surface
+       :item-inserter (lambda (_surface _entry) (insert "channel\n")))
+      (appkit-directory-reconcile
+       surface
+       (list
+        (appkit-directory-entry-create
+         :key '(root spacer) :role 'spacer)
+        (appkit-directory-entry-create
+         :key '(root dm channel "c1")
+         :role 'item
+         :section-key '(root section dm)
+         :item-p t
+         :payload channel)))
       (goto-char (point-min))
-      (cl-letf (((symbol-function 'disco-root--toggle-node-at-point) #'ignore)
-                ((symbol-function 'disco-root--open-channel)
+      (cl-letf (((symbol-function 'disco-root--open-channel)
                  (lambda (channel-id) (setq opened channel-id))))
         (disco-root-open-at-point)
-        (should (equal "c1" opened))
-        (should (= (line-number-at-pos) 2))))))
+        (should-not opened)
+        (should (equal '(root dm channel "c1")
+                       (appkit-directory-key-at-point)))))))
 
 (ert-deftest disco-root-search-parse-query-supports-discord-style-filters ()
   (with-temp-buffer
@@ -2111,7 +2570,8 @@
 (ert-deftest disco-root-reflow-layout-refreshes-existing-ewoc ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((disco-root--ewoc 'dummy-ewoc)
+    (let ((disco-root--layout 'activity)
+          (disco-root--ewoc 'dummy-ewoc)
           ewoc-refreshed
           full-rendered)
       (cl-letf (((symbol-function 'ewoc-refresh)
