@@ -13,6 +13,7 @@
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-customize)
+(require 'disco-gateway)
 (require 'disco-permission)
 (require 'disco-state)
 (require 'disco-thread)
@@ -22,8 +23,15 @@
   "Hook run with one directory lifecycle event plist.")
 
 (defvar disco-directory--index-generation 0)
+(defvar disco-directory--index-request nil
+  "Current index request ownership record, or nil.")
 (defvar disco-directory--guild-generation (make-hash-table :test #'equal))
 (defvar disco-directory--guild-status (make-hash-table :test #'equal))
+(defvar disco-directory--request-epoch 0
+  "Monotonic owner of all outstanding directory requests.")
+(defvar disco-directory--gateway-session-generation
+  (disco-gateway-session-generation)
+  "Gateway session generation owning current directory request state.")
 
 (defvar disco-directory--parent-thread-request-sequence 0
   "Monotonic request token for parent-scoped active-thread searches.")
@@ -37,12 +45,60 @@
 (defconst disco-directory--parent-thread-index-retries 3
   "Number of delayed retries for an unavailable Discord search index.")
 
+(defun disco-directory--settle-index-request (request status errors)
+  "Settle REQUEST once with STATUS and endpoint ERRORS.
+
+STATUS is one of `completed', `superseded', or `cancelled'.  The completion
+callback receives the same explicit result shape for every terminal state."
+  (unless (plist-get request :settled)
+    (setf (plist-get request :settled) t)
+    (when (eq request disco-directory--index-request)
+      (setq disco-directory--index-request nil))
+    (let ((result
+           (list :status status
+                 :generation (plist-get request :generation)
+                 :session-generation
+                 (plist-get request :session-generation)
+                 :errors (nreverse errors))))
+      (disco-directory--emit
+       (pcase status
+         ('completed 'index-loaded)
+         ('superseded 'index-superseded)
+         ('cancelled 'index-cancelled))
+       :generation (plist-get request :generation)
+       :status status
+       :errors (plist-get result :errors)
+       :result result)
+      (when-let* ((on-complete (plist-get request :on-complete)))
+        (funcall on-complete result)))))
+
+(defun disco-directory--retire-requests ()
+  "Cancel every outstanding request and clear its lifecycle state."
+  (let ((index-request disco-directory--index-request))
+    ;; Invalidate and detach first: a completion callback may synchronously
+    ;; start a fresh request, which must belong to the post-reset epoch.
+    (setq disco-directory--index-request nil)
+    (cl-incf disco-directory--request-epoch)
+    (cl-incf disco-directory--index-generation)
+    (clrhash disco-directory--guild-generation)
+    (clrhash disco-directory--guild-status)
+    (clrhash disco-directory--parent-thread-state)
+    (when index-request
+      (disco-directory--settle-index-request
+       index-request 'cancelled nil))))
+
 (defun disco-directory-reset ()
   "Reset directory request ownership state."
-  (cl-incf disco-directory--index-generation)
-  (clrhash disco-directory--guild-generation)
-  (clrhash disco-directory--guild-status)
-  (clrhash disco-directory--parent-thread-state))
+  (setq disco-directory--gateway-session-generation
+        (disco-gateway-session-generation))
+  (disco-directory--retire-requests))
+
+(defun disco-directory--sync-gateway-session ()
+  "Retire requests that belong to a superseded Gateway READY session."
+  (let ((generation (disco-gateway-session-generation)))
+    (unless (= generation disco-directory--gateway-session-generation)
+      (setq disco-directory--gateway-session-generation generation)
+      (disco-directory--retire-requests))))
 
 (defun disco-directory--emit (type &rest properties)
   "Emit directory event TYPE with PROPERTIES."
@@ -53,6 +109,7 @@
   "Return request status for GUILD-ID.
 
 The result is `loading', `error', `loaded', or `unloaded'."
+  (disco-directory--sync-gateway-session)
   (let ((request-status
          (gethash (format "%s" guild-id) disco-directory--guild-status)))
     (cond
@@ -92,6 +149,7 @@ or `error'.  Loading state may also expose `:loaded-count', `:total', and
 `:phase'.  Loaded and loading states expose `:starter-unavailable-ids' for
 threads whose original post was omitted by Discord.  Error state exposes the
 original `:error' payload."
+  (disco-directory--sync-gateway-session)
   (or (gethash (format "%s" parent-channel-id)
                disco-directory--parent-thread-state)
       '(:status unloaded :loaded-count 0)))
@@ -115,6 +173,8 @@ page without its corresponding `first_messages' entry."
   "Return non-nil when TOKEN still owns PARENT-ID's active request."
   (let ((state (gethash parent-id disco-directory--parent-thread-state)))
     (and (eq (plist-get state :status) 'loading)
+         (= (or (plist-get state :session-generation) -1)
+            (disco-gateway-session-generation))
          (= (or (plist-get state :token) -1) token)
          (disco-state-channel parent-id)
          (disco-directory--guild-known-p (plist-get state :guild-id)))))
@@ -209,6 +269,7 @@ page without its corresponding `first_messages' entry."
      parent-id
      (list :status 'error
            :guild-id guild-id
+           :session-generation (disco-gateway-session-generation)
            :token token
            :error error-value)
      'parent-threads-error)))
@@ -241,6 +302,8 @@ for this page."
                        (list :status 'loading
                              :phase 'indexing
                              :guild-id guild-id
+                             :session-generation
+                             (disco-gateway-session-generation)
                              :token token
                              :loaded-count (length accumulated)
                              :total total
@@ -289,6 +352,8 @@ for this page."
                 (list :status (if has-more 'loading 'loaded)
                       :phase (and has-more 'fetching)
                       :guild-id guild-id
+                      :session-generation
+                      (disco-gateway-session-generation)
                       :token token
                       :loaded-count (length merged)
                       :total next-total
@@ -310,6 +375,7 @@ for this page."
 
 Search pages are fetched lazily only for the selected parent.  Concurrent
 loads are coalesced; FORCE supersedes an in-flight or completed request."
+  (disco-directory--sync-gateway-session)
   (let* ((parent-id (format "%s" parent-channel-id))
          (parent (disco-state-channel parent-id))
          (guild-id (and parent (alist-get 'guild_id parent)))
@@ -333,6 +399,8 @@ loads are coalesced; FORCE supersedes an in-flight or completed request."
              (state (list :status 'loading
                           :phase 'fetching
                           :guild-id guild-id
+                          :session-generation
+                          (disco-gateway-session-generation)
                           :token token
                           :loaded-count 0
                           :total nil
@@ -372,50 +440,99 @@ loads are coalesced; FORCE supersedes an in-flight or completed request."
 (cl-defun disco-directory-refresh-index-async (&key on-complete)
   "Refresh guild and private-channel indexes asynchronously.
 
-Call ON-COMPLETE with a list of endpoint errors after both requests settle."
-  (let ((generation (cl-incf disco-directory--index-generation))
-        (pending 2)
-        errors)
+Call ON-COMPLETE exactly once with a result plist.  Its `:status' is
+`completed', `superseded', or `cancelled'; `:errors' contains endpoint/error
+pairs collected by a completed request.  Starting another index refresh
+immediately supersedes the current one.  A directory reset or a new Gateway
+READY session cancels it.  Superseded and cancelled responses never mutate
+directory state."
+  (disco-directory--sync-gateway-session)
+  (let* ((superseded-request disco-directory--index-request)
+         (generation (cl-incf disco-directory--index-generation))
+         (session-generation (disco-gateway-session-generation))
+         (request (list :generation generation
+                        :session-generation session-generation
+                        :on-complete on-complete
+                        :settled nil))
+         (pending-endpoints (make-hash-table :test #'eq))
+         (pending 2)
+         errors)
+    (puthash 'guilds t pending-endpoints)
+    (puthash 'private-channels t pending-endpoints)
+    (setq disco-directory--index-request request)
     (disco-directory--emit 'index-loading :generation generation)
     (cl-labels
-        ((active-p () (= generation disco-directory--index-generation))
-         (finish-one ()
-           (cl-decf pending)
-           (when (and (zerop pending) (active-p))
-             (setq errors (nreverse errors))
-             (disco-directory--emit
-              'index-loaded :generation generation :errors errors)
-             (when on-complete
-               (funcall on-complete errors))))
+        ((active-p ()
+           (and (not (plist-get request :settled))
+                (eq request disco-directory--index-request)
+                (= generation disco-directory--index-generation)
+                (= session-generation
+                   (disco-gateway-session-generation))))
+         (settle-stale ()
+           (unless (plist-get request :settled)
+             (disco-directory--settle-index-request
+              request
+              (if (= session-generation
+                     (disco-gateway-session-generation))
+                  'superseded
+                'cancelled)
+              errors)))
+         (endpoint-pending-p (endpoint)
+           (gethash endpoint pending-endpoints))
+         (finish-one (endpoint)
+           (when (endpoint-pending-p endpoint)
+             (remhash endpoint pending-endpoints)
+             (if (active-p)
+                 (progn
+                   (cl-decf pending)
+                   (when (zerop pending)
+                     (disco-directory--settle-index-request
+                      request 'completed errors)))
+               (settle-stale))))
          (fail (endpoint error-value)
-           (when (active-p)
+           (when (and (endpoint-pending-p endpoint) (active-p))
              (push (cons endpoint error-value) errors))
-           (finish-one)))
-      (disco-api-user-guilds-async
-       :on-success
-       (lambda (guilds)
-         (when (active-p)
-           (disco-state-set-guilds guilds)
-           (disco-directory--prune-guild-requests))
-         (finish-one))
-       :on-error (lambda (error-value) (fail 'guilds error-value)))
-      (disco-api-user-private-channels-async
-       :on-success
-       (lambda (channels)
-         (when (active-p)
-           (disco-state-set-private-channels channels))
-         (finish-one))
-       :on-error (lambda (error-value) (fail 'private-channels error-value)))
+           (finish-one endpoint)))
+      ;; Install the new owner before notifying the old request.  If an old
+      ;; completion callback starts another refresh synchronously, that newer
+      ;; refresh supersedes this one and `active-p' prevents duplicate I/O.
+      (when superseded-request
+        (disco-directory--settle-index-request
+         superseded-request 'superseded nil))
+      (when (active-p)
+        (disco-api-user-guilds-async
+         :on-success
+         (lambda (guilds)
+           (when (and (endpoint-pending-p 'guilds) (active-p))
+             (disco-state-set-guilds guilds)
+             (disco-directory--prune-guild-requests))
+           (finish-one 'guilds))
+         :on-error (lambda (error-value) (fail 'guilds error-value))))
+      (when (active-p)
+        (disco-api-user-private-channels-async
+         :on-success
+         (lambda (channels)
+           (when (and (endpoint-pending-p 'private-channels) (active-p))
+             (disco-state-set-private-channels channels))
+           (finish-one 'private-channels))
+         :on-error (lambda (error-value)
+                     (fail 'private-channels error-value))))
       generation)))
 
-(defun disco-directory--load-active-threads-async (guild-id generation)
-  "Load active threads for GUILD-ID under request GENERATION."
+(defun disco-directory--load-active-threads-async
+    (guild-id generation request-epoch session-generation)
+  "Load active threads for GUILD-ID under exact request ownership.
+
+GENERATION, REQUEST-EPOCH, and SESSION-GENERATION must all remain current."
   (when disco-fetch-guild-active-threads
     (disco-api-guild-active-threads-async
      guild-id
      :on-success
      (lambda (active)
-       (when (and (= generation
+       (when (and (= request-epoch disco-directory--request-epoch)
+                  (= session-generation
+                     (disco-gateway-session-generation))
+                  (= generation
                      (gethash guild-id disco-directory--guild-generation 0))
                   (disco-directory--guild-known-p guild-id))
          (dolist (thread (or (alist-get 'threads active) '()))
@@ -423,8 +540,11 @@ Call ON-COMPLETE with a list of endpoint errors after both requests settle."
          (disco-directory--emit 'guild-enriched :guild-id guild-id)))
      :on-error
      (lambda (error-value)
-       (when (= generation
-                (gethash guild-id disco-directory--guild-generation 0))
+       (when (and (= request-epoch disco-directory--request-epoch)
+                  (= session-generation
+                     (disco-gateway-session-generation))
+                  (= generation
+                     (gethash guild-id disco-directory--guild-generation 0)))
          (disco-directory--emit
           'guild-enrichment-error
           :guild-id guild-id :error error-value))))))
@@ -445,7 +565,9 @@ for the same guild are coalesced."
       (error "disco: cannot load unknown guild %s" guild-id))
      (t
       (let ((generation
-             (1+ (gethash guild-id disco-directory--guild-generation 0))))
+             (1+ (gethash guild-id disco-directory--guild-generation 0)))
+            (request-epoch disco-directory--request-epoch)
+            (session-generation (disco-gateway-session-generation)))
         (puthash guild-id generation disco-directory--guild-generation)
         (puthash guild-id 'loading disco-directory--guild-status)
         (disco-directory--emit
@@ -454,7 +576,10 @@ for the same guild are coalesced."
          guild-id
          :on-success
          (lambda (channels)
-           (when (and (= generation
+           (when (and (= request-epoch disco-directory--request-epoch)
+                      (= session-generation
+                         (disco-gateway-session-generation))
+                      (= generation
                          (gethash guild-id disco-directory--guild-generation 0))
                       (disco-directory--guild-known-p guild-id))
              (if (disco-directory--guild-channel-snapshot-resolved-p channels)
@@ -463,7 +588,8 @@ for the same guild are coalesced."
                    (puthash guild-id 'loaded disco-directory--guild-status)
                    (disco-directory--emit
                     'guild-loaded :guild-id guild-id :generation generation)
-                   (disco-directory--load-active-threads-async guild-id generation))
+                   (disco-directory--load-active-threads-async
+                    guild-id generation request-epoch session-generation))
                (let ((error-value
                       (disco-directory--unresolved-channel-snapshot-error
                        guild-id channels)))
@@ -473,8 +599,11 @@ for the same guild are coalesced."
                   :error error-value)))))
          :on-error
          (lambda (error-value)
-           (when (= generation
-                    (gethash guild-id disco-directory--guild-generation 0))
+           (when (and (= request-epoch disco-directory--request-epoch)
+                      (= session-generation
+                         (disco-gateway-session-generation))
+                      (= generation
+                         (gethash guild-id disco-directory--guild-generation 0)))
              (puthash guild-id 'error disco-directory--guild-status)
              (disco-directory--emit
               'guild-error :guild-id guild-id :generation generation
@@ -485,8 +614,9 @@ for the same guild are coalesced."
   "Refresh the index, then explicitly hydrate every known guild."
   (disco-directory-refresh-index-async
    :on-complete
-   (lambda (errors)
-     (unless (assq 'guilds errors)
+   (lambda (result)
+     (when (and (eq (plist-get result :status) 'completed)
+                (not (assq 'guilds (plist-get result :errors))))
        (dolist (guild (disco-state-guilds))
          (when-let* ((guild-id (alist-get 'id guild)))
            (disco-directory-load-guild-async guild-id :force t)))))))

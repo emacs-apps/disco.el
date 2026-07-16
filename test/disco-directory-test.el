@@ -7,7 +7,7 @@
 (ert-deftest disco-directory-index-refresh-does-not-hydrate-guilds ()
   (disco-state-reset)
   (disco-directory-reset)
-  (let (guild-channel-requested completed-errors)
+  (let (guild-channel-requested completion)
     (cl-letf (((symbol-function 'disco-api-user-guilds-async)
                (lambda (&rest args)
                  (funcall (plist-get args :on-success)
@@ -19,13 +19,111 @@
                (lambda (&rest _args)
                  (setq guild-channel-requested t))))
       (disco-directory-refresh-index-async
-       :on-complete (lambda (errors) (setq completed-errors errors)))
+       :on-complete (lambda (result) (setq completion result)))
       (should (equal '("g1")
                      (mapcar (lambda (guild) (alist-get 'id guild))
                              (disco-state-guilds))))
       (should-not guild-channel-requested)
-      (should-not completed-errors)
+      (should (eq 'completed (plist-get completion :status)))
+      (should-not (plist-get completion :errors))
       (should-not (disco-state-guild-channels-loaded-p "g1")))))
+
+(ert-deftest disco-directory-index-refresh-supersedes-with-exactly-one-completion ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (let (guild-successes private-successes first-results second-results events)
+    (let ((disco-directory-event-hook
+           (list (lambda (event) (push (plist-get event :type) events)))))
+      (cl-letf (((symbol-function 'disco-api-user-guilds-async)
+                 (lambda (&rest args)
+                   (push (plist-get args :on-success) guild-successes)))
+                ((symbol-function 'disco-api-user-private-channels-async)
+                 (lambda (&rest args)
+                   (push (plist-get args :on-success) private-successes))))
+        (disco-directory-refresh-index-async
+         :on-complete (lambda (result) (push result first-results)))
+        (disco-directory-refresh-index-async
+         :on-complete (lambda (result) (push result second-results)))
+        (should (= 1 (length first-results)))
+        (should (eq 'superseded
+                    (plist-get (car first-results) :status)))
+        ;; Returning both stale endpoints cannot settle or mutate twice.
+        (funcall (cadr guild-successes)
+                 '(((id . "stale") (name . "Stale"))))
+        (funcall (cadr private-successes)
+                 '(((id . "stale-dm") (type . 1))))
+        (should (= 1 (length first-results)))
+        (should-not (disco-state-guilds))
+        (should-not (disco-state-private-channels))
+        ;; The replacing request completes normally.
+        (funcall (car guild-successes)
+                 '(((id . "fresh") (name . "Fresh"))))
+        (funcall (car guild-successes)
+                 '(((id . "duplicate") (name . "Duplicate"))))
+        (should-not second-results)
+        (funcall (car private-successes)
+                 '(((id . "fresh-dm") (type . 1))))
+        (should (= 1 (length second-results)))
+        (should (eq 'completed
+                    (plist-get (car second-results) :status)))
+        (should (equal '("fresh")
+                       (mapcar (lambda (guild) (alist-get 'id guild))
+                               (disco-state-guilds))))
+        (should (= 1 (seq-count (lambda (type) (eq type 'index-superseded))
+                                events)))
+        (should (= 1 (seq-count (lambda (type) (eq type 'index-loaded))
+                                events)))))))
+
+(ert-deftest disco-directory-index-loaded-event-exposes-endpoint-errors ()
+  (disco-state-reset)
+  (disco-directory-reset)
+  (let (completion loaded-event)
+    (let ((disco-directory-event-hook
+           (list (lambda (event)
+                   (when (eq (plist-get event :type) 'index-loaded)
+                     (setq loaded-event event))))))
+      (cl-letf (((symbol-function 'disco-api-user-guilds-async)
+                 (lambda (&rest args)
+                   (funcall (plist-get args :on-error) '(:status 503))))
+                ((symbol-function 'disco-api-user-private-channels-async)
+                 (lambda (&rest args)
+                   (funcall (plist-get args :on-success) '()))))
+        (disco-directory-refresh-index-async
+         :on-complete (lambda (result) (setq completion result)))
+        (should (eq 'completed (plist-get completion :status)))
+        (should (equal '((guilds :status 503))
+                       (plist-get completion :errors)))
+        (should (equal (plist-get completion :errors)
+                       (plist-get loaded-event :errors)))
+        (should (eq 'completed (plist-get loaded-event :status)))))))
+
+(ert-deftest disco-directory-index-refresh-cancels-on-new-gateway-session ()
+  (unwind-protect
+      (let ((disco-gateway--session-generation 20))
+        (disco-state-reset)
+        (disco-directory-reset)
+        (let (guild-success private-success results)
+          (cl-letf (((symbol-function 'disco-api-user-guilds-async)
+                     (lambda (&rest args)
+                       (setq guild-success (plist-get args :on-success))))
+                    ((symbol-function 'disco-api-user-private-channels-async)
+                     (lambda (&rest args)
+                       (setq private-success (plist-get args :on-success)))))
+            (disco-directory-refresh-index-async
+             :on-complete (lambda (result) (push result results)))
+            (cl-incf disco-gateway--session-generation)
+            ;; Any directory entry point observes READY and cancels the old
+            ;; request without waiting for either HTTP endpoint.
+            (disco-directory-guild-status "absent")
+            (should (= 1 (length results)))
+            (should (eq 'cancelled (plist-get (car results) :status)))
+            (funcall guild-success '(((id . "stale") (name . "Stale"))))
+            (funcall private-success '(((id . "stale-dm") (type . 1))))
+            (should (= 1 (length results)))
+            (should-not (disco-state-guilds))
+            (should-not (disco-state-private-channels)))))
+    (disco-directory-reset)
+    (disco-state-reset)))
 
 (ert-deftest disco-directory-guild-load-is-coalesced-and-marks-snapshot-complete ()
   (disco-state-reset)
@@ -46,6 +144,34 @@
       (should (disco-state-guild-channels-loaded-p "g1"))
       (should (equal "c1"
                      (alist-get 'id (car (disco-state-guild-channels "g1"))))))))
+
+(ert-deftest disco-directory-old-session-response-cannot-overwrite-gateway-state ()
+  (unwind-protect
+      (let ((disco-gateway--session-generation 10))
+        (disco-state-reset)
+        (disco-directory-reset)
+        (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
+        (let (success)
+          (cl-letf (((symbol-function 'disco-api-guild-channels-async)
+                     (lambda (_guild-id &rest args)
+                       (setq success (plist-get args :on-success)))))
+            (disco-directory-load-guild-async "g1")
+            ;; A new READY session publishes native access before the old REST
+            ;; request returns.
+            (cl-incf disco-gateway--session-generation)
+            (disco-state-upsert-gateway-channel
+             `((id . "c1") (guild_id . "g1") (type . 0)
+               (flags . ,disco-channel-flag-obfuscated)))
+            (funcall success
+                     '(((id . "c1") (guild_id . "g1") (type . 0)
+                        (permissions . "1024"))))
+            (should (eq 'hidden (disco-state-channel-access "c1")))
+            (should-not
+             (disco-state-channel-viewable-p (disco-state-channel "c1") t))
+            (should (eq 'unloaded
+                        (disco-directory-guild-status "g1"))))))
+    (disco-directory-reset)
+    (disco-state-reset)))
 
 (ert-deftest disco-directory-guild-load-rejects-unresolved-permissions ()
   (disco-state-reset)
