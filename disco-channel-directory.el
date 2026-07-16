@@ -12,13 +12,11 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'ewoc)
 (require 'seq)
 (require 'subr-x)
 (require 'appkit-core)
-(require 'appkit-ewoc)
+(require 'appkit-directory)
 (require 'appkit-invalidation)
-(require 'appkit-position)
 (require 'appkit-transaction)
 (require 'appkit-view)
 (require 'disco-channel-type)
@@ -54,40 +52,11 @@
   :type 'integer
   :group 'disco)
 
-(cl-defstruct (disco-channel-directory-entry
-               (:constructor disco-channel-directory-entry-create))
-  key
-  type
-  group-id
-  title
-  unread-count
-  expanded
-  channel
-  indent
-  stamp
-  text
-  face)
-
 (defvar disco-channel-directory--window-size-hook-installed nil
   "Non-nil once the guild-directory resize hook has been installed.")
 
 (defvar-local disco-channel-directory--guild-id nil
   "Guild ID owned by the current channel-directory buffer.")
-
-(defvar-local disco-channel-directory--ewoc nil
-  "Persistent EWOC for the current guild channel directory.")
-
-(defvar-local disco-channel-directory--node-table nil
-  "Hash table mapping stable entry keys to EWOC nodes.")
-
-(defvar-local disco-channel-directory--key-cache nil
-  "Hash table interning stable entry keys within this directory buffer.")
-
-(defvar-local disco-channel-directory--collapsed-groups nil
-  "Hash table containing category/group IDs explicitly collapsed by the user.")
-
-(defvar-local disco-channel-directory--expanded-thread-parents nil
-  "Hash table containing forum/media parent IDs expanded by the user.")
 
 (defvar-local disco-channel-directory--pending-focus-channel-id nil
   "Channel ID to focus after its guild snapshot becomes renderable.")
@@ -193,22 +162,19 @@
        :parts '(frame entries))))))
 
 (defun disco-channel-directory--canonical-key (kind id)
-  "Return a buffer-local canonical entry key for KIND and ID."
-  (let* ((token (format "%s:%s" kind id))
-         (cached (gethash token disco-channel-directory--key-cache)))
-    (or cached
-        (puthash token token disco-channel-directory--key-cache))))
+  "Return the stable directory key for KIND and ID."
+  (format "%s:%s" kind id))
 
 (defun disco-channel-directory--entry-key-for-channel (channel-id)
-  "Return canonical EWOC key for CHANNEL-ID."
+  "Return the stable directory key for CHANNEL-ID."
   (disco-channel-directory--canonical-key 'channel channel-id))
 
 (defun disco-channel-directory--entry-key-for-group (group-id)
-  "Return canonical EWOC key for GROUP-ID."
+  "Return the stable directory key for GROUP-ID."
   (disco-channel-directory--canonical-key 'group group-id))
 
 (defun disco-channel-directory--entry-key-for-note (note-id)
-  "Return canonical EWOC key for NOTE-ID."
+  "Return the stable directory key for NOTE-ID."
   (disco-channel-directory--canonical-key 'note note-id))
 
 (defun disco-channel-directory--channel-name (channel)
@@ -280,8 +246,11 @@ but do not require the channel name to match."
 
 (defun disco-channel-directory--group-expanded-p (group-id)
   "Return non-nil when GROUP-ID should expose its children."
-  (or (disco-channel-directory--filter-active-p)
-      (not (gethash group-id disco-channel-directory--collapsed-groups))))
+  (appkit-directory-fold-expanded-p
+   (appkit-directory-surface)
+   (disco-channel-directory--entry-key-for-group group-id)
+   t
+   (disco-channel-directory--filter-active-p)))
 
 (defun disco-channel-directory--thread-before-p (left right)
   "Return non-nil when thread LEFT should appear before RIGHT."
@@ -349,9 +318,12 @@ IGNORE-NAME-FILTER has the same meaning as in
 
 (defun disco-channel-directory--thread-parent-expanded-p (parent-id)
   "Return non-nil when PARENT-ID should expose inline active threads."
-  (or (disco-channel-directory--filter-active-p)
-      (gethash (disco-channel-directory--normalize-id parent-id)
-               disco-channel-directory--expanded-thread-parents)))
+  (appkit-directory-fold-expanded-p
+   (appkit-directory-surface)
+   (list 'thread-parent
+         (disco-channel-directory--normalize-id parent-id))
+   nil
+   (disco-channel-directory--filter-active-p)))
 
 (defun disco-channel-directory--channel-stamp (channel)
   "Return render-relevant state stamp for CHANNEL."
@@ -365,55 +337,109 @@ IGNORE-NAME-FILTER has the same meaning as in
           (and latest-message (sxhash-equal latest-message))
           (and starter-message (sxhash-equal starter-message)))))
 
+(defun disco-channel-directory--channel-group-key (channel)
+  "Return the semantic directory group key owning CHANNEL."
+  (let* ((parent-id
+          (disco-channel-directory--normalize-id
+           (alist-get 'parent_id channel)))
+         (parent (and parent-id (disco-state-channel parent-id)))
+         (category-id
+          (if (and parent (disco-state-channel-thread-p channel))
+              (disco-channel-directory--normalize-id
+               (alist-get 'parent_id parent))
+            parent-id)))
+    (disco-channel-directory--entry-key-for-group
+     (or category-id disco-channel-directory--uncategorized-group))))
+
 (defun disco-channel-directory--channel-entry (channel indent)
   "Return one directory entry for CHANNEL at INDENT."
   (let ((channel-id
          (disco-channel-directory--normalize-id (alist-get 'id channel))))
-    (disco-channel-directory-entry-create
+    (appkit-directory-entry-create
      :key (disco-channel-directory--entry-key-for-channel channel-id)
-     :type 'channel
-     :channel channel
+     :role 'item
+     :section-key (list 'guild disco-channel-directory--guild-id)
+     :group-key (disco-channel-directory--channel-group-key channel)
+     :item-p t
+     :unread-p (disco-state-channel-has-unread-p channel)
+     :payload channel
      :indent indent
-     :stamp (disco-channel-directory--channel-stamp channel))))
+     :stamp (disco-channel-directory--channel-stamp channel)
+     :help-echo
+     (and (disco-root--openable-channel-p channel)
+          (disco-root--channel-open-help-echo channel))
+     :properties
+     (list 'disco-channel-directory-row-type 'channel))))
 
 (defun disco-channel-directory--thread-parent-entry (channel indent)
   "Return one expandable forum/media CHANNEL entry at INDENT."
   (let* ((parent-id
           (disco-channel-directory--normalize-id (alist-get 'id channel)))
          (threads (disco-channel-directory--active-forum-posts parent-id))
-         (state (disco-directory-parent-threads-state parent-id)))
-    (disco-channel-directory-entry-create
+         (state (disco-directory-parent-threads-state parent-id))
+         (unread-count
+          (disco-channel-directory--children-unread-count threads)))
+    (appkit-directory-entry-create
      :key (disco-channel-directory--entry-key-for-channel parent-id)
-     :type 'thread-parent
-     :channel channel
+     :role 'item
+     :section-key (list 'guild disco-channel-directory--guild-id)
+     :group-key (disco-channel-directory--channel-group-key channel)
+     :item-p t
+     :unread-p (> unread-count 0)
+     :payload channel
      :indent indent
-     :unread-count (disco-channel-directory--children-unread-count threads)
-     :expanded (disco-channel-directory--thread-parent-expanded-p parent-id)
+     :foldable-p t
+     :fold-key (list 'thread-parent parent-id)
+     :fold-default-expanded-p nil
+     :expanded-p (disco-channel-directory--thread-parent-expanded-p parent-id)
+     :fold-locked-reason
+     (and (disco-channel-directory--filter-active-p)
+          "Disco: clear directory lenses before folding active posts")
+     :help-echo
+     "RET/TAB toggles active posts; g refreshes; A opens archived posts"
      :stamp (list (disco-channel-directory--channel-stamp channel)
                   (plist-get state :status)
                   (plist-get state :phase)
                   (plist-get state :loaded-count)
                   (plist-get state :total)
-                  (length threads)))))
+                  (length threads))
+     :properties
+     (list 'disco-channel-directory-row-type 'thread-parent
+           'disco-channel-directory-thread-parent-id parent-id
+           'disco-unread-count unread-count
+           'disco-has-unread (> unread-count 0)))))
 
 (defun disco-channel-directory--group-entry (group-id title unread-count expanded)
   "Return category GROUP-ID entry with TITLE, UNREAD-COUNT, and EXPANDED."
-  (disco-channel-directory-entry-create
-   :key (disco-channel-directory--entry-key-for-group group-id)
-   :type 'group
-   :group-id group-id
-   :title title
-   :unread-count unread-count
-   :expanded expanded))
+  (let ((key (disco-channel-directory--entry-key-for-group group-id)))
+    (appkit-directory-entry-create
+     :key key
+     :role 'group
+     :section-key (list 'guild disco-channel-directory--guild-id)
+     :label title
+     :indent 1
+     :trailing (and (> unread-count 0) (format "  @%d" unread-count))
+     :face 'disco-channel-directory-category
+     :foldable-p t :fold-key key
+     :fold-default-expanded-p t :expanded-p expanded
+     :fold-locked-reason
+     (and (disco-channel-directory--filter-active-p)
+          "Disco: clear directory lenses before collapsing categories")
+     :help-echo "RET/TAB toggles this category"
+     :properties
+     (list 'disco-channel-directory-row-type 'group
+           'disco-channel-directory-group-id group-id))))
 
 (defun disco-channel-directory--note-entry (note-id text &optional face indent)
   "Return one status NOTE-ID entry displaying TEXT with FACE at INDENT."
-  (disco-channel-directory-entry-create
+  (appkit-directory-entry-create
    :key (disco-channel-directory--entry-key-for-note note-id)
-   :type 'note
-   :text text
-   :indent indent
-   :face (or face 'shadow)))
+   :role 'note
+   :section-key (list 'guild disco-channel-directory--guild-id)
+   :label text
+   :indent (or indent 2)
+   :face (or face 'shadow)
+   :properties (list 'disco-channel-directory-row-type 'note)))
 
 (defun disco-channel-directory--children-unread-count (channels)
   "Return unread mention total represented by parent CHANNELS."
@@ -640,105 +666,34 @@ extended reverse accumulator."
       disco-channel-directory--fill-column
       (max 40 (- (window-width) disco-channel-directory-margin-columns))))
 
-(defun disco-channel-directory--insert-group (entry)
-  "Insert category/group ENTRY."
-  (let* ((start (point))
-         (expanded (disco-channel-directory-entry-expanded entry))
-         (indicator (if expanded "▾" "▸"))
-         (title (or (disco-channel-directory-entry-title entry) "Category"))
-         (unread (or (disco-channel-directory-entry-unread-count entry) 0)))
-    (insert " " indicator " " title)
-    (when (> unread 0)
-      (insert (format "  @%d" unread)))
-    (insert "\n")
-    (add-text-properties
-     start
-     (point)
-     (list 'face 'disco-channel-directory-category
-           'disco-channel-directory-row-type 'group
-           'disco-channel-directory-group-id
-           (disco-channel-directory-entry-group-id entry)
-           'disco-channel-directory-key
-           (disco-channel-directory-entry-key entry)
-           'help-echo "RET/TAB toggles this category"))))
-
-(defun disco-channel-directory--insert-channel (entry)
-  "Insert channel ENTRY as a responsive one-line row."
-  (let* ((start (point))
-         (channel (disco-channel-directory-entry-channel entry))
+(defun disco-channel-directory--insert-channel (_surface entry)
+  "Insert Appkit channel ENTRY as one responsive row."
+  (let* ((channel (appkit-directory-entry-payload entry))
          (scope (if (disco-state-channel-thread-p channel)
                     'parent-thread
                   'directory)))
     (disco-root--insert-activity-channel-line
-     channel
-     (or (disco-channel-directory-entry-indent entry) 0)
-     scope
-     disco-channel-directory--fill-column)
-    (add-text-properties
-     start
-     (point)
-     (list 'disco-channel-directory-row-type 'channel
-           'disco-channel-directory-key
-           (disco-channel-directory-entry-key entry)))))
+     channel 0 scope disco-channel-directory--fill-column)))
 
-(defun disco-channel-directory--insert-thread-parent (entry)
-  "Insert expandable forum/media parent ENTRY."
-  (let* ((start (point))
-         (channel (disco-channel-directory-entry-channel entry))
-         (parent-id
-          (disco-channel-directory--normalize-id (alist-get 'id channel)))
-         (expanded (disco-channel-directory-entry-expanded entry))
-         (unread (or (disco-channel-directory-entry-unread-count entry) 0))
-         (indent (or (disco-channel-directory-entry-indent entry) 0)))
-    (insert (make-string indent ?\s) (if expanded "▾ " "▸ "))
-    (disco-root--insert-activity-channel-line
-     channel 0 'directory disco-channel-directory--fill-column)
-    (add-text-properties
-     start
-     (point)
-     (list 'disco-channel-directory-row-type 'thread-parent
-           'disco-channel-directory-thread-parent-id parent-id
-           'disco-channel-directory-key
-           (disco-channel-directory-entry-key entry)
-           'disco-unread-count unread
-           'disco-has-unread (> unread 0)
-           'help-echo
-           "RET/TAB toggles active posts; g refreshes; A opens archived posts"))))
+(defun disco-channel-directory--activate-channel (_surface entry)
+  "Open the Discord channel carried by Appkit directory ENTRY."
+  (disco-root--open-channel
+   (alist-get 'id (appkit-directory-entry-payload entry))))
 
-(defun disco-channel-directory--insert-note (entry)
-  "Insert lifecycle/status note ENTRY."
-  (let ((start (point)))
-    (insert (make-string (or (disco-channel-directory-entry-indent entry) 2)
-                         ?\s)
-            (or (disco-channel-directory-entry-text entry) "") "\n")
-    (add-text-properties
-     start
-     (point)
-     (list 'face (or (disco-channel-directory-entry-face entry) 'shadow)
-           'disco-channel-directory-row-type 'note
-           'disco-channel-directory-key
-           (disco-channel-directory-entry-key entry)))))
-
-(defun disco-channel-directory--ewoc-printer (entry)
-  "Insert one guild-directory EWOC ENTRY."
-  (pcase (disco-channel-directory-entry-type entry)
-    ('group (disco-channel-directory--insert-group entry))
-    ('channel (disco-channel-directory--insert-channel entry))
-    ('thread-parent (disco-channel-directory--insert-thread-parent entry))
-    ('note (disco-channel-directory--insert-note entry))
-    (type (error "Disco: unknown channel-directory entry type %S" type))))
+(defun disco-channel-directory--fold-changed (_surface entry expanded-p)
+  "Apply an Appkit fold change for ENTRY with EXPANDED-P."
+  (if-let* ((channel (appkit-directory-entry-payload entry)))
+      (let ((parent-id
+             (disco-channel-directory--normalize-id (alist-get 'id channel))))
+        (when expanded-p
+          (disco-directory-load-parent-threads-async parent-id))
+        (disco-channel-directory--invalidate-and-sync (list parent-id) t))
+    (disco-channel-directory--invalidate-and-sync nil t)))
 
 (defun disco-channel-directory--apply-entries (entries force-entry-keys)
-  "Reconcile EWOC against ENTRIES and FORCE-ENTRY-KEYS.
-
-Existing keyed nodes are updated or moved in place.  Only disappeared nodes
-are deleted and only new nodes are inserted."
-  (setq disco-channel-directory--node-table
-        (appkit-ewoc-reconcile
-         disco-channel-directory--ewoc
-         entries
-         #'disco-channel-directory-entry-key
-         :force-keys force-entry-keys)))
+  "Reconcile Appkit directory ENTRIES, redrawing FORCE-ENTRY-KEYS."
+  (appkit-directory-reconcile
+   (appkit-directory-surface) entries :force-keys force-entry-keys))
 
 (defun disco-channel-directory--header-line ()
   "Compute header-line text for the current guild directory."
@@ -787,7 +742,7 @@ are deleted and only new nodes are inserted."
 
 (defun disco-channel-directory--reconcile
     (&optional force-channel-ids force-entry-keys)
-  "Reconcile the current EWOC, forcing channel IDs and stable entry keys.
+  "Reconcile the directory, forcing channel IDs and stable entry keys.
 
 FORCE-CHANNEL-IDS is retained for direct interactive callers.
 FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
@@ -799,23 +754,14 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
             (append
              (mapcar #'disco-channel-directory--entry-key-for-channel
                      force-channel-ids)
-             (copy-sequence force-entry-keys))))
-          (snapshot
-           (appkit-position-capture
-            :anchor-property 'disco-channel-directory-key
-            :preserve-window-start t)))
+             (copy-sequence force-entry-keys)))))
       (unwind-protect
           (progn
             (setq disco-channel-directory--fill-column
                   (disco-channel-directory--usable-width))
-            (let ((inhibit-read-only t)
-                  (buffer-undo-list t))
-              (with-silent-modifications
-                (disco-channel-directory--apply-entries
-                 (disco-channel-directory--project-entries)
-                 forced)))
-            (when snapshot
-              (appkit-position-restore snapshot))
+            (disco-channel-directory--apply-entries
+             (disco-channel-directory--project-entries)
+             forced)
             (when disco-channel-directory--pending-focus-channel-id
               (when-let* ((position
                            (disco-channel-directory--find-channel-position
@@ -834,11 +780,13 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
   (window-live-p (get-buffer-window (current-buffer) t)))
 
 (defun disco-channel-directory--all-entry-keys ()
-  "Return all stable keys currently represented by this directory EWOC."
+  "Return all stable keys currently represented by this Appkit directory."
   (let (keys)
-    (when (hash-table-p disco-channel-directory--node-table)
+    (let ((node-table
+           (appkit-directory-surface-node-table
+            (appkit-directory-surface))))
       (maphash (lambda (key _node) (push key keys))
-               disco-channel-directory--node-table))
+               node-table))
     keys))
 
 (defun disco-channel-directory--defer-invalidations (invalidations)
@@ -998,35 +946,15 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
                position 'disco-channel-id nil (point-max)))))
     found))
 
-(defun disco-channel-directory--channel-line-positions (&optional unread-only)
-  "Return channel-row positions, restricted to unread rows when UNREAD-ONLY."
-  (let ((position (point-min))
-        positions)
-    (while (< position (point-max))
-      (when (and (get-text-property position 'disco-channel-id)
-                 (or (not unread-only)
-                     (get-text-property position 'disco-has-unread)))
-        (push position positions))
-      (setq position (next-single-property-change
-                      position 'disco-channel-id nil (point-max))))
-    (nreverse (seq-uniq positions #'=))))
-
 (defun disco-channel-directory--move-channel (step)
   "Move STEP channel rows from the current line."
-  (let* ((positions (disco-channel-directory--channel-line-positions))
-         (origin (line-beginning-position))
-         (index (cl-position-if (lambda (position) (> position origin)) positions))
-         (target-index
-          (if (> step 0)
-              (or index (length positions))
-            (1- (or (cl-position-if
-                     (lambda (position) (>= position origin)) positions)
-                    (length positions)))))
-         (target (nth target-index positions)))
-    (if target
-        (goto-char target)
-      (message "Disco: no %s channel"
-               (if (> step 0) "next" "previous")))))
+  (unless
+      (appkit-directory-move
+       (appkit-directory-surface)
+       #'appkit-directory-entry-item-p
+       (if (> step 0) 1 -1))
+    (message "Disco: no %s channel"
+             (if (> step 0) "next" "previous"))))
 
 (defun disco-channel-directory-next-channel ()
   "Move to the next channel row."
@@ -1041,34 +969,27 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
 (defun disco-channel-directory-next-unread ()
   "Move to the next unread channel row, wrapping once."
   (interactive)
-  (let* ((positions (disco-channel-directory--channel-line-positions t))
-         (origin (line-beginning-position))
-         (target (or (seq-find (lambda (position) (> position origin)) positions)
-                     (car positions))))
-    (if target
-        (goto-char target)
-      (message "Disco: no unread channels in this guild"))))
+  (unless
+      (appkit-directory-move
+       (appkit-directory-surface)
+       (lambda (entry)
+         (and (appkit-directory-entry-item-p entry)
+              (appkit-directory-entry-unread-p entry)))
+       1 t)
+    (message "Disco: no unread channels in this guild")))
 
 (defun disco-channel-directory-toggle-group ()
   "Toggle the category/group row at point."
   (interactive)
-  (when (disco-channel-directory--filter-active-p)
-    (user-error "Disco: clear directory lenses before collapsing categories"))
-  (let ((group-id
-         (disco-channel-directory--line-property
-          'disco-channel-directory-group-id)))
-    (unless group-id
+  (let ((entry (appkit-directory-entry-at-point)))
+    (unless (and entry (eq (appkit-directory-entry-role entry) 'group))
       (user-error "Disco: point is not on a category"))
-    (if (gethash group-id disco-channel-directory--collapsed-groups)
-        (remhash group-id disco-channel-directory--collapsed-groups)
-      (puthash group-id t disco-channel-directory--collapsed-groups))
-    (disco-channel-directory--invalidate-and-sync nil t)))
+    (appkit-directory-activate-entry
+     (appkit-directory-surface) entry)))
 
 (defun disco-channel-directory-toggle-thread-parent (&optional parent-id)
   "Toggle inline active posts under forum/media PARENT-ID or the row at point."
   (interactive)
-  (when (disco-channel-directory--filter-active-p)
-    (user-error "Disco: clear directory lenses before folding active posts"))
   (setq parent-id
         (disco-channel-directory--normalize-id
          (or parent-id
@@ -1077,50 +998,43 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
   (let ((parent (and parent-id (disco-state-channel parent-id))))
     (unless (and parent (disco-channel-forum-or-media-p parent))
       (user-error "Disco: point is not on a forum or media channel"))
-    (if (gethash parent-id disco-channel-directory--expanded-thread-parents)
-        (remhash parent-id disco-channel-directory--expanded-thread-parents)
-      (puthash parent-id t disco-channel-directory--expanded-thread-parents)
-      (disco-directory-load-parent-threads-async parent-id))
-    (disco-channel-directory--invalidate-and-sync (list parent-id) t)))
+    (let ((entry
+           (appkit-directory-entry-for-key
+            (appkit-directory-surface)
+            (disco-channel-directory--entry-key-for-channel parent-id))))
+      (unless (and entry (appkit-directory-entry-foldable-p entry))
+        (user-error "Disco: forum or media channel is not visible"))
+      (appkit-directory-activate-entry
+       (appkit-directory-surface) entry))))
 
 (defun disco-channel-directory-toggle-at-point ()
   "Toggle the category or forum/media parent at point."
   (interactive)
-  (cond
-   ((disco-channel-directory--line-property
-     'disco-channel-directory-group-id)
-    (disco-channel-directory-toggle-group))
-   ((disco-channel-directory--line-property
-     'disco-channel-directory-thread-parent-id)
-    (disco-channel-directory-toggle-thread-parent))
-   (t
-    (user-error "Disco: point is not on a foldable row"))))
+  (let ((entry (appkit-directory-entry-at-point)))
+    (unless (and entry (appkit-directory-entry-foldable-p entry))
+      (user-error "Disco: point is not on a foldable row"))
+    (appkit-directory-activate-entry
+     (appkit-directory-surface) entry)))
 
 (defun disco-channel-directory-open-at-point ()
   "Toggle the category or open the channel at point."
   (interactive)
-  (cond
-   ((disco-channel-directory--line-property
-     'disco-channel-directory-group-id)
-    (disco-channel-directory-toggle-group))
-   ((disco-channel-directory--line-property
-     'disco-channel-directory-thread-parent-id)
-    (disco-channel-directory-toggle-thread-parent))
-   ((disco-channel-directory--line-property 'disco-channel-id)
-    (disco-root--open-channel
-     (disco-channel-directory--line-property 'disco-channel-id)))
-   (t
-    (disco-channel-directory-next-channel))))
+  (let ((entry (appkit-directory-entry-at-point)))
+    (if (and entry
+             (or (appkit-directory-entry-foldable-p entry)
+                 (appkit-directory-entry-item-p entry)))
+        (appkit-directory-activate-entry
+         (appkit-directory-surface) entry)
+      (disco-channel-directory-next-channel))))
 
 (defun disco-channel-directory-tab-dwim ()
   "Toggle a foldable row at point, otherwise move to the next channel."
   (interactive)
-  (if (or (disco-channel-directory--line-property
-           'disco-channel-directory-group-id)
-          (disco-channel-directory--line-property
-           'disco-channel-directory-thread-parent-id))
-      (disco-channel-directory-toggle-at-point)
-    (disco-channel-directory-next-channel)))
+  (let ((entry (appkit-directory-entry-at-point)))
+    (if (and entry (appkit-directory-entry-foldable-p entry))
+        (appkit-directory-activate-entry
+         (appkit-directory-surface) entry)
+      (disco-channel-directory-next-channel))))
 
 (defun disco-channel-directory-mouse-open-at-point (event)
   "Open the directory row selected by mouse EVENT."
@@ -1157,11 +1071,12 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
 (defun disco-channel-directory-refresh ()
   "Refresh the forum at point, or the current guild channel snapshot."
   (interactive)
-  (if-let* ((parent-id
+    (if-let* ((parent-id
              (disco-channel-directory--line-property
               'disco-channel-directory-thread-parent-id)))
       (progn
-        (puthash parent-id t disco-channel-directory--expanded-thread-parents)
+        (appkit-directory-set-fold-expanded
+         (appkit-directory-surface) (list 'thread-parent parent-id) t)
         (disco-directory-load-parent-threads-async parent-id :force t)
         (message "Disco: refreshing active posts in %s…"
                  (disco-channel-directory--channel-name
@@ -1363,6 +1278,7 @@ VIEW defaults to the current buffer's Appkit view."
 
 (defvar disco-channel-directory-mode-map
   (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
     (define-key map (kbd "g") #'disco-channel-directory-refresh)
     (define-key map (kbd "/") #'disco-channel-directory-set-filter)
     (define-key map (kbd "C-c C-k") #'disco-channel-directory-clear-filter)
@@ -1378,28 +1294,19 @@ VIEW defaults to the current buffer's Appkit view."
     (define-key map (kbd "p") #'disco-channel-directory-previous-channel)
     (define-key map (kbd "u") #'disco-channel-directory-next-unread)
     (define-key map (kbd "b") #'disco-channel-directory-open-root)
-    (define-key map (kbd "q") #'quit-window)
     (define-key map [mouse-1]
       #'disco-channel-directory-mouse-open-at-point)
     map)
   "Keymap for `disco-channel-directory-mode'.")
 
-(define-derived-mode disco-channel-directory-mode special-mode "Disco-Directory"
+(define-derived-mode disco-channel-directory-mode special-mode
+  "Disco-Directory"
   "Major mode for one guild's channel directory."
-  (setq buffer-read-only t)
-  (setq truncate-lines t)
-  (setq-local switch-to-buffer-preserve-window-point nil)
+  (setq buffer-read-only t
+        truncate-lines t)
   (buffer-disable-undo)
   (setq-local buffer-undo-list t)
-  (setq-local disco-channel-directory--ewoc nil)
-  (setq-local disco-channel-directory--node-table
-              (make-hash-table :test #'equal))
-  (setq-local disco-channel-directory--key-cache
-              (make-hash-table :test #'equal))
-  (setq-local disco-channel-directory--collapsed-groups
-              (make-hash-table :test #'equal))
-  (setq-local disco-channel-directory--expanded-thread-parents
-              (make-hash-table :test #'equal))
+  (setq-local switch-to-buffer-preserve-window-point nil)
   (setq-local disco-channel-directory--pending-focus-channel-id nil)
   (setq-local disco-channel-directory--filter nil)
   (setq-local disco-channel-directory--unread-only nil)
@@ -1417,10 +1324,12 @@ VIEW defaults to the current buffer's Appkit view."
   (setq-local revert-buffer-function
               (lambda (&rest _ignored)
                 (disco-channel-directory-refresh)))
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (setq disco-channel-directory--ewoc
-          (ewoc-create #'disco-channel-directory--ewoc-printer nil nil t)))
+  (appkit-directory-initialize)
+  (appkit-directory-configure
+   (appkit-directory-surface)
+   :item-inserter #'disco-channel-directory--insert-channel
+   :activate-function #'disco-channel-directory--activate-channel
+   :fold-function #'disco-channel-directory--fold-changed)
   (disco-channel-directory--ensure-window-size-hook)
   (add-hook 'window-buffer-change-functions
             #'disco-channel-directory--window-buffer-change nil t)
@@ -1494,7 +1403,8 @@ VIEW defaults to the current buffer's Appkit view."
       (user-error "Disco: channel %s has no guild context" parent-id))
     (let ((buffer (disco-channel-directory-open guild-id)))
       (with-current-buffer buffer
-        (puthash parent-id t disco-channel-directory--expanded-thread-parents)
+        (appkit-directory-set-fold-expanded
+         (appkit-directory-surface) (list 'thread-parent parent-id) t)
         (setq disco-channel-directory--pending-focus-channel-id parent-id)
         (disco-channel-directory--invalidate-and-sync (list parent-id) t)
         (disco-directory-load-parent-threads-async parent-id))
