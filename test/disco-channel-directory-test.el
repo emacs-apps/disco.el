@@ -118,17 +118,38 @@
          (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
            (appkit-stop-app disco-runtime--app))))))
 
-(ert-deftest disco-channel-directory-excludes-ordinary-channel-threads ()
+(ert-deftest disco-channel-directory-projects-ordinary-channel-threads ()
   (disco-channel-directory-test--with-guild
     (let* ((entries (disco-channel-directory-test--project-loaded))
-           (ids (mapcar #'disco-channel-directory-test--entry-id entries)))
+           (ids (mapcar #'disco-channel-directory-test--entry-id entries))
+           (parent
+            (seq-find
+             (lambda (entry)
+               (equal "c2"
+                      (disco-channel-directory-test--entry-id entry)))
+             entries)))
       (should
-       (equal '(group channel group channel)
+       (equal '(group thread-parent group thread-parent)
               (disco-channel-directory-test--entry-types entries)))
       (should
        (equal (list disco-guild-directory-uncategorized-group
                     "c1" "cat" "c2")
-              ids)))))
+              ids))
+      (should (eq 'item (appkit-directory-entry-primary-action parent)))
+      (should-not (member "t1" ids)))
+    (puthash "c2"
+             '(:status loaded :thread-ids ("t1") :total 1)
+             disco-directory--parent-thread-state)
+    (disco-channel-directory-test--set-parent-expanded "c2" t)
+    (let ((expanded
+           (disco-channel-directory-test--project-loaded)))
+      (should
+       (equal (list disco-guild-directory-uncategorized-group
+                    "c1" "cat" "c2" "t1")
+              (mapcar #'disco-channel-directory-test--entry-id expanded)))
+      (should
+       (equal '(group thread-parent group thread-parent channel)
+              (disco-channel-directory-test--entry-types expanded))))))
 
 (ert-deftest disco-guild-directory-preserves-position-order-after-grouping ()
   (disco-channel-directory-test--with-guild
@@ -230,8 +251,12 @@
       (should (= 6 (appkit-directory-entry-indent channel)))
       (should (eq (disco-state-channel "c2")
                   (appkit-directory-entry-payload channel)))
-      (should (equal "Open channel c2"
-                     (appkit-directory-entry-help-echo channel)))
+      (should
+       (equal
+        "RET opens channel; TAB/t toggles active threads; g refreshes; A opens archived threads"
+        (appkit-directory-entry-help-echo channel)))
+      (should (appkit-directory-entry-foldable-p channel))
+      (should (eq 'item (appkit-directory-entry-primary-action channel)))
       (should (equal "cat"
                      (disco-guild-directory-entry-group-id channel))))))
 
@@ -316,6 +341,36 @@
   (should (eq (lookup-key disco-channel-directory-mode-map [mouse-1])
               #'disco-channel-directory-mouse-open-at-point)))
 
+(ert-deftest disco-channel-directory-ordinary-parent-ret-opens-tab-expands ()
+  (disco-channel-directory-test--with-guild
+    (let (opened loaded)
+      (cl-letf (((symbol-function 'disco-root--open-channel)
+                 (lambda (channel-id)
+                   (setq opened channel-id)))
+                ((symbol-function
+                  'disco-directory-load-parent-threads-async)
+                 (lambda (parent-id &rest _arguments)
+                   (setq loaded parent-id))))
+        (disco-channel-directory--reconcile)
+        (goto-char
+         (disco-channel-directory-test--entry-position
+          (disco-channel-directory--entry-key-for-channel "c2")))
+        (disco-channel-directory-open-at-point)
+        (should (equal "c2" opened))
+        (should-not loaded)
+        (should-not
+         (appkit-directory-fold-expanded-p
+          (appkit-directory-surface)
+          (disco-channel-directory--entry-key-for-thread-parent "c2")
+          nil))
+        (disco-channel-directory-tab-dwim)
+        (should (equal "c2" loaded))
+        (should
+         (appkit-directory-fold-expanded-p
+          (appkit-directory-surface)
+          (disco-channel-directory--entry-key-for-thread-parent "c2")
+          nil))))))
+
 (ert-deftest disco-channel-directory-ret-advances-from-passive-rows ()
   (disco-channel-directory-test--with-guild
     (let* ((note-key
@@ -392,8 +447,8 @@
       (should (eq node
                   (gethash key
                            (disco-channel-directory-test--node-table))))
-      (should (= 3 (car (appkit-directory-entry-stamp
-                         (ewoc-data node))))))))
+      (should (= 3 (caar (appkit-directory-entry-stamp
+                          (ewoc-data node))))))))
 
 (ert-deftest disco-channel-directory-header-is-cached-between-reconciles ()
   (disco-channel-directory-test--with-guild
@@ -747,7 +802,7 @@
          (equal '("visible")
                 (mapcar
                  (lambda (thread) (alist-get 'id thread))
-                 (disco-guild-directory--active-posts "forum")))))
+                (disco-guild-directory--active-threads "forum")))))
     (disco-directory-reset)
     (disco-state-reset)))
 

@@ -40,7 +40,7 @@
 
 (defconst disco-guild-directory-thread-parent-id-property
   'disco-guild-directory-thread-parent-id
-  "Text property carrying a projected row's forum/media parent ID.")
+  "Text property carrying a projected row's thread parent ID.")
 
 (defconst disco-guild-directory-uncategorized-group :uncategorized
   "Synthetic group ID used for channels outside a category.")
@@ -74,11 +74,11 @@
   "Create a validated guild projection context.
 
 GUILD-ID identifies the canonical guild snapshot.  SURFACE owns category and
-forum fold state.  NAMESPACE separates keys belonging to this occurrence from
-other projections of the same guild, while SECTION-KEY is the semantic owner
-assigned to every returned entry.  GROUP-INDENT, CHANNEL-INDENT, and
-THREAD-INDENT control the three visible hierarchy levels.  FILTER and
-UNREAD-ONLY are optional projection lenses."
+thread-parent fold state.  NAMESPACE separates keys belonging to this
+occurrence from other projections of the same guild, while SECTION-KEY is the
+semantic owner assigned to every returned entry.  GROUP-INDENT,
+CHANNEL-INDENT, and THREAD-INDENT control the three visible hierarchy levels.
+FILTER and UNREAD-ONLY are optional projection lenses."
   (setq guild-id (disco-guild-directory--normalize-id guild-id))
   (unless guild-id
     (error "Disco guild directory context requires a guild id"))
@@ -132,7 +132,7 @@ surface may safely host multiple occurrences or guilds."
   (disco-guild-directory-key context 'note note-id))
 
 (defun disco-guild-directory-thread-parent-key (context parent-id)
-  "Return CONTEXT's stable fold key for forum/media PARENT-ID."
+  "Return CONTEXT's stable fold key for thread parent PARENT-ID."
   (disco-guild-directory-key
    context 'thread-parent
    (disco-guild-directory--normalize-id parent-id)))
@@ -153,7 +153,7 @@ surface may safely host multiple occurrences or guilds."
              disco-guild-directory-group-id-property))
 
 (defun disco-guild-directory-entry-thread-parent-id (entry)
-  "Return the forum/media parent ID carried by projected ENTRY."
+  "Return the thread parent ID carried by projected ENTRY."
   (plist-get (appkit-directory-entry-properties entry)
              disco-guild-directory-thread-parent-id-property))
 
@@ -274,8 +274,8 @@ but do not require the channel name to match."
        (downcase (disco-guild-directory-channel-name left))
        (downcase (disco-guild-directory-channel-name right))))))
 
-(defun disco-guild-directory--active-posts (parent-id)
-  "Return sorted viewable active posts in PARENT-ID's loaded snapshot."
+(defun disco-guild-directory--active-threads (parent-id)
+  "Return sorted viewable active threads in PARENT-ID's loaded snapshot."
   (sort
    (seq-filter
     (lambda (thread)
@@ -293,12 +293,12 @@ but do not require the channel name to match."
        (or (not (disco-guild-directory-context-unread-only context))
            (disco-state-channel-has-unread-p thread))))
 
-(defun disco-guild-directory--visible-forum-posts
-    (context channel &optional ignore-name-filter active-posts)
-  "Return CONTEXT's sorted visible active posts beneath forum/media CHANNEL.
+(defun disco-guild-directory--visible-parent-threads
+    (context channel &optional ignore-name-filter active-threads)
+  "Return CONTEXT's sorted visible active threads beneath parent CHANNEL.
 
 IGNORE-NAME-FILTER retains unread and permission lenses while showing every
-child name.  ACTIVE-POSTS may provide the already filtered parent snapshot."
+child name.  ACTIVE-THREADS may provide the already filtered parent snapshot."
   (let ((ignore-name-filter
          (or ignore-name-filter
              (and (disco-guild-directory-context-filter context)
@@ -307,28 +307,32 @@ child name.  ACTIVE-POSTS may provide the already filtered parent snapshot."
      (lambda (thread)
        (disco-guild-directory--thread-matches-lens-p
         context thread ignore-name-filter))
-     (or active-posts
-         (disco-guild-directory--active-posts (alist-get 'id channel))))))
+     (or active-threads
+         (disco-guild-directory--active-threads (alist-get 'id channel))))))
 
 (defun disco-guild-directory--channel-visible-p
     (context channel &optional ignore-name-filter)
   "Return non-nil when CHANNEL belongs in CONTEXT's current lens."
-  (if (disco-channel-forum-or-media-p channel)
+  (if (disco-channel-thread-parent-p channel)
       (or (disco-guild-directory--channel-matches-lens-p
            context channel ignore-name-filter)
           (and (disco-guild-directory-displayable-channel-p channel)
-               (disco-guild-directory--visible-forum-posts
+               (disco-guild-directory--visible-parent-threads
                 context channel ignore-name-filter)))
     (disco-guild-directory--channel-matches-lens-p
      context channel ignore-name-filter)))
 
-(defun disco-guild-directory--thread-parent-expanded-p (context parent-id)
-  "Return non-nil when PARENT-ID exposes inline active threads in CONTEXT."
+(defun disco-guild-directory--thread-parent-expanded-p
+    (context parent-id &optional force-expanded-p)
+  "Return non-nil when PARENT-ID exposes inline active threads in CONTEXT.
+
+FORCE-EXPANDED-P reveals children for an active projection lens without
+overwriting the user's stored fold preference."
   (appkit-directory-fold-expanded-p
    (disco-guild-directory-context-surface context)
    (disco-guild-directory-thread-parent-key context parent-id)
    nil
-   (disco-guild-directory--filter-active-p context)))
+   force-expanded-p))
 
 (defun disco-guild-directory--channel-stamp (channel)
   "Return render-relevant state stamp for CHANNEL."
@@ -355,16 +359,16 @@ child name.  ACTIVE-POSTS may provide the already filtered parent snapshot."
     (or category-id disco-guild-directory-uncategorized-group)))
 
 (defun disco-guild-directory--channel-thread-parent-id (channel)
-  "Return CHANNEL's forum/media parent ID, or nil."
+  "Return CHANNEL's own or containing thread parent ID, or nil."
   (cond
-   ((disco-channel-forum-or-media-p channel)
+   ((disco-channel-thread-parent-p channel)
     (disco-guild-directory--normalize-id (alist-get 'id channel)))
    ((disco-state-channel-thread-p channel)
     (let* ((parent-id
             (disco-guild-directory--normalize-id
              (alist-get 'parent_id channel)))
            (parent (and parent-id (disco-state-channel parent-id))))
-      (and (disco-channel-forum-or-media-p parent) parent-id)))))
+      (and (disco-channel-thread-parent-p parent) parent-id)))))
 
 (defun disco-guild-directory--channel-help-echo (channel)
   "Return hover help describing CHANNEL's supported open action."
@@ -407,12 +411,26 @@ child name.  ACTIVE-POSTS may provide the already filtered parent snapshot."
             (+ total
                (disco-state-channel-effective-unread-count channel))))))
 
-(defun disco-guild-directory--thread-parent-entry (context channel indent)
-  "Return one expandable forum/media CHANNEL entry at INDENT in CONTEXT."
+(defun disco-guild-directory--thread-child-noun (channel &optional plural)
+  "Return CHANNEL's child noun, optionally PLURAL.
+
+Thread-only parents present their children as posts; timeline parents present
+the same Discord thread entities as threads."
+  (if (disco-channel-thread-only-parent-p channel)
+      (if plural "posts" "post")
+    (if plural "threads" "thread")))
+
+(defun disco-guild-directory--thread-parent-entry
+    (context channel indent &optional force-expanded-p)
+  "Return one expandable thread parent CHANNEL at INDENT in CONTEXT.
+
+FORCE-EXPANDED-P reveals lens-selected children without changing fold state."
   (let* ((parent-id
           (disco-guild-directory--normalize-id (alist-get 'id channel)))
          (group-id (disco-guild-directory--channel-group-id channel))
          (state (disco-directory-parent-threads-state parent-id))
+         (thread-only-p (disco-channel-thread-only-parent-p channel))
+         (children (disco-guild-directory--thread-child-noun channel t))
          (unread-count (disco-state-channel-effective-unread-count channel)))
     (appkit-directory-entry-create
      :key (disco-guild-directory-channel-key context parent-id)
@@ -427,12 +445,19 @@ child name.  ACTIVE-POSTS may provide the already filtered parent snapshot."
      :fold-key (disco-guild-directory-thread-parent-key context parent-id)
      :fold-default-expanded-p nil
      :expanded-p
-     (disco-guild-directory--thread-parent-expanded-p context parent-id)
+     (disco-guild-directory--thread-parent-expanded-p
+      context parent-id force-expanded-p)
+     :primary-action (unless thread-only-p 'item)
      :fold-locked-reason
      (and (disco-guild-directory--filter-active-p context)
-          "Disco: clear directory lenses before folding active posts")
+          (format "Disco: clear directory lenses before folding active %s"
+                  children))
      :help-echo
-     "RET/TAB toggles active posts; g refreshes; A opens archived posts"
+     (if thread-only-p
+         (format "RET/TAB toggles active %s; g refreshes; A opens archived %s"
+                 children children)
+       (format "RET opens channel; TAB/t toggles active %s; g refreshes; A opens archived %s"
+               children children))
      :stamp (list (disco-guild-directory--channel-stamp channel)
                   (plist-get state :status)
                   (plist-get state :phase)
@@ -473,7 +498,7 @@ child name.  ACTIVE-POSTS may provide the already filtered parent snapshot."
     (context note-id text &optional face indent thread-parent-id)
   "Return CONTEXT status NOTE-ID displaying TEXT with FACE at INDENT.
 
-THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
+THREAD-PARENT-ID, when non-nil, records the thread parent context of the note."
   (appkit-directory-entry-create
    :key (disco-guild-directory-note-key context note-id)
    :role 'note
@@ -491,7 +516,9 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
   "Return an actionable pagination row for CHANNEL using ACTION and LABEL."
   (let* ((parent-id
           (disco-guild-directory--normalize-id (alist-get 'id channel)))
-         (group-id (disco-guild-directory--channel-group-id channel)))
+         (group-id (disco-guild-directory--channel-group-id channel))
+         (child (disco-guild-directory--thread-child-noun channel))
+         (children (disco-guild-directory--thread-child-noun channel t)))
     (appkit-directory-entry-create
      :key (disco-guild-directory-key
            context 'parent-action parent-id)
@@ -505,9 +532,12 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
      :indent (disco-guild-directory-context-thread-indent context)
      :help-echo
      (pcase action
-       ('parent-threads-load "Load the first page of active posts")
-       ('parent-threads-load-more "Load the next page of active posts")
-       ('parent-threads-retry "Retry the interrupted active-post page"))
+       ('parent-threads-load
+        (format "Load the first page of active %s" children))
+       ('parent-threads-load-more
+        (format "Load the next page of active %s" children))
+       ('parent-threads-retry
+        (format "Retry the interrupted active-%s page" child)))
      :stamp (list action label)
      :properties
      (disco-guild-directory--properties
@@ -532,26 +562,34 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
 
 (defun disco-guild-directory--prepend-channel-entries
     (context entries channel &optional ignore-name-filter)
-  "Prepend CHANNEL and visible forum children to reverse ENTRIES for CONTEXT."
+  "Prepend CHANNEL and visible thread children to reverse ENTRIES for CONTEXT."
   (let ((channel-indent
          (disco-guild-directory-context-channel-indent context))
         (thread-indent
          (disco-guild-directory-context-thread-indent context)))
-    (if (disco-channel-forum-or-media-p channel)
+    (if (disco-channel-thread-parent-p channel)
         (let* ((parent-id
                 (disco-guild-directory--normalize-id (alist-get 'id channel)))
+               (child
+                (disco-guild-directory--thread-child-noun channel))
+               (children-label
+                (disco-guild-directory--thread-child-noun channel t))
+               (active-threads
+                (disco-guild-directory--active-threads parent-id))
+               (threads
+                (disco-guild-directory--visible-parent-threads
+                 context channel ignore-name-filter active-threads))
+               (force-expanded-p
+                (and (disco-guild-directory--filter-active-p context)
+                     (or (disco-channel-thread-only-parent-p channel)
+                         threads)))
                (expanded
                 (disco-guild-directory--thread-parent-expanded-p
-                 context parent-id))
-               (active-posts
-                (disco-guild-directory--active-posts parent-id))
-               (threads
-                (disco-guild-directory--visible-forum-posts
-                 context channel ignore-name-filter active-posts))
+                 context parent-id force-expanded-p))
                (state (disco-directory-parent-threads-state parent-id))
                (status (plist-get state :status)))
           (push (disco-guild-directory--thread-parent-entry
-                 context channel channel-indent)
+                 context channel channel-indent force-expanded-p)
                 entries)
           (when expanded
             (dolist (thread threads)
@@ -563,7 +601,8 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
                (push
                 (disco-guild-directory--parent-action-entry
                  context channel 'parent-threads-load
-                 "Load active posts" 'font-lock-keyword-face)
+                 (format "Load active %s" children-label)
+                 'font-lock-keyword-face)
                 entries))
               ('loading
                (let ((loaded (length (plist-get state :thread-ids)))
@@ -574,11 +613,14 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
                    context (list 'parent-threads parent-id)
                    (cond
                     ((eq phase 'indexing)
-                     "Discord is indexing active posts…")
+                     (format "Discord is indexing active %s…" children-label))
                     ((and (numberp total) (> loaded 0))
-                     (format "Loading more active posts… %d/%d" loaded total))
-                    ((> loaded 0) (format "Loading more active posts… %d" loaded))
-                    (t "Loading active posts…"))
+                     (format "Loading more active %s… %d/%d"
+                             children-label loaded total))
+                    ((> loaded 0)
+                     (format "Loading more active %s… %d"
+                             children-label loaded))
+                    (t (format "Loading active %s…" children-label)))
                    'shadow thread-indent parent-id)
                   entries)))
               ('error
@@ -590,7 +632,8 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
                  (push
                   (disco-guild-directory--parent-action-entry
                    context channel 'parent-threads-retry
-                   (format "Retry active post loading%s: %s"
+                   (format "Retry active %s loading%s: %s"
+                           child
                            (if progress (format " (%s)" progress) "")
                            error-text)
                    'error)
@@ -604,8 +647,9 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
                     (disco-guild-directory--parent-action-entry
                      context channel 'parent-threads-load-more
                      (if progress
-                         (format "Load more active posts (%s)" progress)
-                       "Load more active posts")
+                         (format "Load more active %s (%s)"
+                                 children-label progress)
+                       (format "Load more active %s" children-label))
                      'font-lock-keyword-face)
                     entries)))
                 ((null threads)
@@ -613,11 +657,13 @@ THREAD-PARENT-ID, when non-nil, records the forum/media context of the note."
                   (disco-guild-directory--note-entry
                    context (list 'parent-threads parent-id)
                    (cond
-                    (active-posts
-                     "No active posts match the current directory lens.")
+                    (active-threads
+                     (format "No active %s match the current directory lens."
+                             children-label))
                     ((disco-directory-parent-threads parent-id)
-                     "No viewable active posts in the loaded page.")
-                    (t "No active posts."))
+                     (format "No viewable active %s in the loaded page."
+                             children-label))
+                    (t (format "No active %s." children-label)))
                    'shadow thread-indent parent-id)
                   entries)))))))
       (push (disco-guild-directory--channel-entry

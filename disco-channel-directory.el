@@ -176,7 +176,7 @@
    (disco-channel-directory--projection-context) channel-id))
 
 (defun disco-channel-directory--entry-key-for-thread-parent (parent-id)
-  "Return the standalone projector fold key for forum/media PARENT-ID."
+  "Return the standalone projector fold key for thread parent PARENT-ID."
   (disco-guild-directory-thread-parent-key
    (disco-channel-directory--projection-context) parent-id))
 
@@ -551,11 +551,11 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
   (let ((entry (appkit-directory-entry-at-point)))
     (unless (and entry (eq (appkit-directory-entry-role entry) 'group))
       (user-error "Disco: point is not on a category"))
-    (appkit-directory-activate-entry
+    (appkit-directory-toggle-entry-fold
      (appkit-directory-surface) entry)))
 
 (defun disco-channel-directory-toggle-thread-parent (&optional parent-id)
-  "Toggle inline active posts under forum/media PARENT-ID or the row at point."
+  "Toggle inline active threads under PARENT-ID or the row at point."
   (interactive)
   (setq parent-id
         (disco-channel-directory--normalize-id
@@ -563,28 +563,28 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
              (disco-channel-directory--line-property
               disco-guild-directory-thread-parent-id-property))))
   (let ((parent (and parent-id (disco-state-channel parent-id))))
-    (unless (and parent (disco-channel-forum-or-media-p parent))
-      (user-error "Disco: point is not on a forum or media channel"))
+    (unless (and parent (disco-channel-thread-parent-p parent))
+      (user-error "Disco: point is not on a thread parent channel"))
     (let ((entry
            (appkit-directory-entry-for-key
             (appkit-directory-surface)
             (disco-channel-directory--entry-key-for-channel parent-id))))
       (unless (and entry (appkit-directory-entry-foldable-p entry))
-        (user-error "Disco: forum or media channel is not visible"))
-      (appkit-directory-activate-entry
+        (user-error "Disco: thread parent channel is not visible"))
+      (appkit-directory-toggle-entry-fold
        (appkit-directory-surface) entry))))
 
 (defun disco-channel-directory-toggle-at-point ()
-  "Toggle the category or forum/media parent at point."
+  "Toggle the category or thread parent at point."
   (interactive)
   (let ((entry (appkit-directory-entry-at-point)))
     (unless (and entry (appkit-directory-entry-foldable-p entry))
       (user-error "Disco: point is not on a foldable row"))
-    (appkit-directory-activate-entry
+    (appkit-directory-toggle-entry-fold
      (appkit-directory-surface) entry)))
 
 (defun disco-channel-directory-open-at-point ()
-  "Toggle the category or open the channel at point."
+  "Run the row's primary action or advance from a passive row."
   (interactive)
   (let ((entry (appkit-directory-entry-at-point)))
     (if (and entry
@@ -599,7 +599,7 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
   (interactive)
   (let ((entry (appkit-directory-entry-at-point)))
     (if (and entry (appkit-directory-entry-foldable-p entry))
-        (appkit-directory-activate-entry
+        (appkit-directory-toggle-entry-fold
          (appkit-directory-surface) entry)
       (disco-channel-directory-next-channel))))
 
@@ -636,7 +636,7 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
            (if disco-channel-directory--unread-only "enabled" "disabled")))
 
 (defun disco-channel-directory-refresh ()
-  "Refresh the forum at point, or the current guild channel snapshot."
+  "Refresh the thread parent at point, or the guild channel snapshot."
   (interactive)
   (if-let* ((parent-id
              (disco-channel-directory--line-property
@@ -646,9 +646,12 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
          (appkit-directory-surface)
          (disco-channel-directory--entry-key-for-thread-parent parent-id) t)
         (disco-directory-load-parent-threads-async parent-id :force t)
-        (message "Disco: refreshing active posts in %s…"
-                 (disco-guild-directory-channel-name
-                  (disco-state-channel parent-id))))
+        (let* ((parent (disco-state-channel parent-id))
+               (children
+                (disco-guild-directory--thread-child-noun parent t)))
+          (message "Disco: refreshing active %s in %s…"
+                   children
+                   (disco-guild-directory-channel-name parent))))
     (unless (disco-channel-directory--guild)
       (user-error "Disco: this guild is no longer available"))
     (disco-directory-load-guild-async
@@ -671,7 +674,7 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
     (and parent (disco-channel-thread-parent-p parent) parent)))
 
 (defun disco-channel-directory-open-archived-at-point ()
-  "Open paginated archived posts for the parent represented at point."
+  "Open paginated archived threads for the parent represented at point."
   (interactive)
   (let ((parent (disco-channel-directory--archived-parent-at-point)))
     (unless parent
@@ -965,8 +968,8 @@ VIEW defaults to the current buffer's Appkit view."
           (disco-channel-directory--normalize-id parent-channel-id))
          (parent (and parent-id (disco-state-channel parent-id)))
          (guild-id (and parent (alist-get 'guild_id parent))))
-    (unless (and parent (disco-channel-forum-or-media-p parent))
-      (user-error "Disco: channel %s is not a forum or media channel"
+    (unless (and parent (disco-channel-thread-parent-p parent))
+      (user-error "Disco: channel %s is not a thread parent"
                   parent-channel-id))
     (unless (disco-state-channel-viewable-p parent nil)
       (user-error "Disco: channel %s is not viewable" parent-id))
