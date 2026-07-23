@@ -941,6 +941,18 @@ pagination reports its own exact loaded/total progress below the parent row."
   (when-let* ((parent-id (alist-get 'parent_id thread)))
     (disco-state-channel parent-id)))
 
+(defun disco-root--thread-directory-scope (thread)
+  "Return the directory presentation scope for THREAD.
+
+Threads below Forum or Media parents are presented as posts whose preview is
+their starter message.  Threads below timeline parents use their latest
+message.  When the parent is not cached, prefer the latest-message path because
+THREAD's `last_message_id' can still be hydrated independently."
+  (if (disco-channel-thread-only-parent-p
+       (disco-root--thread-parent-channel thread))
+      'thread-post
+    'timeline-thread))
+
 (defun disco-root--thread-tag-label (tag)
   "Return human-readable label for one forum/media TAG object."
   (when (listp tag)
@@ -1027,7 +1039,7 @@ pagination reports its own exact loaded/total progress below the parent row."
 (defun disco-root--activity-context-label (channel &optional scope)
   "Return context label for CHANNEL one-line rows under SCOPE."
   (pcase scope
-    ((or 'parent-thread 'archived-thread)
+    ((or 'thread-post 'timeline-thread 'archived-thread)
      (disco-root--thread-browser-context-label channel))
     ('directory
      (disco-root--channel-display-name channel))
@@ -1197,7 +1209,7 @@ Output includes formatted date/time and a trailing status symbol."
   "Return one-line preview text for CHANNEL row under SCOPE.
 
 When MESSAGE is non-nil, use it as cached preview source."
-  (if (eq scope 'parent-thread)
+  (if (eq scope 'thread-post)
       (if-let* ((starter (disco-thread-starter-message channel)))
           (disco-msg-preview-line starter)
         (propertize "Original post unavailable" 'face 'shadow))
@@ -1262,14 +1274,15 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
   (let* ((channel-id (alist-get 'id channel))
          (latest-message (disco-msg-channel-last-cached-message channel))
          (preview-message
-          (if (eq scope 'parent-thread)
+          (if (eq scope 'thread-post)
               (disco-thread-starter-message channel)
             latest-message))
          (mention-count (disco-state-channel-effective-unread-count channel))
          (has-unread (disco-root--channel-has-unread-p channel))
          (preview-text (disco-root--activity-preview-line
                         channel preview-message scope))
-         (time-text (if (memq scope '(parent-thread archived-thread))
+         (time-text (if (memq scope '(thread-post timeline-thread
+                                      archived-thread))
                         (disco-root--thread-browser-time-label channel scope latest-message)
                       (disco-root--channel-last-activity-time-label channel latest-message))))
     (appkit-view-one-line-row-create
@@ -2328,7 +2341,7 @@ When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
   "Insert one CHANNEL at INDENT spaces.
 
 SCOPE is forwarded to extra-info providers."
-  (if (memq scope '(activity parent-thread archived-thread))
+  (if (memq scope '(activity thread-post timeline-thread archived-thread))
       (disco-root--insert-activity-channel-line channel indent scope)
     (let* ((channel-id (alist-get 'id channel))
            (label (disco-root--channel-label channel scope))
@@ -2714,7 +2727,7 @@ layout retains fall-forward navigation."
                ('unread-channel 'unread)
                ('dm-channel 'dm)
                (_ (if (disco-state-channel-thread-p channel)
-                      'parent-thread
+                      (disco-root--thread-directory-scope channel)
                     'directory)))))
        (disco-root--insert-activity-channel-line channel 0 scope)))))
 

@@ -1019,6 +1019,19 @@
                 (sort (copy-sequence forced)
                       #'disco-channel-directory-test--key<)))))))
 
+(ert-deftest disco-channel-directory-last-messages-refreshes-returned-thread-row ()
+  (disco-channel-directory-test--with-appkit-guild
+    (disco-channel-directory--handle-gateway-event
+     '(:type last-messages :guild-id "g1" :channel-ids ("t1"))
+     view)
+    (let ((pending
+           (appkit-invalidations-take
+            (appkit-view-invalidations view))))
+      (should-not (appkit-invalidations-structure-p pending))
+      (should
+       (equal (list (disco-channel-directory-test--channel-key "t1"))
+              (appkit-invalidations-entry-keys pending))))))
+
 (ert-deftest disco-channel-directory-callbacks-target-or-structure-only ()
   (disco-channel-directory-test--with-appkit-guild
     (let (requests
@@ -1144,20 +1157,41 @@
         (appkit-sync-invalidations view)
         (should (zerop forced))))))
 
-(ert-deftest disco-channel-directory-thread-rows-use-parent-thread-layout ()
-  (with-temp-buffer
-    (let ((entry
-           (appkit-directory-entry-create
-            :key "channel:t1"
-            :role 'item
-            :payload '((id . "t1") (type . 11) (name . "post"))
-            :indent 4))
-          captured)
-      (cl-letf (((symbol-function 'disco-root--insert-activity-channel-line)
-                 (lambda (channel indent scope width)
-                   (setq captured (list channel indent scope width)))))
-        (disco-channel-directory--insert-item nil entry)
-        (should (equal 'parent-thread (nth 2 captured)))))))
+(ert-deftest disco-channel-directory-thread-rows-use-parent-capability-scope ()
+  (disco-state-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-state-upsert-channel
+         '((id . "text") (guild_id . "g1") (type . 0)))
+        (disco-state-upsert-channel
+         '((id . "forum") (guild_id . "g1") (type . 15)))
+        (let ((entries
+               (list
+                (appkit-directory-entry-create
+                 :key "channel:text-thread"
+                 :role 'item
+                 :payload '((id . "text-thread") (type . 11)
+                            (parent_id . "text") (name . "discussion"))
+                 :indent 4)
+                (appkit-directory-entry-create
+                 :key "channel:forum-post"
+                 :role 'item
+                 :payload '((id . "forum-post") (type . 11)
+                            (parent_id . "forum") (name . "post"))
+                 :indent 4)))
+              captured)
+          (cl-letf (((symbol-function 'disco-root--insert-activity-channel-line)
+                     (lambda (channel indent scope width)
+                       (push (list (alist-get 'id channel)
+                                   indent scope width)
+                             captured))))
+            (dolist (entry entries)
+              (disco-channel-directory--insert-item nil entry))
+            (should
+             (equal '(("text-thread" 0 timeline-thread nil)
+                      ("forum-post" 0 thread-post nil))
+                    (nreverse captured))))))
+    (disco-state-reset)))
 
 (ert-deftest disco-channel-directory-finds-equal-nonidentical-channel-id ()
   (with-temp-buffer

@@ -1344,6 +1344,40 @@
                   ("c1" 0 directory nil))
                 (nreverse calls)))))))
 
+(ert-deftest disco-root-tree-thread-items-use-parent-capability-scope ()
+  (disco-state-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (disco-state-upsert-channel
+         '((id . "text") (guild_id . "g1") (type . 0)))
+        (disco-state-upsert-channel
+         '((id . "forum") (guild_id . "g1") (type . 15)))
+        (let ((threads
+               '(((id . "text-thread") (guild_id . "g1") (type . 11)
+                  (parent_id . "text"))
+                 ((id . "forum-post") (guild_id . "g1") (type . 11)
+                  (parent_id . "forum"))))
+              calls)
+          (cl-letf (((symbol-function 'disco-root--insert-activity-channel-line)
+                     (lambda (channel indent &optional scope width)
+                       (push (list (alist-get 'id channel)
+                                   indent scope width)
+                             calls))))
+            (dolist (thread threads)
+              (disco-root--tree-item-inserter
+               nil
+               (appkit-directory-entry-create
+                :key (list 'shared 'channel (alist-get 'id thread))
+                :role 'item
+                :payload thread
+                :properties
+                (list disco-guild-directory-row-kind-property 'channel))))
+            (should
+             (equal '(("text-thread" 0 timeline-thread nil)
+                      ("forum-post" 0 thread-post nil))
+                    (nreverse calls))))))
+    (disco-state-reset)))
+
 (ert-deftest disco-root-tree-renders-without-buttons-or-whole-row-hover ()
   (with-temp-buffer
     (disco-root-mode)
@@ -2358,7 +2392,29 @@
                           (applied_tags . ("tag1" "tag2")))))))
     (disco-state-reset)))
 
-(ert-deftest disco-root-insert-channel-line-parent-thread-uses-activity-preview-layout ()
+(ert-deftest disco-root-thread-directory-scope-follows-parent-capability ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-upsert-channel
+         '((id . "text") (guild_id . "g1") (type . 0)))
+        (disco-state-upsert-channel
+         '((id . "forum") (guild_id . "g1") (type . 15)))
+        (should
+         (eq 'timeline-thread
+             (disco-root--thread-directory-scope
+              '((id . "text-thread") (type . 11) (parent_id . "text")))))
+        (should
+         (eq 'thread-post
+             (disco-root--thread-directory-scope
+              '((id . "forum-post") (type . 11) (parent_id . "forum")))))
+        (should
+         (eq 'timeline-thread
+             (disco-root--thread-directory-scope
+              '((id . "orphan") (type . 11) (parent_id . "missing"))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-insert-channel-line-thread-post-uses-activity-preview-layout ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--fill-column 90)
@@ -2387,7 +2443,7 @@
                 (content . "hello world")
                 (author . ((username . "alice"))))))
             (disco-root--insert-channel-line
-             (disco-state-channel "th1") 2 'parent-thread)
+             (disco-state-channel "th1") 2 'thread-post)
             (should (string-match-p "\\[Thread title | bug *\\]" (buffer-string)))
             (should (string-match-p "alice> hello world" (buffer-string))))
         (disco-state-reset)))))
@@ -2652,7 +2708,7 @@
                      (disco-root--activity-preview-line
                       forum nil 'directory))))))
 
-(ert-deftest disco-root-parent-thread-preview-shows-unavailable-state ()
+(ert-deftest disco-root-thread-post-preview-shows-unavailable-state ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((thread '((id . "th1")
@@ -2667,13 +2723,13 @@
                    (setq queued t))))
         (let ((preview
                (disco-root--activity-preview-line
-                thread nil 'parent-thread)))
+                thread nil 'thread-post)))
           (should (equal "Original post unavailable"
                          (substring-no-properties preview)))
           (should (eq 'shadow (get-text-property 0 'face preview))))
         (should-not queued)))))
 
-(ert-deftest disco-root-parent-thread-preview-prefers-cached-starter-message ()
+(ert-deftest disco-root-thread-post-preview-prefers-cached-starter-message ()
   (disco-state-reset)
   (unwind-protect
       (let ((thread '((id . "th1")
@@ -2700,18 +2756,64 @@
           (should
            (equal "alice> starter preview"
                   (appkit-view-one-line-row-preview
-                   (disco-root--channel-one-line-row thread 'parent-thread))))
+                   (disco-root--channel-one-line-row thread 'thread-post))))
           (should-not queued)))
     (disco-state-reset)))
 
-(ert-deftest disco-root-parent-thread-row-uses-thread-icon-not-guild-icon ()
+(ert-deftest disco-root-timeline-thread-preview-hydrates-latest-message ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((thread '((id . "th1")
+                      (guild_id . "g1")
+                      (type . 11)
+                      (parent_id . "text1")
+                      (last_message_id . "latest")))
+            queued)
+        (disco-state-upsert-channel
+         '((id . "text1") (guild_id . "g1") (type . 0)))
+        (disco-state-upsert-channel thread)
+        (disco-state-upsert-message
+         "th1"
+         '((id . "th1")
+           (channel_id . "th1")
+           (content . "starter preview")
+           (author . ((username . "alice")))))
+        (cl-letf (((symbol-function 'disco-preview-request-channel)
+                   (lambda (channel)
+                     (push (alist-get 'id channel) queued))))
+          (let* ((channel (disco-state-channel "th1"))
+                 (scope (disco-root--thread-directory-scope channel)))
+            (should (eq 'timeline-thread scope))
+            (should
+             (equal ""
+                    (appkit-view-one-line-row-preview
+                     (disco-root--channel-one-line-row channel scope))))
+            (should (equal '("th1") queued))))
+        (disco-state-upsert-message
+         "th1"
+         '((id . "latest")
+           (channel_id . "th1")
+           (content . "latest preview")
+           (author . ((username . "bob")))))
+        (cl-letf (((symbol-function 'disco-preview-request-channel)
+                   (lambda (_channel)
+                     (ert-fail "cached latest message requested hydration"))))
+          (let* ((channel (disco-state-channel "th1"))
+                 (scope (disco-root--thread-directory-scope channel)))
+            (should
+             (equal "bob> latest preview"
+                    (appkit-view-one-line-row-preview
+                     (disco-root--channel-one-line-row channel scope)))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-root-thread-directory-row-uses-thread-icon-not-guild-icon ()
   (disco-state-reset)
   (unwind-protect
       (with-temp-buffer
         (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
         (disco-root--insert-activity-icon
          '((id . "th1") (guild_id . "g1") (type . 11))
-         'parent-thread)
+         'timeline-thread)
         (should (equal "↳" (substring-no-properties (buffer-string)))))
     (disco-state-reset)))
 

@@ -211,7 +211,7 @@
     (_
      (let* ((channel (appkit-directory-entry-payload entry))
             (scope (if (disco-state-channel-thread-p channel)
-                       'parent-thread
+                       (disco-root--thread-directory-scope channel)
                      'directory)))
        (disco-root--insert-activity-channel-line
         channel 0 scope disco-channel-directory--fill-column)))))
