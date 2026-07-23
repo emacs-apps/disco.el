@@ -35,7 +35,8 @@ This repository currently contains an MVP scaffold designed with these reference
 - Room prompt footer now shows telega-style live typing indicators when other users are typing (DM + guild channels).
 - Room prompt/history are immutable while only the draft area after `>>>` is editable (telega-style input boundary).
 - Room keyboard search flow (`s` then `n`/`p`) for message-level navigation.
-- Room message rows now include reply preview lines, avatar placeholders, and deterministic multi-color author names.
+- Room message rows now include reply preview lines, avatar placeholders, and
+  deterministic multi-color author names from Appkit's shared palette.
 - Room can render inline Discord avatar images (async, cached) with automatic placeholder fallback.
 - Draft input supports dynamic `TAB` completion for `@`/`#`/`:` tokens (remote guild-member prefix search, roles, `@everyone`/`@here`, guild channels, standard Unicode emoji, and guild custom emoji) and inserts native Discord mention/emoji syntax; company/Corfu rows can show nickname/global-name/username/id/avatar metadata.
 - Room provides `C-c M-v` to clear avatar cache and refetch avatars when image decoding/network glitches occur.

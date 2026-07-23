@@ -55,6 +55,20 @@
     (disco-room-mode)
     (should-not (derived-mode-p 'special-mode))))
 
+(ert-deftest disco-room-author-face-uses-stable-discord-identity ()
+  (let ((original
+         '((author . ((id . "42")
+                      (global_name . "Original Name")))))
+        (renamed
+         '((author . ((id . "42")
+                      (global_name . "Renamed User"))))))
+    (should
+     (eq (appkit-name-color-face "42")
+         (disco-room--author-face original)))
+    (should
+     (eq (disco-room--author-face original)
+         (disco-room--author-face renamed)))))
+
 (ert-deftest disco-room-open-resets-replacement-view-state-but-reuses-live-state ()
   (let ((disco-runtime--app nil)
         (channel-id "room-replacement")

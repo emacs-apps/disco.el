@@ -24,6 +24,7 @@
 (require 'appkit-chat-ins)
 (require 'appkit-chatbuf)
 (require 'appkit-chat-timeline)
+(require 'appkit-name-color)
 (require 'disco-ins)
 (require 'appkit-ui)
 (require 'disco-util)
@@ -579,57 +580,6 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   '((t :inherit font-lock-comment-face))
   "Face used for system event divider lines (e.g. user join)."
   :group 'disco)
-
-(defface disco-room-author-color-1
-  '((t :foreground "LightSkyBlue"))
-  "Face palette entry 1 for room author names."
-  :group 'disco)
-
-(defface disco-room-author-color-2
-  '((t :foreground "PaleGreen"))
-  "Face palette entry 2 for room author names."
-  :group 'disco)
-
-(defface disco-room-author-color-3
-  '((t :foreground "Khaki"))
-  "Face palette entry 3 for room author names."
-  :group 'disco)
-
-(defface disco-room-author-color-4
-  '((t :foreground "LightSalmon"))
-  "Face palette entry 4 for room author names."
-  :group 'disco)
-
-(defface disco-room-author-color-5
-  '((t :foreground "Plum1"))
-  "Face palette entry 5 for room author names."
-  :group 'disco)
-
-(defface disco-room-author-color-6
-  '((t :foreground "LightSteelBlue"))
-  "Face palette entry 6 for room author names."
-  :group 'disco)
-
-(defface disco-room-author-color-7
-  '((t :foreground "Aquamarine"))
-  "Face palette entry 7 for room author names."
-  :group 'disco)
-
-(defface disco-room-author-color-8
-  '((t :foreground "Wheat"))
-  "Face palette entry 8 for room author names."
-  :group 'disco)
-
-(defconst disco-room--author-faces
-  [disco-room-author-color-1
-   disco-room-author-color-2
-   disco-room-author-color-3
-   disco-room-author-color-4
-   disco-room-author-color-5
-   disco-room-author-color-6
-   disco-room-author-color-7
-   disco-room-author-color-8]
-  "Palette used for deterministic per-author name coloring.")
 
 (defvar disco-room-timeline-mode-map
   (let ((map (make-sparse-keymap)))
@@ -2876,15 +2826,10 @@ source message, not the synthetic starter row itself."
 
 (defun disco-room--author-face (msg)
   "Return deterministic face symbol for MSG author."
-  (let* ((faces disco-room--author-faces)
-         (count (length faces))
-         (key (or (disco-room--message-author-id msg)
-                  (disco-room--message-author msg)
-                  "unknown"))
-         (idx (if (> count 0)
-                  (mod (abs (sxhash key)) count)
-                0)))
-    (aref faces idx)))
+  (appkit-name-color-face
+   (or (disco-room--message-author-id msg)
+       (disco-room--message-author msg)
+       "unknown")))
 
 (defun disco-room--avatar-placeholder (msg)
   "Return text avatar placeholder for MSG author (for example `[AB]')."
