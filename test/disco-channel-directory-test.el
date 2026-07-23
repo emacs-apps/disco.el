@@ -1032,6 +1032,21 @@
        (equal (list (disco-channel-directory-test--channel-key "t1"))
               (appkit-invalidations-entry-keys pending))))))
 
+(ert-deftest disco-channel-directory-preview-update-refreshes-own-guild-row ()
+  (disco-channel-directory-test--with-appkit-guild
+    (disco-state-upsert-channel
+     '((id . "other") (guild_id . "g2") (type . 11)))
+    (disco-channel-directory--handle-preview-update "t1" view)
+    (disco-channel-directory--handle-preview-update "other" view)
+    (disco-channel-directory--handle-preview-update "missing" view)
+    (let ((pending
+           (appkit-invalidations-take
+            (appkit-view-invalidations view))))
+      (should-not (appkit-invalidations-structure-p pending))
+      (should
+       (equal (list (disco-channel-directory-test--channel-key "t1"))
+              (appkit-invalidations-entry-keys pending))))))
+
 (ert-deftest disco-channel-directory-callbacks-target-or-structure-only ()
   (disco-channel-directory-test--with-appkit-guild
     (let (requests
@@ -1109,6 +1124,7 @@
          '(:type channel-create :guild-id "g1" :channel-id "c1") view)
         (disco-channel-directory--handle-directory-event
          '(:type guild-loaded :guild-id "g1") view)
+        (disco-channel-directory--handle-preview-update "c1" view)
         (should (zerop updates))))))
 
 (ert-deftest disco-channel-directory-reconcile-never-implicitly-reattaches-view ()

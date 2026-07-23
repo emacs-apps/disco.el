@@ -946,8 +946,8 @@ pagination reports its own exact loaded/total progress below the parent row."
 
 Threads below Forum or Media parents are presented as posts whose preview is
 their starter message.  Threads below timeline parents use their latest
-message.  When the parent is not cached, prefer the latest-message path because
-THREAD's `last_message_id' can still be hydrated independently."
+message.  When the parent is not cached, prefer the latest-message path; parent
+thread-page loading may hydrate that preview with one best-effort guild search."
   (if (disco-channel-thread-only-parent-p
        (disco-root--thread-parent-channel thread))
       'thread-post
@@ -1217,7 +1217,8 @@ When MESSAGE is non-nil, use it as cached preview source."
         (disco-msg-channel-preview-line channel)
         (disco-root--activity-secondary-placeholder channel)
         (progn
-          (disco-preview-request-channel channel)
+          (unless (eq scope 'timeline-thread)
+            (disco-preview-request-channel channel))
           (disco-root--activity-preview-label channel scope)))))
 
 (defun disco-root--insert-activity-icon (channel &optional scope)

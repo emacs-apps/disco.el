@@ -26,6 +26,7 @@
 (require 'disco-guild-directory)
 (require 'disco-msg)
 (require 'disco-permission)
+(require 'disco-preview)
 (require 'disco-root-view)
 (require 'disco-runtime)
 (require 'disco-state)
@@ -74,6 +75,9 @@
 
 (defvar-local disco-channel-directory--directory-handler nil
   "Buffer-local directory lifecycle event handler closure.")
+
+(defvar-local disco-channel-directory--preview-handler nil
+  "Buffer-local preview update handler closure.")
 
 (defvar-local disco-channel-directory--live-update-handle nil
   "Appkit lifecycle handle owning this directory's shared event hooks.")
@@ -741,6 +745,23 @@ VIEW defaults to the current buffer's Appkit view."
                          (plist-get event :channel-id)))
              :structure t)))))))
 
+(defun disco-channel-directory--handle-preview-update (channel-id &optional view)
+  "Queue an exact row invalidation for preview CHANNEL-ID in this guild.
+
+VIEW defaults to the current buffer's Appkit view."
+  (let ((view (or view (appkit-current-view))))
+    (when (appkit-view-live-p view)
+      (appkit-with-live-view view
+        (when-let* ((channel-id
+                     (disco-channel-directory--normalize-id channel-id))
+                    (channel (disco-state-channel channel-id))
+                    (guild-id
+                     (disco-channel-directory--normalize-id
+                      (alist-get 'guild_id channel))))
+          (when (equal guild-id disco-channel-directory--guild-id)
+            (disco-channel-directory--queue-view-update
+             view :channel-ids (list channel-id))))))))
+
 (defun disco-channel-directory--remove-live-updates ()
   "Remove this buffer's shared event hooks without touching Appkit ownership."
   (let ((watched-p (functionp disco-channel-directory--gateway-handler)))
@@ -750,8 +771,12 @@ VIEW defaults to the current buffer's Appkit view."
     (when disco-channel-directory--directory-handler
       (remove-hook 'disco-directory-event-hook
                    disco-channel-directory--directory-handler))
+    (when disco-channel-directory--preview-handler
+      (remove-hook 'disco-preview-update-hook
+                   disco-channel-directory--preview-handler))
     (setq disco-channel-directory--gateway-handler nil
           disco-channel-directory--directory-handler nil
+          disco-channel-directory--preview-handler nil
           disco-channel-directory--live-update-handle nil)
     (when watched-p
       (disco-gateway-unwatch-global))))
@@ -779,7 +804,7 @@ VIEW defaults to the current buffer's Appkit view."
           #'disco-channel-directory--handle-state-reset)
 
 (defun disco-channel-directory--attach-live-updates ()
-  "Attach the current Appkit view to gateway and directory events."
+  "Attach the current Appkit view to gateway, directory, and preview events."
   (let ((view (disco-channel-directory--ensure-view)))
     (disco-channel-directory--detach-live-updates)
     (let ((buffer (current-buffer)))
@@ -789,12 +814,18 @@ VIEW defaults to the current buffer's Appkit view."
       (setq disco-channel-directory--directory-handler
             (lambda (event)
               (disco-channel-directory--handle-directory-event event view)))
+      (setq disco-channel-directory--preview-handler
+            (lambda (channel-id)
+              (disco-channel-directory--handle-preview-update
+               channel-id view)))
       (condition-case err
           (progn
             (add-hook 'disco-gateway-event-hook
                       disco-channel-directory--gateway-handler)
             (add-hook 'disco-directory-event-hook
                       disco-channel-directory--directory-handler)
+            (add-hook 'disco-preview-update-hook
+                      disco-channel-directory--preview-handler)
             (disco-gateway-watch-global)
             (setq disco-channel-directory--live-update-handle
                   (appkit-register-handle

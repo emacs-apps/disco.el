@@ -51,6 +51,185 @@
                         "c1"
                         disco-preview--requested-message-id-by-channel)))))))
 
+(ert-deftest disco-preview-thread-page-search-hydrates-only-exact-last-messages ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let ((threads
+           '(((id . "t1") (guild_id . "g1") (type . 11)
+              (last_message_id . "m1"))
+             ((id . "t2") (guild_id . "g1") (type . 11)
+              (last_message_id . "m2"))
+             ((id . "t3") (guild_id . "g1") (type . 11)
+              (last_message_id . "m3"))))
+          (calls 0)
+          request
+          updated)
+      (unwind-protect
+          (progn
+            (dolist (thread threads)
+              (disco-state-upsert-channel thread))
+            (let ((disco-preview-update-hook
+                   (list (lambda (channel-id) (push channel-id updated)))))
+              (cl-letf
+                  (((symbol-function
+                     'disco-api-guild-search-messages-async)
+                    (lambda (guild-id &rest args)
+                      (cl-incf calls)
+                      (setq request (cons guild-id args))
+                      (funcall
+                       (plist-get args :on-success)
+                       '((messages .
+                          ((((id . "m1")
+                             (channel_id . "t1")
+                             (content . "first"))
+                            ((id . "older-1")
+                             (channel_id . "t1")
+                             (content . "old context")))
+                           (((id . "older-2")
+                             (channel_id . "t2")
+                             (content . "not the latest")))
+                           (((id . "m3")
+                             (channel_id . "t3")
+                             (content . "third"))))))))))
+                (should
+                 (disco-preview-request-thread-page "g1" threads))
+                ;; Successful misses are not re-searched until the advertised
+                ;; `last_message_id' changes.
+                (should-not
+                 (disco-preview-request-thread-page "g1" threads))))
+            (should (= 1 calls))
+            (should (equal "g1" (car request)))
+            (should (= disco-preview--thread-page-search-limit
+                       (plist-get (cdr request) :limit)))
+            (should (eq 'timestamp (plist-get (cdr request) :sort-by)))
+            (should (eq 'desc (plist-get (cdr request) :sort-order)))
+            (should (equal '("t1" "t2" "t3")
+                           (plist-get (cdr request) :channel-ids)))
+            (should
+             (equal
+              "first"
+              (alist-get
+               'content
+               (disco-msg-channel-last-cached-message
+                (disco-state-channel "t1")))))
+            (should-not
+             (disco-msg-channel-last-cached-message
+              (disco-state-channel "t2")))
+            (should
+             (equal
+              "third"
+              (alist-get
+               'content
+               (disco-msg-channel-last-cached-message
+                (disco-state-channel "t3")))))
+            (should (equal '("t1" "t3")
+                           (sort updated #'string-lessp))))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-thread-page-search-failures-allow-retry ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let* ((thread
+            '((id . "t1") (guild_id . "g1") (type . 11)
+              (last_message_id . "m1")))
+           (threads (list thread))
+           (calls 0))
+      (unwind-protect
+          (progn
+            (disco-state-upsert-channel thread)
+            (cl-letf
+                (((symbol-function
+                   'disco-api-guild-search-messages-async)
+                  (lambda (_guild-id &rest args)
+                    (cl-incf calls)
+                    (pcase calls
+                      (1
+                       (funcall
+                        (plist-get args :on-success)
+                        '((code . 110000)
+                          (message . "Index not yet available")
+                          (retry_after . 1))))
+                      (2
+                       (funcall
+                        (plist-get args :on-error)
+                        '(:status 503)))))))
+              (should
+               (disco-preview-request-thread-page "g1" threads))
+              (should-not
+               (gethash
+                "t1"
+                disco-preview--requested-message-id-by-channel))
+              (should
+               (disco-preview-request-thread-page "g1" threads))
+              (should-not
+               (gethash
+                "t1"
+                disco-preview--requested-message-id-by-channel))
+              (should
+               (disco-preview-request-thread-page "g1" threads))
+              (should (= 3 calls))
+              (should
+               (equal
+                "m1"
+                (gethash
+                 "t1"
+                 disco-preview--requested-message-id-by-channel)))))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-thread-page-search-ignores-callback-after-reset ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let* ((thread
+            '((id . "t1") (guild_id . "g1") (type . 11)
+              (last_message_id . "m1")))
+           (threads (list thread))
+           callback
+           updated)
+      (unwind-protect
+          (progn
+            (disco-state-upsert-channel thread)
+            (let ((disco-preview-update-hook
+                   (list (lambda (_channel-id) (setq updated t)))))
+              (cl-letf
+                  (((symbol-function
+                     'disco-api-guild-search-messages-async)
+                    (lambda (_guild-id &rest args)
+                      (setq callback (plist-get args :on-success)))))
+                (should
+                 (disco-preview-request-thread-page "g1" threads))
+                (disco-preview-reset)
+                (funcall
+                 callback
+                 '((messages .
+                    ((((id . "m1")
+                       (channel_id . "t1")
+                       (content . "stale session")))))))))
+            (should-not updated)
+            (should-not (disco-state-messages "t1")))
+        (disco-state-reset)))))
+
+(ert-deftest disco-preview-guild-thread-row-does-not-queue-opcode-34 ()
+  (disco-preview-test--with-state
+    (disco-state-reset)
+    (let ((thread
+           '((id . "t1") (guild_id . "g1") (type . 11)
+             (last_message_id . "m1"))))
+      (unwind-protect
+          (progn
+            (disco-state-upsert-channel thread)
+            (cl-letf (((symbol-function 'disco-preview--enqueue-channel-id)
+                       (lambda (&rest _args)
+                         (ert-fail "thread row queued Gateway hydration")))
+                      ((symbol-function 'disco-preview--schedule)
+                       (lambda ()
+                         (ert-fail "thread row scheduled Gateway hydration"))))
+              (should-not (disco-preview-request-channel thread)))
+            (should (= 0 (hash-table-count
+                          disco-preview--requested-message-id-by-channel)))
+            (should (= 0 (hash-table-count
+                          disco-preview--pending-by-guild))))
+        (disco-state-reset)))))
+
 (ert-deftest disco-preview-request-channel-waits-for-gateway-ready ()
   (disco-preview-test--with-state
     (let ((running nil)

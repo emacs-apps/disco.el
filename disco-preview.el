@@ -5,10 +5,12 @@
 ;;; Commentary:
 
 ;; Owns hydration of channels whose `last_message_id' is known but whose message
-;; object is absent from local state.  Guild channels use Discord client Gateway
-;; opcode 34 (Request Last Messages), grouped into batches by guild.  Private
-;; channels use Discord's Preload Messages endpoint in batches of up to 100.
-;; Both paths accept only an exact `last_message_id' match.
+;; object is absent from local state.  Ordinary guild channels use Discord
+;; client Gateway opcode 34 (Request Last Messages), grouped into batches by
+;; guild.  Timeline thread pages use one best-effort guild message search per
+;; loaded page.  Private channels use Discord's Preload Messages endpoint in
+;; batches of up to 100.  Every path accepts only an exact `last_message_id'
+;; match.
 
 ;;; Code:
 
@@ -40,6 +42,9 @@
 
 (defconst disco-preview--gateway-batch-limit 100
   "Maximum channel IDs accepted by one Gateway opcode 34 request.")
+
+(defconst disco-preview--thread-page-search-limit 25
+  "Maximum messages requested for one timeline thread page preview search.")
 
 (defvar disco-preview--timer nil
   "Timer scheduled to flush pending channel preview requests.")
@@ -217,8 +222,8 @@
         (puthash channel-id message index)))
     index))
 
-(defun disco-preview--hydrate-private-entry (entry response-index)
-  "Hydrate one private preview request ENTRY from RESPONSE-INDEX.
+(defun disco-preview--hydrate-exact-entry (entry message)
+  "Hydrate request ENTRY from exact candidate MESSAGE.
 
 Return the channel ID only when a previously absent exact message was cached."
   (let* ((channel-id (plist-get entry :channel-id))
@@ -232,16 +237,40 @@ Return the channel ID only when a previously absent exact message was cached."
           (and channel
                (disco-msg-normalize-id
                 (alist-get 'last_message_id channel))))
-         (message (gethash channel-id response-index)))
+         (response-channel-id
+          (and (listp message)
+               (disco-msg-normalize-id
+                (alist-get 'channel_id message))))
+         (response-message-id
+          (and (listp message)
+               (disco-msg-normalize-id
+                (alist-get 'id message)))))
     (when (and (equal latest-request-id message-id)
                (equal current-message-id message-id)
                (not (disco-msg-channel-last-cached-message channel))
-               (equal message-id
-                      (disco-msg-normalize-id
-                       (and message (alist-get 'id message)))))
+               (equal channel-id response-channel-id)
+               (equal message-id response-message-id))
       (disco-state-merge-message-page channel-id (list message) revision)
       (when (disco-msg-channel-last-cached-message channel)
         channel-id))))
+
+(defun disco-preview--hydrate-private-entry (entry response-index)
+  "Hydrate one private preview request ENTRY from RESPONSE-INDEX."
+  (disco-preview--hydrate-exact-entry
+   entry
+   (gethash (plist-get entry :channel-id) response-index)))
+
+(defun disco-preview--clear-request-entries (entries)
+  "Release ENTRIES whose requested message IDs are still current."
+  (dolist (entry entries)
+    (let ((channel-id (plist-get entry :channel-id))
+          (message-id (plist-get entry :message-id)))
+      (when (equal message-id
+                   (gethash
+                    channel-id
+                    disco-preview--requested-message-id-by-channel))
+        (remhash channel-id
+                 disco-preview--requested-message-id-by-channel)))))
 
 (defun disco-preview--finish-private-request
     (generation entries messages failed-p)
@@ -256,18 +285,10 @@ response.  FAILED-P is non-nil when the transport failed."
                (equal entries (plist-get request :entries)))
       (setq disco-preview--in-flight-private nil)
       (if failed-p
-          (dolist (entry entries)
-            (let ((channel-id (plist-get entry :channel-id))
-                  (message-id (plist-get entry :message-id)))
-              (when (equal message-id
-                           (gethash
-                            channel-id
-                            disco-preview--requested-message-id-by-channel))
-                ;; A later render may retry a transport failure.  Successful
-                ;; omissions remain deduplicated because the server has already
-                ;; answered for this exact `last_message_id'.
-                (remhash channel-id
-                         disco-preview--requested-message-id-by-channel))))
+          ;; A later render may retry a transport failure.  Successful
+          ;; omissions remain deduplicated because the server has already
+          ;; answered for this exact `last_message_id'.
+          (disco-preview--clear-request-entries entries)
         (let ((response-index
                (disco-preview--private-response-index messages)))
           (dolist (entry entries)
@@ -308,6 +329,144 @@ response.  FAILED-P is non-nil when the transport failed."
                (disco-preview--finish-private-request
                 generation entries nil t)))))))))
 
+(defun disco-preview--thread-page-request-entries (guild-id threads)
+  "Reserve missing preview requests for THREADS in GUILD-ID.
+
+Return immutable request entries in page order."
+  (let ((seen (make-hash-table :test #'equal))
+        entries)
+    (dolist (thread (and (listp threads) threads))
+      (when-let* ((channel-id
+                   (and (listp thread)
+                        (disco-msg-normalize-id (alist-get 'id thread))))
+                  (channel (disco-state-channel channel-id))
+                  (message-id
+                   (disco-msg-normalize-id
+                    (alist-get 'last_message_id channel))))
+        (let ((channel-guild-id
+               (disco-msg-normalize-id (alist-get 'guild_id channel)))
+              (requested-id
+               (gethash
+                channel-id
+                disco-preview--requested-message-id-by-channel)))
+          (when (and (not (gethash channel-id seen))
+                     (equal guild-id channel-guild-id)
+                     (disco-channel-thread-p channel)
+                     (not (disco-msg-channel-last-cached-message channel))
+                     (not (equal requested-id message-id)))
+            (puthash channel-id t seen)
+            (puthash channel-id message-id
+                     disco-preview--requested-message-id-by-channel)
+            (push (list :channel-id channel-id
+                        :message-id message-id
+                        :revision
+                        (disco-state-message-revision channel-id))
+                  entries)))))
+    (nreverse entries)))
+
+(defun disco-preview--flatten-search-messages (groups)
+  "Flatten Discord nested search message GROUPS."
+  (let (messages)
+    (dolist (group (and (listp groups) groups))
+      (cond
+       ((and (listp group) (assq 'id group))
+        (push group messages))
+       ((listp group)
+        (dolist (message group)
+          (when (and (listp message) (assq 'id message))
+            (push message messages))))))
+    (nreverse messages)))
+
+(defun disco-preview--thread-page-response-index (entries groups)
+  "Index exact preview messages for ENTRIES from search GROUPS."
+  (let ((entry-index (make-hash-table :test #'equal))
+        (response-index (make-hash-table :test #'equal)))
+    (dolist (entry entries)
+      (puthash (plist-get entry :channel-id) entry entry-index))
+    (dolist (message (disco-preview--flatten-search-messages groups))
+      (let* ((channel-id
+              (disco-msg-normalize-id (alist-get 'channel_id message)))
+             (message-id
+              (disco-msg-normalize-id (alist-get 'id message)))
+             (entry (and channel-id (gethash channel-id entry-index))))
+        (when (and entry
+                   (equal message-id (plist-get entry :message-id)))
+          (puthash channel-id message response-index))))
+    response-index))
+
+(defun disco-preview--thread-page-search-result-p (result)
+  "Return non-nil when RESULT is a completed message search response."
+  (and (listp result)
+       (not (equal (alist-get 'code result) 110000))
+       (assq 'messages result)))
+
+(defun disco-preview--finish-thread-page-request
+    (generation entries result failed-p)
+  "Finish one timeline thread page preview request.
+
+GENERATION and ENTRIES identify the request.  RESULT is the guild search
+response.  FAILED-P is non-nil for transport, indexing, or malformed-response
+failures."
+  (when (= generation disco-preview--generation)
+    (if failed-p
+        (disco-preview--clear-request-entries entries)
+      (let ((response-index
+             (disco-preview--thread-page-response-index
+              entries (alist-get 'messages result))))
+        (dolist (entry entries)
+          (when-let* ((channel-id
+                       (disco-preview--hydrate-exact-entry
+                        entry
+                        (gethash
+                         (plist-get entry :channel-id)
+                         response-index))))
+            (run-hook-with-args 'disco-preview-update-hook channel-id)))))))
+
+(defun disco-preview-request-thread-page (guild-id threads)
+  "Hydrate timeline THREADS with one best-effort search in GUILD-ID.
+
+Only messages whose `channel_id' and `id' exactly match a thread's current
+`last_message_id' are cached.  A successful omission stays deduplicated until
+that ID changes.  Failed searches may be retried by a later page refresh.
+Return non-nil when a search was started."
+  (when disco-preview-fetch-enabled
+    (when-let* ((guild-id (disco-msg-normalize-id guild-id))
+                (entries
+                 (disco-preview--thread-page-request-entries
+                  guild-id threads)))
+      (let ((generation disco-preview--generation)
+            settled)
+        (condition-case nil
+            (progn
+              (disco-api-guild-search-messages-async
+               guild-id
+               :limit disco-preview--thread-page-search-limit
+               :sort-by 'timestamp
+               :sort-order 'desc
+               :channel-ids
+               (mapcar
+                (lambda (entry) (plist-get entry :channel-id))
+                entries)
+               :on-success
+               (lambda (result)
+                 (unless settled
+                   (setq settled t)
+                   (disco-preview--finish-thread-page-request
+                    generation entries result
+                    (not
+                     (disco-preview--thread-page-search-result-p result)))))
+               :on-error
+               (lambda (_error-value)
+                 (unless settled
+                   (setq settled t)
+                   (disco-preview--finish-thread-page-request
+                    generation entries nil t))))
+              t)
+          (error
+           (setq settled t)
+           (disco-preview--clear-request-entries entries)
+           nil))))))
+
 (defun disco-preview-request-channel (channel)
   "Queue CHANNEL preview hydration.
 
@@ -328,6 +487,11 @@ Return non-nil when CHANNEL was newly queued."
                  (not (disco-msg-channel-last-cached-message channel))
                  (not (equal requested-id message-id)))
         (cond
+         ((and guild-id (disco-channel-thread-p channel))
+          ;; Timeline threads are hydrated once per loaded parent page through
+          ;; `disco-preview-request-thread-page'.  Opcode 34 returns no messages
+          ;; for these thread channel IDs.
+          nil)
          (guild-id
           (puthash channel-id message-id
                    disco-preview--requested-message-id-by-channel)

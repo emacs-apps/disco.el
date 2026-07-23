@@ -2760,15 +2760,14 @@
           (should-not queued)))
     (disco-state-reset)))
 
-(ert-deftest disco-root-timeline-thread-preview-hydrates-latest-message ()
+(ert-deftest disco-root-timeline-thread-preview-uses-page-hydrated-message ()
   (disco-state-reset)
   (unwind-protect
       (let ((thread '((id . "th1")
                       (guild_id . "g1")
                       (type . 11)
                       (parent_id . "text1")
-                      (last_message_id . "latest")))
-            queued)
+                      (last_message_id . "latest"))))
         (disco-state-upsert-channel
          '((id . "text1") (guild_id . "g1") (type . 0)))
         (disco-state-upsert-channel thread)
@@ -2779,16 +2778,16 @@
            (content . "starter preview")
            (author . ((username . "alice")))))
         (cl-letf (((symbol-function 'disco-preview-request-channel)
-                   (lambda (channel)
-                     (push (alist-get 'id channel) queued))))
+                   (lambda (_channel)
+                     (ert-fail
+                      "timeline thread row requested per-channel hydration"))))
           (let* ((channel (disco-state-channel "th1"))
                  (scope (disco-root--thread-directory-scope channel)))
             (should (eq 'timeline-thread scope))
             (should
              (equal ""
                     (appkit-view-one-line-row-preview
-                     (disco-root--channel-one-line-row channel scope))))
-            (should (equal '("th1") queued))))
+                     (disco-root--channel-one-line-row channel scope))))))
         (disco-state-upsert-message
          "th1"
          '((id . "latest")

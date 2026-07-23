@@ -15,6 +15,7 @@
 (require 'disco-customize)
 (require 'disco-gateway)
 (require 'disco-permission)
+(require 'disco-preview)
 (require 'disco-state)
 (require 'disco-thread)
 (require 'disco-util)
@@ -437,6 +438,9 @@ next page automatically."
                         :next-cursor (and has-more next-cursor)
                         :total next-total)
                   disco-directory--parent-thread-state)
+                 (unless (disco-channel-thread-only-parent-p
+                          (disco-state-channel parent-id))
+                   (disco-preview-request-thread-page guild-id page))
                  (disco-directory--emit-parent-thread-state
                   parent-id 'parent-threads-loaded)))
            (error

@@ -13,6 +13,15 @@
    "guild" '(((id . "forum") (guild_id . "guild") (type . 15)
                (permissions . "1024")))))
 
+(defun disco-directory-test--seed-visible-text-parent ()
+  "Reset directory state and install one accessible text parent."
+  (disco-state-reset)
+  (disco-directory-reset)
+  (disco-state-set-guilds '(((id . "guild") (name . "Guild"))))
+  (disco-state-put-channels
+   "guild" '(((id . "chat") (guild_id . "guild") (type . 0)
+               (permissions . "1024")))))
+
 (ert-deftest disco-directory-index-refresh-does-not-hydrate-guilds ()
   (disco-state-reset)
   (disco-directory-reset)
@@ -249,6 +258,9 @@
                              (content . "preview"))))
                         (has_more . t)
                         (total_results . 2)))))))
+              ((symbol-function 'disco-preview-request-thread-page)
+               (lambda (&rest _args)
+                 (ert-fail "forum posts requested latest-message search")))
               (disco-directory-event-hook
                (list (lambda (event) (push (plist-get event :type) events)))))
       (should (eq 'loading
@@ -279,6 +291,41 @@
                        parent-threads-loading
                        parent-threads-loaded)
                      (nreverse events))))))
+
+(ert-deftest disco-directory-timeline-thread-page-requests-one-preview-batch ()
+  (disco-directory-test--seed-visible-text-parent)
+  (let (preview-request)
+    (cl-letf
+        (((symbol-function 'disco-api-channel-search-threads-async)
+          (lambda (_parent-id &rest args)
+            (funcall
+             (plist-get args :on-success)
+             '((threads .
+                (((id . "t1")
+                  (parent_id . "chat")
+                  (type . 11)
+                  (last_message_id . "m1"))
+                 ((id . "t2")
+                  (parent_id . "chat")
+                  (type . 11)
+                  (last_message_id . "m2"))))
+               (has_more . :false)
+               (total_results . 2)))))
+         ((symbol-function 'disco-preview-request-thread-page)
+          (lambda (guild-id threads)
+            (setq preview-request
+                  (list guild-id
+                        (mapcar
+                         (lambda (thread) (alist-get 'id thread))
+                         threads))))))
+      (should (eq 'loading
+                  (disco-directory-load-parent-threads-async "chat")))
+      (should (equal '("guild" ("t1" "t2")) preview-request))
+      (should
+       (equal '("t1" "t2")
+              (plist-get
+               (disco-directory-parent-threads-state "chat")
+               :thread-ids))))))
 
 (ert-deftest disco-directory-parent-thread-load-coalesces-and-force-supersedes ()
   (disco-directory-test--seed-visible-forum)
