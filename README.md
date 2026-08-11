@@ -78,7 +78,7 @@ This repository currently contains an MVP scaffold designed with these reference
 - Emacs 27.1+
 - `plz` (required): HTTP transport backend
 - `websocket` (required): Discord Gateway websocket transport
-- `appkit` (required): shared view, chat, presentation, and media runtime
+- `appkit` 0.2.2+ (required): shared view, chat, presentation, and media runtime
 
 ## File Layout
 

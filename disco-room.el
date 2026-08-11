@@ -1723,12 +1723,6 @@ dead view never degrades this guard to channel identity alone."
        (car bounds) (cdr bounds)
        '(disco-room-input t)))))
 
-(defun disco-room--update-context-mode ()
-  "Enable timeline bindings only when point is outside the room draft."
-  (let ((timeline-p (not (appkit-chatbuf-point-in-input-p))))
-    (unless (eq disco-room-timeline-mode timeline-p)
-      (disco-room-timeline-mode (if timeline-p 1 -1)))))
-
 (defun disco-room--maybe-auto-load-older ()
   "Load older channel history when point approaches the timeline top."
   (when (and disco-room--channel-id
@@ -1767,12 +1761,8 @@ visible end for both selected and inactive room windows."
           (disco-room--maybe-auto-load-newer position))))))
 
 (defun disco-room--post-command ()
-  "Keep point out of prompt glyphs and hide revealed spoilers when leaving a row."
+  "Maintain Disco-specific row and history behavior after each command."
   (unless (appkit-chatbuf-rendering-p)
-    (appkit-chatbuf-post-command-clamp-point)
-    (when (and (appkit-chatbuf-point-in-input-p)
-               (appkit-chatbuf-input-has-objects-p))
-      (appkit-chatbuf-input-prune-broken-objects))
     (let ((current-message-id (or (get-text-property (point) 'disco-message-id)
                                   (get-text-property (line-beginning-position)
                                                      'disco-message-id))))
@@ -1784,7 +1774,6 @@ visible end for both selected and inactive room windows."
           (when-let* ((view (appkit-current-view)))
             (when (appkit-view-live-p view)
               (appkit-request-sync view :entry previous))))))
-    (disco-room--update-context-mode)
     (disco-room--maybe-auto-load-newer)
     (disco-room--maybe-auto-load-older)))
 
@@ -1794,15 +1783,6 @@ visible end for both selected and inactive room windows."
                          :value)))
     (disco-room--prune-unused-attachment-tokens text)
     (disco-room--sync-pending-attachments-from-draft text)))
-
-(defun disco-room--after-change (beg end old-len)
-  "Keep draft state synced after editable-region changes from BEG to END."
-  (appkit-chatbuf-after-change
-   beg end
-   :old-length old-len
-   :rendering-p (appkit-chatbuf-rendering-p)
-   :prune-broken-objects t
-   :sync-function #'disco-room--sync-draft-from-buffer))
 
 (cl-defun disco-room--apply-draft-state
     (text &key reset-history-p defer-live-update-p)
@@ -5103,7 +5083,7 @@ current effective input-options state.  Return the normalized state plist."
    :anchor-property 'disco-message-id
    :header (disco-room--header-text channel)
    :footer (disco-room--footer-text draft)
-   :after-mutation-function #'disco-room--update-context-mode))
+   :after-mutation-function #'appkit-chatbuf-update-context-mode))
 
 (defun disco-room--view-id ()
   "Return the opaque appkit view id for the current room."
@@ -5435,7 +5415,7 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
               (when logical-end
                 (goto-char logical-end)))))
       (disco-media-set-preview-fetch-budget nil)
-      (disco-room--update-context-mode))))
+      (appkit-chatbuf-update-context-mode))))
 
 (defun disco-room-refresh ()
   "Fetch and redraw latest messages for current room asynchronously."
@@ -7950,10 +7930,6 @@ _MSG is ignored because the transient resolves availability from point."
     (define-key map (kbd "C-c p") #'disco-room-search-prev)
     (define-key map (kbd "C-c m") disco-room-message-prefix-map)
     (define-key map (kbd "RET") #'disco-room-return-dwim)
-    (define-key map (kbd "DEL") #'appkit-chatbuf-input-backward-delete)
-    (define-key map (kbd "<backspace>") #'appkit-chatbuf-input-backward-delete)
-    (define-key map (kbd "C-d") #'appkit-chatbuf-input-forward-delete)
-    (define-key map (kbd "<delete>") #'appkit-chatbuf-input-forward-delete)
     (define-key map (kbd "M-RET") #'disco-room-input-preview)
     (define-key map (kbd "C-c '") #'disco-room-edit-draft)
     (define-key map (kbd "M-p") #'disco-room-draft-prev)
@@ -8070,9 +8046,8 @@ its same-mode buffer survives."
   (setq-local disco-room--live-update-handle nil)
   (funcall #'disco-company-setup-room-buffer))
 
-(define-derived-mode disco-room-mode nil "Disco-Room"
+(define-derived-mode disco-room-mode appkit-chatbuf-mode "Disco-Room"
   "Major mode for disco.el room buffers."
-  (appkit-chatbuf-mode-setup)
   (disco-room--apply-breakline-settings)
   ;; Avoid visible seams between vertically sliced inline images.
   (setq-local line-spacing 0)
@@ -8080,13 +8055,14 @@ its same-mode buffer survives."
   (setq-local filter-buffer-substring-function
               #'disco-room--buffer-substring-filter)
   (disco-room--reset-view-local-state)
+  (setq-local appkit-chatbuf-input-sync-function
+              #'disco-room--sync-draft-from-buffer)
   (add-hook 'window-size-change-functions #'disco-room--on-window-size-change nil t)
   (add-hook 'display-line-numbers-mode-hook #'disco-room--on-window-size-change nil t)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
-  (add-hook 'after-change-functions #'disco-room--after-change nil t)
-  (add-hook 'post-command-hook #'disco-room--post-command nil t)
+  (add-hook 'post-command-hook #'disco-room--post-command t t)
   (add-hook 'window-scroll-functions #'disco-room--window-scroll nil t)
-  (disco-room--update-context-mode))
+  (appkit-chatbuf-use-timeline-mode #'disco-room-timeline-mode))
 
 (defun disco-room-open (channel-id channel-name)
   "Open room for CHANNEL-ID with CHANNEL-NAME and return its actual buffer."
