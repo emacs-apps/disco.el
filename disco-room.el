@@ -94,7 +94,6 @@ This is a search boundary, not the remote/latest protocol frontier.")
 (defvar-local disco-room--filter-in-flight nil)
 (defvar-local disco-room--inplace-search-filter nil)
 (defvar-local disco-room--inplace-search-generation 0)
-(defvar-local disco-room--chat-fill-column nil)
 (defvar-local disco-room--pending-attachments nil)
 (defvar-local disco-room--attachment-token-table nil)
 (defvar-local disco-room--attachment-token-seq 0)
@@ -2635,46 +2634,8 @@ Returns nil when left blank."
   "Build room buffer name for CHANNEL-NAME and CHANNEL-ID."
   (format "*disco:%s (%s)*" channel-name channel-id))
 
-(defun disco-room--render-window ()
-  "Return best live window currently displaying this room buffer."
-  (let ((best nil)
-        (best-width -1))
-    (dolist (win (get-buffer-window-list (current-buffer) nil t) best)
-      (let ((width (if (window-live-p win)
-                       (window-width win 'remap)
-                     -1)))
-        (when (> width best-width)
-          (setq best win)
-          (setq best-width width))))))
-
-(defun disco-room--compute-chat-fill-column (&optional win)
-  "Compute telega-like chat fill column for WIN.
-
-When WIN is nil, use best room window from `disco-room--render-window'."
-  (appkit-view-window-fill-column
-   (or win (disco-room--render-window))
-   disco-room-auto-fill-margin-columns))
-
-(defun disco-room--update-chat-fill-column (&optional win)
-  "Refresh cached chat fill column from WIN or current room window."
-  (let ((next (disco-room--compute-chat-fill-column win)))
-    (when (numberp next)
-      (setq-local disco-room--chat-fill-column next))
-    next))
-
-(defun disco-room--on-window-size-change (&optional _frame)
-  "Recompute geometry state and request projection after window size changes."
-  (when (eq major-mode 'disco-room-mode)
-    (let ((old disco-room--chat-fill-column)
-          (next (disco-room--update-chat-fill-column))
-          (view (appkit-current-view)))
-      (when (and (numberp next)
-                 (not (equal old next))
-                 (appkit-view-live-p view))
-        (appkit-request-sync view :part 'geometry)))))
-
 (defun disco-room--line-fill-column ()
-  "Return target fill column for current message line."
+  "Return target fill column for the current message line."
   (or (and (bound-and-true-p visual-fill-column-mode)
            (integerp disco-room-fill-column)
            (> disco-room-fill-column 0)
@@ -2683,10 +2644,8 @@ When WIN is nil, use best room window from `disco-room--render-window'."
            (integerp fill-column)
            (> fill-column 0)
            fill-column)
-      (and (integerp disco-room--chat-fill-column)
-           (> disco-room--chat-fill-column 0)
-           disco-room--chat-fill-column)
-      (disco-room--update-chat-fill-column)
+      (appkit-view-responsive-width disco-room-auto-fill-margin-columns)
+      (and (integerp fill-column) (> fill-column 0) fill-column)
       80))
 
 (defun disco-room--insert-right-aligned-text (text &optional face left-prefix-width)
@@ -3109,13 +3068,10 @@ No Appkit invalidation is requested."
      (disco-room--refresh-open-rooms))))
 
 (defun disco-room--on-text-scale-change ()
-  "Update geometry state after `text-scale-mode' changes."
+  "Retire cached preview images after `text-scale-mode' changes."
   (when (eq major-mode 'disco-room-mode)
-    ;; Text scale affects remapped widths; invalidate cached fill column.
-    (setq-local disco-room--chat-fill-column nil)
-    ;; Recreate image objects from cache files so resized previews track text scale.
-    (disco-media-clear-preview-memory-cache)
-    (disco-room--refresh-open-rooms)))
+    ;; Appkit's responsive geometry hook owns the coalesced row redraw.
+    (disco-media-clear-preview-memory-cache)))
 
 (defun disco-room--buffer-substring-filter (beg end delete)
   "Copy region BEG..END while stripping display-only prefix properties."
@@ -5070,7 +5026,7 @@ current effective input-options state.  Return the normalized state plist."
    (unless (disco-room--msg-filter-active-p)
      (concat
       (appkit-chat-history-delimiter-string
-       (max 1 (or disco-room--chat-fill-column fill-column 80))
+       (max 1 (disco-room--line-fill-column))
        :loading-text "loading…")
       "\n"))
    (disco-room--input-footer-text)))
@@ -5133,39 +5089,42 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
   "Return the live appkit view owning the current room buffer."
   (let* ((app (disco-runtime-app))
          (id (disco-room--view-id))
-         (current (appkit-current-view)))
-    (cond
-     ((and (appkit-view-live-p current)
-           (eq app (appkit-view-app current))
-           (equal id (appkit-view-id current)))
-      (setf (appkit-view-state current) disco-room--channel-id
-            (appkit-view-sync-function current)
-            #'disco-room--sync-invalidations)
-      current)
-     ((appkit-view-live-p current)
-      (error "disco: room buffer belongs to a different appkit view"))
-     (t
-      (let* ((channel-id disco-room--channel-id)
-             (channel-name disco-room--channel-name)
-             (replacement-p
-              (and (boundp 'appkit--view-fingerprint)
-                   appkit--view-fingerprint))
-             (view
-              (appkit-attach-view
-               :app app
-               :id id
-               :state channel-id
-               :mode 'disco-room-mode
-               :sync-function #'disco-room--sync-invalidations
-               :parts '(frame timeline composer geometry))))
-        ;; A same-mode buffer may outlive its previous Appkit view.  Ad-hoc
-        ;; commands can reach this branch before `disco-room-open', so perform
-        ;; the same replacement reset that open's setup callback would own.
-        ;; Otherwise the newly attached view could inherit the dead view's
-        ;; draft, request owners, generations, and optimistic send state.
-        (when replacement-p
-          (disco-room--reset-view-local-state channel-id channel-name))
-        view)))))
+         (current (appkit-current-view))
+         (view
+          (cond
+           ((and (appkit-view-live-p current)
+                 (eq app (appkit-view-app current))
+                 (equal id (appkit-view-id current)))
+            (setf (appkit-view-state current) disco-room--channel-id
+                  (appkit-view-sync-function current)
+                  #'disco-room--sync-invalidations
+                  (appkit-view-parts current)
+                  '(frame timeline composer geometry))
+            current)
+           ((appkit-view-live-p current)
+            (error "disco: room buffer belongs to a different appkit view"))
+           (t
+            (let* ((channel-id disco-room--channel-id)
+                   (channel-name disco-room--channel-name)
+                   (replacement-p
+                    (and (boundp 'appkit--view-fingerprint)
+                         appkit--view-fingerprint))
+                   (attached
+                    (appkit-attach-view
+                     :app app
+                     :id id
+                     :state channel-id
+                     :mode 'disco-room-mode
+                     :sync-function #'disco-room--sync-invalidations
+                     :parts '(frame timeline composer geometry))))
+              ;; A same-mode buffer may outlive its previous Appkit view.
+              ;; Replacements must not inherit dead controller state.
+              (when replacement-p
+                (disco-room--reset-view-local-state
+                 channel-id channel-name))
+              attached)))))
+    (appkit-view-enable-responsive-geometry view)
+    view))
 
 (defun disco-room--update-frame (&optional channel draft)
   "Update current room header, footer, and composer in place."
@@ -8027,7 +7986,6 @@ its same-mode buffer survives."
   (setq-local disco-room--filter-in-flight nil)
   (setq-local disco-room--inplace-search-filter nil)
   (setq-local disco-room--inplace-search-generation 0)
-  (setq-local disco-room--chat-fill-column nil)
   (setq-local disco-room--pending-attachments nil)
   (setq-local disco-room--attachment-token-table (make-hash-table :test #'equal))
   (setq-local disco-room--attachment-token-seq 0)
@@ -8057,8 +8015,6 @@ its same-mode buffer survives."
   (disco-room--reset-view-local-state)
   (setq-local appkit-chatbuf-input-sync-function
               #'disco-room--sync-draft-from-buffer)
-  (add-hook 'window-size-change-functions #'disco-room--on-window-size-change nil t)
-  (add-hook 'display-line-numbers-mode-hook #'disco-room--on-window-size-change nil t)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command t t)
   (add-hook 'window-scroll-functions #'disco-room--window-scroll nil t)
@@ -8095,7 +8051,7 @@ its same-mode buffer survives."
         (disco-room-refresh)))
     (pop-to-buffer buf)
     (with-current-buffer buf
-      (disco-room--on-window-size-change))
+      (appkit-view-refresh-responsive-geometry))
     buf))
 
 (provide 'disco-room)
