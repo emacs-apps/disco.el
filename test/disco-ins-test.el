@@ -294,19 +294,26 @@
             (should (eq owner played-owner))))
       (ignore-errors (delete-file video-file)))))
 
-(ert-deftest disco-ins-insert-attachment-transfer-line-renders-status-only ()
+(ert-deftest disco-ins-insert-attachment-transfer-line-renders-control ()
   (with-temp-buffer
-    (cl-letf (((symbol-function 'disco-media-attachment-download-state)
-               (lambda (_attachment)
-                 '(:status downloading :path "/tmp/track.mp3"))))
+    (let (canceled)
+      (cl-letf (((symbol-function 'disco-media-attachment-download-state)
+                 (lambda (_attachment)
+                   '(:status downloading :path "/tmp/track.mp3")))
+                ((symbol-function 'disco-media-cancel-attachment-download)
+                 (lambda (_attachment) (setq canceled t))))
         (disco-ins-insert-attachment-transfer-line
          '((content_type . "audio/mpeg")
            (filename . "track.mp3")
            (url . "https://example.invalid/track.mp3"))
          :prefix "    ")
-      (should (string-match-p "downloading" (buffer-string)))
-      (should-not (string-match-p (regexp-quote "[Play]") (buffer-string)))
-      (should-not (string-match-p (regexp-quote "[Cancel]") (buffer-string))))))
+        (should (string-match-p "\\[          \\]" (buffer-string)))
+        (should (string-match-p (regexp-quote "[Cancel]") (buffer-string)))
+        (should-not (string-match-p (regexp-quote "[Play]") (buffer-string)))
+        (goto-char (point-min))
+        (search-forward "[Cancel]")
+        (push-button (match-beginning 0))
+        (should canceled)))))
 
 (ert-deftest disco-ins-insert-attachment-audio-renders-inline-controls-and-waveform ()
   (with-temp-buffer
