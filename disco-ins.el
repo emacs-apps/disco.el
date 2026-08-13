@@ -178,16 +178,27 @@ telega; otherwise fall back to a text placeholder line."
           (appkit-ui-append-face start (point) line-face))
         (cons start (point))))))
 
-(cl-defun disco-ins-insert-attachment-transfer-line (attachment &key prefix face)
-  "Insert compact transfer status for ATTACHMENT.
+(defun disco-ins-attachment-transfer (attachment)
+  "Return Appkit transfer control spec for ATTACHMENT, or nil."
+  (let ((state (disco-media-attachment-download-state attachment)))
+    (when (eq (plist-get state :status) 'downloading)
+      (list :direction 'download
+            :state 'active
+            :action (lambda ()
+                      (disco-media-cancel-attachment-download attachment))
+            :action-label "Cancel"
+            :help-echo "Cancel this download"))))
 
-Open/play/download/save actions now live on the card context and its transient;
-only meaningful transfer state remains inline."
-  (appkit-chat-ins-insert-media-status-line
-   (appkit-chat-ins-media-transfer-status-text
-    (disco-media-attachment-download-state attachment))
-   :prefix (or prefix "    ")
-   :face face))
+(cl-defun disco-ins-insert-attachment-transfer-line (attachment &key prefix face)
+  "Insert transfer control or terminal status for ATTACHMENT."
+  (if-let* ((transfer (disco-ins-attachment-transfer attachment)))
+      (apply #'appkit-chat-ins-insert-transfer
+             :prefix (or prefix "    ") :face face transfer)
+    (appkit-chat-ins-insert-media-status-line
+     (appkit-chat-ins-media-transfer-status-text
+      (disco-media-attachment-download-state attachment))
+     :prefix (or prefix "    ")
+     :face face)))
 
 (cl-defun disco-ins-insert-attachment-preview-block
     (attachment &key prefix face kind required owner)
@@ -283,8 +294,10 @@ be shown yet.  OWNER is captured by an external video playback action."
      :title name
      :details details
      :meta meta-parts
-     :status (appkit-chat-ins-media-transfer-status-text
-              (disco-media-attachment-download-state attachment))
+     :status (unless (disco-ins-attachment-transfer attachment)
+               (appkit-chat-ins-media-transfer-status-text
+                (disco-media-attachment-download-state attachment)))
+     :transfer (disco-ins-attachment-transfer attachment)
      :prefix prefix
      :border-face border-face
      :title-face title-face
@@ -329,8 +342,10 @@ be shown yet.  OWNER is captured by an external video playback action."
      :kind 'photo
      :title name
      :meta meta-parts
-     :status (appkit-chat-ins-media-transfer-status-text
-              (disco-media-attachment-download-state attachment))
+     :status (unless (disco-ins-attachment-transfer attachment)
+               (appkit-chat-ins-media-transfer-status-text
+                (disco-media-attachment-download-state attachment)))
+     :transfer (disco-ins-attachment-transfer attachment)
      :prefix prefix
      :border-face border-face
      :title-face title-face
@@ -377,8 +392,10 @@ OWNER is the exact Appkit app or view captured by every play action."
      :kind 'video
      :title name
      :details details
-     :status (appkit-chat-ins-media-transfer-status-text
-              (disco-media-attachment-download-state attachment))
+     :status (unless (disco-ins-attachment-transfer attachment)
+               (appkit-chat-ins-media-transfer-status-text
+                (disco-media-attachment-download-state attachment)))
+     :transfer (disco-ins-attachment-transfer attachment)
      :prefix prefix
      :border-face border-face
      :title-face title-face
