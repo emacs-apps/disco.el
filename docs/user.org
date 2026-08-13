@@ -1,0 +1,230 @@
+#+title: disco.el user guide
+#+options: toc:2 num:nil
+
+* Start
+
+The default token comes from ~DISCO_TOKEN~.  ~M-x disco-set-token~
+overrides it for the session.  ~M-x disco~ opens the root navigator.
+
+Enable optional presentation modes:
+
+#+begin_src emacs-lisp
+(disco-client-mode-line-mode 1)
+(disco-notifications-mode 1)
+#+end_src
+
+The mode line shows clickable unread and mention status.
+Notifications are delayed and visibility-aware.
+
+* Root
+
+Root is summary-first: guild and DM indexes load without a per-guild
+REST fan-out.  Opening a guild hydrates only that guild.  ~g~
+refreshes the index; ~C-u g~ refreshes every guild directory.
+
+| Key | Action |
+|-----+--------|
+| ~n~ / ~p~ / ~TAB~ | move |
+| ~RET~ | open |
+| ~u~ | unread navigation |
+| ~l~ | cycle layout |
+| ~L~ | choose a layout |
+| ~\~ | toggle sort |
+| ~v~ | cycle all / unread / DMs |
+| ~U~ | unread lens |
+| ~A~ | archived threads for the selected parent |
+
+Layouts: compact account home, an activity list, and custom layouts.
+Activity excludes thread rows by default; set
+~disco-root-activity-include-threads~ to include them.
+
+Private channels (DM, group DM, ephemeral DM) appear in root.  Guild
+channels without ~VIEW_CHANNEL~ are hidden.  Channel labels show
+unread state and mention badges ~[@N]~, not per-channel unread
+message counts.  ~[read]~ means the local cursor reached
+~last_message_id~.
+
+** Guild directories
+
+Directories use collapsible categories, text and unread lenses, and
+active-thread nesting under forum and media parents.
+
+| Key | Action |
+|-----+--------|
+| ~/~ | text lens |
+| ~U~ | unread lens |
+| ~RET~ / ~TAB~ | open a channel or toggle a category |
+| ~g~ | refresh the selected guild only |
+| ~A~ | archived-thread browser for a parent or child post |
+
+The first expansion of a forum or media parent fetches one active
+thread page.  ~Load more active posts~ advances one page.  A failed
+page keeps committed posts and the exact cursor.  Threads under
+ordinary text channels open from messages, references, or search;
+they are not inserted into the directory.
+
+** Archived threads
+
+| Key | Action |
+|-----+--------|
+| ~g~ | refresh from the first page |
+| ~n~ | next page |
+| ~RET~ | open the selected thread |
+
+Private archived sources are queried only with ~MANAGE_THREADS~.
+
+* Rooms
+
+Rooms use compact same-sender grouping, date separators, and an
+unread divider.  Grouped messages show an author header with a
+right-aligned time, then indented body and reply lines.
+
+The prompt and history are immutable.  Only the draft after ~>>>~ is
+editable.
+
+| Key | Action |
+|-----+--------|
+| ~RET~ / ~C-c RET~ | send |
+| ~C-c C-c~ | cancel an active message filter |
+| ~C-c '~ | edit the draft in another buffer |
+| ~M-p~ / ~M-n~ / ~M-r~ | draft history |
+| ~M-RET~ | parsed preview |
+| ~s~ then ~n~ / ~p~ | keyboard search |
+| ~C-c C-o~ | room input options |
+| ~C-c M-v~ | clear avatar cache and refetch |
+| ~?~ | room transient |
+
+History extends automatically near either visible edge.  ~M-<~ and
+~M->~ keep native beginning and end-of-buffer bindings.
+
+Live Gateway events update create, update, and delete.  The room
+closes if its channel or guild is deleted.
+
+** Composer
+
+~TAB~ completes ~@~, ~#~, and ~:~ tokens: guild members, roles,
+~@everyone~ / ~@here~, channels, Unicode emoji, and guild custom
+emoji.  Inserted text uses native Discord mention and emoji syntax.
+
+| Variable | Meaning |
+|----------+---------|
+| ~disco-room-enable-company-backend~ | optional company backend |
+| ~disco-company-show-user-avatars~ | avatars in completion rows |
+| ~disco-company-capf-avatar-size~ | stable completion row height |
+| ~disco-room-allowed-mentions~ | mention send policy |
+| ~disco-room-reply-mention-replied-user~ | whether a reply pings the author |
+
+~C-c C-e~ formatting and ~C-c C-v~ clipboard attach are reserved
+until fuller parity lands.
+
+** Attachments
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-a~ | attach menu |
+| ~C-c C-f~ | attach a file |
+| ~C-c C-d~ | remove the attachment at point |
+| ~C-c C-x~ | clear all attachments |
+| ~C-c M-l~ / ~C-c M-e~ / ~C-c M-r~ | list, edit, or reorder |
+
+Title and preview open or play the item.  An in-flight transfer
+control stays inline with Cancel.  Download, Save As, and Copy URL
+live in the message transient.  Audio keeps play, pause, and stop
+waveform controls inline.
+
+** Messages
+
+Timeline keys apply outside the composer:
+
+| Key | Action |
+|-----+--------|
+| ~n~ / ~p~ | next or previous message |
+| ~c~ | copy DWIM |
+| ~l~ | copy permalink |
+| ~o~ | message action transient |
+| ~r~ | reply |
+| ~C-c C-k~ | clear pending reply |
+| ~f~ | forward |
+| ~e~ | edit |
+| ~d~ | delete, with confirmation |
+| ~i~ | describe |
+| ~L~ | redisplay |
+| ~!~ | add reaction |
+| ~+~ | toggle reaction |
+| ~-~ | remove reaction |
+| ~T~ | open thread |
+
+Legacy ~C-c C-F~ still forwards.  In picker prompts, ~RET~ on empty
+input skips one side.  ~C-c m~ exposes the same message family.
+
+** Polls
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-p s~ | send a poll |
+| ~C-c C-p +~ / ~-~ / ~t~ | select, unselect, or toggle a staged answer |
+| ~C-c C-p v~ | submit the staged vote |
+| ~C-c C-p c~ | remove own vote |
+| ~C-c C-p e~ | end the poll |
+
+* Threads
+
+In a parent room:
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-t m~ | create from the message at point |
+| ~C-c C-t c~ | create a detached thread |
+| ~C-c C-t o~ | jump to the thread room |
+
+Message rows with starter threads show ~[Open thread]~.
+
+In a thread room:
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-j~ | join |
+| ~C-c C-l~ | leave |
+| ~C-c C-t a~ | toggle archived |
+| ~C-c C-t r~ | rename |
+| ~C-c C-t k~ | toggle locked |
+| ~C-c C-t s~ | slowmode |
+| ~C-c C-t A~ | auto-archive duration |
+| ~C-c C-t e~ | multi-field settings |
+| ~C-c C-t u~ | mute |
+
+* Observability
+
+| Command | Shows |
+|---------+-------|
+| ~M-x disco-describe-http-queue~ | queue limit, active, and pending |
+| ~M-x disco-describe-rate-limits~ | global, route, and bucket cooldowns |
+| ~M-x disco-describe-gateway~ | websocket, watches, resume, backoff |
+
+* Options
+
+| Variable | Meaning |
+|----------+---------|
+| ~disco-root-default-layout~ | starting root layout |
+| ~disco-root-custom-layouts~ | user layout specs |
+| ~disco-root-activity-include-threads~ | list threads in activity |
+| ~disco-root-activity-context-width~ | activity left-context width |
+| ~disco-root-activity-time-format-alist~ | activity timestamp buckets |
+| ~disco-root-week-start-day~ | week start for those buckets |
+| ~disco-root-activity-time-column-width~ | reserved time column |
+| ~disco-root-auto-fill-on-window-size-change~ | reflow on resize |
+| ~disco-root-auto-fill-margin-columns~ | extra right margin |
+| ~disco-root-extra-info-functions~ | extra row fragments |
+| ~disco-preview-fetch-enabled~ | opcode-34 preview hydration |
+| ~disco-preview-fetch-debounce~ | preview debounce |
+| ~disco-preview-response-timeout~ | preview timeout |
+| ~disco-gateway-version~ | Gateway API version, default v10 |
+| ~disco-gateway-transport-compression~ | ~zlib-stream~ or disabled |
+| ~disco-gateway-identify-intents~ | identify intents bitmask |
+| ~disco-gateway-enable-lazy-channel-subscriptions~ | op 14 for watched guild channels |
+| ~disco-thread-archive-fetch-limit~ | archived-thread page size, 2–100 |
+
+Typing events need ~GUILD_MESSAGE_TYPING~ and/or
+~DIRECT_MESSAGE_TYPING~.  Poll vote events need
+~GUILD_MESSAGE_POLLS~ and/or ~DIRECT_MESSAGE_POLLS~.
+~M-x disco-root-buffer-auto-fill~ forces one manual reflow.

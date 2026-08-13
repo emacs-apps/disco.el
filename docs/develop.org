@@ -1,0 +1,103 @@
+#+title: disco.el development
+#+options: toc:2 num:nil
+
+* Dependencies
+
+- Emacs 27.1
+- ~plz~ for HTTP
+- ~websocket~ for Gateway
+- Appkit 0.2.15 for views, chat, presentation, and media
+
+* File layout
+
+| File | Owns |
+|------+------|
+| ~disco.el~ | package entry |
+| ~disco-customize.el~ | user options and token command |
+| ~disco-ins.el~ | attachment and message insertion |
+| ~disco-media.el~ | attachment, spoiler, waveform, audio |
+| ~disco-api.el~ | REST, sync and async |
+| ~disco-http.el~ | ~plz~ wrapper |
+| ~disco-permission.el~ | permission bitfields |
+| ~disco-state.el~ | in-memory guild, channel, and message cache |
+| ~disco-directory.el~ | guild and DM indexes |
+| ~disco-preview.el~ | latest-message preview hydration |
+| ~disco-gateway.el~ | Gateway transport and dispatch |
+| ~disco-root-layout.el~ | layout registry and view specs |
+| ~disco-root-view.el~ | root row models and renderers |
+| ~disco-root.el~ | root controllers and live updates |
+| ~disco-channel-directory.el~ | per-guild browser |
+| ~disco-room.el~ | room render and send |
+| ~disco-company.el~ | composer completion |
+
+* Custom layouts
+
+Use ~:build~ when a custom layout should return a view spec.  Pair it
+with ~:update-mode full~ and a ~list-spec~:
+
+#+begin_src emacs-lisp
+(defun my-disco-root-build-dm-focus ()
+  (let ((channels (disco-root--visible-private-channels)))
+    (disco-root-layout-list-spec-view-spec-create
+     (appkit-view-list-spec-create
+      :title "DM Focus"
+      :summary (format "Visible DMs: %d" (length channels))
+      :items channels
+      :item-inserter (lambda (channel)
+                       (disco-root--insert-channel-line channel 2 'activity))
+      :empty-text "(no visible private channels)"))))
+
+(setq disco-root-custom-layouts
+      '((dm-focus
+         :label "DM Focus"
+         :build my-disco-root-build-dm-focus
+         :update-mode full
+         :unread-mode filter
+         :toggle-hint "next channel")))
+#+end_src
+
+For an EWOC-backed layout that reuses the home and activity entry
+pipeline, return an ~items~ view spec:
+
+#+begin_src emacs-lisp
+(defun my-disco-root-build-people-ewoc ()
+  (disco-root-layout-ewoc-entry-view-spec-create
+   (mapcar (lambda (channel)
+             (disco-root-layout-entry-create
+              :type 'channel
+              :channel channel
+              :indent 2
+              :scope 'root))
+           (disco-root--visible-private-channels))))
+#+end_src
+
+* Design notes
+
+Root and room refresh use async requests.  HTTP is ~plz~ with
+optional in-process serialization.  REST applies global and
+bucket/route cooldown plus bounded 429 retries.
+
+Gateway follows HELLO, heartbeat, identify, and resume.  Dispatch
+mutates channel, guild, and thread structure.  Optional
+~compress=zlib-stream~ uses a per-connection shared stream context.
+Reconnect uses exponential backoff with jitter; ~INVALID_SESSION~
+uses a randomized delay window.
+
+Guild directories defer passive EWOC mutations while hidden, then
+coalesce dirty channel IDs when redisplayed.  Room EWOC keeps
+message-node indexes; reaction and poll-vote events patch rows
+locally, while create, update, and delete rerender fully.
+
+READY channel snapshots are reused.  Missing latest-message previews
+hydrate through Gateway opcode 34 (~LAST_MESSAGES~).  Identify can
+include ~PASSIVE_GUILD_UPDATE_V2~ so activity can refresh from
+passive unread deltas.
+
+Shared presentation contracts are documented in Appkit's integrator
+guide, not duplicated here.
+
+* Next
+
+1. Mention and composer parity, including ~C-c C-e~ and ~C-c C-v~.
+2. Faster navigation (~M-g~ unread, mentions, reactions).
+3. Queue prioritization so user actions beat background work.
