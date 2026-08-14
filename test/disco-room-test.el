@@ -544,6 +544,119 @@
                 (should (eq 'geometry (plist-get (cdr request) :part))))))
         (disco-runtime-stop)))))
 
+(ert-deftest disco-room-reaction-reader-uses-shared-visual-catalog ()
+  (let* ((rocket
+          (appkit-chat-completion-candidate-create
+           :label ":rocket:"
+           :insert "🚀"
+           :prefix "🚀 "
+           :search-terms '("rocket")
+           :group "Unicode"
+           :value '(:kind unicode-emoji)))
+         (dance
+          (appkit-chat-completion-candidate-create
+           :label ":dance:"
+           :insert "<:dance:101>"
+           :search-terms '("dance" "101")
+           :group "This Server · Home"
+           :value '(:kind emoji)))
+         (candidates (list rocket dance))
+         (reads 0))
+    (cl-letf (((symbol-function 'disco-company-reaction-candidates)
+               (lambda (&optional _message _own-only) candidates))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table _predicate _require _initial _history
+                        default)
+                 (cl-incf reads)
+                 (let ((group-function
+                        (completion-metadata-get
+                         (completion-metadata "" table nil)
+                         'group-function)))
+                   (if (= reads 1)
+                       (progn
+                         (should default)
+                         (should
+                          (string-prefix-p
+                           ":rocket:" (substring-no-properties default)))
+                         (should (equal "Unicode"
+                                        (funcall group-function default nil)))
+                         default)
+                     (let* ((matches
+                             (completion-all-completions
+                              "dance" table nil 5))
+                            (match (car matches)))
+                       (should (equal (cdr matches) 0))
+                       (should (equal "This Server · Home"
+                                      (funcall group-function match nil)))
+                       match))))))
+      (should
+       (equal "🚀"
+              (disco-room--read-reaction-emoji
+               "Add reaction" "🚀")))
+      (should
+       (equal "<:dance:101>"
+              (disco-room--read-reaction-emoji "Add reaction")))
+      (should (= reads 2)))))
+
+(ert-deftest disco-room-reaction-default-normalizes-search-terms ()
+  (let ((grouped
+         (appkit-chat-completion-candidate-create
+          :label ":alien:"
+          :insert "👽"
+          :group "Unicode · Smileys"))
+        (alias
+         (appkit-chat-completion-candidate-create
+          :label ":thumbs_up:"
+          :insert "👍🏻"
+          :search-terms "👍"
+          :group "Unicode · Body")))
+    (should
+     (eq alias
+         (disco-room--reaction-default-candidate
+          (list grouped alias) "👍")))))
+
+(ert-deftest disco-room-reaction-reader-keeps-text-fallback-without-catalog ()
+  (cl-letf (((symbol-function 'disco-company-reaction-candidates) #'ignore)
+            ((symbol-function 'read-string)
+             (lambda (&rest _) "")))
+    (should
+     (equal "👍"
+            (disco-room--read-reaction-emoji "Add reaction" "👍")))))
+
+(ert-deftest disco-room-remove-reaction-picker-offers-only-own-identities ()
+  (let* ((msg
+          '((id . "m1")
+            (reactions
+             . (((emoji . ((id . nil) (name . "🔥"))) (me . :false))
+                ((emoji . ((id . "42") (name . "mine"))) (me . t))))))
+         seen-message
+         seen-own-only
+         removed)
+    (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
+               (lambda (&optional _msg) nil))
+              ((symbol-function 'disco-room--read-reaction-emoji)
+               (lambda (_prompt _default message own-only)
+                 (setq seen-message message
+                       seen-own-only own-only)
+                 "<:mine:42>"))
+              ((symbol-function 'disco-room-remove-reaction)
+               (lambda (emoji message-id)
+                 (setq removed (list emoji message-id)))))
+      (disco-room--remove-reaction-from-msg msg)
+      (should seen-own-only)
+      (should (eq msg seen-message))
+      (should (equal '("<:mine:42>" "m1") removed)))))
+
+(ert-deftest disco-room-remove-reaction-picker-errors-without-own-reaction ()
+  (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
+             (lambda (&optional _msg) nil)))
+    (should-error
+     (disco-room--remove-reaction-from-msg
+      '((id . "m1")
+        (reactions
+         . (((emoji . ((id . nil) (name . "🔥"))) (me . :false))))))
+     :type 'user-error)))
+
 (ert-deftest disco-room-reaction-callback-only-requests-entry-sync ()
   (let ((disco-runtime--app nil)
         callback

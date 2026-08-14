@@ -954,6 +954,15 @@ When all fields are omitted, return `:empty-object'."
   "Return URL path component for reaction EMOJI."
   (url-hexify-string (disco-api--normalize-reaction-emoji emoji)))
 
+(defun disco-api--normalize-reaction-type (reaction-type)
+  "Return Discord REACTION-TYPE as 0 (normal) or 1 (burst)."
+  (pcase reaction-type
+    ((or 'nil 0 'normal) 0)
+    ((or 1 'burst) 1)
+    (_
+     (user-error
+      "disco: reaction type must be 0/normal or 1/burst"))))
+
 (defun disco-api--normalize-poll-answer-id (answer-id)
   "Normalize poll ANSWER-ID to an integer."
   (let ((value

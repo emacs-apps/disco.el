@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'thingatpt)
+(require 'disco-emoji-image)
 
 (defcustom disco-markdown-enable-discord-tokens t
   "When non-nil, render Discord-specific tokens after Markdown pass.
@@ -188,6 +189,21 @@ This mirrors Discord's language-tagged code block behavior."
 
 (defconst disco-markdown--regexp-custom-emoji "<a?:\\([^:>]+\\):\\([0-9]+\\)>"
   "Regexp matching custom emoji mention tokens.")
+
+(defun disco-markdown-custom-emoji-identities (text)
+  "Return ordered custom emoji identities parsed from Discord TEXT."
+  (let ((start 0)
+        identities)
+    (when (stringp text)
+      (while (string-match disco-markdown--regexp-custom-emoji text start)
+        (let ((token (match-string-no-properties 0 text)))
+          (push
+           (list :name (match-string-no-properties 1 text)
+                 :id (match-string-no-properties 2 text)
+                 :animated (and (string-prefix-p "<a:" token) t))
+           identities))
+        (setq start (match-end 0))))
+    (nreverse identities)))
 
 (defconst disco-markdown--regexp-timestamp "<t:\\([0-9]+\\)\\(?::\\([tTdDfFRsS]\\)\\)?>"
   "Regexp matching Discord timestamp tokens.")
@@ -1222,7 +1238,7 @@ and CLOSE-END and must return non-nil for the span to be transformed."
         (while (re-search-forward regexp nil t)
           (let ((beg (match-beginning 0)))
             (unless (disco-markdown--position-protected-p beg)
-              (let ((replacement (funcall replacer)))
+              (let ((replacement (save-match-data (funcall replacer))))
                 (when (stringp replacement)
                   (replace-match replacement t t))))))))
     (buffer-string)))
@@ -1243,13 +1259,13 @@ and CLOSE-END and must return non-nil for the span to be transformed."
                (point) line-end 'disco-markdown-subtitle-face 'append))))))
     (buffer-string)))
 
-(defun disco-markdown--render-discord-tokens (text message spoiler-message-id
-                                                   reveal-spoilers)
+(defun disco-markdown--render-discord-tokens
+    (text context message spoiler-message-id reveal-spoilers)
   "Render Discord-specific token syntax in TEXT.
 
-MESSAGE carries mention/channel context.  SPOILER-MESSAGE-ID identifies the
-message used for spoiler interaction.
-REVEAL-SPOILERS controls whether spoiler contents are visible."
+CONTEXT selects presentation behavior.  MESSAGE carries mention/channel
+context.  SPOILER-MESSAGE-ID identifies the message used for spoiler
+interaction.  REVEAL-SPOILERS controls whether spoiler contents are visible."
   (if (not (disco-markdown--string-present-p text))
       text
     (let* ((user-map (disco-markdown--build-user-name-map message))
@@ -1292,9 +1308,23 @@ REVEAL-SPOILERS controls whether spoiler contents are visible."
                           (propertize command 'face 'disco-markdown-command-face))))
                 (cons disco-markdown--regexp-custom-emoji
                       (lambda ()
-                        (let ((name (match-string-no-properties 1)))
-                          (propertize (format ":%s:" name)
-                                      'face 'disco-markdown-emoji-face))))
+                        (let* ((token (match-string-no-properties 0))
+                               (name (match-string-no-properties 1))
+                               (emoji-id (match-string-no-properties 2))
+                               (animated
+                                (and (string-prefix-p "<a:" token) t))
+                               (fallback (format ":%s:" name))
+                               (rendered
+                                (if (eq context 'room-message)
+                                    (disco-emoji-image-display-string
+                                     emoji-id animated fallback)
+                                  fallback)))
+                          (propertize
+                           rendered
+                           'face 'disco-markdown-emoji-face
+                           'disco-emoji-id emoji-id
+                           'disco-emoji-name name
+                           'disco-emoji-animated animated))))
                 (cons disco-markdown--regexp-timestamp
                       (lambda ()
                         (let ((seconds (match-string-no-properties 1))
@@ -1355,8 +1385,13 @@ When REVEAL-SPOILERS is non-nil, spoiler contents are shown instead of masked."
                               (disco-markdown--channel-context-key source message)
                               spoiler-message-id
                               (and reveal-spoilers t)))
-         (cacheable-p (and disco-markdown-cache-enabled
-                           (not (disco-markdown--contains-relative-timestamp-p source))))
+         (cacheable-p
+          (and disco-markdown-cache-enabled
+               (not (disco-markdown--contains-relative-timestamp-p source))
+               (not
+                (and (eq context 'room-message)
+                     (string-match-p
+                      disco-markdown--regexp-custom-emoji source)))))
          (cache-key (and cacheable-p
                          (disco-markdown--cache-key cache-context source
                                                     message-context-key)))
@@ -1364,7 +1399,7 @@ When REVEAL-SPOILERS is non-nil, spoiler contents are shown instead of masked."
     (or cached
         (let* ((markdown-rendered (disco-markdown--render-internal source))
                (rendered (disco-markdown--render-discord-tokens
-                          markdown-rendered message
+                          markdown-rendered context message
                           spoiler-message-id reveal-spoilers)))
           (disco-markdown--cache-put cache-key rendered)
           rendered))))

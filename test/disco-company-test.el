@@ -347,6 +347,225 @@
                                  (disco-company--completion-emoji-candidates))))))
     (disco-state-reset)))
 
+(ert-deftest disco-company-reaction-catalog-includes-eligible-external-emoji ()
+  (unwind-protect
+      (progn
+        (disco-state-reset)
+        (disco-state-set-guilds
+         '(((id . "g1") (name . "Home"))
+           ((id . "g2") (name . "Away"))))
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)
+           (permissions . "262144")))
+        (disco-state-upsert-guild-member
+         "g1" '((user . ((id . "u1"))) (roles . ("home-role"))))
+        (disco-state-upsert-guild-member
+         "g2" '((user . ((id . "u1"))) (roles . ("away-role"))))
+        (disco-state-set-guild-emojis
+         "g1"
+         '(((id . "101") (name . "home") (roles . ()))))
+        (disco-state-set-guild-emojis
+         "g2"
+         '(((id . "201") (name . "away") (roles . ("away-role")))
+           ((id . "202") (name . "locked") (roles . ("other-role")))
+           ((id . "203") (name . "unavailable") (available . :false))))
+        (let ((disco-room--guild-id "g1")
+              (disco-room--channel-id "c1"))
+          (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+                     (lambda () "u1"))
+                    ((symbol-function 'disco-gateway-current-user)
+                     (lambda () '((id . "u1") (premium_type . 2))))
+                    ((symbol-function 'appkit-chat-emoji-candidates)
+                     #'ignore))
+            (let* ((candidates (disco-company-reaction-candidates))
+                   (insertions
+                    (mapcar
+                     #'appkit-chat-completion-candidate-insert
+                     candidates))
+                   (groups
+                    (mapcar
+                     (lambda (candidate)
+                       (cons
+                        (appkit-chat-completion-candidate-insert candidate)
+                        (appkit-chat-completion-candidate-group candidate)))
+                     candidates)))
+              (should (member "<:home:101>" insertions))
+              (should (member "<:away:201>" insertions))
+              (should (equal "This Server · Home"
+                             (cdr (assoc "<:home:101>" groups))))
+              (should (equal "Away"
+                             (cdr (assoc "<:away:201>" groups))))
+              (should-not (seq-some
+                           (lambda (value)
+                             (string-match-p "locked\\|unavailable" value))
+                           insertions))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-company-reaction-catalog-excludes-external-without-nitro ()
+  (unwind-protect
+      (progn
+        (disco-state-reset)
+        (disco-state-set-guilds
+         '(((id . "g1") (name . "Home"))
+           ((id . "g2") (name . "Away"))))
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)
+           (permissions . "262144")))
+        (disco-state-set-guild-emojis
+         "g1" '(((id . "101") (name . "home"))))
+        (disco-state-set-guild-emojis
+         "g2" '(((id . "201") (name . "away"))))
+        (let ((disco-room--guild-id "g1")
+              (disco-room--channel-id "c1"))
+          (cl-letf (((symbol-function 'disco-gateway-current-user)
+                     (lambda () '((id . "u1") (premium_type . 0))))
+                    ((symbol-function 'appkit-chat-emoji-candidates)
+                     #'ignore))
+            (should
+             (equal
+              '("<:home:101>")
+              (mapcar
+               #'appkit-chat-completion-candidate-insert
+               (disco-company-reaction-candidates)))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-company-own-reaction-catalog-preserves-deleted-custom-id ()
+  (cl-letf (((symbol-function 'appkit-chat-emoji-candidates) #'ignore))
+    (let* ((reactions
+            '(((emoji . ((id . "777") (name . nil))) (me . t))
+              ((emoji . ((id . "778") (name . "other"))) (me . :false))))
+           (candidates
+            (disco-company-reaction-candidates
+             `((reactions . ,reactions)) t)))
+      (should
+       (equal
+        '("<:_:777>")
+        (mapcar
+         #'appkit-chat-completion-candidate-insert
+         candidates))))))
+
+(ert-deftest disco-company-reaction-catalog-includes-message-content-emoji ()
+  (cl-letf (((symbol-function 'disco-settings-ensure-loaded) #'ignore)
+            ((symbol-function 'disco-settings-favorite-emojis) #'ignore)
+            ((symbol-function 'disco-settings-reaction-frecency) #'ignore)
+            ((symbol-function 'disco-company--reaction-custom-guild-ids)
+             #'ignore)
+            ((symbol-function 'disco-company--ensure-guild-top-emojis)
+             #'ignore)
+            ((symbol-function 'appkit-chat-emoji-candidates) #'ignore))
+    (let* ((candidates
+            (disco-company-reaction-candidates
+             '((content . "<:crosshair:1537844259145646161>"))))
+           (candidate (car candidates)))
+      (should (= 1 (length candidates)))
+      (should
+       (equal "<:crosshair:1537844259145646161>"
+              (appkit-chat-completion-candidate-insert candidate)))
+      (should
+       (equal "Emoji in This Message"
+              (appkit-chat-completion-candidate-group candidate)))
+      (should
+       (functionp
+        (appkit-chat-completion-candidate-prefix candidate))))))
+
+(ert-deftest disco-company-reaction-sections-follow-stable-precedence ()
+  (unwind-protect
+      (let* ((new-id
+              (number-to-string
+               (ash (floor
+                     (* 1000
+                        (- (float-time) 1420070400.0)))
+                    22)))
+             (unicode
+              (appkit-chat-completion-candidate-create
+               :label ":fire:"
+               :insert "🔥"
+               :prefix "🔥 "
+               :value '(:kind unicode-emoji :name "fire" :emoji "🔥"))))
+        (disco-state-reset)
+        (disco-state-set-guilds
+         '(((id . "g1") (name . "Home"))))
+        (disco-state-upsert-channel
+         '((id . "c1") (guild_id . "g1") (type . 0)))
+        (disco-state-set-guild-emojis
+         "g1"
+         `(((id . "101") (name . "top"))
+           ((id . ,new-id) (name . "new") (animated . t))))
+        (disco-state-set-guild-top-emojis
+         "g1" '(((emoji_id . "101") (emoji_rank . 1))) 100.0)
+        (let ((disco-room--guild-id "g1")
+              (disco-room--channel-id "c1"))
+          (cl-letf
+              (((symbol-function 'disco-gateway-current-user)
+                (lambda () '((id . "u1") (premium_type . 0))))
+               ((symbol-function 'appkit-chat-emoji-candidates)
+                (lambda (&optional _force) (list unicode)))
+               ((symbol-function 'disco-settings-ensure-loaded) #'ignore)
+               ((symbol-function 'disco-settings-favorite-emojis)
+                (lambda () (list new-id)))
+               ((symbol-function 'disco-settings-reaction-frecency)
+                (lambda ()
+                  '(("101" :score 8 :total-uses 4))))
+               ((symbol-function
+                 'disco-company--ensure-guild-top-emojis)
+                #'ignore))
+            (let* ((candidates
+                    (disco-company-reaction-candidates
+                     '((reactions . (((emoji . ((name . "🔥")))))))))
+                   (groups
+                    (mapcar
+                     #'appkit-chat-completion-candidate-group
+                     candidates))
+                   (first-seen
+                    (seq-uniq groups #'equal))
+                   (custom
+                    (seq-find
+                     (lambda (candidate)
+                       (equal
+                        (appkit-chat-completion-candidate-insert candidate)
+                        (format "<a:new:%s>" new-id)))
+                     candidates))
+                   (unicode-candidate
+                    (seq-find
+                     (lambda (candidate)
+                       (equal
+                        "Unicode"
+                        (appkit-chat-completion-candidate-group
+                         candidate)))
+                     candidates)))
+              (should
+               (equal
+                '("Top / Newly Added"
+                  "Favorites"
+                  "Frequently Used Reactions"
+                  "Reactions on This Message"
+                  "This Server · Home"
+                  "Unicode")
+                first-seen))
+              (should
+               (functionp
+                (appkit-chat-completion-candidate-prefix custom)))
+              (should
+               (stringp
+                (appkit-chat-completion-candidate-prefix
+                 unicode-candidate)))))))
+    (disco-settings-reset)
+    (disco-company-reset-account-state)
+    (disco-state-reset)))
+
+(ert-deftest disco-company-top-emoji-normalization-keeps-best-rank ()
+  (should
+   (equal
+    '(((emoji_id . "2") (emoji_rank . 1))
+      ((emoji_id . "1") (emoji_rank . 3)))
+    (disco-company--normalize-top-emoji-items
+     '((items
+        . [((emoji_id . "1") (emoji_rank . 9))
+           ((emoji_id . "2") (emoji_rank . 1))
+           ((emoji_id . "1") (emoji_rank . 3))
+           ((emoji_id . nil) (emoji_rank . 0))
+           ((emoji_id . "3") (emoji_rank . "bad"))]))))))
+
 (ert-deftest disco-company-unicode-emoji-capf-inserts-plain-glyph ()
   (let ((candidate
          (appkit-chat-completion-candidate-create
@@ -363,6 +582,7 @@
   (let* ((raw '(:label "@Alice"
                 :insert "<@1>"
                 :kind user
+                :group "Members"
                 :user-id "1"
                 :username "alice"
                 :display-name "Alice"))
@@ -376,6 +596,8 @@
       (setq shared (disco-company--completion-appkit-candidate raw))
       (should (eq raw
                   (appkit-chat-completion-candidate-value shared)))
+      (should (equal "Members"
+                     (appkit-chat-completion-candidate-group shared)))
       (should (member "alice"
                       (appkit-chat-completion-candidate-search-terms shared)))
       (should (= 0 annotation-count))

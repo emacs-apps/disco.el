@@ -34,6 +34,7 @@
 (require 'disco-markdown)
 (require 'disco-media)
 (require 'disco-avatar)
+(require 'disco-emoji-image)
 (require 'disco-embed)
 (require 'appkit-view)
 (require 'disco-api)
@@ -3053,6 +3054,15 @@ No Appkit invalidation is requested."
 (add-hook 'disco-avatar-resources-updated-hook
           #'disco-room--handle-avatar-resources-updated)
 
+(defun disco-room--handle-emoji-resources-updated (resources)
+  "Synchronize room rows depending on changed custom emoji RESOURCES."
+  (when (and resources
+             (not disco-room--session-cache-reset-in-progress))
+    (disco-room--sync-resource-changes-in-open-rooms resources)))
+
+(add-hook 'disco-emoji-image-resources-updated-hook
+          #'disco-room--handle-emoji-resources-updated)
+
 (defun disco-room--handle-media-rerender (kind key)
   "Apply media state change KIND for KEY to dependent timeline rows."
   (pcase kind
@@ -5182,6 +5192,15 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
     (when-let* ((user (disco-room--avatar-user msg))
                 (resource (disco-avatar-resource-key user)))
       (push resource dependencies))
+    (dolist
+        (identity
+         (disco-markdown-custom-emoji-identities
+          (and (listp msg) (alist-get 'content msg))))
+      (when-let* ((resource
+                   (disco-emoji-image-resource-key
+                    (plist-get identity :id)
+                    (plist-get identity :animated))))
+        (push resource dependencies)))
     (when (and (stringp reference-id)
                (disco-room--message-reference-targets-current-room-p msg)
                (or (disco-msg-reply-type-p msg)
@@ -5800,17 +5819,75 @@ REASON is shown in the minibuffer."
     (or (and candidate (disco-msg-reaction-emoji candidate))
         "👍")))
 
-(defun disco-room--read-reaction-emoji (prompt &optional default)
-  "Prompt for emoji with PROMPT and DEFAULT fallback."
-  (let* ((raw (read-string
-               (if default
-                   (format "%s (default %s): " prompt default)
-                 (format "%s: " prompt))
-               nil nil default))
-         (emoji (string-trim raw)))
-    (if (string-empty-p emoji)
-        (or default (user-error "disco: emoji cannot be empty"))
-      emoji)))
+(defvar disco-room--reaction-emoji-history nil
+  "Minibuffer history for visual Discord reaction readers.")
+
+(defun disco-room--reaction-default-candidate (candidates default)
+  "Return the CANDIDATES entry matching reaction DEFAULT, or nil."
+  (when (and (stringp default)
+             (not (string-empty-p (string-trim default))))
+    (let ((target (downcase (string-trim default))))
+      (seq-find
+       (lambda (candidate)
+         (let ((terms
+                (appkit-chat-completion-candidate-search-terms candidate)))
+           (seq-some
+            (lambda (value)
+              (and (stringp value)
+                   (string-equal target (downcase (string-trim value)))))
+            (cons
+             (appkit-chat-completion-candidate-insert candidate)
+             (cond
+              ((stringp terms) (list terms))
+              ((listp terms) terms))))))
+       candidates))))
+
+(defun disco-room--read-reaction-emoji
+    (prompt &optional default message own-only)
+  "Read a Discord reaction with PROMPT and optional DEFAULT.
+MESSAGE supplies aggregate reactions and custom emoji occurring in its content.
+When OWN-ONLY is non-nil, offer only reactions selected by the current user.
+Use the bounded guild and Unicode visual catalog when available.  Older Emacs
+versions or rooms without a catalog retain the unrestricted text fallback."
+  (let ((candidates
+         (disco-company-reaction-candidates message own-only)))
+    (if (null candidates)
+        (let ((emoji
+               (string-trim
+                (read-string (format-prompt prompt default)
+                             nil nil default))))
+          (if (string-empty-p emoji)
+              (or default (user-error "disco: emoji cannot be empty"))
+            emoji))
+      (let* ((default-candidate
+              (disco-room--reaction-default-candidate candidates default))
+             (default-candidate
+              (or
+               default-candidate
+               (when (and (stringp default)
+                          (not (string-empty-p (string-trim default))))
+                 (appkit-chat-completion-candidate-create
+                  :label (string-trim default)
+                  :insert (string-trim default)
+                  :search-terms (list (string-trim default))
+                  :value '(:kind default-reaction)))))
+             (candidates
+              (if (and default-candidate
+                       (not (memq default-candidate candidates)))
+                  (cons default-candidate candidates)
+                candidates))
+             (candidate
+              (appkit-chat-completion-read-visual
+               (format-prompt prompt default)
+               candidates
+               :history 'disco-room--reaction-emoji-history
+               :default-candidate default-candidate))
+             (emoji
+              (appkit-chat-completion-candidate-insert candidate)))
+        (unless (and (stringp emoji)
+                     (not (string-empty-p (string-trim emoji))))
+          (error "disco: reaction candidate has no insertion identity"))
+        emoji))))
 
 (defun disco-room--add-reaction-to-msg (msg)
   "Prompt for and add a reaction to MSG."
@@ -5818,7 +5895,9 @@ REASON is shown in the minibuffer."
    (disco-room--reaction-unavailable-reason msg)
    "add reactions")
   (let* ((default (disco-room--default-reaction-emoji msg))
-         (picked (disco-room--read-reaction-emoji "Add reaction" default)))
+         (picked
+          (disco-room--read-reaction-emoji
+           "Add reaction" default msg)))
     (disco-room-add-reaction picked (alist-get 'id msg))))
 
 (defun disco-room-add-reaction (&optional emoji message-id)
@@ -5830,7 +5909,9 @@ REASON is shown in the minibuffer."
       (disco-room--reaction-unavailable-reason msg)
       "add reactions")
      (let* ((default (disco-room--default-reaction-emoji msg))
-            (picked (disco-room--read-reaction-emoji "Add reaction" default)))
+            (picked
+             (disco-room--read-reaction-emoji
+              "Add reaction" default msg)))
        (list picked (alist-get 'id msg)))))
   (disco-room--ensure-action-available
    (disco-room--reaction-unavailable-reason)
@@ -5875,9 +5956,17 @@ REASON is shown in the minibuffer."
   (disco-room--ensure-action-available
    (disco-room--reaction-unavailable-reason msg)
    "remove reactions")
-  (let* ((default (disco-room--default-reaction-emoji msg))
-         (picked (disco-room--read-reaction-emoji "Remove reaction" default)))
-    (disco-room-remove-reaction picked (alist-get 'id msg))))
+  (let* ((reactions
+          (seq-filter
+           #'disco-msg-reaction-selected-p
+           (disco-msg-reactions msg))))
+    (unless reactions
+      (user-error "disco: this message has no reaction from you"))
+    (let* ((default (disco-msg-reaction-emoji (car reactions)))
+           (picked
+            (disco-room--read-reaction-emoji
+             "Remove reaction" default msg t)))
+      (disco-room-remove-reaction picked (alist-get 'id msg)))))
 
 (defun disco-room-remove-reaction (&optional emoji message-id)
   "Remove current user's EMOJI reaction from MESSAGE-ID at point."
@@ -5887,9 +5976,17 @@ REASON is shown in the minibuffer."
      (disco-room--ensure-action-available
       (disco-room--reaction-unavailable-reason msg)
       "remove reactions")
-     (let* ((default (disco-room--default-reaction-emoji msg))
-            (picked (disco-room--read-reaction-emoji "Remove reaction" default)))
-       (list picked (alist-get 'id msg)))))
+     (let* ((reactions
+             (seq-filter
+              #'disco-msg-reaction-selected-p
+              (disco-msg-reactions msg))))
+       (unless reactions
+         (user-error "disco: this message has no reaction from you"))
+       (let* ((default (disco-msg-reaction-emoji (car reactions)))
+              (picked
+               (disco-room--read-reaction-emoji
+                "Remove reaction" default msg t)))
+         (list picked (alist-get 'id msg))))))
   (disco-room--ensure-action-available
    (disco-room--reaction-unavailable-reason)
    "remove reactions")
@@ -5934,7 +6031,9 @@ REASON is shown in the minibuffer."
    (disco-room--reaction-unavailable-reason msg)
    "toggle reactions")
   (let* ((default (disco-room--default-reaction-emoji msg))
-         (picked (disco-room--read-reaction-emoji "Toggle reaction" default)))
+         (picked
+          (disco-room--read-reaction-emoji
+           "Toggle reaction" default msg)))
     (disco-room-toggle-reaction picked (alist-get 'id msg))))
 
 (defun disco-room-toggle-reaction (&optional emoji message-id)
@@ -5946,7 +6045,9 @@ REASON is shown in the minibuffer."
       (disco-room--reaction-unavailable-reason msg)
       "toggle reactions")
      (let* ((default (disco-room--default-reaction-emoji msg))
-            (picked (disco-room--read-reaction-emoji "Toggle reaction" default)))
+            (picked
+             (disco-room--read-reaction-emoji
+              "Toggle reaction" default msg)))
        (list picked (alist-get 'id msg)))))
   (disco-room--ensure-action-available
    (disco-room--reaction-unavailable-reason)

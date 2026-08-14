@@ -629,6 +629,85 @@
                           disco-api--bucket-rate-limit-until)
                  102.0))))))
 
+(ert-deftest disco-api-add-reaction-sends-explicit-normal-type ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query
+                               unauthenticated raw-body extra-headers body-type)
+                 (setq captured
+                       (list method endpoint payload query unauthenticated
+                             raw-body extra-headers body-type))
+                 'ok)))
+      (should (eq 'ok (disco-api-add-reaction "c1" "m1" "<:dance:42>")))
+      (should (equal "PUT" (nth 0 captured)))
+      (should (string-suffix-p
+               "/reactions/dance%3A42/@me"
+               (nth 1 captured)))
+      (should (equal '((type . 0)) (nth 3 captured))))))
+
+(ert-deftest disco-api-remove-reaction-uses-reaction-type-route ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest args)
+                 (setq captured (list method endpoint args))
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-remove-own-reaction-async
+            "c1" "m1" "dance:42" :reaction-type 'burst)))
+      (should (equal "DELETE" (nth 0 captured)))
+      (should
+       (string-suffix-p
+        "/reactions/dance%3A42/1/@me"
+        (nth 1 captured))))))
+
+(ert-deftest disco-api-reaction-type-rejects-unknown-values ()
+  (should-error
+   (disco-api-add-reaction "c1" "m1" "👍" 2)
+   :type 'user-error))
+
+(ert-deftest disco-api-emoji-metadata-wrappers-use-private-routes ()
+  (let (calls)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &rest _)
+                 (push (list method endpoint) calls)
+                 endpoint)))
+      (should
+       (equal "/users/@me/settings-proto/2"
+              (disco-api-user-settings-proto 2)))
+      (should
+       (equal "/guilds/123/top-emojis"
+              (disco-api-guild-top-emojis "123")))
+      (should
+       (equal
+        '(("GET" "/users/@me/settings-proto/2")
+          ("GET" "/guilds/123/top-emojis"))
+        (nreverse calls))))))
+
+(ert-deftest disco-api-emoji-metadata-async-wrappers-forward-callbacks ()
+  (let (calls)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest options)
+                 (push (list method endpoint options) calls)
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-user-settings-proto-async
+            2 :on-success #'ignore :on-error #'message)))
+      (should
+       (eq 'request
+           (disco-api-guild-top-emojis-async
+            "123" :on-success #'identity :on-error #'ignore)))
+      (setq calls (nreverse calls))
+      (should
+       (equal
+        '(:on-success ignore :on-error message)
+        (nth 2 (nth 0 calls))))
+      (should
+       (equal
+        '(:on-success identity :on-error ignore)
+        (nth 2 (nth 1 calls)))))))
+
 (provide 'disco-api-test)
 
 ;;; disco-api-test.el ends here

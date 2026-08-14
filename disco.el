@@ -25,6 +25,8 @@
 (require 'disco-state)
 (require 'disco-directory)
 (require 'disco-api)
+(require 'disco-settings)
+(require 'disco-emoji-image)
 (require 'disco-http)
 (require 'disco-gateway)
 (require 'disco-preview)
@@ -359,6 +361,9 @@ nonlocal transfer, the remaining privacy cleanup still runs while unwinding."
   (disco-preview--clear-session-data)
   (disco-directory-reset)
   (disco-state-clear-session-data)
+  (disco-settings-reset)
+  (disco-emoji-image-reset)
+  (disco-company-reset-account-state)
   (disco-api--clear-rate-limit-memory)
   (disco-http--clear-queue-state)
   (disco-gateway--clear-session-data)
@@ -419,6 +424,9 @@ cannot leave another old-account projection visible."
         #'disco-preview-reset
         #'disco-directory-reset
         #'disco-state-reset
+        #'disco-settings-reset
+        #'disco-emoji-image-reset
+        #'disco-company-reset-account-state
         #'disco-api-reset-rate-limit-state
         #'disco-http-reset-queue-state
         (lambda ()

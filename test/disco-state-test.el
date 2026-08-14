@@ -965,6 +965,27 @@
         (should (disco-state-channel-viewable-p private nil)))
     (disco-state-reset)))
 
+(ert-deftest disco-state-top-emojis-follow-guild-emoji-lifecycle ()
+  (unwind-protect
+      (progn
+        (disco-state-reset)
+        (disco-state-set-guild-emojis
+         "g1" '(((id . "1") (name . "one"))))
+        (disco-state-set-guild-top-emojis
+         "g1" '(((emoji_id . "1") (emoji_rank . 2))) 10.0)
+        (should
+         (equal
+          '(:items (((emoji_id . "1") (emoji_rank . 2)))
+            :fetched-at 10.0)
+          (disco-state-guild-top-emojis-entry "g1")))
+        (disco-state-set-guild-emojis
+         "g1" '(((id . "2") (name . "two"))))
+        (should-not (disco-state-guild-top-emojis-entry "g1"))
+        (disco-state-set-guild-top-emojis "g1" nil 20.0)
+        (disco-state-delete-guild "g1")
+        (should-not (disco-state-guild-top-emojis-entry "g1")))
+    (disco-state-reset)))
+
 (ert-deftest disco-state-channel-viewable-uses-computed-permission-without-proof ()
   (disco-state-reset)
   (unwind-protect
