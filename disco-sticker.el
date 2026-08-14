@@ -37,11 +37,11 @@
   :group 'disco)
 
 (defcustom disco-sticker-lottie-renderer-command
-  (executable-find "lottie_convert.py")
-  "Python Lottie converter used for Discord format-type 3 stickers.
+  (executable-find "tgs2png")
+  "Native renderer used for Discord format-type 3 Sticker previews.
 
-Nil means Lottie stickers retain their textual fallback without failing room
-rendering or send operations."
+The command must accept the `tgs2png' interface.  Nil keeps the textual
+fallback without affecting room rendering or sending."
   :type '(choice (const :tag "Unavailable" nil) file)
   :group 'disco)
 
@@ -122,8 +122,8 @@ rendering or send operations."
       (or (disco-sticker-id sticker) "Sticker"))))
 
 (defun disco-sticker--animation-enabled-p (format-type)
-  "Return non-nil when FORMAT-TYPE should retain animation."
-  (and (memq format-type '(2 3 4))
+  "Return non-nil when FORMAT-TYPE should retain native animation."
+  (and (memq format-type '(2 4))
        disco-sticker-animate
        appkit-media-inline-animation-enabled))
 
@@ -347,11 +347,9 @@ Settings failure degrades ranking only; catalog failure invokes ON-ERROR."
    (expand-file-name "lottie/" disco-sticker-cache-directory)))
 
 (defun disco-sticker--lottie-render-file (variant)
-  "Return derived image cache file for Lottie VARIANT."
+  "Return derived PNG preview file for Lottie VARIANT."
   (expand-file-name
-   (format "%s.%s"
-           (disco-sticker--cache-token variant)
-           (if (nth 2 variant) "webp" "png"))
+   (concat (disco-sticker--cache-token variant) ".png")
    (expand-file-name "rendered/" disco-sticker-cache-directory)))
 
 (defun disco-sticker--file-valid-p (file)
@@ -426,7 +424,7 @@ Settings failure degrades ranking only; catalog failure invokes ON-ERROR."
     (disco-sticker--schedule-resource-update variant)))
 
 (defun disco-sticker--start-lottie-render (variant owner source)
-  "Render Lottie SOURCE for VARIANT still owned by OWNER."
+  "Render Lottie SOURCE's first frame for VARIANT still owned by OWNER."
   (if-let* ((renderer disco-sticker-lottie-renderer-command)
             ((file-executable-p renderer)))
       (condition-case nil
@@ -435,44 +433,59 @@ Settings failure degrades ranking only; catalog failure invokes ON-ERROR."
                  (staging
                   (make-temp-file
                    (expand-file-name ".render-" (file-name-directory target))
-                   nil
-                   (if (nth 2 variant) ".webp" ".png")))
-                 (_ (delete-file staging))
+                   nil ".png"))
+                 (output (generate-new-buffer " *disco-sticker-tgs2png*"))
                  (command
-                  (if (nth 2 variant)
-                      (list renderer "--webp-quality" "80" "--webp-method" "4"
-                            source staging)
-                    (list renderer "--frame" "0" source staging)))
+                  (list renderer
+                        "-s" (format "0x%d" disco-sticker-size)
+                        "-n" "1"
+                        source))
                  process)
+            (with-current-buffer output
+              (set-buffer-multibyte nil))
             (setq process
                   (make-process
                    :name (format "disco-sticker-%s"
                                  (substring (disco-sticker--cache-token variant)
                                             0 10))
                    :command command
-                   :buffer nil
+                   :buffer output
                    :stderr nil
+                   :coding 'no-conversion
                    :noquery t
                    :connection-type 'pipe
                    :sentinel
                    (lambda (proc _event)
                      (when (memq (process-status proc) '(exit signal))
-                       (if (and (disco-sticker--owner-current-p variant owner)
+                       (unwind-protect
+                           (if (and
+                                (disco-sticker--owner-current-p variant owner)
                                 (= (process-exit-status proc) 0)
-                                (file-regular-p staging))
-                           (condition-case nil
-                               (progn
-                                 (rename-file staging target t)
-                                 (disco-sticker--finish-file
-                                  variant owner target))
-                             (error
-                              (ignore-errors (delete-file staging))
-                              (disco-sticker--finish-file
-                               variant owner 'missing)))
-                         (ignore-errors (delete-file staging))
-                         (when (disco-sticker--owner-current-p variant owner)
-                           (disco-sticker--finish-file
-                            variant owner 'missing)))))))
+                                (buffer-live-p output)
+                                (with-current-buffer output
+                                  (> (buffer-size) 0)))
+                               (condition-case nil
+                                   (progn
+                                     (with-current-buffer output
+                                       (let ((coding-system-for-write
+                                              'no-conversion))
+                                         (write-region
+                                          (point-min) (point-max)
+                                          staging nil 'silent)))
+                                     (rename-file staging target t)
+                                     (disco-sticker--finish-file
+                                      variant owner target))
+                                 (error
+                                  (ignore-errors (delete-file staging))
+                                  (disco-sticker--finish-file
+                                   variant owner 'missing)))
+                             (ignore-errors (delete-file staging))
+                             (when
+                                 (disco-sticker--owner-current-p variant owner)
+                               (disco-sticker--finish-file
+                                variant owner 'missing)))
+                         (when (buffer-live-p output)
+                           (kill-buffer output)))))))
             (setf (plist-get owner :process) process))
         (error
          (disco-sticker--finish-file variant owner 'missing)))
