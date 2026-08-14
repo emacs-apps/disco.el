@@ -2293,8 +2293,11 @@ Return plist with keys :threads and :errors for this page only."
 (defvar disco-root-archived-threads-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'disco-root-archived-threads-refresh)
-    (define-key map (kbd "n") #'disco-root-archived-threads-load-more)
+    (define-key map (kbd "m") #'disco-root-archived-threads-load-more)
+    (define-key map (kbd "n") #'disco-root-button-forward)
+    (define-key map (kbd "p") #'disco-root-button-backward)
     (define-key map (kbd "RET") #'disco-root-open-at-point)
+    (define-key map (kbd "<return>") #'disco-root-open-at-point)
     (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
     (define-key map (kbd "?") #'disco-root-view--transient)
     (define-key map (kbd "q") #'quit-window)

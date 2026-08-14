@@ -39,6 +39,7 @@
 (require 'disco-root)
 (require 'disco-modes)
 (require 'disco-notifications)
+(require 'disco-evil)
 
 (defconst disco--client-major-modes
   '(disco-channel-directory-mode

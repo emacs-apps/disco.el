@@ -3465,6 +3465,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
     (define-key map (kbd "s") #'disco-root-search-transient)
     (define-key map (kbd "t") #'disco-root-toggle-section-at-point)
     (define-key map (kbd "RET") #'disco-root-open-at-point)
+    (define-key map (kbd "<return>") #'disco-root-open-at-point)
     (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
     (define-key map (kbd "n") #'disco-root-button-forward)
     (define-key map (kbd "p") #'disco-root-button-backward)
