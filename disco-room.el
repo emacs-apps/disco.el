@@ -3960,6 +3960,15 @@ UI affordances such as timestamps, reaction rows and attachment cards."
             (if rows
                 (string-join rows "\n")
               (format "[Sticker: %s]" (disco-sticker-name sticker)))))
+      (add-text-properties
+       0 (length text)
+       (list 'disco-sticker-object sticker
+             'mouse-face 'highlight
+             'help-echo
+             (if (= (or (disco-sticker-format-type sticker) 0) 3)
+                 "RET: play Lottie Sticker"
+               "Animated Sticker"))
+       text)
       (appkit-ui-insert-prefixed-lines prefix text))))
 
 (defun disco-room--insert-message-attachments (msg &optional prefix owner)
@@ -7566,17 +7575,37 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
    (t
     (message "disco: no composer context to cancel"))))
 
+(defun disco-room--lottie-sticker-at-point ()
+  "Return the native Lottie Sticker projected at point, or nil."
+  (let ((sticker
+         (or (get-text-property (point) 'disco-sticker-object)
+             (and (> (point) (point-min))
+                  (get-text-property (1- (point)) 'disco-sticker-object)))))
+    (and (= (or (disco-sticker-format-type sticker) 0) 3)
+         sticker)))
+
+(defun disco-room-play-sticker-at-point ()
+  "Play the native Lottie Sticker projected at point."
+  (interactive)
+  (if-let* ((sticker (disco-room--lottie-sticker-at-point)))
+      (disco-sticker-play sticker)
+    (user-error "disco: no Lottie Sticker at point")))
+
 (defun disco-room-return-dwim ()
   "RET behavior for room buffer.
 
 An unresolved composer token owns RET so completion cannot fall through into
-an accidental send.  RET outside the composer only returns point to the draft.
-Otherwise, when send-on-return is enabled, send current draft; when disabled,
-open the draft editor."
+an accidental send.  On a projected Lottie Sticker, RET streams its native
+frames; elsewhere outside the composer, RET returns point to the draft.
+Inside the composer, send-on-return sends the draft and the disabled setting
+opens the draft editor."
   (interactive)
   (cond
    ((not (appkit-chatbuf-point-in-input-p))
-    (goto-char (or (appkit-chatbuf-input-logical-end-position) (point-max))))
+    (if-let* ((sticker (disco-room--lottie-sticker-at-point)))
+        (disco-sticker-play sticker)
+      (goto-char
+       (or (appkit-chatbuf-input-logical-end-position) (point-max)))))
    ((disco-company-completion-token-at-point)
     (disco-room-complete-mention))
    ((disco-room--input-option-send-on-return)
