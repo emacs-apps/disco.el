@@ -140,14 +140,14 @@
       (should
        (eq 'request
            (disco-api-preload-channel-messages-async
-            '("dm1" "dm2")
+            '(1 "dm2" 1 nil "dm2")
             :on-success #'ignore
             :on-error #'ignore)))
       (should
        (equal
         '("POST"
           "/channels/preload-messages"
-          (:payload ((channel_ids "dm1" "dm2"))
+          (:payload ((channel_ids "1" "dm2"))
                     :on-success ignore
                     :on-error ignore))
         captured)))))
@@ -679,9 +679,17 @@
        (equal "/guilds/123/top-emojis"
               (disco-api-guild-top-emojis "123")))
       (should
+       (equal "/guilds/123/stickers"
+              (disco-api-guild-stickers "123")))
+      (should
+       (equal "/sticker-packs"
+              (disco-api-standard-sticker-packs)))
+      (should
        (equal
         '(("GET" "/users/@me/settings-proto/2")
-          ("GET" "/guilds/123/top-emojis"))
+          ("GET" "/guilds/123/top-emojis")
+          ("GET" "/guilds/123/stickers")
+          ("GET" "/sticker-packs"))
         (nreverse calls))))))
 
 (ert-deftest disco-api-emoji-metadata-async-wrappers-forward-callbacks ()
@@ -698,15 +706,47 @@
        (eq 'request
            (disco-api-guild-top-emojis-async
             "123" :on-success #'identity :on-error #'ignore)))
+      (should
+       (eq 'request
+           (disco-api-guild-stickers-async
+            "123" :on-success #'ignore :on-error #'message)))
+      (should
+       (eq 'request
+           (disco-api-standard-sticker-packs-async
+            :on-success #'identity :on-error #'ignore)))
       (setq calls (nreverse calls))
       (should
        (equal
-        '(:on-success ignore :on-error message)
-        (nth 2 (nth 0 calls))))
+        '(("GET" "/users/@me/settings-proto/2"
+           (:on-success ignore :on-error message))
+          ("GET" "/guilds/123/top-emojis"
+           (:on-success identity :on-error ignore))
+          ("GET" "/guilds/123/stickers"
+           (:on-success ignore :on-error message))
+          ("GET" "/sticker-packs"
+           (:unauthenticated t :on-success identity :on-error ignore)))
+        calls)))))
+ 
+(ert-deftest disco-api-send-message-async-forwards-sticker-only-payload ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest options)
+                 (setq captured (list method endpoint options))
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-send-message-async
+            "c1" nil
+            :sticker-ids '("11")
+            :on-success #'identity
+            :on-error #'ignore)))
       (should
        (equal
-        '(:on-success identity :on-error ignore)
-        (nth 2 (nth 1 calls)))))))
+        '("POST" "/channels/c1/messages"
+          (:payload ((sticker_ids . ["11"]))
+           :on-success identity
+           :on-error ignore))
+        captured)))))
 
 (provide 'disco-api-test)
 

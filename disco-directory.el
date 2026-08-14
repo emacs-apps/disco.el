@@ -10,6 +10,7 @@
 
 (require 'cl-lib)
 (require 'seq)
+(require 'subr-x)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-customize)
@@ -18,7 +19,6 @@
 (require 'disco-preview)
 (require 'disco-state)
 (require 'disco-thread)
-(require 'disco-util)
 
 (defvar disco-directory-event-hook nil
   "Hook run with one directory lifecycle event plist.")
@@ -307,9 +307,7 @@ non-thread entity is a protocol error rather than permission evidence."
         (push (copy-tree message) messages)))
     (list :threads (nreverse threads)
           :first-messages (nreverse messages)
-          :has-more (and (disco-util-json-true-p
-                          (alist-get 'has_more result))
-                         t)
+          :has-more (eq (alist-get 'has_more result) t)
           :total total)))
 
 (defun disco-directory--ingest-thread-search-page (threads first-messages)

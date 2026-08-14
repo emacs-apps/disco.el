@@ -27,7 +27,7 @@
 (require 'appkit-name-color)
 (require 'disco-ins)
 (require 'appkit-ui)
-(require 'disco-util)
+(require 'time-date)
 (require 'disco-msg)
 (require 'disco-thread)
 (require 'disco-typing)
@@ -35,6 +35,7 @@
 (require 'disco-media)
 (require 'disco-avatar)
 (require 'disco-emoji-image)
+(require 'disco-sticker)
 (require 'disco-embed)
 (require 'appkit-view)
 (require 'disco-api)
@@ -75,6 +76,8 @@ This is a search boundary, not the remote/latest protocol frontier.")
 (defvar-local disco-room--live-update-handle nil
   "Appkit lifecycle handle owning this room's gateway hook and watch.")
 (defvar-local disco-room--send-in-flight nil)
+(defvar-local disco-room--sticker-picker-pending nil
+  "Non-nil while this room is loading catalogs for an explicit Sticker pick.")
 
 (defvar disco-room--send-nonce-counter 0
   "Monotonic low bits for client-generated Discord message nonces.")
@@ -873,6 +876,10 @@ MIN-COUNT optionally requires at least that many queued attachments."
 (defun disco-room--reaction-unavailable-reason (&optional _msg)
   "Return reason reaction actions are unavailable, or nil."
   (disco-room--room-send-restriction-reason '(add-reactions)))
+
+(defun disco-room--sticker-unavailable-reason ()
+  "Return reason sending a Sticker is unavailable, or nil."
+  (disco-room--room-send-restriction-reason))
 
 (defun disco-room--poll-vote-unavailable-reason (&optional msg)
   "Return reason poll voting actions are unavailable for MSG, or nil."
@@ -2711,7 +2718,7 @@ horizontal bars filling both sides to span the full line width.
 The author name is propertized with its colour face and an inline
 avatar image is prepended when available."
   (let* ((insert-date (plist-get context :insert-date))
-         (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
+         (insert-unread (eq (plist-get context :insert-unread) t))
          (message-id (alist-get 'id msg))
          (content (disco-room--message-display-content msg))
          (author (disco-room--message-author msg))
@@ -3063,6 +3070,15 @@ No Appkit invalidation is requested."
 (add-hook 'disco-emoji-image-resources-updated-hook
           #'disco-room--handle-emoji-resources-updated)
 
+(defun disco-room--handle-sticker-resources-updated (resources)
+  "Synchronize room rows depending on changed sticker RESOURCES."
+  (when (and resources
+             (not disco-room--session-cache-reset-in-progress))
+    (disco-room--sync-resource-changes-in-open-rooms resources)))
+
+(add-hook 'disco-sticker-resources-updated-hook
+          #'disco-room--handle-sticker-resources-updated)
+
 (defun disco-room--handle-media-rerender (kind key)
   "Apply media state change KIND for KEY to dependent timeline rows."
   (pcase kind
@@ -3081,7 +3097,8 @@ No Appkit invalidation is requested."
   "Retire cached preview images after `text-scale-mode' changes."
   (when (eq major-mode 'disco-room-mode)
     ;; Appkit's responsive geometry hook owns the coalesced row redraw.
-    (disco-media-clear-preview-memory-cache)))
+    (disco-media-clear-preview-memory-cache)
+    (disco-sticker-clear-image-memory)))
 
 (defun disco-room--buffer-substring-filter (beg end delete)
   "Copy region BEG..END while stripping display-only prefix properties."
@@ -3512,12 +3529,24 @@ only the message-level fallback used by the shared media transient protocol."
           :channel-id ref-channel-id
           :channel-label channel-label)))
 
+(defun disco-room--format-time (iso8601)
+  "Format ISO8601 into a compact local timestamp."
+  (condition-case nil
+      (format-time-string "%Y-%m-%d %H:%M" (date-to-time iso8601))
+    (error "unknown-time")))
+
+(defun disco-room--format-time-short (iso8601)
+  "Format ISO8601 into a local HH:MM timestamp."
+  (condition-case nil
+      (format-time-string "%H:%M" (date-to-time iso8601))
+    (error "--:--")))
+
 (defun disco-room--forward-snapshot-time-label (msg)
   "Return formatted snapshot timestamp for forwarded MSG, or nil."
   (let* ((snapshot (disco-room--message-forward-snapshot msg))
          (timestamp (and (listp snapshot) (alist-get 'timestamp snapshot))))
     (when (and (stringp timestamp) (not (string-empty-p timestamp)))
-      (disco-util-format-time timestamp))))
+      (disco-room--format-time timestamp))))
 
 (defun disco-room--forward-snapshot-content (msg)
   "Return forwarded snapshot content for MSG without line folding/truncation."
@@ -3737,8 +3766,7 @@ messages; everything else is a system event shown as a centered divider."
               (months (and (listp role-subscription)
                            (alist-get 'total_months_subscribed role-subscription)))
               (renewal (and (listp role-subscription)
-                            (disco-util-json-true-p
-                             (alist-get 'is_renewal role-subscription))))
+                            (eq (alist-get 'is_renewal role-subscription) t)))
               (tier-label (if (and (stringp tier-name)
                                    (not (string-empty-p tier-name)))
                               tier-name
@@ -3850,6 +3878,7 @@ messages; everything else is a system event shown as a centered divider."
                     :spoiler-message-id message-id
                     :reveal-spoilers
                     (disco-room--message-spoilers-revealed-p message-id))))
+         (stickers (disco-sticker-message-items msg))
          (attachments (disco-room--message-effective-attachments msg))
          (embeds (disco-room--message-effective-embeds msg))
          (poll (disco-msg-poll msg))
@@ -3873,6 +3902,7 @@ messages; everything else is a system event shown as a centered divider."
            ((and disco-room-use-rich-forward-cards
                  (disco-room--message-forwarded-p msg))
             "")
+           (stickers "")
            ((or showing-attachments showing-embeds showing-poll)
             "")
            ((and (> attachment-count 0) (> embed-count 0) (> poll-count 0))
@@ -3921,6 +3951,16 @@ UI affordances such as timestamps, reaction rows and attachment cards."
 (defun disco-room--attachment-summary (attachment)
   "Return one-line attachment summary string for ATTACHMENT object."
   (disco-media-attachment-summary attachment))
+
+(defun disco-room--insert-message-stickers (msg &optional prefix)
+  "Insert received sticker image blocks for MSG using PREFIX."
+  (dolist (sticker (disco-sticker-message-items msg))
+    (let* ((rows (disco-sticker-image-slice-rows sticker))
+           (text
+            (if rows
+                (string-join rows "\n")
+              (format "[Sticker: %s]" (disco-sticker-name sticker)))))
+      (appkit-ui-insert-prefixed-lines prefix text))))
 
 (defun disco-room--insert-message-attachments (msg &optional prefix owner)
   "Insert attachment detail lines for MSG.
@@ -4171,8 +4211,7 @@ otherwise remove.  SELF-P non-nil makes the own-vote transition idempotent."
                           (count . 0)
                           (me_voted . :false))))
              (count (max 0 (or (alist-get 'count entry) 0)))
-             (was-voted (disco-util-json-true-p
-                         (alist-get 'me_voted entry)))
+             (was-voted (eq (alist-get 'me_voted entry) t))
              ;; A self Gateway event and its REST completion describe the same
              ;; transition.  Own-selection state makes that transition
              ;; idempotent; votes from other users remain ordinary deltas.
@@ -4701,14 +4740,16 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
   "Insert one message MSG using projected render CONTEXT and Appkit OWNER."
   (if (disco-room--message-system-divider-p msg)
       (disco-room--insert-system-divider-message msg context)
-    (let* ((compact (disco-util-json-true-p (plist-get context :compact)))
+    (let* ((compact (eq (plist-get context :compact) t))
            (insert-date (plist-get context :insert-date))
-           (insert-unread (disco-util-json-true-p (plist-get context :insert-unread)))
-           (timestamp (disco-util-format-time (or (alist-get 'timestamp msg) "")))
-           (short-time (if (alist-get 'pending msg)
-                           "sending…"
-                         (disco-util-format-time-short
-                          (or (alist-get 'timestamp msg) ""))))
+           (insert-unread (eq (plist-get context :insert-unread) t))
+           (timestamp
+            (disco-room--format-time (or (alist-get 'timestamp msg) "")))
+           (short-time
+            (if (alist-get 'pending msg)
+                "sending…"
+              (disco-room--format-time-short
+               (or (alist-get 'timestamp msg) ""))))
            (author (disco-room--message-author msg))
            (author-face (disco-room--author-face msg))
            (content (disco-room--message-display-content msg))
@@ -4799,6 +4840,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
       (let ((appkit-ui-card-indent-prefix-state section-prefix-state)
             (appkit-ui-card-indent-prefix
              (appkit-ui-prefix-string section-prefix-state nil "    ")))
+        (disco-room--insert-message-stickers msg section-prefix-state)
         (disco-room--insert-forward-section msg section-prefix-state)
         (when (disco-room--message-has-thread-p msg)
           (let* ((message-id (alist-get 'id msg))
@@ -5200,6 +5242,9 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
                    (disco-emoji-image-resource-key
                     (plist-get identity :id)
                     (plist-get identity :animated))))
+        (push resource dependencies)))
+    (dolist (sticker (disco-sticker-message-items msg))
+      (when-let* ((resource (disco-sticker-resource-key sticker)))
         (push resource dependencies)))
     (when (and (stringp reference-id)
                (disco-room--message-reference-targets-current-room-p msg)
@@ -6495,6 +6540,19 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
     (display-buffer buf)
     (message "disco: opened composer preview")))
 
+(defun disco-room-attach (attach-type)
+  "Choose ATTACH-TYPE and invoke its configured attachment command."
+  (interactive
+   (list
+    (completing-read
+     "Attachment type: "
+     (mapcar #'car disco-room-attach-commands)
+     nil t)))
+  (let ((command (cadr (assoc attach-type disco-room-attach-commands))))
+    (unless (commandp command)
+      (user-error "disco: invalid attachment command for %s" attach-type))
+    (call-interactively command)))
+
 (defun disco-room-attach-clipboard ()
   "Placeholder for telega-style clipboard attach entry point."
   (interactive)
@@ -6783,6 +6841,100 @@ paragraph, line, and whitespace boundaries near the end of the chunk."
     (list :path path
           :filename disco-room-long-message-file-name
           :content-type "text/plain; charset=utf-8")))
+
+(defun disco-room--send-sticker-object (sticker)
+  "Send one normalized STICKER in the current room."
+  (let ((sticker-id (disco-sticker-id sticker)))
+    (unless sticker-id
+      (user-error "disco: selected Sticker has no valid ID"))
+    (disco-room--ensure-action-available
+     (disco-room--sticker-unavailable-reason)
+     "send stickers")
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
+     (disco-room--required-send-permissions)
+     :action "sending stickers")
+    (if disco-room--send-in-flight
+        (message "disco: send already in progress")
+      (let ((room-buffer (current-buffer))
+            (channel-id disco-room--channel-id)
+            (view (disco-room--ensure-view)))
+        (setq disco-room--send-in-flight t)
+        (appkit-request-sync view :part 'frame)
+        (disco-api-send-message-async
+         channel-id nil
+         :sticker-ids (list sticker-id)
+         :on-success
+         (lambda (response)
+           (when (disco-room--channel-buffer-p room-buffer channel-id view)
+             (with-current-buffer room-buffer
+               (setq disco-room--send-in-flight nil)
+               (if (and (listp response) (alist-get 'id response))
+                   (progn
+                     (disco-state-upsert-message channel-id response)
+                     (disco-room--request-render view)
+                     (message "disco: sticker sent"))
+                 (disco-room--request-render view)
+                 (message "disco: sticker send failed: Discord returned no message")))))
+         :on-error
+         (lambda (err)
+           (when (disco-room--channel-buffer-p room-buffer channel-id view)
+             (with-current-buffer room-buffer
+               (setq disco-room--send-in-flight nil)
+               (disco-room--request-render view)
+               (message "disco: sticker send failed: %s"
+                        (disco-room--async-error-message err))))))))))
+
+(defun disco-room--read-and-send-sticker (&optional ranked-only)
+  "Read and send a sticker, optionally restricting to account rankings."
+  (when-let* ((sticker
+               (disco-sticker-read disco-room--guild-id ranked-only)))
+    (disco-room--send-sticker-object sticker)))
+
+(defun disco-room-send-sticker (&optional ranked-only)
+  "Select and send a sticker.
+
+With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
+  (interactive "P")
+  (disco-room--ensure-action-available
+   (disco-room--sticker-unavailable-reason)
+   "send stickers")
+  (cond
+   (disco-room--send-in-flight
+    (message "disco: send already in progress"))
+   ((disco-sticker-ready-p disco-room--guild-id)
+    (disco-sticker-ensure-ready disco-room--guild-id)
+    (disco-room--read-and-send-sticker ranked-only))
+   (disco-room--sticker-picker-pending
+    (message "disco: sticker catalog is still loading"))
+   (t
+    (let ((room-buffer (current-buffer))
+          (channel-id disco-room--channel-id)
+          (guild-id disco-room--guild-id)
+          (view (disco-room--ensure-view)))
+      (setq disco-room--sticker-picker-pending t)
+      (message "disco: loading sticker catalog…")
+      (disco-sticker-ensure-ready
+       guild-id
+       :on-success
+       (lambda ()
+         (when (disco-room--channel-buffer-p room-buffer channel-id view)
+           (with-current-buffer room-buffer
+             (setq disco-room--sticker-picker-pending nil)
+             (run-at-time
+              0 nil
+              (lambda ()
+                (when (disco-room--channel-buffer-p
+                       room-buffer channel-id view)
+                  (with-current-buffer room-buffer
+                    (disco-room--read-and-send-sticker ranked-only))))))))
+       :on-error
+       (lambda (err)
+         (when (disco-room--channel-buffer-p room-buffer channel-id view)
+           (with-current-buffer room-buffer
+             (setq disco-room--sticker-picker-pending nil)
+             (message "disco: sticker catalog load failed: %s"
+                      (disco-room--async-error-message err))))))))))
 
 (defun disco-room-send-message ()
   "Send current draft message to this room asynchronously.
@@ -7879,14 +8031,6 @@ _MSG is ignored because the transient resolves availability from point."
   (disco-room--poll-expire-unavailable-reason
    (disco-room-menu--message-at-point)))
 
-(transient-define-prefix disco-room-attach-transient ()
-  "Transient for telega-like room attachment commands."
-  [["Attach"
-    ("f" "Attach file" disco-room-attach-file
-     :inapt-if disco-room--attach-unavailable-reason)
-    ("p" "Send poll" disco-room-send-poll
-     :inapt-if disco-room--poll-unavailable-reason)
-    ("v" "Attach clipboard" disco-room-attach-clipboard)]])
 
 (transient-define-prefix disco-room-transient ()
   "Room command menu for disco.el."
@@ -7929,6 +8073,8 @@ _MSG is ignored because the transient resolves availability from point."
      :inapt-if #'disco-room-menu--reaction-inapt-reason)
     ("p" "Send poll" disco-room-send-poll
      :inapt-if disco-room--poll-unavailable-reason)
+    ("i" "Send Sticker" disco-room-send-sticker
+     :inapt-if disco-room--sticker-unavailable-reason)
     ("w" "Select answer" disco-room-vote-poll-answer
      :inapt-if #'disco-room-menu--poll-vote-inapt-reason)
     ("u" "Unselect answer" disco-room-remove-poll-vote
@@ -8012,9 +8158,10 @@ _MSG is ignored because the transient resolves availability from point."
     (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
     (define-key map (kbd "C-c C-P") #'disco-room-ack-channel-pins)
     (define-key map (kbd "C-c RET") #'disco-room-send-message)
-    (define-key map (kbd "C-c C-a") #'disco-room-attach-transient)
+    (define-key map (kbd "C-c C-a") #'disco-room-attach)
     (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
     (define-key map (kbd "C-c C-v") #'disco-room-attach-clipboard)
+    (define-key map (kbd "C-c C-i") #'disco-room-send-sticker)
     (define-key map (kbd "C-c C-e") #'disco-room-input-formatting-set)
     (define-key map (kbd "C-c C-o") #'disco-room-input-options-transient)
     (define-key map (kbd "C-c C-F") #'disco-room-forward-message)
@@ -8066,6 +8213,7 @@ its same-mode buffer survives."
   (disco-room--set-composer-aux-state nil nil)
   (disco-room--sync-shared-input-options-state)
   (setq-local disco-room--send-in-flight nil)
+  (setq-local disco-room--sticker-picker-pending nil)
   (setq-local disco-room--pending-jump-message-id nil)
   (setq-local disco-room--last-search-query nil)
   (setq-local disco-room--msg-filter nil)
@@ -8103,7 +8251,9 @@ its same-mode buffer survives."
   (setq-local disco-room--pins-ack-seq 0)
   (setq-local disco-room--gateway-handler nil)
   (setq-local disco-room--live-update-handle nil)
-  (funcall #'disco-company-setup-room-buffer))
+  (funcall #'disco-company-setup-room-buffer)
+  (when (disco-current-token)
+    (disco-sticker-ensure-ready disco-room--guild-id)))
 
 (define-derived-mode disco-room-mode appkit-chatbuf-mode "Disco-Room"
   "Major mode for disco.el room buffers."

@@ -17,13 +17,13 @@
 (require 'transient)
 (require 'seq)
 (require 'subr-x)
+(require 'time-date)
 (require 'appkit-core)
 (require 'appkit-directory)
 (require 'appkit-invalidation)
 (require 'appkit-transaction)
 (require 'appkit-view)
 (require 'appkit-position)
-(require 'disco-util)
 (require 'disco-api)
 (require 'disco-avatar)
 (require 'disco-channel-type)
@@ -3402,10 +3402,11 @@ When HEADER-P is non-nil, the root header is invalidated too."
                        (if (= left-unread right-unread)
                            (string-lessp (or left-id "") (or right-id ""))
                          (> left-unread right-unread)))))))
-        (disco-util-normalize-id-list
-         (mapcar (lambda (guild)
-                   (alist-get 'id guild))
-                 (seq-take sorted max-guilds)))))))
+        (delete-dups
+         (delq nil
+               (mapcar (lambda (guild)
+                         (alist-get 'id guild))
+                       (seq-take sorted max-guilds))))))))
 
 (defun disco-root-sync-gateway-context (&optional quiet)
   "Request additional gateway context for current root state.

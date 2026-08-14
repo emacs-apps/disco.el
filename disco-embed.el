@@ -14,7 +14,7 @@
 (require 'color)
 (require 'appkit-media)
 (require 'appkit-ui)
-(require 'disco-util)
+(require 'time-date)
 (require 'disco-markdown)
 (require 'disco-media)
 
@@ -171,6 +171,12 @@ Keeps original line breaks and applies markdown renderer pipeline."
   "Return colored visual line prefix state for EMBED card rows."
   (appkit-ui-card-prefix-state :face (disco-embed--accent-face embed)))
 
+(defun disco-embed--format-time (iso8601)
+  "Format ISO8601 into a compact local timestamp."
+  (condition-case nil
+      (format-time-string "%Y-%m-%d %H:%M" (date-to-time iso8601))
+    (error "unknown-time")))
+
 (defun disco-embed--meta-line (embed)
   "Return compact metadata line for EMBED object."
   (let* ((provider (alist-get 'provider embed))
@@ -184,7 +190,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
          (timestamp (alist-get 'timestamp embed))
          (timestamp-text (and (stringp timestamp)
                               (not (string-empty-p timestamp))
-                              (format "time=%s" (disco-util-format-time timestamp))))
+                              (format "time=%s" (disco-embed--format-time timestamp))))
          (fields (or (alist-get 'fields embed) '()))
          (color (disco-embed--color-hex embed))
          (parts (delq nil
@@ -669,7 +675,7 @@ Keeps original line breaks and applies markdown renderer pipeline."
                 (alist-get 'name field)))
          (value (disco-embed--stringify
                  (alist-get 'value field)))
-         (inline (disco-util-json-true-p (alist-get 'inline field))))
+         (inline (eq (alist-get 'inline field) t)))
     (when (or name value)
       (let ((content-start (point)))
         (insert (if name name "(unnamed field)"))
@@ -1128,7 +1134,7 @@ OWNER is the exact Appkit app or view captured by video actions."
          (timestamp (alist-get 'timestamp embed))
          (timestamp-text (and (stringp timestamp)
                               (not (string-empty-p timestamp))
-                              (disco-util-format-time timestamp)))
+                              (disco-embed--format-time timestamp)))
          (footer (alist-get 'footer embed))
          (footer-text (and (listp footer)
                            (disco-embed--stringify

@@ -34,7 +34,6 @@
 (require 'disco-read-state)
 (require 'disco-state)
 (require 'disco-settings)
-(require 'disco-util)
 (require 'websocket)
 
 (defvar disco-gateway-enable-passive-guild-update-v2)
@@ -49,7 +48,7 @@ Event schema:
   `message-reaction-remove-all' `message-reaction-remove-emoji'
   `message-poll-vote-add' `message-poll-vote-remove'
   `guild-members-chunk' `guild-member-add' `guild-member-update'
-  `guild-member-remove' `guild-emojis-update'
+  `guild-member-remove' `guild-emojis-update' `guild-stickers-update'
   `guild-role-create' `guild-role-update' `guild-role-delete'
   `channel-create' `channel-update' `channel-delete'
   `channel-update-partial' `channel-unread-update' `channel-sync'
@@ -81,6 +80,7 @@ Event schema:
 - :member guild member object for member lifecycle events
 - :nonce string for `guild-members-chunk' when present
 - :emojis list of guild custom emoji objects for `guild-emojis-update'
+- :stickers list of guild sticker objects for `guild-stickers-update'
 - :role guild role object for role create/update events
 - :role-id string for role delete events
 - :emoji reaction emoji object/string for reaction events when present
@@ -373,12 +373,24 @@ When FORCE is non-nil, resend subscriptions even when already tracked."
        (disco-gateway--maybe-subscribe-watched-channel channel-id force))
      disco-gateway--watch-counts)))
 
+(defun disco-gateway--normalize-id-list (ids &optional max-items)
+  "Normalize IDS for Gateway payloads, optionally limiting to MAX-ITEMS."
+  (let (result)
+    (dolist (id (or ids '()))
+      (when id
+        (cl-pushnew (format "%s" id) result :test #'equal)))
+    (let ((ordered (nreverse result)))
+      (if (and (integerp max-items)
+               (> (length ordered) max-items))
+          (seq-take ordered max-items)
+        ordered))))
+
 (defun disco-gateway-request-last-messages (guild-id channel-ids)
   "Request last messages for GUILD-ID and CHANNEL-IDS via Gateway op 34.
 
 CHANNEL-IDS is limited to 100 IDs per request by Discord."
   (let* ((normalized-guild-id (and guild-id (format "%s" guild-id)))
-         (normalized-channel-ids (disco-util-normalize-id-list channel-ids 100)))
+         (normalized-channel-ids (disco-gateway--normalize-id-list channel-ids 100)))
     (when (and normalized-guild-id normalized-channel-ids)
       (disco-gateway--send-op
        34
@@ -444,7 +456,7 @@ QUERY performs prefix search on username/nickname. LIMIT defaults to 25 when
 QUERY is non-nil. USER-IDS requests exact members and is limited to 100 IDs."
   (let* ((normalized-guild-id (and guild-id (format "%s" guild-id)))
          (normalized-query (and (stringp query) (string-trim query)))
-         (normalized-user-ids (disco-util-normalize-id-list user-ids 100))
+         (normalized-user-ids (disco-gateway--normalize-id-list user-ids 100))
          (payload `((guild_id . ,normalized-guild-id))))
     (unless normalized-guild-id
       (user-error "disco: guild id is required for member request"))
@@ -1290,6 +1302,10 @@ independent entities and are merged into their channel indexes."
         (disco-state-set-guild-emojis
          guild-id
          (disco-gateway--versioned-entries (alist-get 'emojis guild))))
+      (when (assq 'stickers guild)
+        (disco-state-set-guild-stickers
+         guild-id
+         (disco-gateway--versioned-entries (alist-get 'stickers guild))))
       (when (assq 'roles guild)
         (disco-state-set-guild-roles
          guild-id
@@ -1449,6 +1465,17 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
            :guild-id guild-id
            :emojis emojis))))
 
+(defun disco-gateway--dispatch-guild-stickers-update (payload)
+  "Handle GUILD_STICKERS_UPDATE PAYLOAD as a complete snapshot."
+  (let ((guild-id (alist-get 'guild_id payload))
+        (stickers (or (alist-get 'stickers payload) '())))
+    (when guild-id
+      (disco-state-set-guild-stickers guild-id stickers))
+    (disco-gateway--emit
+     (list :type 'guild-stickers-update
+           :guild-id guild-id
+           :stickers stickers))))
+
 (defun disco-gateway--dispatch-guild-role-upsert (event-type payload)
   "Apply guild role PAYLOAD and emit EVENT-TYPE."
   (let ((guild-id (alist-get 'guild_id payload))
@@ -1589,11 +1616,10 @@ response entries are upserted and emitted."
 
 (defun disco-gateway--channel-unread-channel-ids (updates)
   "Extract channel IDs from channel unread UPDATES list."
-  (disco-util-normalize-id-list
-   (mapcar (lambda (it)
-             (and (listp it)
-                  (alist-get 'id it)))
-           (or updates '()))))
+  (disco-gateway--normalize-id-list (mapcar (lambda (it)
+            (and (listp it)
+                 (alist-get 'id it)))
+          (or updates '()))))
 
 (defun disco-gateway--dispatch-passive-update-v1 (payload)
   "Handle PASSIVE_UPDATE_V1 dispatch PAYLOAD."
@@ -1604,9 +1630,8 @@ response entries are upserted and emitted."
          (voice-channel-ids
           (disco-state-apply-passive-voice-state-snapshot guild-id voice-states))
          (channel-ids
-          (disco-util-normalize-id-list
-           (append (disco-gateway--channel-unread-channel-ids channels)
-                   voice-channel-ids))))
+          (disco-gateway--normalize-id-list (append (disco-gateway--channel-unread-channel-ids channels)
+                  voice-channel-ids))))
     (disco-state-apply-channel-unread-updates channels)
     (disco-gateway--emit
      (list :type 'passive-update-v1
@@ -1629,9 +1654,8 @@ response entries are upserted and emitted."
            updated-voice-states
            removed-voice-states))
          (channel-ids
-          (disco-util-normalize-id-list
-           (append (disco-gateway--channel-unread-channel-ids updated-channels)
-                   voice-channel-ids))))
+          (disco-gateway--normalize-id-list (append (disco-gateway--channel-unread-channel-ids updated-channels)
+                  voice-channel-ids))))
     (disco-state-apply-channel-unread-updates updated-channels)
     (disco-gateway--emit
      (list :type 'passive-update-v2
@@ -2076,6 +2100,7 @@ response entries are upserted and emitted."
     ("GUILD_CREATE" . disco-gateway--dispatch-guild-create)
     ("GUILD_UPDATE" . disco-gateway--dispatch-guild-update)
     ("GUILD_EMOJIS_UPDATE" . disco-gateway--dispatch-guild-emojis-update)
+    ("GUILD_STICKERS_UPDATE" . disco-gateway--dispatch-guild-stickers-update)
     ("GUILD_ROLE_CREATE" . disco-gateway--dispatch-guild-role-create)
     ("GUILD_ROLE_UPDATE" . disco-gateway--dispatch-guild-role-update)
     ("GUILD_ROLE_DELETE" . disco-gateway--dispatch-guild-role-delete)

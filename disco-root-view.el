@@ -15,7 +15,8 @@
 (require 'ewoc)
 (require 'seq)
 (require 'subr-x)
-(require 'disco-util)
+(require 'time-date)
+
 (require 'disco-avatar)
 (require 'disco-api)
 (require 'disco-channel-type)
@@ -2034,7 +2035,7 @@ Return plist with keys:
   (condition-case err
       (let* ((resp (funcall source-fn parent-channel-id before disco-thread-archive-fetch-limit))
              (threads (or (alist-get 'threads resp) '()))
-             (has-more (disco-util-json-true-p (alist-get 'has_more resp)))
+             (has-more (eq (alist-get 'has_more resp) t))
              (next-before (disco-root--archived-next-before-cursor source-name threads)))
         (when (and has-more (null threads))
           ;; Prevent endless pagination loops when server returns

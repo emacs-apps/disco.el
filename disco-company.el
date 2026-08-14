@@ -23,7 +23,6 @@
 (require 'disco-settings)
 (require 'disco-thread)
 (require 'disco-permission)
-(require 'disco-util)
 
 (defvar company-mode)
 (defvar company-backends)
@@ -106,6 +105,7 @@ completion row height stays stable across CAPF/Corfu and company popups."
   "Maximum account reaction-frecency entries shown in their picker section."
   :type 'integer
   :group 'disco)
+
 
 (defvar disco-company--top-emoji-requests
   (make-hash-table :test #'equal)
@@ -869,7 +869,7 @@ PROPS is appended as additional plist metadata."
   "Return non-nil when custom EMOJI is available for insertion."
   (let ((available (and (listp emoji) (assq 'available emoji))))
     (or (null available)
-        (disco-util-json-true-p (cdr available)))))
+        (eq (cdr available) t))))
 
 (defun disco-company--completion-emoji-role-usable-p (emoji guild-id)
   "Return non-nil when current member may use EMOJI in GUILD-ID."
@@ -926,8 +926,7 @@ semantics.  Reaction readers may explicitly supply every eligible guild."
                (raw-name (and (listp emoji) (alist-get 'name emoji)))
                (name (and (stringp raw-name) (string-trim raw-name)))
                (animated (and (listp emoji)
-                              (disco-util-json-true-p
-                               (alist-get 'animated emoji))))
+                              (eq (alist-get 'animated emoji) t)))
                (current-p (equal guild-id current-guild-id))
                (guild-name
                 (disco-company--completion-guild-name guild-id))
@@ -1126,7 +1125,7 @@ candidate's opaque value."
          (name (and (stringp raw-name) (string-trim raw-name)))
          (animated
           (and (listp emoji)
-               (disco-util-json-true-p (alist-get 'animated emoji)))))
+               (eq (alist-get 'animated emoji) t))))
     (cond
      (emoji-id
       (let ((route-name
@@ -1239,6 +1238,7 @@ candidate's opaque value."
 (defun disco-company-reset-account-state ()
   "Forget account-scoped asynchronous completion request ownership."
   (clrhash disco-company--top-emoji-requests))
+
 
 (defun disco-company--reaction-friendly-name-key (value)
   "Return comparable Discord-friendly emoji name key for VALUE."

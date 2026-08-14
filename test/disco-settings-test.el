@@ -12,6 +12,13 @@
       (setq value (ash value -7)))
     (push value bytes)
     (apply #'unibyte-string (nreverse bytes))))
+(defun disco-settings-test--fixed64 (value)
+  "Encode unsigned fixed64 VALUE as little-endian bytes."
+  (let (bytes)
+    (dotimes (index 8)
+      (push (logand #xff (ash value (- (* index 8)))) bytes))
+    (apply #'unibyte-string (nreverse bytes))))
+
 
 (defun disco-settings-test--field (number wire-type value)
   "Encode protobuf field NUMBER with WIRE-TYPE and VALUE."
@@ -19,6 +26,7 @@
    (disco-settings-test--varint (logior (ash number 3) wire-type))
    (pcase wire-type
      (0 (disco-settings-test--varint value))
+     (1 value)
      (2 (concat (disco-settings-test--varint (length value)) value)))))
 
 (defun disco-settings-test--message-field (number payload)
@@ -140,6 +148,42 @@
          (disco-settings-apply-base64
           (base64-encode-string (unibyte-string #x2a #x05 #x41) t)))
         (should (equal '("101") (disco-settings-favorite-emojis))))
+    (disco-settings-reset)))
+
+(ert-deftest disco-settings-decodes-sticker-favorites-and-frecency ()
+  (unwind-protect
+      (let* ((favorite-list
+              (disco-settings-test--message-field
+               1
+               (concat
+                (disco-settings-test--fixed64 700)
+                (disco-settings-test--fixed64 800))))
+             (frecency-value
+              (concat
+               (disco-settings-test--field 1 0 6)
+               (disco-settings-test--field 2 0 10)
+               (disco-settings-test--field 2 0 20)
+               (disco-settings-test--field 3 0 11)
+               (disco-settings-test--field 4 0 17)))
+             (frecency-entry
+              (concat
+               (disco-settings-test--field
+                1 1 (disco-settings-test--fixed64 700))
+               (disco-settings-test--message-field 2 frecency-value)))
+             (payload
+              (concat
+               (disco-settings-test--message-field 3 favorite-list)
+               (disco-settings-test--message-field
+                4
+                (disco-settings-test--message-field 1 frecency-entry)))))
+        (disco-settings-reset)
+        (disco-settings-apply-base64 (base64-encode-string payload t))
+        (should (equal (disco-settings-favorite-stickers) '("700" "800")))
+        (should
+         (equal
+          (disco-settings-sticker-frecency)
+          '(("700" :total-uses 6 :recent-uses (10 20)
+             :frecency 11 :score 17)))))
     (disco-settings-reset)))
 
 ;;; disco-settings-test.el ends here

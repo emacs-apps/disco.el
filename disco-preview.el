@@ -23,7 +23,6 @@
 (require 'disco-gateway)
 (require 'disco-msg)
 (require 'disco-state)
-(require 'disco-util)
 
 (defcustom disco-preview-fetch-enabled t
   "When non-nil, hydrate missing channel previews from Discord."
@@ -42,6 +41,13 @@
 
 (defconst disco-preview--gateway-batch-limit 100
   "Maximum channel IDs accepted by one Gateway opcode 34 request.")
+
+(defun disco-preview--normalize-id-list (ids)
+  "Normalize queued IDS, preserving first-seen order."
+  (let (result)
+    (dolist (id (or ids '()) (nreverse result))
+      (when id
+        (cl-pushnew (format "%s" id) result :test #'equal)))))
 
 (defconst disco-preview--thread-page-search-limit 25
   "Maximum messages requested for one timeline thread page preview search.")
@@ -511,7 +517,7 @@ Return non-nil when CHANNEL was newly queued."
   "Return CHANNEL-IDS to the front of GUILD-ID's pending queue."
   (let ((pending (gethash guild-id disco-preview--pending-by-guild)))
     (puthash guild-id
-             (disco-util-normalize-id-list (append channel-ids pending))
+             (disco-preview--normalize-id-list (append channel-ids pending))
              disco-preview--pending-by-guild)))
 
 (defun disco-preview--in-flight-expired-p (request now)
@@ -562,7 +568,7 @@ Return non-nil when CHANNEL was newly queued."
         (disco-preview--expire-rate-limits now)
         (maphash
          (lambda (guild-id pending)
-           (let ((ordered (disco-util-normalize-id-list pending)))
+           (let ((ordered (disco-preview--normalize-id-list pending)))
              (cond
               ((null ordered)
                (push (cons guild-id nil) updates))

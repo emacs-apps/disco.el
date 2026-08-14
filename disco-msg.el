@@ -15,7 +15,6 @@
 (require 'thingatpt)
 (require 'disco-markdown)
 (require 'disco-state)
-(require 'disco-util)
 
 (defconst disco-msg--reference-field-map
   '((id . message_id)
@@ -768,7 +767,7 @@ Return the inspect buffer."
   "Return non-nil when current user voted ANSWER-ID in POLL."
   (let* ((entry (disco-msg-poll-answer-count-entry poll answer-id))
          (me-voted (and (listp entry) (alist-get 'me_voted entry))))
-    (disco-util-json-true-p me-voted)))
+    (eq me-voted t)))
 
 (defun disco-msg-poll-total-votes (poll)
   "Return aggregate vote count from POLL results."
@@ -782,7 +781,7 @@ Return the inspect buffer."
 
 (defun disco-msg-poll-multiselect-p (poll)
   "Return non-nil when POLL allows multiple answers."
-  (disco-util-json-true-p (alist-get 'allow_multiselect poll)))
+  (eq (alist-get 'allow_multiselect poll) t))
 
 (defun disco-msg-poll-expired-p (poll)
   "Return non-nil when POLL expiry is in the past."
@@ -809,7 +808,7 @@ FORMAT defaults to `%Y-%m-%d %H:%M'."
   "Return short status label for POLL."
   (let* ((results (disco-msg-poll-results poll))
          (finalized (and (listp results)
-                         (disco-util-json-true-p (alist-get 'is_finalized results))))
+                         (eq (alist-get 'is_finalized results) t)))
          (expired (disco-msg-poll-expired-p poll)))
     (cond
      (finalized "finalized")
@@ -858,8 +857,8 @@ FORMAT defaults to `%Y-%m-%d %H:%M'."
 
 (defun disco-msg-reaction-selected-p (reaction)
   "Return non-nil when REACTION is selected by current user."
-  (or (disco-util-json-true-p (alist-get 'me reaction))
-      (disco-util-json-true-p (alist-get 'is_chosen reaction))))
+  (or (eq (alist-get 'me reaction) t)
+      (eq (alist-get 'is_chosen reaction) t)))
 
 (defun disco-msg-reactions (message)
   "Return normalized reactions list for MESSAGE."
