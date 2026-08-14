@@ -284,7 +284,7 @@
                 ((symbol-function 'disco-root--queue-live-update)
                  (lambda (channel-ids &optional structural-p header-p)
                    (setq queued (list channel-ids structural-p header-p)))))
-      (disco-root--handle-state-reset))
+	(disco-root--handle-state-reset))
       (should (equal '(nil t t) queued)))))
 
 (ert-deftest disco-root-attach-live-updates-does-not-own-render-timer ()
@@ -419,7 +419,7 @@
                 (cl-letf (((symbol-function 'disco-root--handle-gateway-event)
                            (lambda (_event) (setq callback-called t))))
                   (funcall callback '(:type message-create
-                                      :channel-id "c1")))
+					    :channel-id "c1")))
                 (should-not callback-called))))
         (disco-runtime-stop)))))
 
@@ -497,17 +497,17 @@
     '("c0" "t0" "c1" "c2" "c3" "c4" "p4" "c5")
     (disco-gateway-event-channel-ids
      '(:channel-id "c0"
-       :thread-id "t0"
-       :channel-unread-updates (((id . "c1"))
-                                ((channel_id . "c2"))
-                                ((id . "c1")))
-       :channels (((id . "c2"))
-                  ((id . "c3")))
-       :updated-channels (((channel_id . "c3"))
-                          ((id . "c4")))
-       :threads (((id . "c4") (parent_id . "p4"))
-                 ((id . "c2") (parent_id . "p4")))
-       :channel-ids ("c5" "c0"))))))
+		   :thread-id "t0"
+		   :channel-unread-updates (((id . "c1"))
+					    ((channel_id . "c2"))
+					    ((id . "c1")))
+		   :channels (((id . "c2"))
+			      ((id . "c3")))
+		   :updated-channels (((channel_id . "c3"))
+				      ((id . "c4")))
+		   :threads (((id . "c4") (parent_id . "p4"))
+			     ((id . "c2") (parent_id . "p4")))
+		   :channel-ids ("c5" "c0"))))))
 
 (ert-deftest disco-gateway-event-channel-ids-includes-voice-move-and-message-payloads ()
   (should
@@ -515,9 +515,9 @@
     '("c2" "c1" "c3")
     (disco-gateway-event-channel-ids
      '(:channel-id "c2"
-       :previous-channel-id "c1"
-       :messages (((channel_id . "c3"))
-                  ((channel_id . "c2"))))))))
+		   :previous-channel-id "c1"
+		   :messages (((channel_id . "c3"))
+			      ((channel_id . "c2"))))))))
 
 (ert-deftest disco-root-append-extra-info-merges-provider-output ()
   (let ((disco-root-extra-info-functions
@@ -1284,7 +1284,7 @@
            (equal
             '((root unread channel "c1")
               (disco-guild-directory (root guild "g1") "g1"
-                                      channel "c1"))
+                                     channel "c1"))
             before-occurrences))
           (let ((disco-root--tree-force-channel-ids '("c1")))
             (should (equal before-occurrences
@@ -1296,7 +1296,7 @@
             (should
              (equal
               '((disco-guild-directory (root guild "g1") "g1"
-                                        channel "c1"))
+                                       channel "c1"))
               after-occurrences))
             (should-not
              (seq-find
@@ -1448,6 +1448,22 @@
     (disco-root-mode)
     (should (eq disco-root--layout 'tree))))
 
+(ert-deftest disco-root-layout-selection-excludes-search-workflow ()
+  (let ((disco-root-custom-layouts
+         '((custom-demo
+            :label "Custom Demo"
+            :build disco-root-test--build-demo))))
+    (should (equal '(tree activity custom-demo)
+                   (disco-root-selectable-layout-names)))
+    (should-not (disco-root-layout-selectable-p 'search))
+    (should (disco-root-layout-selectable-p 'custom-demo))))
+
+(ert-deftest disco-root-set-layout-rejects-search-workflow ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (should-error (disco-root-set-layout 'search) :type 'user-error)
+    (should (eq disco-root--layout 'tree))))
+
 (ert-deftest disco-root-unread-guild-channel-keeps-guild-icon-scope ()
   (with-temp-buffer
     (let ((channel '((id . "c1") (guild_id . "g1") (type . 0)))
@@ -1516,6 +1532,25 @@
                         (list resource))))
         (disco-root--handle-avatar-resources-updated (list resource))
         (should (equal '("dm1" "dm2") queued))))))
+
+(ert-deftest disco-root-media-resource-invalidates-dependent-channel-row ()
+  (with-temp-buffer
+    (let ((channels '(((id . "c1")) ((id . "c2"))))
+          queued)
+      (cl-letf (((symbol-function 'disco-state-channels)
+                 (lambda () channels))
+                ((symbol-function 'disco-msg-channel-last-cached-message)
+                 (lambda (channel)
+                   `((channel-id . ,(alist-get 'id channel)))))
+                ((symbol-function 'disco-media-message-one-line-resource-keys)
+                 (lambda (message &optional _attachments)
+                   (when (equal (alist-get 'channel-id message) "c2")
+                     '((:preview "media-key")))))
+                ((symbol-function 'disco-root--queue-live-update)
+                 (lambda (ids &rest _arguments)
+                   (setq queued ids))))
+        (disco-root--handle-media-rerender 'preview "media-key")
+        (should (equal '("c2") queued))))))
 
 (ert-deftest disco-root-refresh-index-is-lazy-unless-prefix-is-given ()
   (with-temp-buffer
@@ -2147,10 +2182,10 @@
     (disco-root-mode)
     (setq-local disco-root--search-tabs
                 '((messages :items (((id . "m1")))
-                   :loading nil
-                   :error nil
-                   :cursor nil
-                   :total-results 1)))
+			    :loading nil
+			    :error nil
+			    :cursor nil
+			    :total-results 1)))
     (let ((first-entry (car (disco-root--search-layout-entries))))
       (should (eq 'search-section (disco-root-layout-entry-type first-entry)))
       (should (equal "Messages" (disco-root-layout-entry-title first-entry)))
@@ -2189,11 +2224,11 @@
                 '((messages :items (((id . "m1")
                                      (channel_id . "c1")
                                      (content . "hello")))
-                   :loading nil
-                   :error nil
-                   :cursor ((type . "timestamp")
-                            (timestamp . "1"))
-                   :total-results 1)
+			    :loading nil
+			    :error nil
+			    :cursor ((type . "timestamp")
+				     (timestamp . "1"))
+			    :total-results 1)
                   (links :items nil
                          :loading nil
                          :error nil
@@ -2565,7 +2600,7 @@
            (parent_id . "forum") (type . 11)))
         (puthash "forum"
                  '(:status loaded :thread-ids ("loaded-post")
-                   :next-cursor "older" :total 545)
+			   :next-cursor "older" :total 545)
                  disco-directory--parent-thread-state)
         (let ((label
                (substring-no-properties
@@ -2607,12 +2642,12 @@
            (name . "secret") (flags . ,disco-channel-flag-obfuscated)))
         (cl-letf (((symbol-function 'disco-root--search-current-channel-domain)
                    (lambda () '(:kind channel :id "visible" :guild-id "g1"
-                                         :label "general"))))
+                                      :label "general"))))
           (should
            (assoc "Channel: general" (disco-root--search-domain-candidates))))
         (cl-letf (((symbol-function 'disco-root--search-current-channel-domain)
                    (lambda () '(:kind channel :id "obfuscated" :guild-id "g1"
-                                         :label "secret"))))
+                                      :label "secret"))))
           (should-not
            (assoc "Channel: secret" (disco-root--search-domain-candidates)))))
     (disco-state-reset)))
@@ -2753,10 +2788,20 @@
            (author . ((username . "bob")))))
         (cl-letf (((symbol-function 'disco-preview-request-channel)
                    (lambda (_channel) (setq queued t))))
-          (should
-           (equal "alice> starter preview"
-                  (appkit-view-one-line-row-preview
-                   (disco-root--channel-one-line-row thread 'thread-post))))
+          (let* ((row (disco-root--channel-one-line-row thread 'thread-post))
+                 (preview (appkit-view-one-line-row-preview row)))
+            (should
+             (equal "starter preview"
+                    (appkit-ui-one-line-preview-text preview)))
+            (should
+             (equal "alice"
+                    (appkit-ui-one-line-preview-label preview)))
+            (should
+             (equal ">"
+                    (appkit-ui-one-line-preview-separator preview)))
+            (should
+             (eq (appkit-name-color-face "alice")
+                 (appkit-ui-one-line-preview-label-face preview))))
           (should-not queued)))
     (disco-state-reset)))
 
@@ -2786,8 +2831,7 @@
             (should (eq 'timeline-thread scope))
             (should
              (equal ""
-                    (appkit-view-one-line-row-preview
-                     (disco-root--channel-one-line-row channel scope))))))
+                    (appkit-ui-one-line-preview-text (appkit-view-one-line-row-preview (disco-root--channel-one-line-row channel scope)))))))
         (disco-state-upsert-message
          "th1"
          '((id . "latest")
@@ -2800,9 +2844,11 @@
           (let* ((channel (disco-state-channel "th1"))
                  (scope (disco-root--thread-directory-scope channel)))
             (should
-             (equal "bob> latest preview"
-                    (appkit-view-one-line-row-preview
-                     (disco-root--channel-one-line-row channel scope)))))))
+             (equal "latest preview"
+                    (appkit-ui-one-line-preview-text
+                     (appkit-view-one-line-row-preview
+                      (disco-root--channel-one-line-row
+                       channel scope))))))))
     (disco-state-reset)))
 
 (ert-deftest disco-root-thread-directory-row-uses-thread-icon-not-guild-icon ()

@@ -10,11 +10,15 @@
 ;;; Code:
 
 (require 'subr-x)
+(require 'seq)
 (require 'appkit-media)
+(require 'appkit-media-image)
+(require 'appkit-ui)
 (require 'cl-lib)
 (require 'image)
 (require 'dom)
 (require 'svg nil t)
+(require 'disco-sticker)
 
 (defgroup disco-media nil
   "Media preview, placeholder, and spoiler rendering for disco."
@@ -44,6 +48,11 @@ Set to nil to disable per-render capping."
 (defcustom disco-media-show-previews t
   "When non-nil, render inline previews for image/video attachments."
   :type 'boolean
+  :group 'disco-media)
+
+(defcustom disco-media-one-line-preview-columns 2
+  "Columns reserved for one-line attachment and Sticker previews."
+  :type 'integer
   :group 'disco-media)
 
 (defcustom disco-media-audio-player-command
@@ -81,8 +90,8 @@ Values are image objects or the symbol `:missing'.")
 (defvar disco-media--attachment-preview-fetch-budget nil
   "Dynamic cap for number of preview fetches started during one render pass.")
 
-(defvar disco-media-rerender-function nil
-  "Function called with KIND and KEY after media state/cache updates.")
+(defvar disco-media-rerender-hook nil
+  "Hook run with KIND and KEY after media state/cache updates.")
 
 (defvar disco-media--attachment-download-state-table (make-hash-table :test #'equal)
   "Attachment download state keyed by stable attachment download key.")
@@ -357,14 +366,12 @@ Downloaded files and the on-disk preview cache are intentionally preserved."
   (set-default symbol value)
   (when (fboundp 'disco-media-clear-preview-memory-cache)
     (disco-media-clear-preview-memory-cache))
-  (let ((callback disco-media-rerender-function))
-    (when (functionp callback)
-      (funcall callback 'visual nil))))
+  (run-hook-with-args 'disco-media-rerender-hook 'visual nil))
 
 (defcustom disco-media-spoiler-turbulence-base-frequency '(0.1 . 0.1)
   "Base-frequency pair passed to spoiler `feTurbulence'."
   :type '(cons (number :tag "X frequency")
-          (number :tag "Y frequency"))
+               (number :tag "Y frequency"))
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
@@ -413,7 +420,7 @@ Downloaded files and the on-disk preview cache are intentionally preserved."
 (defcustom disco-media-audio-waveform-colors '("#17c23a" . "#72d86f")
   "Colors used for audio waveform bars as (PLAYED . UNPLAYED)."
   :type '(cons (string :tag "Played color")
-          (string :tag "Unplayed color"))
+               (string :tag "Unplayed color"))
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
@@ -1059,9 +1066,7 @@ When SPOILER-P is non-nil, key the spoilerized placeholder variant."
 KIND is a symbol such as `audio', `download', or `preview'.  KEY is the stable
 attachment/download key associated with the update when available."
   (unless disco-media--reset-in-progress
-    (let ((callback disco-media-rerender-function))
-      (when (functionp callback)
-        (funcall callback kind key)))))
+    (run-hook-with-args 'disco-media-rerender-hook kind key)))
 
 (defun disco-media--attachment-preview-complete-fetch
     (cache-key image &optional target-file owner)
@@ -1269,6 +1274,106 @@ OWNER is the exact Appkit app or view that owns external video playback."
                (or image-like video-like))
       (or (disco-media--attachment-real-preview-image attachment image-like video-like)
           (disco-media-attachment-placeholder-image attachment)))))
+
+(defun disco-media--one-line-preview-max-pixels ()
+  "Return the pixel width cap for one-line media previews."
+  (* (max 1 disco-media-one-line-preview-columns)
+     (max 1 (frame-char-width))))
+
+(defun disco-media-attachment-one-line-preview-image (attachment)
+  "Return one-line preview image for non-spoiler ATTACHMENT.
+
+Cold cache entries schedule acquisition through the ordinary attachment
+preview pipeline and return nil until that resource is available."
+  (when (and (not (disco-media-attachment-spoiler-p attachment))
+             (memq (disco-media-attachment-kind attachment) '(photo video))
+             (disco-media-attachment-preview-rendering-available-p))
+    (let* ((cache-key
+            (disco-media-attachment-preview-cache-key attachment))
+           (file
+            (and cache-key
+                 (disco-media-attachment-preview-cache-existing-file
+                  cache-key))))
+      (unless file
+        (disco-media-attachment-preview-image attachment)
+        (setq file
+              (and cache-key
+                   (disco-media-attachment-preview-cache-existing-file
+                    cache-key))))
+      (when file
+        (appkit-media-one-line-preview-image-from-file
+         file (disco-media--one-line-preview-max-pixels))))))
+
+(defun disco-media--message-one-line-attachment (attachments)
+  "Return the first safe visual attachment from ATTACHMENTS."
+  (seq-find
+   (lambda (attachment)
+     (and (listp attachment)
+          (not (disco-media-attachment-spoiler-p attachment))
+          (memq (disco-media-attachment-kind attachment) '(photo video))))
+   attachments))
+
+(cl-defun disco-media-message-one-line-preview
+    (message text &key attachments label separator label-face)
+  "Return Appkit one-line preview for MESSAGE and visible TEXT.
+
+ATTACHMENTS overrides MESSAGE's direct attachment list, allowing callers to
+project forwarded snapshots.  Discord payload selection and acquisition stay
+in this adapter; the returned Appkit model contains only display content."
+  (let* ((attachments
+          (or attachments
+              (let ((value (and (listp message)
+                                (alist-get 'attachments message))))
+                (cond
+                 ((vectorp value) (append value nil))
+                 ((listp value) value)
+                 (t nil)))))
+         (attachment
+          (disco-media--message-one-line-attachment attachments))
+         (sticker
+          (car (disco-sticker-message-items message)))
+         (image
+          (or (and attachment
+                   (disco-media-attachment-one-line-preview-image attachment))
+              (and sticker
+                   (disco-sticker-image
+                    sticker 'completion
+                    (disco-media--one-line-preview-max-pixels)))))
+         (visual
+          (and image
+               (appkit-media-one-line-image-display-string image "▧"))))
+    (appkit-ui-one-line-preview-create
+     :text text
+     :label label
+     :separator separator
+     :visual visual
+     :visual-columns
+     (and visual (max 1 disco-media-one-line-preview-columns))
+     :label-face label-face)))
+
+(defun disco-media-message-one-line-resource-keys
+    (message &optional attachments)
+  "Return resources that can change MESSAGE's one-line media visual."
+  (let ((attachments
+         (or attachments
+             (let ((value (and (listp message)
+                               (alist-get 'attachments message))))
+               (cond
+                ((vectorp value) (append value nil))
+                ((listp value) value)
+                (t nil)))))
+        resources)
+    (dolist (attachment attachments)
+      (when (and (listp attachment)
+                 (not (disco-media-attachment-spoiler-p attachment))
+                 (memq (disco-media-attachment-kind attachment) '(photo video)))
+        (when-let* ((key
+                     (disco-media-attachment-preview-cache-key attachment)))
+          (push (list :preview key) resources))))
+    (dolist (sticker (disco-sticker-message-items message))
+      (when-let* ((resource (disco-sticker-resource-key sticker)))
+        (push resource resources)))
+    (delete-dups (nreverse resources))))
 
 (defun disco-media-attachment-ephemeral-p (attachment)
   "Return non-nil when ATTACHMENT is ephemeral."

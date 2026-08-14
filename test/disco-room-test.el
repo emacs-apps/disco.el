@@ -566,7 +566,7 @@
                (lambda (&optional _message _own-only) candidates))
               ((symbol-function 'completing-read)
                (lambda (_prompt table _predicate _require _initial _history
-                        default)
+				default)
                  (cl-incf reads)
                  (let ((group-function
                         (completion-metadata-get
@@ -734,9 +734,9 @@
               ;; operation and the self echo must not increment count twice.
               (disco-room--apply-live-reaction-event
                '(:type message-reaction-add
-                 :message-id "m1"
-                 :user-id "self"
-                 :emoji ((id . "42") (name . "renamed")))))
+                       :message-id "m1"
+                       :user-id "self"
+                       :emoji ((id . "42") (name . "renamed")))))
             (let* ((message (disco-room--message-by-id "m1"))
                    (reaction (car (disco-msg-reactions message))))
               (should (= 1 (disco-msg-reaction-count reaction)))
@@ -772,9 +772,9 @@
               (disco-room-add-reaction "wave" "m1")
               (disco-room--apply-live-reaction-event
                '(:type message-reaction-add
-                 :message-id "m1"
-                 :user-id "self"
-                 :emoji ((name . "wave"))))
+                       :message-id "m1"
+                       :user-id "self"
+                       :emoji ((name . "wave"))))
               ;; The echo retired the request owner.  Its later REST success
               ;; cannot mutate or schedule presentation again.
               (funcall success-callback nil))
@@ -846,18 +846,18 @@
                (lambda () "self")))
       (disco-room--apply-live-reaction-event
        '(:type message-reaction-add
-         :message-id "m1"
-         :user-id "other"
-         :emoji ((name . "wave"))))
+               :message-id "m1"
+               :user-id "other"
+               :emoji ((name . "wave"))))
       (let ((reaction
              (car (disco-msg-reactions (disco-room--message-by-id "m1")))))
         (should (= 2 (disco-msg-reaction-count reaction)))
         (should (disco-msg-reaction-selected-p reaction)))
       (disco-room--apply-live-reaction-event
        '(:type message-reaction-remove
-         :message-id "m1"
-         :user-id "other"
-         :emoji ((name . "wave"))))
+               :message-id "m1"
+               :user-id "other"
+               :emoji ((name . "wave"))))
       (let ((reaction
              (car (disco-msg-reactions (disco-room--message-by-id "m1")))))
         (should (= 1 (disco-msg-reaction-count reaction)))
@@ -866,9 +866,9 @@
       ;; aggregate vote implied by our own selected state.
       (disco-room--apply-live-reaction-event
        '(:type message-reaction-remove
-         :message-id "m1"
-         :user-id "other"
-         :emoji ((name . "wave"))))
+               :message-id "m1"
+               :user-id "other"
+               :emoji ((name . "wave"))))
       (let ((reaction
              (car (disco-msg-reactions (disco-room--message-by-id "m1")))))
         (should (= 1 (disco-msg-reaction-count reaction)))
@@ -935,9 +935,9 @@
               (disco-room--poll-set-draft-selection "p1" '(2))
               (disco-room--apply-live-poll-vote-event
                '(:type message-poll-vote-add
-                 :message-id "p1"
-                 :answer-id 1
-                 :user-id "self")))
+                       :message-id "p1"
+                       :answer-id 1
+                       :user-id "self")))
             (let ((poll (disco-msg-poll (disco-room--message-by-id "p1"))))
               (should (= 1 (disco-msg-poll-answer-count poll 1)))
               (should (equal '(1) (disco-msg-poll-voted-answer-ids poll)))
@@ -971,9 +971,9 @@
               (disco-room-submit-poll-vote "p1")
               (disco-room--apply-live-poll-vote-event
                '(:type message-poll-vote-add
-                 :message-id "p1"
-                 :answer-id 1
-                 :user-id "self"))
+                       :message-id "p1"
+                       :answer-id 1
+                       :user-id "self"))
               (funcall success-callback nil))
             (let ((poll (disco-msg-poll (disco-room--message-by-id "p1"))))
               (should (= 1 (disco-msg-poll-answer-count poll 1)))
@@ -1129,7 +1129,7 @@
                (type . 0)
                (guild_id . "g1")
                (permissions . ,(number-to-string
-                                 (logior 2048 (ash 1 15))))))
+                                (logior 2048 (ash 1 15))))))
             (let ((path (make-temp-file "disco-room-callback-attach")))
               (unwind-protect
                   (let* ((view (disco-room--ensure-view))
@@ -1648,9 +1648,9 @@
     (disco-room-mode)
     (appkit-chatbuf-input-options-set
      '(:send-on-return t
-       :long-message-action file
-       :allowed-mentions none
-       :reply-mention-replied-user t))
+		       :long-message-action file
+		       :allowed-mentions none
+		       :reply-mention-replied-user t))
     (setq-local disco-room-send-on-return nil)
     (setq-local disco-room-long-message-action 'split)
     (setq-local disco-room-allowed-mentions 'all)
@@ -1862,7 +1862,7 @@
                  (lambda () (setq frame-called t))))
         (disco-room--apply-gateway-event
          '(:type channel-pins-update
-           :channel-id "chan"))
+		 :channel-id "chan"))
         (should frame-called)
         (should (equal "new" disco-room--channel-name))))))
 
@@ -1911,12 +1911,12 @@
                  (lambda (&rest _args) nil)))
         (disco-room--apply-gateway-event
          '(:type message-create
-           :channel-id "chat"
-           :message ((id . "m2")
-                     (channel_id . "chat")
-                     (timestamp . "2026-03-08T00:05:00.000000+00:00")
-                     (content . "second")
-                     (author . ((id . "u1") (username . "alice")))))))
+		 :channel-id "chat"
+		 :message ((id . "m2")
+			   (channel_id . "chat")
+			   (timestamp . "2026-03-08T00:05:00.000000+00:00")
+			   (content . "second")
+			   (author . ((id . "u1") (username . "alice")))))))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
       (should (eq node-m1 (appkit-chat-timeline-node "m1")))
@@ -1975,8 +1975,8 @@
                  (lambda (&rest _args) nil)))
         (disco-room--apply-gateway-event
          '(:type message-delete
-           :channel-id "chat"
-           :message-id "m1")))
+		 :channel-id "chat"
+		 :message-id "m1")))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
       (should (eq node-m2 (appkit-chat-timeline-node "m2")))
@@ -2052,12 +2052,12 @@
                  (lambda (&rest _args) nil)))
         (disco-room--apply-gateway-event
          '(:type message-update
-           :channel-id "chat"
-           :message ((id . "m1")
-                     (channel_id . "chat")
-                     (timestamp . "2026-03-08T00:00:00.000000+00:00")
-                     (content . "source edited")
-                     (author . ((id . "u1") (username . "alice")))))))
+		 :channel-id "chat"
+		 :message ((id . "m1")
+			   (channel_id . "chat")
+			   (timestamp . "2026-03-08T00:00:00.000000+00:00")
+			   (content . "source edited")
+			   (author . ((id . "u1") (username . "alice")))))))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
       (should (eq node-m3 (appkit-chat-timeline-node "m3")))
@@ -2115,8 +2115,8 @@
                  (lambda (&rest _args) nil)))
         (disco-room--apply-gateway-event
          '(:type message-delete
-           :channel-id "chat"
-           :message-id "m1")))
+		 :channel-id "chat"
+		 :message-id "m1")))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
       (should (eq node-m2 (appkit-chat-timeline-node "m2")))
@@ -2176,7 +2176,7 @@
                  (lambda (&rest _args) nil)))
         (disco-room--apply-gateway-event
          '(:type channel-update
-           :channel-id "src")))
+		 :channel-id "src")))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
       (should (eq node-m1 (appkit-chat-timeline-node "m1")))
@@ -2218,12 +2218,12 @@
                  (lambda (&rest _args) nil)))
         (disco-room--apply-gateway-event
          '(:type message-update
-           :channel-id "chat"
-           :message ((id . "m1")
-                     (channel_id . "chat")
-                     (timestamp . "2026-03-08T00:00:00.000000+00:00")
-                     (content . "source edited")
-                     (author . ((id . "u1") (username . "alice")))))))
+		 :channel-id "chat"
+		 :message ((id . "m1")
+			   (channel_id . "chat")
+			   (timestamp . "2026-03-08T00:00:00.000000+00:00")
+			   (content . "source edited")
+			   (author . ((id . "u1") (username . "alice")))))))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
       (should (string-match-p "  ▏ source edited" (buffer-string))))))
@@ -2271,8 +2271,8 @@
                  (lambda () (setq render-called t))))
         (disco-room--apply-gateway-event
          '(:type message-ack
-           :channel-id "chat"
-           :message-id "m2")))
+		 :channel-id "chat"
+		 :message-id "m2")))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
       (should (eq node-m2 (appkit-chat-timeline-node "m2")))
@@ -2976,7 +2976,7 @@
                  (lambda (&optional id) (setq read-id id))))
         (disco-room--apply-gateway-event
          '(:type message-create :channel-id "chan"
-           :message ((id . "1000") (channel_id . "chan")))))
+		 :message ((id . "1000") (channel_id . "chan")))))
       (should-not read-id))
     (should (equal "1000" disco-room--remote-latest-message-id))
     (should (= 1 (disco-state-channel-unread-count "chan")))
@@ -3027,8 +3027,8 @@
     (setq disco-room--remote-latest-message-id "300"
           disco-room--msg-filter
           '(:active t
-            :query "needle"
-            :items (((id . "200") (channel_id . "chan")))))
+		    :query "needle"
+		    :items (((id . "200") (channel_id . "chan")))))
     (appkit-chat-history-window-set "100" "300")
     (disco-room-render)
     (disco-state-upsert-message
@@ -3038,7 +3038,7 @@
                  (lambda (&optional id) (setq read-id id))))
         (disco-room--apply-gateway-event
          '(:type message-create :channel-id "chan"
-           :message ((id . "400") (channel_id . "chan")))))
+		 :message ((id . "400") (channel_id . "chan")))))
       (should-not read-id))
     (should (equal "400" disco-room--remote-latest-message-id))
     (should (equal "100" (appkit-chat-history-window-first-key)))
@@ -3073,8 +3073,8 @@
     (setq disco-room--remote-latest-message-id "300"
           disco-room--msg-filter
           '(:active t
-            :query "needle"
-            :items (((id . "200") (channel_id . "chan")))))
+		    :query "needle"
+		    :items (((id . "200") (channel_id . "chan")))))
     (appkit-chat-history-window-set "100" "300")
     (let ((owner (appkit-chat-history-request-begin 'latest)))
       (disco-room--apply-gateway-event
@@ -3090,10 +3090,10 @@
     (disco-room-test-setup-channel)
     (setq disco-room--msg-filter
           '(:active t
-            :query "needle"
-            :items (((id . "200") (channel_id . "chan")))
-            :total-count 2
-            :has-more t))
+		    :query "needle"
+		    :items (((id . "200") (channel_id . "chan")))
+		    :total-count 2
+		    :has-more t))
     (appkit-chat-history-window-establish-empty)
     (let (success-callback)
       (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
@@ -3119,8 +3119,8 @@
     (disco-room-test-setup-channel)
     (setq disco-room--msg-filter
           '(:active t
-            :query "needle"
-            :items (((id . "200") (channel_id . "chan")))))
+		    :query "needle"
+		    :items (((id . "200") (channel_id . "chan")))))
     (appkit-chat-history-window-clear)
     (let (refreshed rendered)
       (cl-letf (((symbol-function 'disco-room-refresh)
@@ -3144,8 +3144,8 @@
        ((id . "100") (channel_id . "chan"))))
     (setq disco-room--msg-filter
           '(:active t
-            :query "needle"
-            :items (((id . "900") (channel_id . "chan")))))
+		    :query "needle"
+		    :items (((id . "900") (channel_id . "chan")))))
     (appkit-chat-history-window-set "100" "300")
     (let (jumped rendered)
       (cl-letf (((symbol-function 'disco-room--message-id-at-point)
@@ -3199,8 +3199,8 @@
         (disco-room-refresh))
       (setq disco-room--msg-filter
             '(:active t
-              :query "needle"
-              :items (((id . "200") (channel_id . "chan")))))
+		      :query "needle"
+		      :items (((id . "200") (channel_id . "chan")))))
       ;; Mirror Gateway ordering: canonical deletion happens before delivery.
       (disco-state-put-messages
        "chan"
@@ -3811,8 +3811,8 @@
     (should (equal "hello "
                    (disco-room--draft-without-attachment-tokens)))
     (should (equal '((:path "/tmp/a.txt"
-                      :filename "a.txt"
-                      :description "preview"))
+			    :filename "a.txt"
+			    :description "preview"))
                    (disco-room--attachments-from-draft)))))
 
 (ert-deftest disco-room-send-message-parses-attachment-input-objects ()
@@ -3853,8 +3853,8 @@
               (disco-room-send-message))
             (should (equal "hello" sent-content))
             (should (equal `((:path ,path
-                              :filename ,(file-name-nondirectory path)
-                              :description "preview"))
+				    :filename ,(file-name-nondirectory path)
+				    :description "preview"))
                            sent-attachments))
             (should (equal ""
                            (appkit-chatbuf-string-plain-text
@@ -4036,17 +4036,25 @@
       (should (equal '("m2")
                      (appkit-chat-timeline-dependent-keys
                       (list (list :preview preview-key)))))
-      (let (changed-resources)
+      (appkit-chatbuf-aux-set
+       `(:aux-type reply :message-id "m2"
+		   :aux-msg ((id . "m2") (channel_id . "chat")
+			     (attachments . (,attachment)))))
+      (let (changed-resources frame-updated)
         (cl-letf (((symbol-function 'buffer-list)
                    (lambda () (list (current-buffer))))
                   ((symbol-function 'disco-room--sync-timeline)
                    (lambda (&rest arguments)
                      (setq changed-resources
-                           (plist-get arguments :changed-resources)))))
+                           (plist-get arguments :changed-resources))))
+                  ((symbol-function 'disco-room--update-frame)
+                   (lambda (&rest _arguments)
+                     (setq frame-updated t))))
           (disco-room--handle-media-rerender 'preview preview-key)
           (appkit-sync-invalidations (appkit-current-view))
           (should (equal (list (list :preview preview-key))
-                         changed-resources)))))))
+                         changed-resources))
+          (should frame-updated))))))
 
 (ert-deftest disco-room-insert-message-attachments-hides-spoiler-media-until-revealed ()
   (with-temp-buffer
@@ -4160,8 +4168,8 @@
             (should (appkit-chatbuf-string-has-objects-p
                      (disco-room--current-draft)))
             (should (equal `((:path ,path
-                              :filename ,(file-name-nondirectory path)
-                              :description "preview"))
+				    :filename ,(file-name-nondirectory path)
+				    :description "preview"))
                            (disco-room--attachments-from-draft)))
             (should (string-match-p (regexp-quote (format "[file] %s"
                                                           (file-name-nondirectory path)))
@@ -4806,14 +4814,14 @@
           (disco-room-avatar-round-images nil))
       (cl-labels
           ((avatar-slice-height
-            ()
-            (goto-char (point-min))
-            (search-forward "Alice")
-            (let* ((prefix
-                    (get-text-property (line-beginning-position) 'line-prefix))
-                   (display (and (stringp prefix)
-                                 (get-text-property 0 'display prefix))))
-              (nth 4 (car display)))))
+             ()
+             (goto-char (point-min))
+             (search-forward "Alice")
+             (let* ((prefix
+                     (get-text-property (line-beginning-position) 'line-prefix))
+                    (display (and (stringp prefix)
+                                  (get-text-property 0 'display prefix))))
+               (nth 4 (car display)))))
         (cl-letf (((symbol-function 'disco-avatar-image)
                    (lambda (_user)
                      '(image :type png :data "avatar" :width 16 :height 16)))

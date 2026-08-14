@@ -94,7 +94,8 @@ Custom entries can override built-in layouts when NAME matches."
      :label "Search"
      :build disco-root--build-search-layout-view-spec
      :update-mode full
-     :unread-mode summary))
+     :unread-mode summary
+     :selectable nil))
   "Built-in root layout specs.")
 
 (defun disco-root-layout-specs ()
@@ -114,6 +115,17 @@ Custom entries can override built-in layouts when NAME matches."
 (defun disco-root-layout-names ()
   "Return ordered list of available root layout symbols."
   (mapcar #'car (disco-root-layout-specs)))
+
+(defun disco-root-layout-selectable-p (layout)
+  "Return non-nil when LAYOUT is a user-selectable root presentation."
+  (let ((spec (disco-root-layout-spec layout)))
+    (not (and (plist-member spec :selectable)
+              (null (plist-get spec :selectable))))))
+
+(defun disco-root-selectable-layout-names ()
+  "Return ordered user-selectable root layout symbols."
+  (seq-filter #'disco-root-layout-selectable-p
+              (disco-root-layout-names)))
 
 (defun disco-root-layout--active-layout (&optional layout)
   "Return explicit LAYOUT or currently active root layout symbol."

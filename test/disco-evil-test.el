@@ -14,6 +14,8 @@
     (should (eq (key-binding (kbd "g j")) #'disco-root-button-forward))
     (should (eq (key-binding (kbd "g u")) #'disco-root-next-unread))
     (should (eq (key-binding (kbd "n")) #'evil-search-next))
+    (should (eq (key-binding (kbd "l")) #'evil-forward-char))
+    (should (eq (key-binding (kbd "L")) #'evil-window-bottom))
     (evil-motion-state)
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))
     (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))))
