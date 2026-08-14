@@ -887,6 +887,8 @@ VIEW defaults to the current buffer's Appkit view."
     (define-key map (kbd "C-c C-k") #'disco-channel-directory-clear-filter)
     (define-key map (kbd "U") #'disco-channel-directory-toggle-unread-only)
     (define-key map (kbd "RET") #'disco-channel-directory-open-at-point)
+    (define-key map (kbd "<return>")
+      #'disco-channel-directory-open-at-point)
     (define-key map (kbd "TAB") #'disco-channel-directory-tab-dwim)
     (define-key map (kbd "<backtab>")
       #'disco-channel-directory-previous-channel)
