@@ -75,6 +75,9 @@ fallback without affecting room rendering or sending."
 (defvar disco-sticker--fetching (make-hash-table :test #'equal)
   "Sticker variant to exact asynchronous transfer/conversion owner.")
 
+(defvar disco-sticker--players (make-hash-table :test #'equal)
+  "Lottie variant to exact live streaming playback owner.")
+
 (defvar disco-sticker--known (make-hash-table :test #'equal)
   "Sticker variants observed in the current account session.")
 
@@ -511,6 +514,162 @@ Settings failure degrades ranking only; catalog failure invokes ON-ERROR."
         (when handle
           (setf (plist-get owner :handle) handle))))))
 
+(defun disco-sticker--player-current-p (variant owner)
+  "Return non-nil when OWNER still owns VARIANT's live playback."
+  (and (= (plist-get owner :generation) disco-sticker--generation)
+       (eq (gethash variant disco-sticker--players) owner)))
+
+(defun disco-sticker--write-png-frame (file bytes)
+  "Write complete unibyte PNG BYTES to unpublished FILE."
+  (make-directory (file-name-directory file) t)
+  (let ((coding-system-for-write 'no-conversion))
+    (write-region bytes nil file nil 'silent)))
+
+(defun disco-sticker--publish-lottie-frame (variant owner bytes)
+  "Project latest PNG BYTES for live VARIANT playback owned by OWNER."
+  (when (disco-sticker--player-current-p variant owner)
+    (let* ((base (disco-sticker--lottie-render-file variant))
+           (file
+            (if (file-readable-p base)
+                (let ((directory
+                       (expand-file-name
+                        "playing/" disco-sticker-cache-directory)))
+                  (make-directory directory t)
+                  (make-temp-file
+                   (expand-file-name
+                    (concat (disco-sticker--cache-token variant) "-")
+                    directory)
+                   nil ".png"))
+              base)))
+      (condition-case err
+          (progn
+            (disco-sticker--write-png-frame file bytes)
+            (unless (equal file base)
+              (push file (plist-get owner :frame-files)))
+            (puthash variant file disco-sticker--files)
+            (disco-sticker--clear-variant-images variant)
+            (disco-sticker--schedule-resource-update variant))
+        (error
+         (message "disco: could not project Lottie frame: %s"
+                  (error-message-string err))
+         (when-let* ((process (plist-get owner :process)))
+           (when (process-live-p process)
+             (delete-process process))))))))
+
+(defun disco-sticker--finish-lottie-player (variant owner output)
+  "Retire VARIANT playback OWNER and its process OUTPUT buffer."
+  (when (disco-sticker--player-current-p variant owner)
+    (remhash variant disco-sticker--players)
+    (let ((base (disco-sticker--lottie-render-file variant)))
+      (when (file-readable-p base)
+        (puthash variant base disco-sticker--files)))
+    (disco-sticker--clear-variant-images variant)
+    (disco-sticker--schedule-resource-update variant))
+  (let ((files (plist-get owner :frame-files)))
+    (when files
+      (run-at-time
+       0.5 nil
+       (lambda (retired-files)
+         (dolist (file retired-files)
+           (ignore-errors (delete-file file))))
+       files)))
+  (when (buffer-live-p output)
+    (kill-buffer output)))
+
+(defun disco-sticker--start-lottie-player (variant owner source)
+  "Stream Lottie SOURCE frames for VARIANT still owned by OWNER."
+  (condition-case err
+      (let* ((renderer disco-sticker-lottie-renderer-command)
+             (output (generate-new-buffer " *disco-sticker-lottie-player*"))
+             process)
+        (unless (and renderer (file-executable-p renderer))
+          (error "tgs2png is unavailable"))
+        (with-current-buffer output
+          (set-buffer-multibyte nil))
+        (setq process
+              (make-process
+               :name
+               (format "disco-sticker-play-%s"
+                       (substring (disco-sticker--cache-token variant) 0 10))
+               :command
+               (list renderer
+                     "-s" (format "0x%d" disco-sticker-size)
+                     source)
+               :buffer output
+               :stderr nil
+               :coding 'no-conversion
+               :noquery t
+               :connection-type 'pipe
+               :filter
+               (lambda (proc bytes)
+                 (when (and (process-live-p proc)
+                            (disco-sticker--player-current-p variant owner)
+                            (buffer-live-p output))
+                   (condition-case filter-error
+                       (with-current-buffer output
+                         (goto-char (point-max))
+                         (insert bytes)
+                         (when-let*
+                             ((frame
+                               (appkit-media-png-stream-pop-latest output)))
+                           (disco-sticker--publish-lottie-frame
+                            variant owner frame)))
+                     (error
+                      (message "disco: invalid Lottie frame stream: %s"
+                               (error-message-string filter-error))
+                      (delete-process proc)))))
+               :sentinel
+               (lambda (proc _event)
+                 (when (memq (process-status proc) '(exit signal))
+                   (disco-sticker--finish-lottie-player
+                    variant owner output)))))
+        (setf (plist-get owner :process) process
+              (plist-get owner :handle) nil))
+    (error
+     (when (disco-sticker--player-current-p variant owner)
+       (remhash variant disco-sticker--players))
+     (message "disco: could not start Lottie playback: %s"
+              (error-message-string err)))))
+
+(defun disco-sticker-play (sticker)
+  "Play one native Lottie STICKER stream in its projected room rows."
+  (unless (= (or (disco-sticker-format-type sticker) 0) 3)
+    (user-error "disco: this Sticker already uses native image animation"))
+  (unless (and disco-sticker-lottie-renderer-command
+               (file-executable-p disco-sticker-lottie-renderer-command))
+    (user-error "disco: Lottie playback requires tgs2png"))
+  (let* ((variant (disco-sticker--variant-key sticker))
+         (source (disco-sticker--lottie-source-file variant))
+         (previous (gethash variant disco-sticker--players))
+         (owner (list :generation disco-sticker--generation
+                      :handle nil
+                      :process nil
+                      :frame-files nil)))
+      (when-let* ((handle (plist-get previous :handle)))
+        (ignore-errors (appkit-media-cancel-transfer handle)))
+      (when-let* ((process (plist-get previous :process)))
+        (when (process-live-p process)
+          (delete-process process)))
+    (puthash variant owner disco-sticker--players)
+    (if (file-readable-p source)
+        (disco-sticker--start-lottie-player variant owner source)
+      (make-directory (file-name-directory source) t)
+      (let ((handle
+             (appkit-media-copy-or-download-resource-async
+              `((url . ,(disco-sticker-url sticker))
+                (name . ,(format "%s.json" (car variant))))
+              source
+              (lambda (file)
+                (when (disco-sticker--player-current-p variant owner)
+                  (disco-sticker--start-lottie-player variant owner file)))
+              (lambda (reason)
+                (when (disco-sticker--player-current-p variant owner)
+                  (remhash variant disco-sticker--players)
+                  (message "disco: could not load Lottie Sticker: %s"
+                           reason))))))
+        (setf (plist-get owner :handle) handle)))
+    t))
+
 (defun disco-sticker--start-direct-fetch (variant sticker owner)
   "Acquire direct-image STICKER for VARIANT and OWNER."
   (let ((handle
@@ -810,23 +969,26 @@ sections."
   "Forget display descriptors while retaining downloaded sticker files."
   (clrhash disco-sticker--images))
 
+(defun disco-sticker--cancel-media-owner (_variant owner)
+  "Cancel asynchronous media OWNER while isolating teardown failures."
+  (when-let* ((handle (plist-get owner :handle)))
+    (condition-case nil
+        (appkit-media-cancel-transfer handle)
+      ((error quit) nil)))
+  (when-let* ((process (plist-get owner :process)))
+    (when (process-live-p process)
+      (ignore-errors (delete-process process)))))
+
 (defun disco-sticker--reset-media-state ()
   "Cancel sticker media work and clear its in-memory caches."
   (cl-incf disco-sticker--generation)
   (let ((timer disco-sticker--resource-update-timer))
     (setq disco-sticker--resource-update-timer nil)
     (disco-sticker--cancel-timer timer))
-  (maphash
-   (lambda (_variant owner)
-     (when-let* ((handle (plist-get owner :handle)))
-       (condition-case nil
-           (appkit-media-cancel-transfer handle)
-         ((error quit) nil)))
-     (when-let* ((process (plist-get owner :process)))
-       (when (process-live-p process)
-         (ignore-errors (delete-process process)))))
-   disco-sticker--fetching)
+  (maphash #'disco-sticker--cancel-media-owner disco-sticker--fetching)
+  (maphash #'disco-sticker--cancel-media-owner disco-sticker--players)
   (clrhash disco-sticker--fetching)
+  (clrhash disco-sticker--players)
   (clrhash disco-sticker--files)
   (clrhash disco-sticker--images)
   (clrhash disco-sticker--pending-resource-updates))

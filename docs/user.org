@@ -136,9 +136,10 @@ waveform controls inline.
 The Sticker picker searches names, tags, IDs, current-server Stickers,
 and Discord standard packs.  ~C-u C-c C-i~ restricts it to Favorite
 and Frequently Used Stickers from Discord account settings.  Static,
-APNG, GIF, and Lottie Stickers render through the shared image path;
-native Lottie previews require ~tgs2png~.  Unsupported or temporarily
-unavailable images retain a textual Sticker label.
+APNG, GIF, and Lottie Stickers render through the shared image path.
+APNG and GIF previews play as bounded native images; ~RET~ on a Lottie
+Sticker streams its native frames.  Lottie rendering requires ~tgs2png~.
+Unsupported or temporarily unavailable images retain a textual Sticker label.
 
 ** Messages
 
