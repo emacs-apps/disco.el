@@ -304,18 +304,18 @@ Values are image objects or the symbol `:missing'.")
         (unless (gethash (car record) seen)
           (puthash (car record) t seen)
           (push record unique-records)))
-    (setq items
-          (append
-           items
-           (mapcar (lambda (transfer)
-                     (list :kind 'transfer :transfer transfer))
-                   (delete-dups transfers))
-           (mapcar (lambda (record)
-                     (list :kind 'process
-                           :process (car record)
-                           :buffer (cdr record)))
-                   unique-records)
-           (list (list :kind 'decoration))))
+      (setq items
+            (append
+             items
+             (mapcar (lambda (transfer)
+                       (list :kind 'transfer :transfer transfer))
+                     (delete-dups transfers))
+             (mapcar (lambda (record)
+                       (list :kind 'process
+                             :process (car record)
+                             :buffer (cdr record)))
+                     unique-records)
+             (list (list :kind 'decoration))))
       items)))
 
 (defun disco-media--clear-session-memory ()
