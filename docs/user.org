@@ -137,8 +137,8 @@ The Sticker picker searches names, tags, IDs, current-server Stickers,
 and Discord standard packs.  ~C-u C-c C-i~ restricts it to Favorite
 and Frequently Used Stickers from Discord account settings.  Static,
 APNG, GIF, and Lottie Stickers render through the shared image path;
-Lottie rendering requires ~lottie_convert.py~.  Unsupported or
-temporarily unavailable images retain a textual Sticker label.
+native Lottie previews require ~tgs2png~.  Unsupported or temporarily
+unavailable images retain a textual Sticker label.
 
 ** Messages
 
