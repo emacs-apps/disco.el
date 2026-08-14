@@ -2226,7 +2226,7 @@
                      (author . ((id . "u1") (username . "alice")))))))
       (should-not render-called)
       (should (eq ewoc (appkit-chat-timeline-ewoc)))
-      (should (string-match-p "> source edited" (buffer-string))))))
+      (should (string-match-p "  ▏ source edited" (buffer-string))))))
 
 (ert-deftest disco-room-handle-message-ack-moves-unread-divider-in-place ()
   (with-temp-buffer
@@ -3589,11 +3589,13 @@
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
     (should (text-property-any (point-min) (point-max) 'disco-room-input t))
-    (should (string-match-p "Replying to alice \\[m42\\]"
+    (should (string-match-p "× ▏ Reply to alice\n  ▏ hello reply"
                             (buffer-string)))
-    (should-not (string-match-p "C-c C-k" (buffer-string)))
-    (should (string-match-p "> hello reply"
-                            (buffer-string)))
+    (should-not (string-match-p "\\[m42\\]" (buffer-string)))
+    (goto-char (point-min))
+    (search-forward "×")
+    (should (eq (get-text-property (1- (point)) appkit-ui-action-property)
+                #'disco-room-cancel-reply))
     (should (string-match-p "Queued attachments: \\\[file:1\\\] a.txt, \\\[file:2\\\] b.png - preview"
                             (buffer-string)))))
 
@@ -3617,8 +3619,9 @@
         (author . ((id . "u1") (username . "alice"))))))
     (disco-room-render)
     (should-not (text-property-any (point-min) (point-max) 'disco-room-input t))
-    (should (string-match-p "Replying to alice \\[m42\\]"
-                            (buffer-string)))))
+    (should (string-match-p "× ▏ Reply to alice\n  ▏ hello reply"
+                            (buffer-string)))
+    (should-not (string-match-p "\\[m42\\]" (buffer-string)))))
 
 (ert-deftest disco-room-edit-message-enters-composer-edit-mode ()
   (with-temp-buffer
@@ -3651,10 +3654,9 @@
       (should (equal "old body"
                      (appkit-chatbuf-string-plain-text
                       (disco-room--current-draft))))
-      (should (string-match-p "Editing alice \\[m1\\]"
+      (should (string-match-p "× ▏ Editing message\n  ▏ old body"
                               (buffer-string)))
-      (should (string-match-p "> old body"
-                              (buffer-string)))
+      (should-not (string-match-p "\\[m1\\]" (buffer-string)))
       (should (text-property-any
                (point-min) (point-max) 'disco-room-input t)))))
 
