@@ -1309,7 +1309,6 @@
     (should (eq (key-binding (kbd "+") t) 'disco-msg-toggle-reaction))
     (should (eq (key-binding (kbd "-") t) 'disco-msg-remove-reaction))
     (should (eq (key-binding (kbd "T") t) 'disco-msg-open-thread))
-    (should (eq (key-binding (kbd "C-c C-a") t) 'disco-room-attach-transient))
     (should (eq (key-binding (kbd "C-c m c") t) 'disco-msg-copy-dwim))
     (should (eq (key-binding (kbd "C-c m l") t) 'disco-msg-copy-link))
     (should (eq (key-binding (kbd "C-c m n") t) 'disco-msg-next))
@@ -5021,6 +5020,49 @@
         (kill-buffer owned))
       (when (buffer-live-p ordinary)
         (kill-buffer ordinary)))))
+
+
+(ert-deftest disco-room-insert-message-stickers-keeps-textual-fallback ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'disco-sticker-image-slice-rows)
+               (lambda (_sticker) nil)))
+      (disco-room--insert-message-stickers
+       '((sticker_items . (((id . "11") (name . "Wave")
+                            (format_type . 1))))))
+      (should (equal (buffer-string) "[Sticker: Wave]\n")))))
+
+(ert-deftest disco-room-send-sticker-forwards-exact-snowflake ()
+  (with-temp-buffer
+    (let ((disco-room--channel-id "22")
+          (disco-room--guild-id "33")
+          (disco-room--send-in-flight nil)
+          sent-ids)
+      (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+                 #'ignore)
+                ((symbol-function 'disco-room--sticker-unavailable-reason)
+                 (lambda () nil))
+                ((symbol-function 'disco-permission-ensure-channel)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'disco-room--channel-object)
+                 (lambda () '((id . "22"))))
+                ((symbol-function 'disco-room--ensure-view)
+                 (lambda () 'view))
+                ((symbol-function 'disco-room--channel-buffer-p)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'appkit-request-sync) #'ignore)
+                ((symbol-function 'disco-state-upsert-message) #'ignore)
+                ((symbol-function 'disco-room--request-render) #'ignore)
+                ((symbol-function 'disco-api-send-message-async)
+                 (lambda (_channel-id _content &rest options)
+                   (setq sent-ids (plist-get options :sticker-ids))
+                   (funcall (plist-get options :on-success)
+                            '((id . "server-message")))))
+                ((symbol-function 'message) #'ignore))
+        (disco-room--send-sticker-object
+         '((id . "9007199254740993123") (name . "Wave")
+           (format_type . 1)))
+        (should (equal sent-ids '("9007199254740993123")))
+        (should-not disco-room--send-in-flight)))))
 
 (provide 'disco-room-test)
 

@@ -126,15 +126,19 @@ Each field retains its number, wire type, decoded value, and exact raw bytes."
     (if (>= low #x80000000)
         (- low #x100000000)
       low)))
+
 (defun disco-settings--decode-fixed64 (bytes)
   "Decode one little-endian protobuf fixed64 value from BYTES."
   (unless (= (length bytes) 8)
     (error "disco: malformed protobuf fixed64 value"))
-  (let ((value 0))
-    (dotimes (index 8 value)
+  (let ((value 0)
+        (index 0))
+    (while (< index 8)
       (setq value
             (logior value
-                    (ash (aref bytes index) (* index 8)))))))
+                    (ash (aref bytes index) (* index 8)))
+            index (1+ index)))
+    value))
 
 (defun disco-settings--fixed64-field (fields number)
   "Return the last fixed64 field NUMBER from FIELDS."
@@ -156,7 +160,6 @@ Each field retains its number, wire type, decoded value, and exact raw bytes."
             values)
       (setq bytes (substring bytes 8)))
     (nreverse values)))
-
 
 (defun disco-settings--packed-varints (bytes)
   "Decode packed varints from BYTES."
@@ -228,7 +231,6 @@ Each field retains its number, wire type, decoded value, and exact raw bytes."
                                entries nil nil #'equal)
                     (disco-settings--frecency-item value-bytes)))))))
     (copy-tree entries)))
-
 
 (defun disco-settings-favorite-emojis ()
   "Return current account favorite emoji identities in server order."
