@@ -33,6 +33,7 @@
 (require 'disco-customize)
 (require 'disco-read-state)
 (require 'disco-state)
+(require 'disco-settings)
 (require 'disco-util)
 (require 'websocket)
 
@@ -151,6 +152,8 @@ changes only when Discord establishes a new logical Gateway session.")
 (defvar disco-gateway--resume-url nil)
 (defvar disco-gateway--current-user-id nil
   "Cached current account user ID from READY/USER_UPDATE payloads.")
+(defvar disco-gateway--current-user nil
+  "Cached current account user object from READY/USER_UPDATE payloads.")
 (defvar disco-gateway--lazy-subscribed-channels (make-hash-table :test #'equal)
   "Hash table of channel IDs already subscribed via Gateway op 14.")
 
@@ -194,6 +197,9 @@ changes only when Discord establishes a new logical Gateway session.")
 
 (defconst disco-gateway--capability-passive-guild-update-v2 (ash 1 14)
   "Gateway capability bit for PASSIVE_GUILD_UPDATE_V2.")
+
+(defconst disco-gateway--capability-user-settings-proto (ash 1 9)
+  "Gateway capability bit for USER_SETTINGS_PROTO_UPDATE.")
 
 (defconst disco-gateway--capability-channel-obfuscation (ash 1 15)
   "Gateway capability bit for CHANNEL_OBFUSCATION.
@@ -290,6 +296,10 @@ a close rely on the same session generation without a live connection."
 (defun disco-gateway-current-user-id ()
   "Return current Discord account user ID from gateway session, or nil."
   disco-gateway--current-user-id)
+
+(defun disco-gateway-current-user ()
+  "Return a copy of the current Discord account user object, or nil."
+  (copy-tree disco-gateway--current-user))
 
 (defun disco-gateway-send-queue-slot-available-p (&optional slots)
   "Return non-nil when outbound send queue can accept SLOTS payloads."
@@ -708,6 +718,7 @@ If CLEAR-SESSION is non-nil, drop resume-related values too."
       (setq disco-gateway--session-id nil)
       (setq disco-gateway--resume-url nil)
       (setq disco-gateway--current-user-id nil)
+      (setq disco-gateway--current-user nil)
       (disco-gateway--reset-reconnect-backoff))))
 
 (defun disco-gateway--clear-session-data ()
@@ -725,6 +736,7 @@ terminal no-callback privacy sweep."
         disco-gateway--session-id nil
         disco-gateway--resume-url nil
         disco-gateway--current-user-id nil
+        disco-gateway--current-user nil
         disco-gateway--heartbeat-interval-ms nil
         disco-gateway--heartbeat-timer nil
         disco-gateway--heartbeat-timer-owner nil
@@ -1080,13 +1092,15 @@ This shape follows Discord gateway identify expectations."
 (defun disco-gateway--effective-identify-capabilities ()
   "Return the effective capabilities bitmask for the Identify payload.
 
-`CHANNEL_OBFUSCATION' is an unconditional protocol requirement.  Optional
-capabilities extend that baseline; they cannot disable it."
+`CHANNEL_OBFUSCATION' and `USER_SETTINGS_PROTO_UPDATE' are unconditional
+protocol requirements.  Optional capabilities extend that baseline; they
+cannot disable either one."
   (let ((capabilities
          (logior (or (and (integerp disco-gateway-identify-capabilities)
                           disco-gateway-identify-capabilities)
                      0)
-                 disco-gateway--capability-channel-obfuscation)))
+                 disco-gateway--capability-channel-obfuscation
+                 disco-gateway--capability-user-settings-proto)))
     (when disco-gateway-enable-passive-guild-update-v2
       (setq capabilities
             (logior (or capabilities 0)
@@ -1385,6 +1399,8 @@ CHANNEL watchers are also re-subscribed using Gateway opcode 14."
   (setq disco-gateway--session-id (alist-get 'session_id payload))
   (setq disco-gateway--resume-url (alist-get 'resume_gateway_url payload))
   (let ((ready-user (alist-get 'user payload)))
+    (setq disco-gateway--current-user
+          (and (listp ready-user) (copy-tree ready-user)))
     (setq disco-gateway--current-user-id
           (and (listp ready-user)
                (alist-get 'id ready-user))))
@@ -2023,9 +2039,15 @@ response entries are upserted and emitted."
 (defun disco-gateway--dispatch-user-update (payload)
   "Handle USER_UPDATE dispatch PAYLOAD."
   (disco-state-apply-user-update)
-  (let ((user-id (alist-get 'id payload)))
-    (when user-id
-      (setq disco-gateway--current-user-id user-id))))
+  (when (listp payload)
+    (setq disco-gateway--current-user (copy-tree payload))
+    (let ((user-id (alist-get 'id payload)))
+      (when user-id
+        (setq disco-gateway--current-user-id user-id)))))
+
+(defun disco-gateway--dispatch-user-settings-proto-update (payload)
+  "Handle USER_SETTINGS_PROTO_UPDATE dispatch PAYLOAD."
+  (disco-settings-apply-gateway-update payload))
 
 (defun disco-gateway--dispatch-guild-members-chunk (payload)
   "Handle GUILD_MEMBERS_CHUNK dispatch PAYLOAD."
@@ -2062,6 +2084,7 @@ response entries are upserted and emitted."
     ("GUILD_MEMBER_REMOVE" . disco-gateway--dispatch-guild-member-remove)
     ("GUILD_DELETE" . disco-gateway--dispatch-guild-delete)
     ("USER_GUILD_SETTINGS_UPDATE" . disco-gateway--dispatch-user-guild-settings-update)
+    ("USER_SETTINGS_PROTO_UPDATE" . disco-gateway--dispatch-user-settings-proto-update)
     ("CHANNEL_CREATE" . disco-gateway--dispatch-channel-create)
     ("CHANNEL_UPDATE" . disco-gateway--dispatch-channel-update)
     ("CHANNEL_DELETE" . disco-gateway--dispatch-channel-delete)

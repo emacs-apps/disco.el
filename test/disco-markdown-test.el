@@ -488,6 +488,23 @@
                  (get-text-property pos 'face rendered)
                  'disco-markdown-heading-1-face))))
 
+(ert-deftest disco-markdown-custom-emoji-render-preserves-replacement-match ()
+  (cl-letf (((symbol-function 'disco-emoji-image-display-string)
+             (lambda (emoji-id _animated fallback)
+               (string-match "[0-9]+" emoji-id)
+               fallback)))
+    (let* ((rendered
+            (disco-markdown-render
+             "Ups and downs<:ghostty_bobr:1386470157009944726>"
+             :context 'room-message))
+           (plain (substring-no-properties rendered))
+           (emoji-pos (string-match ":ghostty_bobr:" plain)))
+      (should (equal "Ups and downs:ghostty_bobr:" plain))
+      (should emoji-pos)
+      (should
+       (equal "1386470157009944726"
+              (get-text-property emoji-pos 'disco-emoji-id rendered))))))
+
 (provide 'disco-markdown-test)
 
 ;;; disco-markdown-test.el ends here

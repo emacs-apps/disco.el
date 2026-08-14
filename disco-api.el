@@ -650,6 +650,25 @@ BODY-TYPE is forwarded to transport layer."
    :on-success on-success
    :on-error on-error))
 
+(defun disco-api-user-settings-proto (type)
+  "Fetch current user's settings protobuf of TYPE."
+  (disco-api--request
+   "GET"
+   (format "/users/@me/settings-proto/%s" type)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-user-settings-proto-async
+    (type &key on-success on-error)
+  "Fetch current user's settings protobuf of TYPE asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/users/@me/settings-proto/%s" type)
+   :on-success on-success
+   :on-error on-error))
+
+
 (defun disco-api-guild-channels (guild-id)
   "Fetch channels in GUILD-ID."
   (disco-api--request
@@ -665,6 +684,24 @@ BODY-TYPE is forwarded to transport layer."
    "GET"
    (format "/guilds/%s/channels" guild-id)
    :query '(("permissions" . "true"))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-guild-top-emojis (guild-id)
+  "Fetch ranked top emoji metadata for GUILD-ID."
+  (disco-api--request
+   "GET"
+   (format "/guilds/%s/top-emojis" guild-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-guild-top-emojis-async
+    (guild-id &key on-success on-error)
+  "Fetch ranked top emoji metadata for GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/top-emojis" guild-id)
    :on-success on-success
    :on-error on-error))
 
@@ -1463,39 +1500,58 @@ optional :description/:filename/:content-type."
    :on-success on-success
    :on-error on-error))
 
-(defun disco-api-add-reaction (channel-id message-id emoji)
-  "Add EMOJI reaction to MESSAGE-ID in CHANNEL-ID for current user."
-  (disco-api--request
-   "PUT"
-   (format "/channels/%s/messages/%s/reactions/%s/@me"
-           channel-id message-id (disco-api--encode-reaction-emoji emoji))
-   nil nil nil))
+(defun disco-api-add-reaction
+    (channel-id message-id emoji &optional reaction-type)
+  "Add EMOJI REACTION-TYPE to MESSAGE-ID in CHANNEL-ID for current user."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request
+     "PUT"
+     (format "/channels/%s/messages/%s/reactions/%s/@me"
+             channel-id message-id (disco-api--encode-reaction-emoji emoji))
+     nil `((type . ,reaction-type)) nil)))
 
-(cl-defun disco-api-add-reaction-async (channel-id message-id emoji &key on-success on-error)
-  "Asynchronously add EMOJI reaction to MESSAGE-ID in CHANNEL-ID for current user."
-  (disco-api--request-async
-   "PUT"
-   (format "/channels/%s/messages/%s/reactions/%s/@me"
-           channel-id message-id (disco-api--encode-reaction-emoji emoji))
-   :on-success on-success
-   :on-error on-error))
+(cl-defun disco-api-add-reaction-async
+    (channel-id message-id emoji
+                &key reaction-type on-success on-error)
+  "Asynchronously add EMOJI REACTION-TYPE to MESSAGE-ID in CHANNEL-ID."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request-async
+     "PUT"
+     (format "/channels/%s/messages/%s/reactions/%s/@me"
+             channel-id message-id (disco-api--encode-reaction-emoji emoji))
+     :query `((type . ,reaction-type))
+     :on-success on-success
+     :on-error on-error)))
 
-(defun disco-api-remove-own-reaction (channel-id message-id emoji)
-  "Remove current user's EMOJI reaction from MESSAGE-ID in CHANNEL-ID."
-  (disco-api--request
-   "DELETE"
-   (format "/channels/%s/messages/%s/reactions/%s/@me"
-           channel-id message-id (disco-api--encode-reaction-emoji emoji))
-   nil nil nil))
+(defun disco-api-remove-own-reaction
+    (channel-id message-id emoji &optional reaction-type)
+  "Remove current user's EMOJI REACTION-TYPE from MESSAGE-ID in CHANNEL-ID."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request
+     "DELETE"
+     (format "/channels/%s/messages/%s/reactions/%s/%d/@me"
+             channel-id message-id
+             (disco-api--encode-reaction-emoji emoji)
+             reaction-type)
+     nil nil nil)))
 
-(cl-defun disco-api-remove-own-reaction-async (channel-id message-id emoji &key on-success on-error)
-  "Asynchronously remove current user's EMOJI reaction from MESSAGE-ID."
-  (disco-api--request-async
-   "DELETE"
-   (format "/channels/%s/messages/%s/reactions/%s/@me"
-           channel-id message-id (disco-api--encode-reaction-emoji emoji))
-   :on-success on-success
-   :on-error on-error))
+(cl-defun disco-api-remove-own-reaction-async
+    (channel-id message-id emoji
+                &key reaction-type on-success on-error)
+  "Asynchronously remove current user's EMOJI REACTION-TYPE."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request-async
+     "DELETE"
+     (format "/channels/%s/messages/%s/reactions/%s/%d/@me"
+             channel-id message-id
+             (disco-api--encode-reaction-emoji emoji)
+             reaction-type)
+     :on-success on-success
+     :on-error on-error)))
 
 (defun disco-api-create-poll-vote (channel-id message-id answer-ids)
   "Submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID."

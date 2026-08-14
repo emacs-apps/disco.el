@@ -16,8 +16,13 @@
 (require 'appkit-chat-emoji)
 (require 'disco-avatar)
 (require 'disco-msg)
+(require 'disco-api)
+(require 'disco-emoji-image)
+(require 'disco-markdown)
 (require 'disco-state)
+(require 'disco-settings)
 (require 'disco-thread)
+(require 'disco-permission)
 (require 'disco-util)
 
 (defvar company-mode)
@@ -28,6 +33,29 @@
 
 (declare-function disco-gateway-request-guild-members "disco-gateway")
 (declare-function disco-gateway-running-p "disco-gateway")
+(declare-function disco-gateway-current-user "disco-gateway")
+
+(defun disco-company--refresh-active-emoji-picker (_resources)
+  "Refresh an active completion UI after custom emoji images change."
+  (when-let* ((window (active-minibuffer-window))
+              (buffer (window-buffer window)))
+    (run-at-time
+     0 nil
+     (lambda (owner)
+       (when (and (buffer-live-p owner)
+                  (eq owner
+                      (and (active-minibuffer-window)
+                           (window-buffer (active-minibuffer-window)))))
+         (with-current-buffer owner
+           (if (and (fboundp 'vertico--exhibit)
+                    (bound-and-true-p vertico--candidates-ov))
+               (funcall (symbol-function 'vertico--exhibit))
+             (redisplay t)))))
+     buffer)))
+
+(add-hook 'disco-emoji-image-resources-updated-hook
+          #'disco-company--refresh-active-emoji-picker)
+(declare-function disco-gateway-current-user-id "disco-gateway")
 
 (defcustom disco-company-show-user-avatars t
   "When non-nil, show user avatars in company completion annotations."
@@ -63,6 +91,25 @@ completion row height stays stable across CAPF/Corfu and company popups."
   "Seconds before an unanswered guild member search can be retried."
   :type 'number
   :group 'disco)
+
+(defcustom disco-company-top-emoji-cache-seconds 86400
+  "Seconds a successful guild top-emoji snapshot remains fresh."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-company-new-emoji-days 60
+  "Age window in days for the reaction picker's newly-added emoji section."
+  :type 'number
+  :group 'disco)
+
+(defcustom disco-company-reaction-frecency-limit 42
+  "Maximum account reaction-frecency entries shown in their picker section."
+  :type 'integer
+  :group 'disco)
+
+(defvar disco-company--top-emoji-requests
+  (make-hash-table :test #'equal)
+  "Guild IDs with a top-emoji request currently in flight.")
 
 (defvar disco-company--member-search-nonce-counter 0
   "Monotonic counter used to own guild member search responses.")
@@ -155,6 +202,9 @@ as any Appkit view attaches, so nil can never degrade into replacement access."
   (unless (hash-table-p disco-company--member-search-requests)
     (setq-local disco-company--member-search-requests
                 (make-hash-table :test #'equal)))
+  (when (disco-current-token)
+    (disco-settings-ensure-loaded)
+    (disco-company--ensure-guild-top-emojis disco-room--guild-id))
   (let ((view (appkit-current-view)))
     (cond
      ((and (appkit-view-live-p view)
@@ -464,7 +514,14 @@ Gateway chunk can advance the same room token's completion model."
   "Handle member completion response EVENT for the current room."
   (pcase (plist-get event :type)
     ('ready
-     (disco-company--clear-member-search-state))
+     (disco-company--clear-member-search-state)
+     (disco-settings-ensure-loaded)
+     (disco-company--ensure-guild-top-emojis disco-room--guild-id))
+    ('guild-emojis-update
+     (when (equal
+            (disco-company--normalize-id (plist-get event :guild-id))
+            (disco-company--normalize-id disco-room--guild-id))
+       (disco-company--ensure-guild-top-emojis disco-room--guild-id)))
     ('guild-members-chunk
      (let* ((nonce (plist-get event :nonce))
             (entry (disco-company--member-search-entry-by-nonce nonce))
@@ -814,40 +871,132 @@ PROPS is appended as additional plist metadata."
     (or (null available)
         (disco-util-json-true-p (cdr available)))))
 
-(defun disco-company--completion-emoji-candidates ()
-  "Return `:' custom emoji candidates from current guild state."
-  (let ((guild-id (disco-company--normalize-id disco-room--guild-id))
-        (seen-labels (make-hash-table :test #'equal))
-        out)
-    (dolist (emoji (and guild-id (disco-state-guild-emojis guild-id)))
-      (let* ((emoji-id (disco-company--normalize-id
-                        (and (listp emoji) (alist-get 'id emoji))))
-             (raw-name (and (listp emoji) (alist-get 'name emoji)))
-             (name (and (stringp raw-name) (string-trim raw-name)))
-             (animated (and (listp emoji)
-                            (disco-util-json-true-p
-                             (alist-get 'animated emoji)))))
-        (when (and emoji-id
-                   (disco-company--completion-string-present-p name)
-                   (disco-company--completion-emoji-available-p emoji))
-          (let ((label
-                 (disco-company--completion-disambiguate-label
-                  (format ":%s:" name)
-                  (disco-company--completion-short-id emoji-id)
-                  seen-labels)))
-            (push (disco-company--completion-make-candidate
-                   label
-                   (format "<%s:%s:%s>" (if animated "a" "") name emoji-id)
-                   (if animated " animated emoji" " emoji")
-                   (downcase name)
-                   :kind 'emoji
-                   :emoji-id emoji-id
-                   :emoji-name name
-                   :animated animated)
-                  out)))))
+(defun disco-company--completion-emoji-role-usable-p (emoji guild-id)
+  "Return non-nil when current member may use EMOJI in GUILD-ID."
+  (let ((roles
+         (disco-company--normalize-list-sequence
+          (and (listp emoji) (alist-get 'roles emoji)))))
+    (or
+     (null roles)
+     (when-let* ((user-id
+                  (and (fboundp 'disco-gateway-current-user-id)
+                       (disco-gateway-current-user-id)))
+                 (member (disco-state-guild-member guild-id user-id)))
+       (let ((member-roles
+              (disco-company--normalize-list-sequence
+               (alist-get 'roles member))))
+         (seq-some
+          (lambda (role-id)
+            (member (disco-company--normalize-id role-id)
+                    (mapcar #'disco-company--normalize-id member-roles)))
+          roles))))))
+
+(defun disco-company--completion-guild-name (guild-id)
+  "Return cached display name for GUILD-ID, or its normalized ID."
+  (let ((normalized (disco-company--normalize-id guild-id)))
+    (or
+     (when-let* ((guild
+                  (seq-find
+                   (lambda (candidate)
+                     (equal normalized
+                            (disco-company--normalize-id
+                             (and (listp candidate)
+                                  (alist-get 'id candidate)))))
+                   (disco-state-guilds))))
+       (alist-get 'name guild))
+     normalized)))
+
+(defun disco-company--completion-emoji-candidates (&optional guild-ids)
+  "Return custom emoji candidates from GUILD-IDS.
+
+GUILD-IDS defaults to the current room guild, which preserves composer CAPF
+semantics.  Reaction readers may explicitly supply every eligible guild."
+  (let* ((current-guild-id
+          (disco-company--normalize-id disco-room--guild-id))
+         (guild-ids
+          (or guild-ids
+              (and current-guild-id (list current-guild-id))))
+         (seen-labels (make-hash-table :test #'equal))
+         out)
+    (dolist (guild-id guild-ids)
+      (setq guild-id (disco-company--normalize-id guild-id))
+      (dolist (emoji (and guild-id (disco-state-guild-emojis guild-id)))
+        (let* ((emoji-id (disco-company--normalize-id
+                          (and (listp emoji) (alist-get 'id emoji))))
+               (raw-name (and (listp emoji) (alist-get 'name emoji)))
+               (name (and (stringp raw-name) (string-trim raw-name)))
+               (animated (and (listp emoji)
+                              (disco-util-json-true-p
+                               (alist-get 'animated emoji))))
+               (current-p (equal guild-id current-guild-id))
+               (guild-name
+                (disco-company--completion-guild-name guild-id))
+               (group
+                (if current-p
+                    (format "This Server · %s" guild-name)
+                  guild-name)))
+          (when (and emoji-id
+                     (disco-company--completion-string-present-p name)
+                     (disco-company--completion-emoji-available-p emoji)
+                     (disco-company--completion-emoji-role-usable-p
+                      emoji guild-id))
+            (let ((label
+                   (disco-company--completion-disambiguate-label
+                    (format ":%s:" name)
+                    (disco-company--completion-short-id emoji-id)
+                    seen-labels)))
+              (push
+               (disco-company--completion-make-candidate
+                label
+                (format "<%s:%s:%s>" (if animated "a" "") name emoji-id)
+                (format " %s%s"
+                        (if animated "animated " "")
+                        (if current-p
+                            "emoji"
+                          (format "emoji · %s" guild-name)))
+                (format "%s%c%s"
+                        (if current-p "0" "1")
+                        0
+                        (downcase name))
+                :kind 'emoji
+                :emoji-id emoji-id
+                :emoji-name name
+                :emoji-guild-id guild-id
+                :emoji-guild-name guild-name
+                :group group
+                :prefix
+                (disco-emoji-image-completion-prefix emoji-id animated)
+                :animated animated)
+               out))))))
     (sort out (lambda (left right)
                 (string-lessp (or (plist-get left :sort-key) "")
                               (or (plist-get right :sort-key) ""))))))
+
+(defun disco-company--reaction-custom-guild-ids ()
+  "Return current-first guild IDs eligible for selectable reactions."
+  (let* ((current-id
+          (disco-company--normalize-id disco-room--guild-id))
+         (channel (disco-company--channel-object))
+         (user
+          (and (fboundp 'disco-gateway-current-user)
+               (disco-gateway-current-user)))
+         (premium-type (and (listp user) (alist-get 'premium_type user)))
+         (external-p
+          (and (integerp premium-type)
+               (> premium-type 0)
+               (or
+                (null current-id)
+                (disco-permission-channel-has-p
+                 channel 'use-external-emojis nil))))
+         (ids (and current-id (list current-id))))
+    (when external-p
+      (dolist (guild (disco-state-guilds))
+        (when-let* ((guild-id
+                    (disco-company--normalize-id
+                     (and (listp guild) (alist-get 'id guild)))))
+          (unless (member guild-id ids)
+            (setq ids (append ids (list guild-id)))))))
+    ids))
 
 (defun disco-company--completion-unicode-emoji-candidates ()
   "Return protocol-neutral Unicode emoji candidates from Appkit."
@@ -864,6 +1013,8 @@ PROPS is appended as additional plist metadata."
         :kind 'unicode-emoji
         :emoji-name name
         :emoji-glyph glyph
+        :group (or (appkit-chat-completion-candidate-group candidate)
+                   "Unicode")
         :prefix (appkit-chat-completion-candidate-prefix candidate))))
    (or (appkit-chat-emoji-candidates) '())))
 
@@ -940,7 +1091,9 @@ PROPS is appended as additional plist metadata."
          (plist-get candidate :channel-id)
          (plist-get candidate :emoji-name)
          (plist-get candidate :emoji-id)
-         (plist-get candidate :emoji-glyph))))
+         (plist-get candidate :emoji-glyph)
+         (plist-get candidate :emoji-guild-name)
+         (plist-get candidate :emoji-guild-id))))
 
 (defun disco-company--completion-appkit-candidate (candidate)
   "Wrap Disco plist CANDIDATE for the shared completion layer.
@@ -952,11 +1105,371 @@ candidate's opaque value."
    :insert (plist-get candidate :insert)
    :search-terms (disco-company--completion-search-terms candidate)
    :prefix (plist-get candidate :prefix)
+   :group (plist-get candidate :group)
    :annotation
    (lambda (appkit-candidate)
      (disco-company--completion-capf-annotation
       (appkit-chat-completion-candidate-value appkit-candidate)))
    :value candidate))
+
+(defun disco-company--reaction-object-candidate (reaction)
+  "Return one completion candidate for aggregate REACTION, or nil."
+  (let* ((emoji (and (listp reaction) (alist-get 'emoji reaction)))
+         (emoji-id
+          (disco-company--normalize-id
+           (or (and (listp emoji) (alist-get 'id emoji))
+               (and (listp reaction) (alist-get 'emoji_id reaction)))))
+         (raw-name
+          (or (and (listp emoji) (alist-get 'name emoji))
+              (and (stringp emoji) emoji)
+              (and (listp reaction) (alist-get 'emoji_name reaction))))
+         (name (and (stringp raw-name) (string-trim raw-name)))
+         (animated
+          (and (listp emoji)
+               (disco-util-json-true-p (alist-get 'animated emoji)))))
+    (cond
+     (emoji-id
+      (let ((route-name
+             (if (disco-company--completion-string-present-p name)
+                 name
+               "_")))
+        (disco-company--completion-make-candidate
+         (if (disco-company--completion-string-present-p name)
+             (format ":%s:" name)
+           (format "custom emoji (%s)"
+                   (disco-company--completion-short-id emoji-id)))
+         (format "<%s:%s:%s>" (if animated "a" "") route-name emoji-id)
+         " current reaction"
+         (downcase route-name)
+         :kind 'emoji
+         :emoji-id emoji-id
+         :emoji-name name
+         :group "Current Message"
+         :prefix (disco-emoji-image-completion-prefix emoji-id animated)
+         :animated animated)))
+     ((disco-company--completion-string-present-p name)
+      (disco-company--completion-make-candidate
+       name name " current reaction" name
+       :kind 'unicode-emoji
+       :emoji-glyph name
+       :group "Current Message"))
+     (t nil))))
+
+(defun disco-company--reaction-candidate-identity (candidate)
+  "Return stable Discord reaction identity for plist CANDIDATE."
+  (cond
+   ((plist-get candidate :emoji-id)
+    (cons 'custom (plist-get candidate :emoji-id)))
+   ((plist-get candidate :emoji-glyph)
+    (cons 'unicode (plist-get candidate :emoji-glyph)))
+   (t
+    (cons 'insert (plist-get candidate :insert)))))
+
+(defun disco-company--guild-emoji-id-snapshot (guild-id)
+  "Return current ordered custom emoji ID snapshot for GUILD-ID."
+  (delq nil
+        (mapcar
+         (lambda (emoji)
+           (disco-company--normalize-id
+            (and (listp emoji) (alist-get 'id emoji))))
+         (disco-state-guild-emojis guild-id))))
+
+(defun disco-company--normalize-top-emoji-items (response)
+  "Return validated, best-rank-first top emoji items from RESPONSE."
+  (let* ((raw (and (listp response) (alist-get 'items response)))
+         (items (disco-company--normalize-list-sequence raw))
+         (best (make-hash-table :test #'equal))
+         out)
+    (dolist (item items)
+      (let ((emoji-id
+             (disco-company--normalize-id
+              (and (listp item) (alist-get 'emoji_id item))))
+            (rank (and (listp item) (alist-get 'emoji_rank item))))
+        (when (and emoji-id (integerp rank))
+          (let ((old (gethash emoji-id best)))
+            (when (or (null old) (< rank old))
+              (puthash emoji-id rank best))))))
+    (maphash
+     (lambda (emoji-id rank)
+       (push `((emoji_id . ,emoji-id) (emoji_rank . ,rank)) out))
+     best)
+    (sort out
+          (lambda (left right)
+            (< (alist-get 'emoji_rank left)
+               (alist-get 'emoji_rank right))))))
+
+(defun disco-company--top-emoji-entry-fresh-p (entry)
+  "Return non-nil when timestamped top emoji ENTRY is fresh."
+  (let ((fetched-at (and (listp entry) (plist-get entry :fetched-at))))
+    (and (numberp fetched-at)
+         (< (- (float-time) fetched-at)
+            (max 0 disco-company-top-emoji-cache-seconds)))))
+
+(defun disco-company--ensure-guild-top-emojis (guild-id)
+  "Asynchronously ensure fresh top emoji metadata for GUILD-ID."
+  (setq guild-id (disco-company--normalize-id guild-id))
+  (when guild-id
+    (let ((entry (disco-state-guild-top-emojis-entry guild-id)))
+      (unless (or (disco-company--top-emoji-entry-fresh-p entry)
+                  (gethash guild-id disco-company--top-emoji-requests))
+        (let ((owner (list guild-id
+                           (disco-company--guild-emoji-id-snapshot guild-id))))
+          (puthash guild-id owner disco-company--top-emoji-requests)
+          (disco-api-guild-top-emojis-async
+           guild-id
+           :on-success
+           (lambda (response)
+             (when (eq owner
+                       (gethash guild-id
+                                disco-company--top-emoji-requests))
+               (remhash guild-id disco-company--top-emoji-requests)
+               (when (equal (cadr owner)
+                            (disco-company--guild-emoji-id-snapshot guild-id))
+                 (disco-state-set-guild-top-emojis
+                  guild-id
+                  (disco-company--normalize-top-emoji-items response)))))
+           :on-error
+           (lambda (_error)
+             (when (eq owner
+                       (gethash guild-id
+                                disco-company--top-emoji-requests))
+               (remhash guild-id
+                        disco-company--top-emoji-requests)))))))))
+
+(defun disco-company-reset-account-state ()
+  "Forget account-scoped asynchronous completion request ownership."
+  (clrhash disco-company--top-emoji-requests))
+
+(defun disco-company--reaction-friendly-name-key (value)
+  "Return comparable Discord-friendly emoji name key for VALUE."
+  (when (stringp value)
+    (replace-regexp-in-string
+     "[^[:alnum:]]+" "" (downcase (string-trim value)))))
+
+(defun disco-company--reaction-source-table (candidates)
+  "Build identity and friendly-name lookup table from CANDIDATES."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (candidate candidates)
+      (when-let* ((emoji-id (plist-get candidate :emoji-id)))
+        (puthash (cons 'custom emoji-id) candidate table))
+      (when-let* ((glyph (plist-get candidate :emoji-glyph)))
+        (puthash (cons 'unicode glyph) candidate table))
+      (when-let* ((name (plist-get candidate :emoji-name))
+                  (key (disco-company--reaction-friendly-name-key name)))
+        (puthash (cons 'name key) candidate table)
+        (puthash (cons 'name
+                       (replace-regexp-in-string "and" "" key))
+                 candidate
+                 table)))
+    table))
+
+(defun disco-company--reaction-resolve-identifier (identifier source-table)
+  "Resolve settings emoji IDENTIFIER through SOURCE-TABLE."
+  (let* ((identifier (and identifier (format "%s" identifier)))
+         (name-key
+          (disco-company--reaction-friendly-name-key identifier)))
+    (and identifier
+         (or
+          (and (string-match-p "\\`[0-9]+\\'" identifier)
+               (gethash (cons 'custom identifier) source-table))
+          (gethash (cons 'unicode identifier) source-table)
+          (and name-key
+               (or (gethash (cons 'name name-key) source-table)
+                   (gethash
+                    (cons 'name
+                          (replace-regexp-in-string "and" "" name-key))
+                    source-table)))))))
+
+(defun disco-company--reaction-section
+    (identifiers source-table group)
+  "Resolve IDENTIFIERS into a deduplicated copied candidate GROUP."
+  (let ((seen (make-hash-table :test #'equal))
+        out)
+    (dolist (identifier identifiers)
+      (when-let* ((candidate
+                   (disco-company--reaction-resolve-identifier
+                    identifier source-table))
+                  (identity
+                   (disco-company--reaction-candidate-identity candidate)))
+        (unless (gethash identity seen)
+          (puthash identity t seen)
+          (let ((copy (copy-sequence candidate)))
+            (setq copy (plist-put copy :group group))
+            (push copy out)))))
+    (nreverse out)))
+
+(defun disco-company--snowflake-time-seconds (snowflake)
+  "Return Unix creation time for decimal Discord SNOWFLAKE, or nil."
+  (when (and (stringp snowflake)
+             (string-match-p "\\`[0-9]+\\'" snowflake))
+    (+ 1420070400.0
+       (/ (ash (string-to-number snowflake) -22) 1000.0))))
+
+(defun disco-company--reaction-top-and-new-section
+    (guild-id current-candidates source-table)
+  "Return current GUILD-ID top and newly added custom emoji candidates."
+  (let ((entry (disco-state-guild-top-emojis-entry guild-id))
+        identifiers
+        new)
+    (dolist (item (plist-get entry :items))
+      (when-let* ((emoji-id
+                  (disco-company--normalize-id
+                   (and (listp item) (alist-get 'emoji_id item)))))
+        (push emoji-id identifiers)))
+    (setq identifiers (nreverse identifiers))
+    (dolist (candidate current-candidates)
+      (when-let* ((emoji-id (plist-get candidate :emoji-id))
+                  (created-at
+                   (disco-company--snowflake-time-seconds emoji-id)))
+        (when (<= (- (float-time) created-at)
+                  (* 86400 (max 0 disco-company-new-emoji-days)))
+          (push candidate new))))
+    (setq new
+          (sort new
+                (lambda (left right)
+                  (> (string-to-number (plist-get left :emoji-id))
+                     (string-to-number (plist-get right :emoji-id))))))
+    (disco-company--reaction-section
+     (append identifiers
+             (mapcar (lambda (candidate)
+                       (plist-get candidate :emoji-id))
+                     new))
+     source-table
+     "Top / Newly Added")))
+
+(defun disco-company--reaction-frecency-identifiers ()
+  "Return reaction emoji setting keys ordered by descending frecency."
+  (let ((entries (disco-settings-reaction-frecency)))
+    (setq entries
+          (sort entries
+                (lambda (left right)
+                  (let* ((left-item (cdr left))
+                         (right-item (cdr right))
+                         (left-score (or (plist-get left-item :score) -1))
+                         (right-score (or (plist-get right-item :score) -1))
+                         (left-total
+                          (or (plist-get left-item :total-uses) 0))
+                         (right-total
+                          (or (plist-get right-item :total-uses) 0)))
+                    (if (= left-score right-score)
+                        (> left-total right-total)
+                      (> left-score right-score))))))
+    (mapcar #'car
+            (seq-take entries
+                      (max 0 disco-company-reaction-frecency-limit)))))
+
+(defun disco-company--reaction-message-section (reactions own-only)
+  "Return deduplicated target-message REACTIONS, filtered by OWN-ONLY."
+  (let ((seen (make-hash-table :test #'equal))
+        out)
+    (dolist (reaction (or reactions '()))
+      (when (or (not own-only)
+                (disco-msg-reaction-selected-p reaction))
+        (when-let* ((candidate
+                     (disco-company--reaction-object-candidate reaction))
+                    (identity
+                     (disco-company--reaction-candidate-identity candidate)))
+          (unless (gethash identity seen)
+            (puthash identity t seen)
+            (setq candidate
+                  (plist-put candidate
+                             :group
+                             "Reactions on This Message"))
+            (push candidate out)))))
+    (nreverse out)))
+
+(defun disco-company--reaction-content-section (message own-only)
+  "Return custom emoji occurring in MESSAGE content unless OWN-ONLY."
+  (unless own-only
+    (let ((seen (make-hash-table :test #'equal))
+          out)
+      (dolist
+          (identity
+           (disco-markdown-custom-emoji-identities
+            (and (listp message) (alist-get 'content message))))
+        (let ((emoji-id (plist-get identity :id))
+              (name (plist-get identity :name))
+              (animated (plist-get identity :animated)))
+          (unless (gethash emoji-id seen)
+            (puthash emoji-id t seen)
+            (push
+             (disco-company--completion-make-candidate
+              (format ":%s:" name)
+              (format "<%s:%s:%s>"
+                      (if animated "a" "") name emoji-id)
+              " used in this message"
+              (downcase name)
+              :kind 'emoji
+              :emoji-id emoji-id
+              :emoji-name name
+              :group "Emoji in This Message"
+              :prefix
+              (disco-emoji-image-completion-prefix emoji-id animated)
+              :animated animated)
+             out))))
+      (nreverse out))))
+
+
+
+(defun disco-company-reaction-candidates (&optional message own-only)
+  "Return the grouped Discord reaction catalog for MESSAGE.
+
+MESSAGE supplies aggregate reactions and custom emoji occurring in its content.
+When OWN-ONLY is non-nil, return only aggregates selected by the current user.
+Otherwise, account favorites and reaction frecency, message-local identities,
+current-first eligible guild catalogs, and Unicode emoji are composed in stable
+section order.  Every candidate retains its exact Discord route identity."
+  (let ((message-section
+         (disco-company--reaction-message-section
+          (and (listp message) (disco-msg-reactions message))
+          own-only))
+        (content-section
+         (disco-company--reaction-content-section message own-only)))
+    (unless own-only
+      (disco-settings-ensure-loaded))
+    (let* ((guild-ids
+            (and (not own-only)
+                 (disco-company--reaction-custom-guild-ids)))
+           (current-guild-id
+            (disco-company--normalize-id disco-room--guild-id))
+           (custom-catalog
+            (and guild-ids
+                 (disco-company--completion-emoji-candidates guild-ids)))
+           (current-custom
+            (seq-filter
+             (lambda (candidate)
+               (equal current-guild-id
+                      (plist-get candidate :emoji-guild-id)))
+             custom-catalog))
+           (unicode-catalog
+            (and (not own-only)
+                 (disco-company--completion-unicode-emoji-candidates)))
+           (source-table
+            (disco-company--reaction-source-table
+             (append custom-catalog unicode-catalog)))
+           candidates)
+      (if own-only
+          (setq candidates message-section)
+        (disco-company--ensure-guild-top-emojis current-guild-id)
+        (setq candidates
+              (append
+               (disco-company--reaction-top-and-new-section
+                current-guild-id current-custom source-table)
+               (disco-company--reaction-section
+                (disco-settings-favorite-emojis)
+                source-table
+                "Favorites")
+               (disco-company--reaction-section
+                (disco-company--reaction-frecency-identifiers)
+                source-table
+                "Frequently Used Reactions")
+               message-section
+               content-section
+               custom-catalog
+               unicode-catalog)))
+      (mapcar
+       #'disco-company--completion-appkit-candidate
+       (disco-company--completion-uniquify-candidates candidates)))))
 
 (defun disco-company--completion-apply-candidate (completed candidate)
   "Replace COMPLETED with protocol insertion from plist CANDIDATE."

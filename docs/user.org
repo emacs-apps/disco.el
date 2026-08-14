@@ -154,6 +154,23 @@ Timeline keys apply outside the composer:
 | ~-~ | remove reaction |
 | ~T~ | open thread |
 
+The add/toggle reaction commands open a searchable, sectioned visual catalog.
+Sections are ordered as top/newly-added guild emoji, account favorites,
+frequently used reactions, reactions already on the message, current and
+eligible external guild catalogs, then Unicode emoji.  Account ranking data is
+prefetched when a room opens from Discord's private settings/top-emoji routes;
+until that asynchronous load completes, the picker still contains the local
+guild/message/Unicode sources.  Disabled and role-locked custom emoji are
+omitted.  External guild emoji require Nitro and channel permission.
+
+Custom emoji rows lazily load cached CDN WebP previews only when displayed.
+Animated emoji request animated WebP when both Disco and Appkit animation
+settings permit it; otherwise the same row uses a static preview.  Reactions
+already present on the message remain selectable even when their custom emoji
+was renamed or deleted.  Remove offers only reactions selected by the current
+account.  The message's suggested reaction remains the ~RET~ default.  When no
+catalog is available, add/toggle accepts an unrestricted reaction string.
+
 Legacy ~C-c C-F~ still forwards.  In picker prompts, ~RET~ on empty
 input skips one side.  ~C-c m~ exposes the same message family.
 

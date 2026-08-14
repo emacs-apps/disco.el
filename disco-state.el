@@ -101,6 +101,10 @@ stored here as access evidence.")
 (defvar disco-state--guild-emojis-loaded (make-hash-table :test #'equal)
   "Hash table of guild IDs with an authoritative custom emoji snapshot.")
 
+(defvar disco-state--guild-top-emojis-by-guild
+  (make-hash-table :test #'equal)
+  "Hash table guild-id -> timestamped ranked top emoji metadata.")
+
 (defvar disco-state--roles-by-guild (make-hash-table :test #'equal)
   "Hash table guild-id -> latest complete guild role list.")
 
@@ -229,6 +233,7 @@ stored here as access evidence.")
   (clrhash disco-state--guild-member-ids-by-guild)
   (clrhash disco-state--emojis-by-guild)
   (clrhash disco-state--guild-emojis-loaded)
+  (clrhash disco-state--guild-top-emojis-by-guild)
   (clrhash disco-state--roles-by-guild)
   (clrhash disco-state--guild-roles-loaded)
   (clrhash disco-state--voice-states-by-key)
@@ -608,6 +613,7 @@ MEMBER-COUNT is optional approximate thread member count."
   (remhash guild-id disco-state--guild-member-ids-by-guild)
   (remhash guild-id disco-state--emojis-by-guild)
   (remhash guild-id disco-state--guild-emojis-loaded)
+  (remhash guild-id disco-state--guild-top-emojis-by-guild)
   (remhash guild-id disco-state--roles-by-guild)
   (remhash guild-id disco-state--guild-roles-loaded))
 
@@ -1262,6 +1268,7 @@ guild as loaded, which is distinct from not having received emoji data yet."
                (copy-tree snapshot)
                disco-state--emojis-by-guild)
       (puthash normalized-guild-id t disco-state--guild-emojis-loaded)
+      (remhash normalized-guild-id disco-state--guild-top-emojis-by-guild)
       (copy-tree snapshot))))
 
 (defun disco-state-guild-emojis (guild-id)
@@ -1275,6 +1282,29 @@ guild as loaded, which is distinct from not having received emoji data yet."
   (and (gethash (disco-state--normalize-id guild-id)
                 disco-state--guild-emojis-loaded)
        t))
+
+(defun disco-state-set-guild-top-emojis (guild-id items &optional fetched-at)
+  "Store ranked top emoji ITEMS and FETCHED-AT for GUILD-ID."
+  (when-let* ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (let ((entry (list :items (copy-tree items)
+                       :fetched-at (or fetched-at (float-time)))))
+      (puthash normalized-guild-id
+               entry
+               disco-state--guild-top-emojis-by-guild)
+      (copy-tree entry))))
+
+(defun disco-state-guild-top-emojis-entry (guild-id)
+  "Return copied timestamped top emoji entry for GUILD-ID."
+  (when-let* ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (copy-tree
+     (gethash normalized-guild-id
+              disco-state--guild-top-emojis-by-guild))))
+
+(defun disco-state-invalidate-guild-top-emojis (guild-id)
+  "Forget cached top emoji metadata for GUILD-ID."
+  (when-let* ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (remhash normalized-guild-id
+             disco-state--guild-top-emojis-by-guild)))
 
 (defun disco-state-set-guild-roles (guild-id roles)
   "Replace GUILD-ID's authoritative ROLES snapshot.

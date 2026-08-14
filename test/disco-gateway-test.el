@@ -14,7 +14,8 @@
                (lambda () "tok")))
       (let* ((payload (disco-gateway--identify-payload))
              (capabilities (alist-get 'capabilities payload)))
-        (should (= capabilities (logior (ash 1 14) (ash 1 15))))))))
+        (should (= capabilities
+                   (logior (ash 1 9) (ash 1 14) (ash 1 15))))))))
 
 (ert-deftest disco-gateway-identify-payload-merges-custom-and-native-capabilities ()
   (let ((disco-gateway-identify-capabilities (ash 1 2))
@@ -26,7 +27,8 @@
       (let* ((payload (disco-gateway--identify-payload))
              (capabilities (alist-get 'capabilities payload)))
         (should (= capabilities
-                   (logior (ash 1 2) (ash 1 14) (ash 1 15))))))))
+                   (logior (ash 1 2) (ash 1 9)
+                           (ash 1 14) (ash 1 15))))))))
 
 (ert-deftest disco-gateway-identify-payload-keeps-channel-obfuscation-when-passive-v2-disabled ()
   (let ((disco-gateway-identify-capabilities nil)
@@ -36,7 +38,8 @@
     (cl-letf (((symbol-function 'disco-current-token)
                (lambda () "tok")))
       (let ((payload (disco-gateway--identify-payload)))
-        (should (= (alist-get 'capabilities payload) (ash 1 15)))))))
+        (should (= (alist-get 'capabilities payload)
+                   (logior (ash 1 9) (ash 1 15))))))))
 
 (ert-deftest disco-gateway-ready-advances-logical-session-generation ()
   (disco-state-reset)
@@ -51,6 +54,9 @@
          (user . ((id . "self")))
          (guilds . [])))
       (should (= 8 (disco-gateway-session-generation)))
+      (should
+       (equal '((id . "self"))
+              (disco-gateway-current-user)))
       (disco-gateway--dispatch-resumed nil)
       (should (= 8 (disco-gateway-session-generation)))))
   (disco-state-reset))
@@ -503,14 +509,36 @@
                 :threads (((id . "thread1") (parent_id . "forum1"))))
               emitted)))))
 
-(ert-deftest disco-gateway-dispatch-user-update-applies-state-and-user-id ()
-  (let ((applied nil))
-    (setq disco-gateway--current-user-id nil)
+(ert-deftest disco-gateway-dispatch-user-update-applies-state-and-current-user ()
+  (let ((applied nil)
+        (disco-gateway--current-user nil)
+        (disco-gateway--current-user-id nil))
     (cl-letf (((symbol-function 'disco-state-apply-user-update)
                (lambda () (setq applied t))))
-      (disco-gateway--dispatch-user-update '((id . "u9")))
+      (disco-gateway--dispatch-user-update
+       '((id . "u9") (premium_type . 2)))
       (should applied)
-      (should (equal "u9" disco-gateway--current-user-id)))))
+      (should (equal "u9" (disco-gateway-current-user-id)))
+      (let ((user (disco-gateway-current-user)))
+        (should (= 2 (alist-get 'premium_type user)))
+        (setf (alist-get 'premium_type user) 0)
+        (should (= 2
+                   (alist-get 'premium_type
+                              (disco-gateway-current-user))))))))
+
+(ert-deftest disco-gateway-dispatch-user-settings-proto-update-forwards-payload ()
+  (let (received)
+    (cl-letf (((symbol-function 'disco-settings-apply-gateway-update)
+               (lambda (payload) (setq received payload))))
+      (disco-gateway--handle-dispatch
+       "USER_SETTINGS_PROTO_UPDATE"
+       '((settings . ((type . 2) (proto . "AA==")))
+         (partial . t)))
+      (should
+       (equal
+        '((settings . ((type . 2) (proto . "AA==")))
+          (partial . t))
+        received)))))
 
 (ert-deftest disco-gateway-dispatch-thread-create-applies-read-state-first ()
   (let (calls)
