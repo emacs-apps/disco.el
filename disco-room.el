@@ -1146,9 +1146,14 @@ forwarded to the controller-only restore path used by asynchronous callbacks."
                      (or (and msg (disco-msg-preview-content msg)) ""))))
       (appkit-chatbuf-aux-render
        :title title
-       :preview (if (string-empty-p preview)
-                    "Message preview unavailable"
-                  preview)
+       :preview
+       (disco-media-message-one-line-preview
+        msg
+        (if (string-empty-p preview)
+            "Message preview unavailable"
+          preview)
+        :attachments
+        (and msg (disco-room--message-effective-attachments msg)))
        :cancel-action #'disco-room-cancel-reply
        :cancel-help
        (format "Cancel %s (C-c C-k)"
@@ -3055,18 +3060,33 @@ No Appkit invalidation is requested."
   (when (appkit-chat-timeline-live-p)
     (appkit-chat-timeline-refresh)))
 
+(defun disco-room--composer-one-line-resource-keys ()
+  "Return media resources used by the current composer aux preview."
+  (when-let* ((aux-state (appkit-chatbuf-aux-state))
+              (message-id (plist-get aux-state :message-id))
+              (message
+               (or (disco-room--composer-context-message message-id)
+                   (plist-get aux-state :aux-msg))))
+    (disco-media-message-one-line-resource-keys
+     message (disco-room--message-effective-attachments message))))
+
 (defun disco-room--sync-resource-changes-in-open-rooms (resources)
   "Synchronize open room rows depending on opaque RESOURCES."
   (unless disco-room--session-cache-reset-in-progress
     (let ((resources (delete-dups (delq nil (copy-sequence resources)))))
       (when resources
-       (dolist (buf (buffer-list))
-         (when (buffer-live-p buf)
-           (with-current-buffer buf
-             (when (and (eq major-mode 'disco-room-mode)
-                        (appkit-view-live-p (appkit-current-view)))
-               (let ((view (appkit-current-view)))
-                   (appkit-request-sync view :resources resources))))))))))
+	(dolist (buf (buffer-list))
+          (when (buffer-live-p buf)
+            (with-current-buffer buf
+              (when (and (eq major-mode 'disco-room-mode)
+                         (appkit-view-live-p (appkit-current-view)))
+		(let ((view (appkit-current-view)))
+                  (appkit-request-sync view :resources resources)
+                  (when (seq-some
+                         (lambda (resource)
+                           (member resource resources))
+                         (disco-room--composer-one-line-resource-keys))
+                    (disco-room--update-frame)))))))))))
 
 (defun disco-room--handle-avatar-resources-updated (resources)
   "Synchronize room rows depending on changed avatar RESOURCES."
@@ -3156,7 +3176,7 @@ No Appkit invalidation is requested."
       (when visual-fill-mode-fn
         (funcall visual-fill-mode-fn -1)))))
 
-(setq disco-media-rerender-function #'disco-room--handle-media-rerender)
+(add-hook 'disco-media-rerender-hook #'disco-room--handle-media-rerender)
 
 (defun disco-room--avatar-display-size ()
   "Return full avatar size in pixels for two-line avatar rendering.
@@ -7093,25 +7113,25 @@ When called with prefix argument, force draft edit in minibuffer first."
                        (disco-room--request-render view)
                        (let ((success
                               (lambda (response)
-                                 (if (and (listp response) (alist-get 'id response))
-                                     (progn
-                                       (disco-state-upsert-message channel-id response)
-                                       (when (room-active-p)
-                                         (with-current-buffer room-buffer
-                                           (disco-room--observe-live-create
-                                            (alist-get 'id response))))
-                                       (funcall on-success response)
-                                       (when (room-active-p)
-                                         (with-current-buffer room-buffer
-                                           (disco-room--request-render view))))
-                                   (progn
-                                     (disco-state-remove-pending-message channel-id nonce)
-                                     (funcall on-error
-                                              (list 'error
-                                                    "Discord create-message returned no message"))
-                                     (when (room-active-p)
-                                       (with-current-buffer room-buffer
-                                         (disco-room--request-render view)))))))
+                                (if (and (listp response) (alist-get 'id response))
+                                    (progn
+                                      (disco-state-upsert-message channel-id response)
+                                      (when (room-active-p)
+                                        (with-current-buffer room-buffer
+                                          (disco-room--observe-live-create
+                                           (alist-get 'id response))))
+                                      (funcall on-success response)
+                                      (when (room-active-p)
+                                        (with-current-buffer room-buffer
+                                          (disco-room--request-render view))))
+                                  (progn
+                                    (disco-state-remove-pending-message channel-id nonce)
+                                    (funcall on-error
+                                             (list 'error
+                                                   "Discord create-message returned no message"))
+                                    (when (room-active-p)
+                                      (with-current-buffer room-buffer
+                                        (disco-room--request-render view)))))))
                              (failure
                               (lambda (err)
                                 (disco-state-remove-pending-message channel-id nonce)
@@ -7309,15 +7329,15 @@ When QUIET is non-nil, suppress progress messages."
                      (message "disco: reached beginning of history"))
                     (t
                      (message "disco: older history changed concurrently; retry"))))))))
-        :on-error
-        (lambda (err)
-          (when (disco-room--callback-active-p room-buffer channel-id view)
-            (with-current-buffer room-buffer
-              (when (appkit-chat-history-request-current-p owner)
-                (appkit-chat-history-request-end owner)
-                (disco-room--request-render view)
-                (message "disco: older history load failed: %s"
-                         (disco-room--async-error-message err))))))))))))
+         :on-error
+         (lambda (err)
+           (when (disco-room--callback-active-p room-buffer channel-id view)
+             (with-current-buffer room-buffer
+               (when (appkit-chat-history-request-current-p owner)
+                 (appkit-chat-history-request-end owner)
+                 (disco-room--request-render view)
+                 (message "disco: older history load failed: %s"
+                          (disco-room--async-error-message err))))))))))))
 
 (defun disco-room-load-newer-messages (&optional quiet)
   "Extend a partial around-message window toward the live frontier.
@@ -7407,15 +7427,15 @@ When QUIET is non-nil, suppress progress messages."
                               (length page)))
                     (t
                      (message "disco: newer history made no progress"))))))))
-        :on-error
-        (lambda (err)
-          (when (disco-room--callback-active-p room-buffer channel-id view)
-            (with-current-buffer room-buffer
-              (when (appkit-chat-history-request-current-p owner)
-                (appkit-chat-history-request-end owner)
-                (disco-room--request-render view)
-                (message "disco: newer history load failed: %s"
-                         (disco-room--async-error-message err))))))))))))
+         :on-error
+         (lambda (err)
+           (when (disco-room--callback-active-p room-buffer channel-id view)
+             (with-current-buffer room-buffer
+               (when (appkit-chat-history-request-current-p owner)
+                 (appkit-chat-history-request-end owner)
+                 (disco-room--request-render view)
+                 (message "disco: newer history load failed: %s"
+                          (disco-room--async-error-message err))))))))))))
 
 (defun disco-room--reply-to-msg (msg)
   "Set pending reply target to MSG for the next send."

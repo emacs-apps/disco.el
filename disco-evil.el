@@ -62,13 +62,11 @@
 (declare-function disco-root-button-backward "disco-root" ())
 (declare-function disco-root-button-forward "disco-root" ())
 (declare-function disco-root-channel-inspect-refresh "disco-root-view" ())
-(declare-function disco-root-cycle-layout "disco-root" ())
 (declare-function disco-root-cycle-view-mode "disco-root" ())
 (declare-function disco-root-list-archived-threads "disco-root" ())
 (declare-function disco-root-next-unread "disco-root" ())
 (declare-function disco-root-open-at-point "disco-root" ())
 (declare-function disco-root-refresh "disco-root" (&optional full))
-(declare-function disco-root-set-layout "disco-root" ())
 (declare-function disco-root-sync-gateway-context "disco-root" (&optional quiet))
 (declare-function disco-root-tab-dwim "disco-root" ())
 (declare-function disco-root-toggle-section-at-point "disco-root" ())
@@ -145,8 +143,6 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "g k") #'disco-root-button-backward
     (kbd "g u") #'disco-root-next-unread
     (kbd "s") #'disco-root-search-transient
-    (kbd "l") #'disco-root-cycle-layout
-    (kbd "L") #'disco-root-set-layout
     (kbd "\\") #'disco-root-toggle-sort-mode
     (kbd "v") #'disco-root-cycle-view-mode
     (kbd "U") #'disco-root-toggle-unread-lens

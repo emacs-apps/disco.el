@@ -31,9 +31,11 @@
 (require 'disco-directory)
 (require 'disco-guild-directory)
 (require 'disco-gateway)
+(require 'disco-media)
 (require 'disco-msg)
 (require 'disco-room)
 (require 'disco-state)
+(require 'disco-sticker)
 (require 'disco-thread)
 (require 'disco-permission)
 (require 'disco-preview)
@@ -87,6 +89,12 @@
 
 (defvar-local disco-root--avatar-handler nil
   "Buffer-local shared avatar resource handler closure.")
+
+(defvar-local disco-root--media-handler nil
+  "Buffer-local attachment media resource handler closure.")
+
+(defvar-local disco-root--sticker-handler nil
+  "Buffer-local Sticker resource handler closure.")
 
 (defvar-local disco-root--live-updates-handle nil
   "Appkit lifecycle handle owning this root buffer's global subscriptions.")
@@ -316,13 +324,13 @@ by default to keep root refresh and resize reflow responsive."
     (date-time . "%d.%m.%y %a %H:%M"))
   "Activity timestamp formats, inspired by `telega-date-format-alist'."
   :type '(alist :key-type
-          (choice (const :tag "If date is today" today)
-                  (const :tag "If date is this week" this-week)
-                  (const :tag "If date is older" old)
-                  (const :tag "Time only" time)
-                  (const :tag "Date only" date)
-                  (const :tag "Date and time" date-time))
-          :value-type string)
+		(choice (const :tag "If date is today" today)
+			(const :tag "If date is this week" this-week)
+			(const :tag "If date is older" old)
+			(const :tag "Time only" time)
+			(const :tag "Date only" date)
+			(const :tag "Date and time" date-time))
+		:value-type string)
   :group 'disco)
 
 (defcustom disco-root-activity-time-column-width 9
@@ -347,7 +355,7 @@ The default fits the longest built-in date format plus its status symbol."
 (defcustom disco-root-auto-fill-margin-columns 1
   "Additional margin columns reserved when computing root fill width."
   :type '(choice (const :tag "No extra margin" nil)
-          integer)
+		 integer)
   :group 'disco)
 
 (defcustom disco-root-debug-log-enabled nil
@@ -436,66 +444,55 @@ process, so late callbacks cannot affect a replacement account session.")
   "Return non-nil when EVENT-TYPE should trigger root updates."
   (memq event-type
         '(ready message-create message-ack
-          channel-create channel-update channel-delete channel-update-partial
-          channel-sync
-          channel-unread-update passive-update-v1 passive-update-v2
-          channel-pins-update channel-pins-ack
-          channel-statuses channel-info channel-member-count-update
-          last-messages conversation-summary-update
-          presence-update sessions-replace
-          voice-state-update voice-channel-status-update voice-channel-start-time-update
-          guild-create guild-update guild-delete guild-sync
-          user-guild-settings-update
-          guild-feature-ack user-non-channel-ack notification-center-items-ack
-          thread-create thread-update thread-delete thread-list-sync)))
+		channel-create channel-update channel-delete channel-update-partial
+		channel-sync
+		channel-unread-update passive-update-v1 passive-update-v2
+		channel-pins-update channel-pins-ack
+		channel-statuses channel-info channel-member-count-update
+		last-messages conversation-summary-update
+		presence-update sessions-replace
+		voice-state-update voice-channel-status-update voice-channel-start-time-update
+		guild-create guild-update guild-delete guild-sync
+		user-guild-settings-update
+		guild-feature-ack user-non-channel-ack notification-center-items-ack
+		thread-create thread-update thread-delete thread-list-sync)))
 
 (defun disco-root--live-event-structural-p (event-type)
   "Return non-nil when EVENT-TYPE requires a full root reconcile."
   (memq event-type
         '(channel-create channel-update channel-delete channel-sync
-          guild-create guild-update guild-delete guild-sync
-          user-guild-settings-update
-          thread-create thread-update thread-delete thread-list-sync)))
+			 guild-create guild-update guild-delete guild-sync
+			 user-guild-settings-update
+			 thread-create thread-update thread-delete thread-list-sync)))
 
 (defun disco-root--live-event-header-p (event-type)
   "Return non-nil when EVENT-TYPE affects root header state only."
   (memq event-type
         '(ready guild-feature-ack user-non-channel-ack notification-center-items-ack
-          sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
+		sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
 
 (defun disco-root-set-layout (layout)
-  "Set root LAYOUT and synchronize the current root projection."
+  "Select user-facing root LAYOUT and synchronize its projection.
+
+Search is a transient workflow rather than a selectable presentation."
   (interactive
-   (list
-    (intern
-     (completing-read
-      "Root layout: "
-      (mapcar #'symbol-name (disco-root-layout-names))
-      nil t nil nil (symbol-name (or disco-root--layout
-                                     disco-root-default-layout))))))
-  (unless (memq layout (disco-root-layout-names))
-    (user-error "disco: unknown root layout: %s" layout))
+   (let* ((layouts (disco-root-selectable-layout-names))
+          (default (or (and (memq disco-root--layout layouts)
+                            disco-root--layout)
+                       (and (memq disco-root-default-layout layouts)
+                            disco-root-default-layout))))
+     (list
+      (intern
+       (completing-read
+        "Root layout: "
+        (mapcar #'symbol-name layouts)
+        nil t nil nil (and default (symbol-name default)))))))
+  (unless (memq layout (disco-root-selectable-layout-names))
+    (user-error "disco: root layout is not selectable: %s" layout))
   (setq disco-root--layout layout)
   (disco-root--queue-live-update nil t t)
   (appkit-sync-invalidations (appkit-current-view))
   (message "disco: root layout -> %s" (disco-root-layout-label layout)))
-
-(defun disco-root-cycle-layout ()
-  "Cycle active root layout across registered root layouts."
-  (interactive)
-  (let* ((layouts (disco-root-layout-names))
-         (index (cl-position disco-root--layout layouts :test #'eq))
-         (next-layout
-          (cond
-           ((null layouts)
-            nil)
-           ((null index)
-            (car layouts))
-           (t
-            (nth (mod (1+ index) (length layouts)) layouts)))))
-    (unless next-layout
-      (user-error "disco: no root layouts registered"))
-    (disco-root-set-layout next-layout)))
 
 (defun disco-root--set-view-mode (mode)
   "Set root visibility MODE and keep unread-lens restore state."
@@ -1863,8 +1860,7 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
     ("L" "Set archive fetch limit"
      disco-root-menu-set-thread-archive-fetch-limit)]
    ["View"
-    ("l" "Cycle layout" disco-root-cycle-layout)
-    ("V" "Set layout..." disco-root-set-layout)
+    ("l" "Choose layout..." disco-root-set-layout)
     ("s" "Search..." disco-root-search-transient)
     ("U" "Toggle unread lens" disco-root-toggle-unread-lens)]
    ["Inspect"
@@ -3069,6 +3065,50 @@ When HEADER-P is non-nil, the root header is invalidated too."
                (disco-root--avatar-resource-channel-ids resources)))
     (disco-root--queue-live-update channel-ids nil nil)))
 
+(defun disco-root--one-line-resource-channel-ids (resources)
+  "Return channel IDs whose one-line previews depend on RESOURCES."
+  (let ((resource-set (make-hash-table :test #'equal))
+        channel-ids)
+    (dolist (resource resources)
+      (puthash resource t resource-set))
+    (dolist (channel (disco-state-channels))
+      (let ((messages
+             (delq nil
+                   (list
+                    (disco-msg-channel-last-cached-message channel)
+                    (and (disco-state-channel-thread-p channel)
+                         (disco-thread-starter-message channel))))))
+        (when (seq-some
+               (lambda (message)
+                 (seq-some
+                  (lambda (resource) (gethash resource resource-set))
+                  (disco-media-message-one-line-resource-keys message)))
+               messages)
+          (when-let* ((channel-id (alist-get 'id channel)))
+            (cl-pushnew (format "%s" channel-id)
+                        channel-ids :test #'equal)))))
+    (nreverse channel-ids)))
+
+(defun disco-root--handle-one-line-resources-updated (resources)
+  "Refresh root projections whose one-line previews use RESOURCES."
+  (when resources
+    (if (and (eq major-mode 'disco-root-mode)
+             (eq (disco-root--ensure-layout) 'search))
+        (disco-root--queue-live-update nil t nil)
+      (when-let* ((channel-ids
+                   (disco-root--one-line-resource-channel-ids resources)))
+        (disco-root--queue-live-update channel-ids nil nil)))))
+
+(defun disco-root--handle-media-rerender (kind key)
+  "Refresh root one-line previews after media KIND and KEY change."
+  (pcase kind
+    ('preview
+     (when (stringp key)
+       (disco-root--handle-one-line-resources-updated
+        (list (list :preview key)))))
+    ('visual
+     (disco-root--queue-live-update nil t nil))))
+
 (defun disco-root--attach-live-updates ()
   "Attach root buffer to global gateway update stream."
   (let ((view (disco-root--ensure-view)))
@@ -3097,6 +3137,16 @@ When HEADER-P is non-nil, the root header is invalidated too."
               (when (appkit-view-live-p view)
                 (with-current-buffer (appkit-view-buffer view)
                   (disco-root--handle-avatar-resources-updated resources))))))
+    (setq disco-root--media-handler
+          (lambda (kind key)
+            (when (appkit-view-live-p view)
+              (with-current-buffer (appkit-view-buffer view)
+                (disco-root--handle-media-rerender kind key)))))
+    (setq disco-root--sticker-handler
+          (lambda (resources)
+            (when (appkit-view-live-p view)
+              (with-current-buffer (appkit-view-buffer view)
+                (disco-root--handle-one-line-resources-updated resources)))))
     (add-hook 'disco-gateway-event-hook disco-root--gateway-handler)
     (when disco-root--directory-handler
       (add-hook 'disco-directory-event-hook disco-root--directory-handler))
@@ -3104,6 +3154,11 @@ When HEADER-P is non-nil, the root header is invalidated too."
       (add-hook 'disco-preview-update-hook disco-root--preview-handler))
     (when disco-root--avatar-handler
       (add-hook 'disco-avatar-resources-updated-hook disco-root--avatar-handler))
+    (when disco-root--media-handler
+      (add-hook 'disco-media-rerender-hook disco-root--media-handler))
+    (when disco-root--sticker-handler
+      (add-hook 'disco-sticker-resources-updated-hook
+                disco-root--sticker-handler))
     (disco-gateway-watch-global)
     (let ((buffer (current-buffer)))
       (setq disco-root--live-updates-handle
@@ -3131,6 +3186,13 @@ When HEADER-P is non-nil, the root header is invalidated too."
     (when disco-root--avatar-handler
       (remove-hook 'disco-avatar-resources-updated-hook disco-root--avatar-handler)
       (setq disco-root--avatar-handler nil))
+    (when disco-root--media-handler
+      (remove-hook 'disco-media-rerender-hook disco-root--media-handler)
+      (setq disco-root--media-handler nil))
+    (when disco-root--sticker-handler
+      (remove-hook 'disco-sticker-resources-updated-hook
+                   disco-root--sticker-handler)
+      (setq disco-root--sticker-handler nil))
     (when watched
       (disco-gateway-unwatch-global))))
 
@@ -3457,8 +3519,6 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
     (define-key map (kbd "g") #'disco-root-refresh)
     (define-key map (kbd "G") #'disco-root-sync-gateway-context)
     (define-key map (kbd "A") #'disco-root-list-archived-threads)
-    (define-key map (kbd "l") #'disco-root-cycle-layout)
-    (define-key map (kbd "L") #'disco-root-set-layout)
     (define-key map (kbd "\\") #'disco-root-toggle-sort-mode)
     (define-key map (kbd "v") #'disco-root-cycle-view-mode)
     (define-key map (kbd "U") #'disco-root-toggle-unread-lens)
@@ -3524,6 +3584,9 @@ rebuilt against the new application state."
   (setq-local disco-root--sort-mode 'activity)
   (setq-local disco-root--view-mode 'all)
   (setq-local disco-root--pre-unread-view-mode 'all)
+  (unless (disco-root-layout-selectable-p disco-root-default-layout)
+    (error "Disco: default root layout is not selectable: %S"
+           disco-root-default-layout))
   (setq-local disco-root--layout disco-root-default-layout)
   (setq-local disco-root--tree-fold-state (make-hash-table :test #'equal))
   (disco-root--reset-session-controller-state))

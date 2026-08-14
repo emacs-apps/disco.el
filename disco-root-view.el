@@ -21,6 +21,7 @@
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-gateway)
+(require 'disco-media)
 (require 'disco-msg)
 (require 'disco-permission)
 (require 'disco-preview)
@@ -1263,13 +1264,21 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
       (insert "#")))
     (add-text-properties start (point) (list 'face 'shadow))))
 
-(defun disco-root--preview-leading-length (preview-text message)
-  "Return highlighted author-prefix length for PREVIEW-TEXT from MESSAGE."
-  (let ((author (disco-msg-author-display-name message)))
-    (when (and author
-               (string-match (format "\\`%s>" (regexp-quote author))
-                             (or preview-text "")))
-      (1+ (length author)))))
+(defun disco-root--preview-parts (preview-text message)
+  "Return structured sender and body fragments for PREVIEW-TEXT and MESSAGE."
+  (let* ((text (or preview-text ""))
+         (author (disco-msg-author-display-name message))
+         (sender-end
+          (and author
+               (string-match
+                (format "\\`%s>" (regexp-quote author)) text)
+               (match-end 0))))
+    (if sender-end
+        (list :text (string-trim-left (substring text sender-end))
+              :label author
+              :separator ">"
+              :label-face (disco-room--author-face message))
+      (list :text text))))
 
 (defun disco-root--channel-one-line-row (channel &optional scope)
   "Return one-line row model for CHANNEL under SCOPE."
@@ -1283,18 +1292,22 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
          (has-unread (disco-root--channel-has-unread-p channel))
          (preview-text (disco-root--activity-preview-line
                         channel preview-message scope))
+         (preview-parts
+          (disco-root--preview-parts preview-text preview-message))
          (time-text (if (memq scope '(thread-post timeline-thread
-                                      archived-thread))
+						  archived-thread))
                         (disco-root--thread-browser-time-label channel scope latest-message)
                       (disco-root--channel-last-activity-time-label channel latest-message))))
     (appkit-view-one-line-row-create
      :icon-inserter (lambda ()
                       (disco-root--insert-activity-icon channel scope))
      :context (disco-root--activity-context-label channel scope)
-     :preview preview-text
-     :preview-leading-length
-     (disco-root--preview-leading-length preview-text preview-message)
-     :preview-leading-face 'font-lock-keyword-face
+     :preview
+     (disco-media-message-one-line-preview
+      preview-message (plist-get preview-parts :text)
+      :label (plist-get preview-parts :label)
+      :separator (plist-get preview-parts :separator)
+      :label-face (plist-get preview-parts :label-face))
      :time time-text
      :time-face 'shadow
      :time-tail-face (unless (eq scope 'archived-thread)
@@ -1357,7 +1370,8 @@ WIDTH overrides the root buffer's responsive fill column."
          (channel (disco-root--search-channel channel-id))
          (preview-text (or (disco-msg-preview-line message)
                            (disco-msg-preview-content message)
-                           "(message)")))
+                           "(message)"))
+         (preview-parts (disco-root--preview-parts preview-text message)))
     (appkit-view-one-line-row-create
      :icon-inserter (lambda ()
                       (if channel
@@ -1366,10 +1380,12 @@ WIDTH overrides the root buffer's responsive fill column."
                           (insert "[?]")
                           (add-text-properties start (point) (list 'face 'shadow)))))
      :context (disco-root--search-context-label channel)
-     :preview preview-text
-     :preview-leading-length
-     (disco-root--preview-leading-length preview-text message)
-     :preview-leading-face 'font-lock-keyword-face
+     :preview
+     (disco-media-message-one-line-preview
+      message (plist-get preview-parts :text)
+      :label (plist-get preview-parts :label)
+      :separator (plist-get preview-parts :separator)
+      :label-face (plist-get preview-parts :label-face))
      :time (or (disco-root--search-message-time-label message) "")
      :time-face 'shadow
      :line-properties
@@ -1697,7 +1713,7 @@ Higher score means channel should appear earlier in activity mode."
 (defun disco-root--entry-search-message (message indent &optional tab)
   "Return one search-message layout entry."
   (disco-root-layout-entry-create :key (list 'search-message tab
-                                              (alist-get 'id message))
+                                             (alist-get 'id message))
                                   :type 'search-message
                                   :message message
                                   :indent (or indent 2)

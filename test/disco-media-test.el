@@ -246,8 +246,8 @@
       (should (eq :decorated
                   (disco-media--decorate-preview-image
                    '(image :type png :file "/tmp/demo.png"
-                     :height (2 . ch)
-                     :appkit-media-nslices 2)
+			   :height (2 . ch)
+			   :appkit-media-nslices 2)
                    :video-p nil)))
       (should (plist-get captured-props :height))
       (should (equal 2 (plist-get captured-props :appkit-media-nslices)))
@@ -458,10 +458,58 @@
                "https://cdn.example.invalid/cat.png"))
       (should (eq (nth 1 opened-arguments) 'image)))))
 
+(ert-deftest disco-media-message-one-line-preview-projects-safe-visual-prefix ()
+  (let* ((image '(image :type png :data "bytes"))
+         (message
+          '((attachments
+             . (((id . "a1")
+                 (filename . "cat.png")
+                 (content_type . "image/png")
+                 (url . "https://example.invalid/cat.png")))))))
+    (cl-letf (((symbol-function
+                'disco-media-attachment-one-line-preview-image)
+               (lambda (_attachment) image)))
+      (let ((preview
+             (disco-media-message-one-line-preview message "(attachment)")))
+        (should (equal "(attachment)"
+                       (appkit-ui-one-line-preview-text preview)))
+        (should (= disco-media-one-line-preview-columns
+                   (appkit-ui-one-line-preview-visual-columns preview)))
+        (let ((display
+               (get-text-property
+                0 'display (appkit-ui-one-line-preview-visual preview))))
+          (should (eq 'slice (caar display)))
+          (should
+           (equal "bytes"
+                  (plist-get (cdr (cadr display)) :data))))))))
+
+(ert-deftest disco-media-message-one-line-preview-never-reveals-spoiler-image ()
+  (let ((message
+         '((attachments
+            . (((id . "a1")
+                (filename . "SPOILER_cat.png")
+                (content_type . "image/png")
+                (url . "https://example.invalid/cat.png"))))))
+        called)
+    (cl-letf (((symbol-function
+                'disco-media-attachment-one-line-preview-image)
+               (lambda (_attachment)
+                 (setq called t)
+                 '(image :type png))))
+      (let ((preview
+             (disco-media-message-one-line-preview
+              message "[spoiler image hidden]")))
+        (should-not called)
+        (should-not (appkit-ui-one-line-preview-visual preview))
+        (should
+         (equal "[spoiler image hidden]"
+                (appkit-ui-one-line-preview-text preview)))))))
+
 (ert-deftest disco-media-state-notifications-pass-explicit-resource ()
   (let (received)
-    (let ((disco-media-rerender-function
-           (lambda (kind key) (setq received (cons kind key)))))
+    (let ((disco-media-rerender-hook
+           (list (lambda (kind key)
+                   (setq received (cons kind key))))))
       (disco-media--notify-state-updated 'preview "preview-key")
       (should (equal '(preview . "preview-key") received)))))
 
@@ -580,8 +628,8 @@
         (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
         (disco-media--attachment-download-owner-table (make-hash-table :test #'equal))
         preview-success download-success (rerenders 0) opened succeeded)
-    (let ((disco-media-rerender-function
-           (lambda (&rest _arguments) (cl-incf rerenders))))
+    (let ((disco-media-rerender-hook
+           (list (lambda (&rest _arguments) (cl-incf rerenders)))))
       (cl-letf (((symbol-function 'appkit-media-cache-image-resource-async)
                  (lambda (_resource _base success _error &rest _arguments)
                    (setq preview-success success)

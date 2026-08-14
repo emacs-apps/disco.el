@@ -705,8 +705,8 @@
                (puthash old-url secret disco-root--guild-icon-image-cache)
                (puthash old-url secret disco-avatar--rounded-image-cache))
              nil t))
-          (let ((disco-media-rerender-function
-                 (lambda (&rest _) (cl-incf redraw-count)))
+          (let ((disco-media-rerender-hook
+                 (list (lambda (&rest _) (cl-incf redraw-count))))
                 (disco-root-view-queue-live-update-function
                  (lambda (&rest _) (cl-incf redraw-count))))
             (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore)

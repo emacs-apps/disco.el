@@ -49,15 +49,15 @@ refreshes the index; ~C-u g~ refreshes every guild directory.
 | ~n~ / ~p~ / ~TAB~ | move |
 | ~RET~ | open |
 | ~u~ | unread navigation |
-| ~l~ | cycle layout |
-| ~L~ | choose a layout |
 | ~\~ | toggle sort |
 | ~v~ | cycle all / unread / DMs |
 | ~U~ | unread lens |
 | ~A~ | archived threads for the selected parent |
+| ~? l~ | choose a root presentation |
 
-Layouts: compact account home, an activity list, and custom layouts.
-Activity excludes thread rows by default; set
+Home and Activity are selectable root presentations; custom layouts can add
+more.  Search is a separate ~s~ workflow and is never entered by layout
+selection.  Activity excludes thread rows by default; set
 ~disco-root-activity-include-threads~ to include them.
 
 Private channels (DM, group DM, ephemeral DM) appear in root.  Guild
@@ -65,6 +65,12 @@ channels without ~VIEW_CHANNEL~ are hidden.  Channel labels show
 unread state and mention badges ~[@N]~, not per-channel unread
 message counts.  ~[read]~ means the local cursor reached
 ~last_message_id~.
+
+Activity, thread, archived-thread, and search rows show a one-line image,
+video poster, or Sticker preview when its shared media cache is ready.
+Spoiler attachments stay textual.  Cache completion refreshes only the
+dependent channel rows; failed or unsupported images retain the ordinary
+message summary.
 
 ** Guild directories
 
@@ -137,6 +143,10 @@ emoji.  Inserted text uses native Discord mention and emoji syntax.
 | ~disco-company-capf-avatar-size~ | stable completion row height |
 | ~disco-room-allowed-mentions~ | mention send policy |
 | ~disco-room-reply-mention-replied-user~ | whether a reply pings the author |
+
+Reply and edit cards use the same one-line media projection as root rows.
+The image is cache-backed and optional; the author and message text remain
+visible when images are unavailable.
 
 ~C-c C-e~ formatting and ~C-c C-v~ clipboard attach are reserved
 until fuller parity lands.

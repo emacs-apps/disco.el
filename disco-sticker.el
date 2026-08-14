@@ -730,16 +730,19 @@ Settings failure degrades ranking only; catalog failure invokes ON-ERROR."
           (disco-sticker--start-fetch variant sticker)
           nil)))))))
 
-(defun disco-sticker-image (sticker &optional purpose)
+(defun disco-sticker-image (sticker &optional purpose max-width)
   "Return STICKER's cached immutable image descriptor for PURPOSE.
 
 PURPOSE is `completion' for a one-line preview or `timeline' for the configured
-multi-line sticker size.  Acquisition is scheduled when the cache is cold."
+multi-line sticker size.  MAX-WIDTH bounds completion previews and defaults to
+32 pixels.  Acquisition is scheduled when the cache is cold."
   (when (appkit-media-inline-image-rendering-available-p)
     (when-let* ((variant (disco-sticker--variant-key sticker))
                 (file (disco-sticker--cached-file variant sticker)))
       (let* ((purpose (or purpose 'timeline))
-             (cache-key (list variant purpose disco-sticker-size))
+             (cache-key
+              (list variant purpose disco-sticker-size
+                    (and (eq purpose 'completion) max-width)))
              (cached (gethash cache-key disco-sticker--images)))
         (if (appkit-media-image-object-valid-p cached)
             cached
@@ -748,7 +751,8 @@ multi-line sticker size.  Acquisition is scheduled when the cache is cold."
           (let ((image
                  (condition-case nil
                      (if (eq purpose 'completion)
-                         (appkit-media-one-line-preview-image-from-file file 32)
+                         (appkit-media-one-line-preview-image-from-file
+                          file (or max-width 32))
                        (appkit-media-preview-image-from-file
                         file disco-sticker-size disco-sticker-size))
                    ((error quit) nil))))
