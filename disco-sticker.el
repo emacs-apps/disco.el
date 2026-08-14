@@ -90,8 +90,6 @@ rendering or send operations."
 
 (defvar disco-sticker--history nil
   "Minibuffer history for visual Discord sticker readers.")
-(defvar-local disco-sticker--picker-owner-p nil
-  "Non-nil only in the minibuffer owned by an active Sticker reader.")
 
 
 (defun disco-sticker--normalize-id (value)
@@ -764,22 +762,6 @@ sections."
     (mapcar #'disco-sticker--appkit-candidate
             (disco-sticker--unique-labels candidates))))
 
-(defun disco-sticker--read-visual-owned (prompt candidates)
-  "Read from CANDIDATES under PROMPT and own only that minibuffer."
-  (let (picker-buffer setup)
-    (setq setup
-          (lambda ()
-            (setq picker-buffer (current-buffer))
-            (setq-local disco-sticker--picker-owner-p t)
-            (remove-hook 'minibuffer-setup-hook setup)))
-    (unwind-protect
-        (let ((minibuffer-setup-hook
-               (cons setup minibuffer-setup-hook)))
-          (appkit-chat-completion-read-visual
-           prompt candidates :history 'disco-sticker--history))
-      (when (buffer-live-p picker-buffer)
-        (with-current-buffer picker-buffer
-          (setq-local disco-sticker--picker-owner-p nil))))))
 
 (defun disco-sticker-read (&optional guild-id ranked-only)
   "Read one sticker for GUILD-ID.
@@ -793,38 +775,16 @@ sections."
            "disco: no favorite or frequently used stickers"
          "disco: no available stickers in the loaded catalog")))
     (let* ((candidate
-            (disco-sticker--read-visual-owned
+            (appkit-chat-completion-read-visual
              (if ranked-only "Favorite/recent sticker" "Send sticker")
-             candidates))
+             candidates
+             :history 'disco-sticker--history))
            (value (appkit-chat-completion-candidate-value candidate))
            (sticker (plist-get value :sticker)))
       (unless (and (listp sticker) (disco-sticker-id sticker))
         (error "disco: sticker candidate has no exact identity"))
       (copy-tree sticker))))
 
-(defun disco-sticker--refresh-active-picker (_resources)
-  "Refresh an active visual picker after sticker resources change."
-  (when-let* ((window (active-minibuffer-window))
-              (buffer (window-buffer window))
-              ((buffer-local-value 'disco-sticker--picker-owner-p buffer)))
-    (run-at-time
-     0 nil
-     (lambda (owner)
-       (when (and (buffer-live-p owner)
-                  (buffer-local-value
-                   'disco-sticker--picker-owner-p owner)
-                  (eq owner
-                      (and (active-minibuffer-window)
-                           (window-buffer (active-minibuffer-window)))))
-         (with-current-buffer owner
-           (if (and (fboundp 'vertico--exhibit)
-                    (bound-and-true-p vertico--candidates-ov))
-               (funcall (symbol-function 'vertico--exhibit))
-             (redisplay t)))))
-     buffer)))
-
-(add-hook 'disco-sticker-resources-updated-hook
-          #'disco-sticker--refresh-active-picker)
 
 (defun disco-sticker--cancel-timer (timer)
   "Cancel TIMER while isolating ordinary cancellation failures."

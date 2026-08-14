@@ -16,6 +16,7 @@
 | ~disco-customize.el~ | user options and token command |
 | ~disco-ins.el~ | attachment and message insertion |
 | ~disco-media.el~ | attachment, spoiler, waveform, audio |
+| ~disco-sticker.el~ | Sticker catalogs, ranking, visual selection, and image projection |
 | ~disco-api.el~ | REST, sync and async |
 | ~disco-http.el~ | ~plz~ wrapper |
 | ~disco-permission.el~ | permission bitfields |

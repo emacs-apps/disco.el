@@ -7,7 +7,7 @@
 
 (ert-deftest disco-sticker-candidates-rank-account-sections-before-catalogs ()
   (let ((guild-sticker '((id . "111111111") (name . "Guild Wave")
-                         (format_type . 1) (available . t) (guild_id . "g1")))
+                         (format_type . 1) (available . t) (guild_id . "1")))
         (standard-sticker '((id . "222222222") (name . "Standard Wave")
                             (format_type . 1) (available . t)))
         (disco-sticker-frecency-limit 10))
@@ -20,23 +20,23 @@
                (lambda () '("222222222")))
               ((symbol-function 'disco-settings-sticker-frecency)
                (lambda () '(("111111111" :score 9 :total-uses 4)))))
-      (let* ((candidates (disco-sticker-candidates "g1"))
+      (let* ((candidates (disco-sticker-candidates "1"))
              (groups (mapcar #'appkit-chat-completion-candidate-group candidates))
              (values (mapcar #'appkit-chat-completion-candidate-value candidates))
              (ids (mapcar (lambda (value) (plist-get value :sticker-id)) values))
              (labels (mapcar #'appkit-chat-completion-candidate-label candidates)))
         (should (equal groups
                        '("Favorite Stickers" "Frequently Used Stickers"
-                         "g1" "Standard")))
+                         "This Server" "Standard · Standard")))
         (should (equal ids
                        '("222222222" "111111111" "111111111" "222222222")))
         (should (= (length labels) (length (delete-dups (copy-sequence labels)))))))))
 
 (ert-deftest disco-sticker-candidates-ranked-only-omits-unranked-catalog ()
   (let ((sticker-a '((id . "111") (name . "One")
-                     (format_type . 1) (available . t) (guild_id . "g1")))
+                     (format_type . 1) (available . t) (guild_id . "1")))
         (sticker-b '((id . "222") (name . "Two")
-                     (format_type . 1) (available . t) (guild_id . "g1"))))
+                     (format_type . 1) (available . t) (guild_id . "1"))))
     (cl-letf (((symbol-function 'disco-state-guild-stickers)
                (lambda (_guild-id) (list sticker-a sticker-b)))
               ((symbol-function 'disco-state-standard-sticker-packs)
@@ -45,7 +45,7 @@
                (lambda () '("222")))
               ((symbol-function 'disco-settings-sticker-frecency)
                (lambda () nil)))
-      (let ((candidates (disco-sticker-candidates "g1" t)))
+      (let ((candidates (disco-sticker-candidates "1" t)))
         (should (= (length candidates) 1))
         (should (equal
                  (plist-get
@@ -76,7 +76,7 @@
                (lambda (_guild-id &rest options)
                  (setq guild-error (plist-get options :on-error)))))
       (disco-sticker-ensure-catalogs
-       "g1"
+       "1"
        :on-success (lambda () (push t successes))
        :on-error (lambda (reason) (push reason errors)))
       (funcall standard-success '((sticker_packs . [])))
@@ -84,6 +84,39 @@
       (funcall guild-error "forbidden")
       (should (equal successes '(t)))
       (should-not errors))))
+
+(ert-deftest disco-sticker-media-failure-retries-after-bounded-delay ()
+  (let* ((variant '("11" 1 nil))
+         (owner (list :generation 4))
+         (disco-sticker--generation 4)
+         (disco-sticker--files (make-hash-table :test #'equal))
+         (disco-sticker--fetching (make-hash-table :test #'equal))
+         timer
+         updates)
+    (puthash variant owner disco-sticker--fetching)
+    (cl-letf (((symbol-function 'disco-sticker--file-valid-p)
+               (lambda (_file) nil))
+              ((symbol-function 'disco-sticker--clear-variant-images)
+               #'ignore)
+              ((symbol-function 'disco-sticker--schedule-resource-update)
+               (lambda (resource) (push resource updates)))
+              ((symbol-function 'run-at-time)
+               (lambda (_delay _repeat function &rest arguments)
+                 (setq timer (cons function arguments))
+                 'timer)))
+      (disco-sticker--finish-file variant owner nil)
+      (should (plist-get (gethash variant disco-sticker--files) :retry-at))
+      (should-not (gethash variant disco-sticker--fetching))
+      (apply (car timer) (cdr timer))
+      (should-not (gethash variant disco-sticker--files))
+      (should (equal updates (list variant variant))))))
+
+(ert-deftest disco-sticker-ready-accepts-one-authoritative-catalog ()
+  (cl-letf (((symbol-function 'disco-state-standard-sticker-packs-loaded-p)
+             (lambda () t))
+            ((symbol-function 'disco-state-guild-stickers-loaded-p)
+             (lambda (_guild-id) nil)))
+    (should (disco-sticker-ready-p "1"))))
 
 (provide 'disco-sticker-test)
 

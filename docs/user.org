@@ -121,8 +121,9 @@ until fuller parity lands.
 
 | Key | Action |
 |-----+--------|
-| ~C-c C-a~ | attach menu |
+| ~C-c C-a~ | choose an attachment command |
 | ~C-c C-f~ | attach a file |
+| ~C-c C-i~ | choose and send a Sticker |
 | ~C-c C-d~ | remove the attachment at point |
 | ~C-c C-x~ | clear all attachments |
 | ~C-c M-l~ / ~C-c M-e~ / ~C-c M-r~ | list, edit, or reorder |
@@ -131,6 +132,13 @@ Title and preview open or play the item.  An in-flight transfer
 control stays inline with Cancel.  Download, Save As, and Copy URL
 live in the message transient.  Audio keeps play, pause, and stop
 waveform controls inline.
+
+The Sticker picker searches names, tags, IDs, current-server Stickers,
+and Discord standard packs.  ~C-u C-c C-i~ restricts it to Favorite
+and Frequently Used Stickers from Discord account settings.  Static,
+APNG, GIF, and Lottie Stickers render through the shared image path;
+Lottie rendering requires ~lottie_convert.py~.  Unsupported or
+temporarily unavailable images retain a textual Sticker label.
 
 ** Messages
 
