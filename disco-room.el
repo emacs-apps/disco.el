@@ -1125,21 +1125,37 @@ forwarded to the controller-only restore path used by asynchronous callbacks."
   "Return cached local message object for MESSAGE-ID, or nil."
   (and message-id (disco-room--message-by-id message-id)))
 
-(defun disco-room--composer-context-text (action message-id)
-  "Return multi-line composer context text for ACTION and MESSAGE-ID."
-  (let* ((msg (disco-room--composer-context-message message-id))
-         (author (and msg (disco-room--message-author msg)))
-         (preview (and msg (disco-msg-preview-content msg)))
-         (headline
-          (if author
-              (format "%s %s [%s]" action author message-id)
-            (format "%s: %s" action message-id))))
-    (concat
-     headline
-     "\n"
-     (if (and (stringp preview) (not (string-empty-p preview)))
-         (format "> %s\n" preview)
-       ""))))
+(defun disco-room--composer-context-text (aux-state)
+  "Return the unified composer context card for AUX-STATE."
+  (when aux-state
+    (let* ((aux-type (plist-get aux-state :aux-type))
+           (message-id (plist-get aux-state :message-id))
+           (msg (or (disco-room--composer-context-message message-id)
+                    (plist-get aux-state :aux-msg)))
+           (author (and msg (disco-room--message-author msg)))
+           (author-face (and msg (disco-room--author-face msg)))
+           (subject
+            (if (and (stringp author) (not (string-empty-p author)))
+                (propertize author 'face author-face)
+              "message"))
+           (title
+            (pcase aux-type
+              ('edit "Editing message")
+              ('reply (concat "Reply to " subject))
+              (_ "")))
+           (preview (string-trim
+                     (or (and msg (disco-msg-preview-content msg)) ""))))
+      (appkit-chatbuf-aux-render
+       :title title
+       :preview (if (string-empty-p preview)
+                    "Message preview unavailable"
+                  preview)
+       :cancel-action #'disco-room-cancel-reply
+       :cancel-help
+       (format "Cancel %s (C-c C-k)"
+               (if (eq aux-type 'edit) "edit" "reply"))
+       :accent-face author-face
+       :width (disco-room--line-fill-column)))))
 
 (defun disco-room--composer-enter-edit (msg)
   "Enter composer edit mode for MSG."
@@ -4911,22 +4927,16 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--input-footer-context-text ()
   "Return extra context lines shown above the room composer."
-  (let* ((aux-state (appkit-chatbuf-aux-state))
-         (aux-type (plist-get aux-state :aux-type))
-         (message-id (plist-get aux-state :message-id)))
-    (concat
-     (pcase aux-type
-       ('edit
-        (disco-room--composer-context-text "Editing" message-id))
-       ('reply
-        (disco-room--composer-context-text "Replying to" message-id))
-       (_ ""))
-     (if disco-room--pending-attachments
-         (format "Queued attachments: %s\n"
-                 (mapconcat #'identity
-                            (disco-room--pending-attachment-labels)
-                            ", "))
-       ""))))
+  (concat
+   (or (disco-room--composer-context-text
+        (appkit-chatbuf-aux-state))
+       "")
+   (if disco-room--pending-attachments
+       (format "Queued attachments: %s\n"
+               (mapconcat #'identity
+                          (disco-room--pending-attachment-labels)
+                          ", "))
+     "")))
 
 (defun disco-room--input-footer-text ()
   "Build read-only EWOC footer text shown above the room prompt."
