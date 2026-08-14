@@ -10,10 +10,11 @@
 
 (require 'cl-lib)
 (require 'seq)
+(require 'subr-x)
+(require 'time-date)
 (require 'disco-channel-type)
 (require 'disco-permission)
 (require 'disco-read-state)
-(require 'disco-util)
 
 (defvar disco-state-reset-hook nil
   "Hook run after all in-memory Discord state has been cleared.")
@@ -104,6 +105,18 @@ stored here as access evidence.")
 (defvar disco-state--guild-top-emojis-by-guild
   (make-hash-table :test #'equal)
   "Hash table guild-id -> timestamped ranked top emoji metadata.")
+
+(defvar disco-state--stickers-by-guild (make-hash-table :test #'equal)
+  "Hash table guild-id -> latest complete guild sticker list.")
+
+(defvar disco-state--guild-stickers-loaded (make-hash-table :test #'equal)
+  "Hash table of guild IDs with an authoritative sticker snapshot.")
+
+(defvar disco-state--standard-sticker-packs nil
+  "Latest complete standard Discord sticker-pack list.")
+
+(defvar disco-state--standard-sticker-packs-loaded-p nil
+  "Non-nil after an authoritative standard sticker-pack snapshot.")
 
 (defvar disco-state--roles-by-guild (make-hash-table :test #'equal)
   "Hash table guild-id -> latest complete guild role list.")
@@ -234,6 +247,10 @@ stored here as access evidence.")
   (clrhash disco-state--emojis-by-guild)
   (clrhash disco-state--guild-emojis-loaded)
   (clrhash disco-state--guild-top-emojis-by-guild)
+  (clrhash disco-state--stickers-by-guild)
+  (clrhash disco-state--guild-stickers-loaded)
+  (setq disco-state--standard-sticker-packs nil
+        disco-state--standard-sticker-packs-loaded-p nil)
   (clrhash disco-state--roles-by-guild)
   (clrhash disco-state--guild-roles-loaded)
   (clrhash disco-state--voice-states-by-key)
@@ -372,7 +389,7 @@ SEEN is an internal list of visited channel IDs used to avoid recursion loops."
        ((and channel-id (member channel-id seen))
         nil)
        ((and explicit-nsfw
-             (disco-util-json-true-p (cdr explicit-nsfw)))
+             (eq (cdr explicit-nsfw) t))
         t)
        ((disco-state-channel-thread-p channel)
         (let* ((parent-id (alist-get 'parent_id channel))
@@ -614,6 +631,8 @@ MEMBER-COUNT is optional approximate thread member count."
   (remhash guild-id disco-state--emojis-by-guild)
   (remhash guild-id disco-state--guild-emojis-loaded)
   (remhash guild-id disco-state--guild-top-emojis-by-guild)
+  (remhash guild-id disco-state--stickers-by-guild)
+  (remhash guild-id disco-state--guild-stickers-loaded)
   (remhash guild-id disco-state--roles-by-guild)
   (remhash guild-id disco-state--guild-roles-loaded))
 
@@ -1282,6 +1301,54 @@ guild as loaded, which is distinct from not having received emoji data yet."
   (and (gethash (disco-state--normalize-id guild-id)
                 disco-state--guild-emojis-loaded)
        t))
+
+(defun disco-state-set-guild-stickers (guild-id stickers)
+  "Replace GUILD-ID's authoritative custom STICKERS snapshot.
+
+STICKERS may be a list or vector.  An empty snapshot still marks the guild as
+loaded."
+  (when-let* ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (let* ((items (cond
+                   ((vectorp stickers) (append stickers nil))
+                   ((listp stickers) stickers)
+                   (t nil)))
+           (snapshot (cl-remove-if-not #'listp items)))
+      (puthash normalized-guild-id
+               (copy-tree snapshot)
+               disco-state--stickers-by-guild)
+      (puthash normalized-guild-id t disco-state--guild-stickers-loaded)
+      (copy-tree snapshot))))
+
+(defun disco-state-guild-stickers (guild-id)
+  "Return a copy of cached custom stickers for GUILD-ID."
+  (when-let* ((normalized-guild-id (disco-state--normalize-id guild-id)))
+    (copy-tree (gethash normalized-guild-id
+                        disco-state--stickers-by-guild))))
+
+(defun disco-state-guild-stickers-loaded-p (guild-id)
+  "Return non-nil when GUILD-ID has an authoritative sticker snapshot."
+  (and (gethash (disco-state--normalize-id guild-id)
+                disco-state--guild-stickers-loaded)
+       t))
+
+(defun disco-state-set-standard-sticker-packs (packs)
+  "Replace the authoritative standard Discord sticker PACKS snapshot."
+  (let* ((items (cond
+                 ((vectorp packs) (append packs nil))
+                 ((listp packs) packs)
+                 (t nil)))
+         (snapshot (cl-remove-if-not #'listp items)))
+    (setq disco-state--standard-sticker-packs (copy-tree snapshot)
+          disco-state--standard-sticker-packs-loaded-p t)
+    (copy-tree snapshot)))
+
+(defun disco-state-standard-sticker-packs ()
+  "Return a copy of cached standard Discord sticker packs."
+  (copy-tree disco-state--standard-sticker-packs))
+
+(defun disco-state-standard-sticker-packs-loaded-p ()
+  "Return non-nil after an authoritative standard sticker-pack snapshot."
+  disco-state--standard-sticker-packs-loaded-p)
 
 (defun disco-state-set-guild-top-emojis (guild-id items &optional fetched-at)
   "Store ranked top emoji ITEMS and FETCHED-AT for GUILD-ID."
@@ -2207,7 +2274,7 @@ counter is reset to zero. VERSION is stored when provided."
 (defun disco-state--mute-active-p (object)
   "Return non-nil when OBJECT describes an active mute."
   (when (and (listp object)
-             (disco-util-json-true-p (alist-get 'muted object)))
+             (eq (alist-get 'muted object) t))
     (let* ((config (alist-get 'mute_config object))
            (window (and (listp config) (alist-get 'selected_time_window config)))
            (end-time (and (listp config) (alist-get 'end_time config))))

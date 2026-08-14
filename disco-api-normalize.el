@@ -13,14 +13,19 @@
 (require 'subr-x)
 (require 'url-util)
 (require 'disco-read-state)
-(require 'disco-util)
+
+(defun disco-api--input-true-p (value)
+  "Return non-nil when API input VALUE represents true."
+  (or (eq value t)
+      (eq value 'true)
+      (equal value "true")))
 
 (defun disco-api--query-bool-string (value)
   "Return VALUE as API query boolean string.
 
 JSON-like true values map to the true string and everything else maps to
 the false string."
-  (if (disco-util-json-true-p value) "true" "false"))
+  (if (disco-api--input-true-p value) "true" "false"))
 
 (defconst disco-api--thread-search-tag-setting-alist
   '((match-some . "match_some")
@@ -200,13 +205,13 @@ FIELD-NAME is used to describe the failing payload field."
             payload))
     (when (not (null mention-everyone))
       (push `(mention_everyone
-              . ,(if (disco-util-json-true-p mention-everyone) t :false))
+              . ,(if (disco-api--input-true-p mention-everyone) t :false))
             payload))
     (when has
       (push `(has . ,(disco-api--normalize-string-sequence has "message search has"))
             payload))
     (when (not (null pinned))
-      (push `(pinned . ,(if (disco-util-json-true-p pinned) t :false)) payload))
+      (push `(pinned . ,(if (disco-api--input-true-p pinned) t :false)) payload))
     (let ((sort-by-value (disco-api--message-search-sort-by-value sort-by)))
       (when sort-by-value
         (push `(sort_by . ,sort-by-value) payload)))
@@ -246,11 +251,11 @@ FIELD-NAME is used to describe the failing payload field."
                               "message search channel_ids"))
             payload))
     (when (not (null include-nsfw))
-      (push `(include_nsfw . ,(if (disco-util-json-true-p include-nsfw) t :false))
+      (push `(include_nsfw . ,(if (disco-api--input-true-p include-nsfw) t :false))
             payload))
     (when (not (null track-exact-total-hits))
       (push `(track_exact_total_hits
-              . ,(if (disco-util-json-true-p track-exact-total-hits) t :false))
+              . ,(if (disco-api--input-true-p track-exact-total-hits) t :false))
             payload))
     (nreverse payload)))
 
@@ -317,15 +322,15 @@ FIELD-NAME is used to describe the failing payload field."
     (when (and (stringp name) (not (string-empty-p name)))
       (push `(name . ,name) payload))
     (when (not (null archived))
-      (push `(archived . ,(if (disco-util-json-true-p archived) t :false)) payload))
+      (push `(archived . ,(if (disco-api--input-true-p archived) t :false)) payload))
     (when (not (null locked))
-      (push `(locked . ,(if (disco-util-json-true-p locked) t :false)) payload))
+      (push `(locked . ,(if (disco-api--input-true-p locked) t :false)) payload))
     (when auto-archive-duration
       (push `(auto_archive_duration . ,auto-archive-duration) payload))
     (when (not (null rate-limit-per-user))
       (push `(rate_limit_per_user . ,rate-limit-per-user) payload))
     (when (not (null invitable))
-      (push `(invitable . ,(if (disco-util-json-true-p invitable) t :false)) payload))
+      (push `(invitable . ,(if (disco-api--input-true-p invitable) t :false)) payload))
     (when (listp applied-tags)
       (push `(applied_tags . ,applied-tags) payload))
     (nreverse payload)))
@@ -526,7 +531,7 @@ When POLL is nil, return nil."
           (user-error "disco: poll duration must be 1..768 hours"))
         (push `(duration . ,(truncate duration)) payload))
       (when allow-multiselect-pair
-        (push `(allow_multiselect . ,(if (disco-util-json-true-p (cdr allow-multiselect-pair))
+        (push `(allow_multiselect . ,(if (disco-api--input-true-p (cdr allow-multiselect-pair))
                                          t
                                        :false))
               payload))
@@ -561,6 +566,33 @@ When POLL is nil, return nil."
                     (disco-api--normalize-id-string item field-name))
                   source)))
     (vconcat normalized)))
+
+(defun disco-api--normalize-sticker-ids (sticker-ids)
+  "Return STICKER-IDS as a validated vector of at most three snowflakes."
+  (let* ((source (cond
+                  ((null sticker-ids) nil)
+                  ((vectorp sticker-ids) (append sticker-ids nil))
+                  ((listp sticker-ids) sticker-ids)
+                  (t (list sticker-ids))))
+         (ids
+          (vconcat
+           (mapcar
+            (lambda (id)
+              (let ((normalized
+                     (cond
+                      ((stringp id) (string-trim id))
+                      ((integerp id) (number-to-string id))
+                      (t
+                       (user-error
+                        "disco: sticker_ids entry must be an exact snowflake")))))
+                (unless (string-match-p "\\`[0-9]+\\'" normalized)
+                  (user-error
+                   "disco: sticker_ids entry must be a decimal snowflake"))
+                normalized))
+            source))))
+    (when (> (length ids) 3)
+      (user-error "disco: sticker_ids accepts at most 3 stickers"))
+    ids))
 
 (defun disco-api--normalize-allowed-mentions-parse-types (parse)
   "Normalize PARSE mention-type list/vector into vector."
@@ -614,7 +646,7 @@ When POLL is nil, return nil."
                           "allowed_mentions.users"))
               payload))
       (when (not (null replied-user))
-        (push `(replied_user . ,(if (disco-util-json-true-p replied-user)
+        (push `(replied_user . ,(if (disco-api--input-true-p replied-user)
                                     t
                                   :false))
               payload))
@@ -729,7 +761,7 @@ REPLY-TO-MESSAGE-ID remains as backwards-compatible shorthand for replies."
                              "message_reference.guild_id"))
               payload))
       (when (not (null fail-if-not-exists))
-        (push `(fail_if_not_exists . ,(if (disco-util-json-true-p fail-if-not-exists)
+        (push `(fail_if_not_exists . ,(if (disco-api--input-true-p fail-if-not-exists)
                                           t
                                         :false))
               payload))
@@ -743,13 +775,16 @@ REPLY-TO-MESSAGE-ID remains as backwards-compatible shorthand for replies."
         (user-error "disco: forward_only can only be used with FORWARD references"))
       (nreverse payload)))))
 
-(defun disco-api--message-send-payload (content reply-to-message-id message-reference attachments poll allowed-mentions &optional nonce)
+(defun disco-api--message-send-payload
+    (content reply-to-message-id message-reference attachments poll
+             allowed-mentions &optional nonce sticker-ids)
   "Build message create payload.
 
 CONTENT is optional message text. REPLY-TO-MESSAGE-ID and MESSAGE-REFERENCE
 select attribution metadata. ATTACHMENTS is normalized attachment plist list,
 POLL is optional poll object. ALLOWED-MENTIONS controls mention parsing.
-NONCE is a client-generated id used for exact send reconciliation."
+NONCE is a client-generated id used for exact send reconciliation.
+STICKER-IDS contains at most three Discord sticker snowflakes."
   (let* ((normalized-message-reference
           (disco-api--normalize-message-reference message-reference reply-to-message-id))
          (normalized-content
@@ -761,6 +796,8 @@ NONCE is a client-generated id used for exact send reconciliation."
                     "content")))))
          (normalized-allowed-mentions
           (disco-api--normalize-allowed-mentions allowed-mentions))
+         (normalized-sticker-ids
+          (disco-api--normalize-sticker-ids sticker-ids))
          payload)
     (when normalized-content
       (push `(content . ,normalized-content) payload))
@@ -781,6 +818,8 @@ NONCE is a client-generated id used for exact send reconciliation."
       (push `(poll . ,poll) payload))
     (when normalized-allowed-mentions
       (push `(allowed_mentions . ,normalized-allowed-mentions) payload))
+    (when (> (length normalized-sticker-ids) 0)
+      (push `(sticker_ids . ,normalized-sticker-ids) payload))
     (when nonce
       (push `(nonce . ,(format "%s" nonce)) payload)
       (push '(enforce_nonce . t) payload))
@@ -912,7 +951,7 @@ ALLOWED-MENTIONS is normalized using `disco-api--normalize-allowed-mentions'."
 
 `mention_count' implies `manual=true' following Discord read-state docs.
 When all fields are omitted, return `:empty-object'."
-  (let* ((manual-value (or (disco-util-json-true-p manual)
+  (let* ((manual-value (or (disco-api--input-true-p manual)
                            (not (null mention-count))))
          (normalized-token
           (disco-api--normalize-ack-token token))

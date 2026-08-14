@@ -574,6 +574,23 @@
                         (fields "status" "voice_start_time")))
                      captured)))))
 
+(ert-deftest disco-gateway-request-last-messages-normalizes-and-limits-channel-ids ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-gateway--send-op)
+               (lambda (op data)
+                 (setq captured (list op data))
+                 t)))
+      (should
+       (disco-gateway-request-last-messages
+        "guild1"
+        (append '(1 nil 1) (number-sequence 2 101))))
+      (let ((channel-ids (alist-get 'channel_ids (cadr captured))))
+        (should (= 34 (car captured)))
+        (should (equal "guild1" (alist-get 'guild_id (cadr captured))))
+        (should (= 100 (length channel-ids)))
+        (should (equal "1" (car channel-ids)))
+        (should (equal "100" (car (last channel-ids))))))))
+
 (ert-deftest disco-gateway-request-guild-channel-sync-sends-strict-deduplicated-op38 ()
   (let (captured)
     (cl-letf (((symbol-function 'disco-gateway--send-op)

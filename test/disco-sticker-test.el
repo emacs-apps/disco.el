@@ -1,0 +1,90 @@
+;;; disco-sticker-test.el --- Tests for Discord stickers -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'cl-lib)
+(require 'seq)
+(require 'disco-sticker)
+
+(ert-deftest disco-sticker-candidates-rank-account-sections-before-catalogs ()
+  (let ((guild-sticker '((id . "111111111") (name . "Guild Wave")
+                         (format_type . 1) (available . t) (guild_id . "g1")))
+        (standard-sticker '((id . "222222222") (name . "Standard Wave")
+                            (format_type . 1) (available . t)))
+        (disco-sticker-frecency-limit 10))
+    (cl-letf (((symbol-function 'disco-state-guild-stickers)
+               (lambda (_guild-id) (list guild-sticker)))
+              ((symbol-function 'disco-state-standard-sticker-packs)
+               (lambda () (list `((name . "Standard")
+                                  (stickers . (,standard-sticker))))))
+              ((symbol-function 'disco-settings-favorite-stickers)
+               (lambda () '("222222222")))
+              ((symbol-function 'disco-settings-sticker-frecency)
+               (lambda () '(("111111111" :score 9 :total-uses 4)))))
+      (let* ((candidates (disco-sticker-candidates "g1"))
+             (groups (mapcar #'appkit-chat-completion-candidate-group candidates))
+             (values (mapcar #'appkit-chat-completion-candidate-value candidates))
+             (ids (mapcar (lambda (value) (plist-get value :sticker-id)) values))
+             (labels (mapcar #'appkit-chat-completion-candidate-label candidates)))
+        (should (equal groups
+                       '("Favorite Stickers" "Frequently Used Stickers"
+                         "g1" "Standard")))
+        (should (equal ids
+                       '("222222222" "111111111" "111111111" "222222222")))
+        (should (= (length labels) (length (delete-dups (copy-sequence labels)))))))))
+
+(ert-deftest disco-sticker-candidates-ranked-only-omits-unranked-catalog ()
+  (let ((sticker-a '((id . "111") (name . "One")
+                     (format_type . 1) (available . t) (guild_id . "g1")))
+        (sticker-b '((id . "222") (name . "Two")
+                     (format_type . 1) (available . t) (guild_id . "g1"))))
+    (cl-letf (((symbol-function 'disco-state-guild-stickers)
+               (lambda (_guild-id) (list sticker-a sticker-b)))
+              ((symbol-function 'disco-state-standard-sticker-packs)
+               (lambda () nil))
+              ((symbol-function 'disco-settings-favorite-stickers)
+               (lambda () '("222")))
+              ((symbol-function 'disco-settings-sticker-frecency)
+               (lambda () nil)))
+      (let ((candidates (disco-sticker-candidates "g1" t)))
+        (should (= (length candidates) 1))
+        (should (equal
+                 (plist-get
+                  (appkit-chat-completion-candidate-value (car candidates))
+                  :sticker-id)
+                 "222"))))))
+
+(ert-deftest disco-sticker-ensure-catalogs-allows-one-authoritative-source ()
+  (let ((standard-loaded nil)
+        (guild-loaded nil)
+        standard-success
+        guild-error
+        successes
+        errors
+        (disco-sticker--catalog-requests (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'disco-state-standard-sticker-packs-loaded-p)
+               (lambda () standard-loaded))
+              ((symbol-function 'disco-state-guild-stickers-loaded-p)
+               (lambda (_guild-id) guild-loaded))
+              ((symbol-function 'disco-state-set-standard-sticker-packs)
+               (lambda (_packs) (setq standard-loaded t)))
+              ((symbol-function 'disco-state-set-guild-stickers)
+               (lambda (_guild-id _stickers) (setq guild-loaded t)))
+              ((symbol-function 'disco-api-standard-sticker-packs-async)
+               (lambda (&rest options)
+                 (setq standard-success (plist-get options :on-success))))
+              ((symbol-function 'disco-api-guild-stickers-async)
+               (lambda (_guild-id &rest options)
+                 (setq guild-error (plist-get options :on-error)))))
+      (disco-sticker-ensure-catalogs
+       "g1"
+       :on-success (lambda () (push t successes))
+       :on-error (lambda (reason) (push reason errors)))
+      (funcall standard-success '((sticker_packs . [])))
+      (should-not successes)
+      (funcall guild-error "forbidden")
+      (should (equal successes '(t)))
+      (should-not errors))))
+
+(provide 'disco-sticker-test)
+
+;;; disco-sticker-test.el ends here

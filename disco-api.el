@@ -16,7 +16,6 @@
 (require 'url-util)
 (require 'disco-customize)
 (require 'disco-http)
-(require 'disco-util)
 (require 'disco-api-normalize)
 
 (define-error 'disco-api-error "Disco API error")
@@ -342,7 +341,7 @@ discard the update if that asynchronous or synchronous request was retired."
         ;; Authoritative cooldown on 429 responses.
         (when (and (current-p) (= status 429) retry-after)
           (let ((deadline (+ now retry-after disco-rate-limit-safety-margin)))
-            (if (or (disco-util-json-true-p global-body)
+            (if (or (eq global-body t)
                     (equal global-header "true"))
                 (when (current-p)
                   (setq disco-api--global-rate-limit-until deadline))
@@ -702,6 +701,33 @@ BODY-TYPE is forwarded to transport layer."
   (disco-api--request-async
    "GET"
    (format "/guilds/%s/top-emojis" guild-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-guild-stickers (guild-id)
+  "Fetch custom stickers in GUILD-ID."
+  (disco-api--request
+   "GET" (format "/guilds/%s/stickers" guild-id) nil nil nil))
+
+(cl-defun disco-api-guild-stickers-async
+    (guild-id &key on-success on-error)
+  "Fetch custom stickers in GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/stickers" guild-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-standard-sticker-packs ()
+  "Fetch Discord's standard sticker packs."
+  (disco-api--request "GET" "/sticker-packs" nil nil t))
+
+(cl-defun disco-api-standard-sticker-packs-async (&key on-success on-error)
+  "Fetch Discord's standard sticker packs asynchronously."
+  (disco-api--request-async
+   "GET"
+   "/sticker-packs"
+   :unauthenticated t
    :on-success on-success
    :on-error on-error))
 
@@ -1173,6 +1199,13 @@ ON-ERROR receives the transport error."
      :on-success on-success
      :on-error on-error)))
 
+(defun disco-api--normalize-id-list (ids)
+  "Normalize IDS for an API list payload, preserving first-seen order."
+  (let (result)
+    (dolist (id (or ids '()) (nreverse result))
+      (when id
+        (cl-pushnew (format "%s" id) result :test #'equal)))))
+
 (defconst disco-api-preload-channel-messages-limit 100
   "Maximum private channels accepted by Preload Messages.")
 
@@ -1180,7 +1213,7 @@ ON-ERROR receives the transport error."
     (channel-ids &key on-success on-error)
   "Preload the last message from each private channel in CHANNEL-IDS."
   (let ((normalized-channel-ids
-         (disco-util-normalize-id-list channel-ids)))
+         (disco-api--normalize-id-list channel-ids)))
     (unless normalized-channel-ids
       (error "disco: Preload Messages requires at least one channel ID"))
     (when (> (length normalized-channel-ids)
@@ -1388,14 +1421,17 @@ READ-STATE-TYPE and VERSION are optional request fields."
      :on-success on-success
      :on-error on-error)))
 
-(cl-defun disco-api-create-message (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll nonce)
+(cl-defun disco-api-create-message
+    (channel-id &key content reply-to-message-id message-reference
+                allowed-mentions attachments poll nonce sticker-ids)
   "Create one message in CHANNEL-ID.
 
 CONTENT is optional text content. REPLY-TO-MESSAGE-ID is a reply shorthand.
 MESSAGE-REFERENCE can be used for explicit reply/forward references.
 ALLOWED-MENTIONS controls mention parsing for the message.
 ATTACHMENTS is an optional list of upload descriptors.
-POLL is an optional poll create payload."
+POLL is an optional poll create payload.  STICKER-IDS contains up to three
+Discord sticker snowflakes."
   (let* ((normalized-attachments
           (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
          (normalized-poll (disco-api--normalize-poll-request poll))
@@ -1406,12 +1442,14 @@ POLL is an optional poll create payload."
                    normalized-attachments
                    normalized-poll
                    allowed-mentions
-                   nonce)))
+                   nonce
+                   sticker-ids)))
     (unless (or (alist-get 'content payload)
                 (alist-get 'message_reference payload)
                 normalized-attachments
-                normalized-poll)
-      (user-error "disco: message content, poll, attachments, and message_reference are all empty"))
+                normalized-poll
+                (alist-get 'sticker_ids payload))
+      (user-error "disco: message content, poll, stickers, attachments, and message_reference are all empty"))
     (if normalized-attachments
         (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
                (boundary (car multipart))
@@ -1432,7 +1470,10 @@ POLL is an optional poll create payload."
        nil
        nil))))
 
-(cl-defun disco-api-create-message-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments poll nonce on-success on-error)
+(cl-defun disco-api-create-message-async
+    (channel-id &key content reply-to-message-id message-reference
+                allowed-mentions attachments poll nonce sticker-ids
+                on-success on-error)
   "Asynchronously create one message in CHANNEL-ID.
 
 Keyword arguments are the same as `disco-api-create-message'."
@@ -1446,12 +1487,14 @@ Keyword arguments are the same as `disco-api-create-message'."
                    normalized-attachments
                    normalized-poll
                    allowed-mentions
-                   nonce)))
+                   nonce
+                   sticker-ids)))
     (unless (or (alist-get 'content payload)
                 (alist-get 'message_reference payload)
                 normalized-attachments
-                normalized-poll)
-      (user-error "disco: message content, poll, attachments, and message_reference are all empty"))
+                normalized-poll
+                (alist-get 'sticker_ids payload))
+      (user-error "disco: message content, poll, stickers, attachments, and message_reference are all empty"))
     (if normalized-attachments
         (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
                (boundary (car multipart))
@@ -1603,17 +1646,15 @@ When ALLOWED-MENTIONS is non-nil, send explicit allowed_mentions payload."
    :allowed-mentions allowed-mentions
    :poll poll))
 
-(cl-defun disco-api-send-message-async (channel-id content
-                                                   &key reply-to-message-id
-                                                   message-reference
-                                                   allowed-mentions
-                                                   poll
-                                                   nonce
-                                                   on-success on-error)
+(cl-defun disco-api-send-message-async
+    (channel-id content
+                &key reply-to-message-id message-reference allowed-mentions
+                poll nonce sticker-ids on-success on-error)
   "Send CONTENT into CHANNEL-ID asynchronously.
 
 MESSAGE-REFERENCE may be used for explicit reply/forward references.
-When POLL is non-nil, include poll create payload."
+When POLL is non-nil, include poll create payload.  STICKER-IDS is an exact
+sequence of up to three Discord sticker snowflakes."
   (disco-api-create-message-async
    channel-id
    :content content
@@ -1622,6 +1663,7 @@ When POLL is non-nil, include poll create payload."
    :allowed-mentions allowed-mentions
    :poll poll
    :nonce nonce
+   :sticker-ids sticker-ids
    :on-success on-success
    :on-error on-error))
 

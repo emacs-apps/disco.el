@@ -4,6 +4,11 @@
 
 (require 'disco-api-normalize)
 
+(ert-deftest disco-api-normalize-input-true-values ()
+  (dolist (value '(t true "true"))
+    (should (equal "true" (disco-api--query-bool-string value))))
+  (should (equal "false" (disco-api--query-bool-string :false))))
+
 (ert-deftest disco-api-normalize-ack-message-payload-empty ()
   (should (eq :empty-object
               (disco-api--ack-message-payload nil nil nil nil nil))))
@@ -62,6 +67,24 @@
                   "hello" nil nil nil nil nil "12345")))
     (should (equal "12345" (alist-get 'nonce payload)))
     (should (eq t (alist-get 'enforce_nonce payload)))))
+
+(ert-deftest disco-api-normalize-message-send-payload-supports-sticker-only ()
+  (should
+   (equal '((sticker_ids . ["11" "22"]))
+          (disco-api--message-send-payload
+           nil nil nil nil nil nil nil '("11" 22))))
+  (should-error
+   (disco-api--message-send-payload
+    nil nil nil nil nil nil nil '("1" "2" "3" "4"))
+   :type 'user-error)
+  (should-error
+   (disco-api--message-send-payload
+    nil nil nil nil nil nil nil '("not-a-snowflake"))
+   :type 'user-error)
+  (should-error
+   (disco-api--message-send-payload
+    nil nil nil nil nil nil nil '(123.0))
+   :type 'user-error))
 
 (ert-deftest disco-api-normalize-token-payload ()
   (should (eq :empty-object (disco-api--token-payload nil)))

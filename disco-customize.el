@@ -72,6 +72,20 @@ Nil leaves notification lifetime to the desktop server."
   "Additional keyword arguments passed to `notifications-notify'."
   :type '(repeat sexp) :group 'disco-notifications)
 
+(defcustom disco-room-attach-commands
+  '(("file" disco-room-attach-file)
+    ("sticker" disco-room-send-sticker)
+    ("poll" disco-room-send-poll))
+  "Attachment commands offered by `disco-room-attach'.
+
+Each entry has the form (NAME COMMAND).  NAME is the stable completion
+candidate shown after `C-c C-a'; COMMAND must be interactive.  Users and
+extensions may append Discord attachment kinds without replacing the
+dispatcher."
+  :type '(alist :key-type (string :tag "Attachment name")
+                :value-type (list function))
+  :group 'disco)
+
 (defcustom disco-token nil
   "Discord token used for authenticated API requests.
 

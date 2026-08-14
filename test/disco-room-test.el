@@ -2253,9 +2253,9 @@
     (disco-state-apply-message-ack "chat" "m1" 1)
     (disco-room-test-establish-latest-window)
     (disco-room-render)
-    (should (disco-util-json-true-p
-             (plist-get (appkit-chat-timeline-context "m2")
-                        :insert-unread)))
+    (should (eq (plist-get (appkit-chat-timeline-context "m2")
+                           :insert-unread)
+                t))
     (let ((ewoc (appkit-chat-timeline-ewoc))
           (node-m2 (appkit-chat-timeline-node "m2"))
           (node-m3 (appkit-chat-timeline-node "m3"))
@@ -2273,9 +2273,9 @@
       (should (eq node-m3 (appkit-chat-timeline-node "m3")))
       (should-not (plist-get (appkit-chat-timeline-context "m2")
                              :insert-unread))
-      (should (disco-util-json-true-p
-               (plist-get (appkit-chat-timeline-context "m3")
-                          :insert-unread))))))
+      (should (eq (plist-get (appkit-chat-timeline-context "m3")
+                             :insert-unread)
+                  t)))))
 
 (ert-deftest disco-room-mark-read-applies-optimistic-unread-patch ()
   (with-temp-buffer
@@ -2308,9 +2308,9 @@
     (disco-state-apply-message-ack "chat" "m1" 1)
     (disco-room-test-establish-latest-window)
     (disco-room-render)
-    (should (disco-util-json-true-p
-             (plist-get (appkit-chat-timeline-context "m2")
-                        :insert-unread)))
+    (should (eq (plist-get (appkit-chat-timeline-context "m2")
+                           :insert-unread)
+                t))
     (cl-letf (((symbol-function 'disco-api-ack-message-async)
                (lambda (&rest _args) nil))
               ((symbol-function 'message)
@@ -2415,9 +2415,9 @@
       (appkit-sync-invalidations (appkit-current-view)))
     (should-not disco-room--pending-optimistic-read-ack)
     (should (equal "m1" (disco-state-channel-last-read-message-id "chat")))
-    (should (disco-util-json-true-p
-             (plist-get (appkit-chat-timeline-context "m2")
-                        :insert-unread)))
+    (should (eq (plist-get (appkit-chat-timeline-context "m2")
+                           :insert-unread)
+                t))
     (should-not (plist-get (appkit-chat-timeline-context "m3")
                            :insert-unread))))
 

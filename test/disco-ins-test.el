@@ -29,7 +29,7 @@
   (with-temp-buffer
     (let* ((selected '((emoji . ((name . ":wave:")))
                        (count . 2)
-                       (me . true)))
+                       (me . t)))
            (plain '((emoji . ((name . ":sparkles:")))
                     (total_count . 1)
                     (is_chosen . :false)))
@@ -55,7 +55,7 @@
   (with-temp-buffer
     (let ((reaction '((emoji . ((name . ":wave:")))
                       (count . 3)
-                      (me . true)))
+                      (me . t)))
           clicked)
       (disco-ins-insert-reaction-line
        (list reaction)

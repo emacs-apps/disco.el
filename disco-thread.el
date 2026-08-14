@@ -10,7 +10,7 @@
 
 (require 'seq)
 (require 'subr-x)
-(require 'disco-util)
+
 (require 'disco-state)
 
 (defconst disco-thread-channel-types '(10 11 12)
@@ -74,16 +74,16 @@ Discord forum starter messages share their snowflake with the thread channel."
 (defun disco-thread-archived-p (channel)
   "Return non-nil when CHANNEL thread is archived."
   (let ((meta (disco-thread-metadata channel)))
-    (or (disco-util-json-true-p (alist-get 'archived meta))
-        (disco-util-json-true-p (and (listp channel)
-                                     (alist-get 'archived channel))))))
+    (or (eq (alist-get 'archived meta) t)
+        (and (listp channel)
+             (eq (alist-get 'archived channel) t)))))
 
 (defun disco-thread-locked-p (channel)
   "Return non-nil when CHANNEL thread is locked."
   (let ((meta (disco-thread-metadata channel)))
-    (or (disco-util-json-true-p (alist-get 'locked meta))
-        (disco-util-json-true-p (and (listp channel)
-                                     (alist-get 'locked channel))))))
+    (or (eq (alist-get 'locked meta) t)
+        (and (listp channel)
+             (eq (alist-get 'locked channel) t)))))
 
 (defun disco-thread-private-p (channel)
   "Return non-nil when CHANNEL is a private thread."
@@ -139,7 +139,7 @@ Return symbol `keep', t, or :false."
   (let* ((choice (completing-read
                   (format "%s (keep/yes/no, current %s): "
                           prompt
-                          (if (disco-util-json-true-p current-value)
+                          (if (eq current-value t)
                               "yes"
                             "no"))
                   (mapcar #'car disco-thread--tristate-choice-alist)
