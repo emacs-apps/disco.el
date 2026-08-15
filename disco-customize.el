@@ -19,6 +19,40 @@
   "Global presentation modes for disco.el."
   :group 'disco)
 
+(defcustom disco-title-bracket-rules
+  '((user "{" "}")
+    (ephemeral-user "⦃" "⦄")
+    (group "(" ")")
+    (guild "[[" "]]")
+    (channel "[" "]")
+    (announcement "⟪" "⟫")
+    (thread "⟨" "⟩")
+    (private-thread "⦇" "⦈")
+    (voice "「" "」")
+    (stage "『" "』")
+    (forum "⟦" "⟧")
+    (media "【" "】")
+    (directory "〔" "〕")
+    (lobby "⌜" "⌝")
+    (none "" "")
+    (t "[" "]"))
+  "Ordered rules selecting Discord presentation delimiters.
+
+Each rule is (SELECTOR OPEN CLOSE); the first matching rule wins.  SELECTOR
+may be a presentation kind symbol, t as a fallback, (channel-type TYPE...)
+for exact numeric Discord channel types, or a function called with
+(KIND SUBJECT).  OPEN may include a type prefix: `(channel \"#[\" \"]\")'
+renders an ordinary channel as `#[name]'.  Appkit measures the complete
+delimiters by display width."
+  :type
+  '(repeat
+    (list :tag "Delimiter rule"
+          (sexp :tag "Selector")
+          (string :tag "Opening delimiter")
+          (string :tag "Closing delimiter")))
+  :group 'disco)
+
+
 (defcustom disco-mode-line-string-format
   '("  " (:eval (disco-client-mode-line-icon))
     (:eval (disco-client-mode-line-unread))

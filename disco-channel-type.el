@@ -8,6 +8,7 @@
 ;; and profile layers.
 
 ;;; Code:
+(require 'disco-customize)
 
 (defconst disco-channel-flag-obfuscated (ash 1 17)
   "Discord channel flag `OBFUSCATED'.
@@ -120,34 +121,49 @@ Discord uses this flag on the limited channel objects included by the
      :direct-message t))
   "Declarative map of Discord channel type to capability plist.")
 
-(defconst disco-title-bracket-alist
-  '((user . ("{" "}"))
-    (ephemeral-user . ("⦃" "⦄"))
-    (group . ("(" ")"))
-    (guild . ("[[" "]]"))
-    (channel . ("[" "]"))
-    (announcement . ("⟪" "⟫"))
-    (thread . ("⟨" "⟩"))
-    (private-thread . ("⦇" "⦈"))
-    (voice . ("「" "」"))
-    (stage . ("『" "』"))
-    (forum . ("⟦" "⟧"))
-    (media . ("【" "】"))
-    (directory . ("〔" "〕"))
-    (lobby . ("⌜" "⌝"))
-    (none . ("" "")))
-  "Telega-style title brackets for Discord presentation domains.")
 
-(defun disco-title-brackets (kind)
-  "Return the registered presentation bracket pair for KIND."
-  (or (alist-get kind disco-title-bracket-alist)
-      (error "Unknown Disco title kind: %S" kind)))
+(defun disco-title--bracket-selector-match-p (selector kind subject)
+  "Return non-nil when SELECTOR matches presentation KIND and SUBJECT."
+  (cond
+   ((eq selector t)
+    t)
+   ((eq selector kind)
+    t)
+   ((and (consp selector) (eq (car selector) 'channel-type))
+    (let ((channel-type
+           (cond
+            ((integerp subject)
+             subject)
+            ((listp subject)
+             (alist-get 'type subject)))))
+      (and (integerp channel-type)
+           (memq channel-type (cdr selector)))))
+   ((functionp selector)
+    (funcall selector kind subject))
+   (t
+    nil)))
 
-(defun disco-title-format (kind title)
-  "Wrap TITLE in the presentation brackets registered for KIND."
+(defun disco-title-brackets (kind &optional subject)
+  "Return delimiters selected for presentation KIND and optional SUBJECT."
+  (catch 'brackets
+    (dolist (rule disco-title-bracket-rules)
+      (unless (and (consp rule)
+                   (consp (cdr rule))
+                   (stringp (cadr rule))
+                   (consp (cddr rule))
+                   (stringp (caddr rule))
+                   (null (cdddr rule)))
+        (error "Invalid Disco title delimiter rule: %S" rule))
+      (when (disco-title--bracket-selector-match-p
+             (car rule) kind subject)
+        (throw 'brackets (list (cadr rule) (caddr rule)))))
+    (error "No Disco title delimiter rule matches %S" kind)))
+
+(defun disco-title-format (kind title &optional subject)
+  "Wrap TITLE in delimiters selected for KIND and optional SUBJECT."
   (unless (stringp title)
     (error "Disco title must be a string: %S" title))
-  (let ((brackets (disco-title-brackets kind)))
+  (let ((brackets (disco-title-brackets kind subject)))
     (concat (car brackets) title (cadr brackets))))
 
 (defun disco-title-compact-count (value)
@@ -211,12 +227,13 @@ Discord uses this flag on the limited channel objects included by the
 
 (defun disco-channel-title-brackets (channel-or-type)
   "Return the presentation bracket pair for CHANNEL-OR-TYPE."
-  (disco-title-brackets (disco-channel-title-kind channel-or-type)))
+  (disco-title-brackets (disco-channel-title-kind channel-or-type)
+                        channel-or-type))
 
 (defun disco-channel-format-title (channel-or-type title)
   "Wrap TITLE according to the Discord CHANNEL-OR-TYPE domain."
-  (disco-title-format
-   (disco-channel-title-kind channel-or-type) title))
+  (disco-title-format (disco-channel-title-kind channel-or-type) title
+                      channel-or-type))
 
 (defun disco-channel-thread-p (channel-or-type)
   "Return non-nil when CHANNEL-OR-TYPE is a thread channel."
