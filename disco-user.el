@@ -15,6 +15,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'appkit-core)
+(require 'appkit-chat-avatar)
 (require 'appkit-invalidation)
 (require 'appkit-transaction)
 (require 'appkit-position)
@@ -29,6 +30,8 @@
 (declare-function disco-gateway-current-user "disco-gateway" ())
 (declare-function disco-gateway-current-user-id "disco-gateway" ())
 (declare-function disco-room-open "disco-room" (channel-id channel-name))
+(declare-function disco-channel-directory-open
+                  "disco-channel-directory" (guild-id))
 
 (defun disco-user--view-id (user-id guild-id)
   "Return the Appkit view identity for USER-ID in GUILD-ID context."
@@ -172,14 +175,15 @@
                    "")))
     (format "[%s]" (upcase (concat first second)))))
 
-(defun disco-user--insert-avatar ()
-  "Insert the current user's shared avatar or a text fallback."
+(defun disco-user--avatar-prefixes ()
+  "Return Telega-style two-line prefixes for the current user's avatar."
   (let* ((user (disco-user--user))
          (fallback (disco-user--avatar-placeholder))
-         (image (and user (disco-avatar-rounded-image user 64))))
-    (if image
-        (insert-image image fallback)
-      (insert fallback))))
+         (pixel-size (appkit-chat-avatar-two-line-pixel-size))
+         (image (and user
+                     (disco-avatar-rounded-image user pixel-size))))
+    (appkit-chat-avatar-prefixes
+     image fallback :pixel-size pixel-size :resize t)))
 
 (defun disco-user--insert-field (label value &optional face)
   "Insert profile LABEL and VALUE when VALUE is present."
@@ -222,18 +226,34 @@
     (or (and guild (disco-user--present-string (alist-get 'name guild)))
         normalized)))
 
-(defun disco-user--mutual-guild-label ()
-  "Return a concise label for the current profile's mutual guilds."
-  (when-let* ((guilds (and (listp disco-user--profile)
-                           (alist-get 'mutual_guilds disco-user--profile)))
-              ((listp guilds))
-              ((not (null guilds))))
-    (string-join
-     (delq nil
-           (mapcar (lambda (guild)
-                     (disco-user--guild-label (alist-get 'id guild)))
-                   guilds))
-     ", ")))
+(defun disco-user--mutual-guilds ()
+  "Return the current profile's mutual Guild objects."
+  (let ((guilds (and (listp disco-user--profile)
+                     (alist-get 'mutual_guilds disco-user--profile))))
+    (and (listp guilds) guilds)))
+
+(defun disco-user--open-mutual-guild (button)
+  "Open the channel directory identified by mutual Guild BUTTON."
+  (disco-channel-directory-open (button-get button 'disco-guild-id)))
+
+(defun disco-user--insert-mutual-guilds ()
+  "Insert each mutual Guild as an independently navigable row."
+  (when-let* ((guilds (disco-user--mutual-guilds)))
+    (disco-user--insert-field "Mutual servers" (length guilds))
+    (dolist (guild guilds)
+      (when-let* ((guild-id
+                   (disco-user--normalize-id (alist-get 'id guild))))
+        (insert "  ")
+        (insert-text-button
+         (or (disco-user--guild-label guild-id) guild-id)
+         'follow-link t
+         'action #'disco-user--open-mutual-guild
+         'disco-guild-id guild-id
+         'help-echo "Open this server's channel directory")
+        (when-let* ((nick (disco-user--present-string
+                           (alist-get 'nick guild))))
+          (insert (propertize (format " · %s" nick) 'face 'shadow)))
+        (insert "\n")))))
 
 (defun disco-user--badge-label ()
   "Return descriptions for global and guild profile badges."
@@ -307,13 +327,19 @@
        (setq-local header-line-format '(:eval (disco-user--header-line)))
        (if (and disco-user--loading (null user))
            (appkit-view-insert-note-line "Loading user profile…")
-         (disco-user--insert-avatar)
-         (insert "  "
-                 (propertize (disco-user--display-name)
-                             'face 'disco-user-card-title))
-         (when-let* ((username (disco-user--username-label)))
-           (insert "\n    " (propertize username 'face 'shadow)))
-         (insert "\n\n")
+         (let* ((prefixes (disco-user--avatar-prefixes))
+                (header-prefix (plist-get prefixes :header))
+                (status-prefix (plist-get prefixes :first-body))
+                (status (disco-user--presence-status)))
+           (insert header-prefix
+                   (propertize (disco-user--display-name)
+                               'face 'disco-user-card-title))
+           (when-let* ((username (disco-user--username-label)))
+             (insert (propertize (format " · %s" username) 'face 'shadow)))
+           (insert "\n" status-prefix)
+           (when status
+             (insert (propertize (capitalize status) 'face 'shadow)))
+           (insert "\n"))
          (disco-user--insert-action-buttons)
          (when disco-user--loading
            (appkit-view-insert-note-line
@@ -325,14 +351,9 @@
          (appkit-view-insert-note-line
           "g refresh · m message · Y copy ID · q quit" :face 'shadow)
          (insert "\n")
-         (appkit-view-insert-heading-line "Identity" :face 'bold)
-         (disco-user--insert-field "Display name" (disco-user--display-name))
-         (disco-user--insert-field "Username" (disco-user--username-label))
          (disco-user--insert-field "User ID" disco-user--user-id)
          (disco-user--insert-field
           "Account created" (disco-user--snowflake-date disco-user--user-id))
-         (when-let* ((status (disco-user--presence-status)))
-           (disco-user--insert-field "Status" (capitalize status)))
          (when (eq t (and user (alist-get 'bot user)))
            (disco-user--insert-field "Account type" "Bot"))
          (let* ((member (disco-user--guild-member))
@@ -371,8 +392,7 @@
                               (alist-get 'pronouns user-profile)))
              (disco-user--insert-paragraph "About me" global-bio)))
          (disco-user--insert-field "Badges" (disco-user--badge-label))
-         (disco-user--insert-field
-          "Mutual servers" (disco-user--mutual-guild-label))
+         (disco-user--insert-mutual-guilds)
          (let ((count (and (listp disco-user--profile)
                            (alist-get 'mutual_friends_count
                                       disco-user--profile))))

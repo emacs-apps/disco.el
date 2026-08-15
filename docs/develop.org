@@ -28,7 +28,7 @@
 | ~disco-root-view.el~ | root row models and renderers |
 | ~disco-root.el~ | root controllers and live updates |
 | ~disco-user.el~ | Appkit profile views keyed by user and server context |
-| ~disco-channel-directory.el~ | per-guild browser |
+| ~disco-channel-directory.el~ | per-guild browser and async Guild Profile overview |
 | ~disco-room.el~ | room render and send |
 | ~disco-company.el~ | composer completion |
 

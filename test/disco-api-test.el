@@ -772,6 +772,28 @@
            :on-error ignore))
         captured)))))
 
+(ert-deftest disco-api-guild-profile-uses-public-profile-endpoint ()
+  (let (calls)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &rest options)
+                 (push (list method endpoint options) calls)
+                 'profile))
+              ((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest options)
+                 (push (list method endpoint options) calls)
+                 'request)))
+      (should (eq 'profile (disco-api-guild-profile "99")))
+      (should
+       (eq 'request
+           (disco-api-guild-profile-async
+            "99" :on-success #'identity :on-error #'ignore)))
+      (should
+       (equal
+        '(("GET" "/guilds/99/profile"
+           (:on-success identity :on-error ignore))
+          ("GET" "/guilds/99/profile" (nil nil nil)))
+        calls)))))
+
 (ert-deftest disco-api-create-private-channel-async-uses-one-recipient ()
   (let (captured)
     (cl-letf (((symbol-function 'disco-api--request-async)

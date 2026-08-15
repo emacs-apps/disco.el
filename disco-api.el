@@ -653,6 +653,20 @@ BODY-TYPE is forwarded to transport layer."
    :on-success on-success
    :on-error on-error))
 
+(defun disco-api-guild-profile (guild-id)
+  "Fetch GUILD-ID's public server profile."
+  (disco-api--request
+   "GET" (format "/guilds/%s/profile" guild-id) nil nil nil))
+
+(cl-defun disco-api-guild-profile-async
+    (guild-id &key on-success on-error)
+  "Fetch GUILD-ID's public server profile asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/profile" guild-id)
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-user-private-channels ()
   "Fetch current user's private channel list."
   (disco-api--request "GET" "/users/@me/channels" nil nil nil))
