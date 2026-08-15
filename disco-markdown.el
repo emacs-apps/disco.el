@@ -262,19 +262,15 @@ This mirrors Discord's language-tagged code block behavior."
     table)
   "Translation table used to mask hidden spoiler contents.")
 
-(defvar disco-markdown--link-keymap
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mouse-1] #'disco-markdown-open-at-point)
-    (define-key map (kbd "RET") #'disco-markdown-open-at-point)
-    map)
-  "Keymap used for rendered Markdown links.")
+(defvar-keymap disco-markdown--link-keymap
+  :doc "Keymap used for rendered Markdown links."
+  "<mouse-1>" #'disco-markdown-open-at-point
+  "RET" #'disco-markdown-open-at-point)
 
-(defvar disco-markdown--spoiler-keymap
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mouse-1] #'disco-markdown-toggle-spoiler-at-point)
-    (define-key map (kbd "RET") #'disco-markdown-toggle-spoiler-at-point)
-    map)
-  "Keymap used for rendered spoiler regions.")
+(defvar-keymap disco-markdown--spoiler-keymap
+  :doc "Keymap used for rendered spoiler regions."
+  "<mouse-1>" #'disco-markdown-toggle-spoiler-at-point
+  "RET" #'disco-markdown-toggle-spoiler-at-point)
 
 (defvar disco-markdown--cache (make-hash-table :test #'equal)
   "Cache table for rendered Markdown strings.")

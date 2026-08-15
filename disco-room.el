@@ -388,7 +388,7 @@ This is optional and requires the external `visual-fill-column' package."
 When non-nil and visual fill mode is active, set local `fill-column' to this
 value before enabling visual fill."
   :type '(choice (const :tag "Use current fill-column" nil)
-                 integer)
+          integer)
   :group 'disco)
 
 (defcustom disco-room-auto-fill-margin-columns 1
@@ -396,7 +396,7 @@ value before enabling visual fill."
 
 This mirrors telega auto-fill behavior and helps avoid edge clipping."
   :type '(choice (const :tag "No additional margin" nil)
-                 (integer :tag "Additional margin columns"))
+          (integer :tag "Additional margin columns"))
   :group 'disco)
 
 (defcustom disco-room-show-attachment-urls nil
@@ -510,51 +510,47 @@ This mirrors telega auto-fill behavior and helps avoid edge clipping."
   "Face used for system event divider lines (e.g. user join)."
   :group 'disco)
 
-(defvar disco-room-timeline-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "c") #'disco-msg-copy-dwim)
-    (define-key map (kbd "l") #'disco-msg-copy-link)
-    (define-key map (kbd "n") #'disco-msg-next)
-    (define-key map (kbd "p") #'disco-msg-previous)
-    (define-key map (kbd "o") #'disco-msg-operate)
-    (define-key map (kbd "t") #'disco-msg-copy-text)
-    (define-key map (kbd "r") #'disco-msg-reply)
-    (define-key map (kbd "f") #'disco-msg-forward)
-    (define-key map (kbd "e") #'disco-msg-edit)
-    (define-key map (kbd "d") #'disco-msg-delete)
-    (define-key map (kbd "P") #'disco-msg-toggle-pin)
-    (define-key map (kbd "i") #'disco-msg-describe-message)
-    (define-key map (kbd "L") #'disco-msg-redisplay)
-    (define-key map (kbd "!") #'disco-msg-add-reaction)
-    (define-key map (kbd "+") #'disco-msg-toggle-reaction)
-    (define-key map (kbd "-") #'disco-msg-remove-reaction)
-    (define-key map (kbd "T") #'disco-msg-open-thread)
-    (define-key map (kbd "?") #'disco-room-transient)
-    map)
-  "Timeline-only keymap active when point is outside the room draft.")
+(defvar-keymap disco-room-timeline-mode-map
+  :doc "Timeline-only keymap active when point is outside the room draft."
+  "q" #'quit-window
+  "c" #'disco-msg-copy-dwim
+  "l" #'disco-msg-copy-link
+  "n" #'disco-msg-next
+  "p" #'disco-msg-previous
+  "o" #'disco-msg-operate
+  "t" #'disco-msg-copy-text
+  "r" #'disco-msg-reply
+  "f" #'disco-msg-forward
+  "e" #'disco-msg-edit
+  "d" #'disco-msg-delete
+  "P" #'disco-msg-toggle-pin
+  "i" #'disco-msg-describe-message
+  "L" #'disco-msg-redisplay
+  "!" #'disco-msg-add-reaction
+  "+" #'disco-msg-toggle-reaction
+  "-" #'disco-msg-remove-reaction
+  "T" #'disco-msg-open-thread
+  "?" #'disco-room-transient)
 
-(defvar disco-room-message-prefix-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "c") #'disco-msg-copy-dwim)
-    (define-key map (kbd "l") #'disco-msg-copy-link)
-    (define-key map (kbd "n") #'disco-msg-next)
-    (define-key map (kbd "p") #'disco-msg-previous)
-    (define-key map (kbd "o") #'disco-msg-operate)
-    (define-key map (kbd "t") #'disco-msg-copy-text)
-    (define-key map (kbd "r") #'disco-msg-reply)
-    (define-key map (kbd "f") #'disco-msg-forward)
-    (define-key map (kbd "e") #'disco-msg-edit)
-    (define-key map (kbd "d") #'disco-msg-delete)
-    (define-key map (kbd "P") #'disco-msg-toggle-pin)
-    (define-key map (kbd "i") #'disco-msg-describe-message)
-    (define-key map (kbd "L") #'disco-msg-redisplay)
-    (define-key map (kbd "!") #'disco-msg-add-reaction)
-    (define-key map (kbd "+") #'disco-msg-toggle-reaction)
-    (define-key map (kbd "-") #'disco-msg-remove-reaction)
-    (define-key map (kbd "T") #'disco-msg-open-thread)
-    map)
-  "Prefix map for message actions at point in `disco-room-mode'.")
+(defvar-keymap disco-room-message-prefix-map
+  :doc "Prefix map for message actions at point in `disco-room-mode'."
+  "c" #'disco-msg-copy-dwim
+  "l" #'disco-msg-copy-link
+  "n" #'disco-msg-next
+  "p" #'disco-msg-previous
+  "o" #'disco-msg-operate
+  "t" #'disco-msg-copy-text
+  "r" #'disco-msg-reply
+  "f" #'disco-msg-forward
+  "e" #'disco-msg-edit
+  "d" #'disco-msg-delete
+  "P" #'disco-msg-toggle-pin
+  "i" #'disco-msg-describe-message
+  "L" #'disco-msg-redisplay
+  "!" #'disco-msg-add-reaction
+  "+" #'disco-msg-toggle-reaction
+  "-" #'disco-msg-remove-reaction
+  "T" #'disco-msg-open-thread)
 
 (define-minor-mode disco-room-timeline-mode
   "Buffer-local navigation bindings active outside the room draft."
@@ -902,10 +898,10 @@ recoverable."
            (message-revision (plist-get slot :message-revision)))
       (cl-labels
           ((deleted-after-capture-p
-            (message-id)
-            (and message-id
-                 (disco-state-message-deleted-after-p
-                  disco-room--channel-id message-id message-revision))))
+             (message-id)
+             (and message-id
+                  (disco-state-message-deleted-after-p
+                   disco-room--channel-id message-id message-revision))))
         (when (deleted-after-capture-p
                (plist-get pending-edit :message-id))
           (setq pending-edit nil))
@@ -2069,15 +2065,13 @@ When RESET is non-nil, the returned page replaces the cached projection."
      :anchor-property 'disco-message-id
      :preserve-window-start t)))
 
-(defvar disco-room-pinned-messages-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-room-pinned-messages-refresh)
-    (define-key map (kbd "m") #'disco-room-pinned-messages-load-more)
-    (define-key map (kbd "RET") #'appkit-ui-activate)
-    (define-key map (kbd "<return>") #'appkit-ui-activate)
-    (define-key map (kbd "q") #'quit-window)
-    map)
-  "Keymap for `disco-room-pinned-messages-mode'.")
+(defvar-keymap disco-room-pinned-messages-mode-map
+  :doc "Keymap for `disco-room-pinned-messages-mode'."
+  "g" #'disco-room-pinned-messages-refresh
+  "m" #'disco-room-pinned-messages-load-more
+  "RET" #'appkit-ui-activate
+  "<return>" #'appkit-ui-activate
+  "q" #'quit-window)
 
 (define-derived-mode disco-room-pinned-messages-mode special-mode "Disco-Pins"
   "Major mode for one channel's pinned-message browser."
@@ -6584,47 +6578,47 @@ When called with prefix argument, force draft edit in minibuffer first."
                           (appkit-request-sync view :part 'frame)
                           (cl-labels
                               ((finish-error (error-data)
-                                (unless operation-settled-p
-                                  (setq operation-settled-p t)
-                                  (when (disco-room--channel-buffer-p
-                                         room-buffer channel-id view)
-                                    (with-current-buffer room-buffer
-                                      (setq disco-room--send-in-flight nil)
-                                      (disco-room--restore-composer-operation-slot
-                                       cleared-revision operation-slot t)
-                                      (disco-room--request-render view)
-                                      (message
-                                       "disco: edit failed for %s: %s"
-                                       edit-message-id
-                                       (disco-room--async-error-message
-                                        error-data))))))
+                                 (unless operation-settled-p
+                                   (setq operation-settled-p t)
+                                   (when (disco-room--channel-buffer-p
+                                          room-buffer channel-id view)
+                                     (with-current-buffer room-buffer
+                                       (setq disco-room--send-in-flight nil)
+                                       (disco-room--restore-composer-operation-slot
+                                        cleared-revision operation-slot t)
+                                       (disco-room--request-render view)
+                                       (message
+                                        "disco: edit failed for %s: %s"
+                                        edit-message-id
+                                        (disco-room--async-error-message
+                                         error-data))))))
                                (finish-success (response)
-                                (if (not (and (listp response)
-                                              (alist-get 'id response)))
-                                    (finish-error
-                                     (list 'error
-                                           "Discord edit-message returned no message"))
-                                  (unless operation-settled-p
-                                    (setq operation-settled-p t)
-                                    (disco-state-merge-message-response
-                                     channel-id response request-revision)
-                                    (when (disco-room--channel-buffer-p
-                                           room-buffer channel-id view)
-                                      (with-current-buffer room-buffer
-                                        (setq disco-room--send-in-flight nil)
-                                        (when (= cleared-revision
-                                                 (appkit-chatbuf-composer-revision))
-                                          (disco-room--composer-edit-restore-state
-                                           saved-state t))
-                                        (disco-room--request-render view)
-                                        (message
-                                         "disco: edited message %s"
-                                         edit-message-id)))))))
+                                 (if (not (and (listp response)
+                                               (alist-get 'id response)))
+                                     (finish-error
+                                      (list 'error
+                                            "Discord edit-message returned no message"))
+                                   (unless operation-settled-p
+                                     (setq operation-settled-p t)
+                                     (disco-state-merge-message-response
+                                      channel-id response request-revision)
+                                     (when (disco-room--channel-buffer-p
+                                            room-buffer channel-id view)
+                                       (with-current-buffer room-buffer
+                                         (setq disco-room--send-in-flight nil)
+                                         (when (= cleared-revision
+                                                  (appkit-chatbuf-composer-revision))
+                                           (disco-room--composer-edit-restore-state
+                                            saved-state t))
+                                         (disco-room--request-render view)
+                                         (message
+                                          "disco: edited message %s"
+                                          edit-message-id)))))))
                             (disco-api-edit-message-async channel-id edit-message-id normalized
-                             :allowed-mentions
-                             (disco-room--send-allowed-mentions)
-                             :on-success #'finish-success
-                             :on-error #'finish-error)))
+                                                          :allowed-mentions
+                                                          (disco-room--send-allowed-mentions)
+                                                          :on-success #'finish-success
+                                                          :on-error #'finish-error)))
                       (error
                        (unless operation-settled-p
                          (setq operation-settled-p t)
@@ -6657,115 +6651,115 @@ When called with prefix argument, force draft edit in minibuffer first."
                       (appkit-request-sync view :part 'frame)
                       (cl-labels
                           ((room-active-p ()
-                            (disco-room--channel-buffer-p
-                             room-buffer channel-id view))
+                             (disco-room--channel-buffer-p
+                              room-buffer channel-id view))
                            (settle-success
-                            (text)
-                            (unless operation-settled-p
-                              (setq operation-settled-p t)
-                              (when (room-active-p)
-                                (with-current-buffer room-buffer
-                                  (setq disco-room--send-in-flight nil)
-                                  (disco-room--request-render view)
-                                  (message "%s" text)))))
+                             (text)
+                             (unless operation-settled-p
+                               (setq operation-settled-p t)
+                               (when (room-active-p)
+                                 (with-current-buffer room-buffer
+                                   (setq disco-room--send-in-flight nil)
+                                   (disco-room--request-render view)
+                                   (message "%s" text)))))
                            (settle-failure
-                            (slot error-data text)
-                            (unless operation-settled-p
-                              (setq operation-settled-p t)
-                              (when (room-active-p)
-                                (with-current-buffer room-buffer
-                                  (setq disco-room--send-in-flight nil)
-                                  (let ((restored
-                                         (disco-room--restore-composer-operation-slot
-                                          cleared-revision slot t)))
-                                    (disco-room--request-render view)
-                                    (message
-                                     "%s%s: %s"
-                                     text
-                                     (if restored " (draft restored)" "")
-                                     (disco-room--async-error-message
-                                      error-data)))))))
+                             (slot error-data text)
+                             (unless operation-settled-p
+                               (setq operation-settled-p t)
+                               (when (room-active-p)
+                                 (with-current-buffer room-buffer
+                                   (setq disco-room--send-in-flight nil)
+                                   (let ((restored
+                                          (disco-room--restore-composer-operation-slot
+                                           cleared-revision slot t)))
+                                     (disco-room--request-render view)
+                                     (message
+                                      "%s%s: %s"
+                                      text
+                                      (if restored " (draft restored)" "")
+                                      (disco-room--async-error-message
+                                       error-data)))))))
                            (send-one
-                            (text reply attachments-list on-success on-error)
-                            (let* ((request-revision
-                                    (disco-state-message-revision channel-id))
-                                   (nonce (disco-room--next-send-nonce))
-                                   (pending-content
-                                    (if (and attachments-list
-                                             (or (not (stringp text))
-                                                 (string-empty-p text)))
-                                        (format
-                                         "Uploading %d attachment%s…"
-                                         (length attachments-list)
-                                         (if (= (length attachments-list) 1)
-                                             ""
-                                           "s"))
-                                      text))
-                                   leg-settled-p)
-                              (disco-state-insert-pending-message
-                               channel-id nonce pending-content
-                               (disco-gateway-current-user-id) reply)
-                              (disco-room--request-render view)
-                              (cl-labels
-                                  ((failure
-                                    (error-data)
-                                    (unless leg-settled-p
-                                      (setq leg-settled-p t)
-                                      (disco-state-remove-pending-message
-                                       channel-id nonce)
-                                      (funcall on-error error-data)))
-                                   (success
-                                    (response)
-                                    (if (not (and (listp response)
-                                                  (alist-get 'id response)))
-                                        (failure
-                                         (list
-                                          'error
-                                          "Discord create-message returned no message"))
+                             (text reply attachments-list on-success on-error)
+                             (let* ((request-revision
+                                     (disco-state-message-revision channel-id))
+                                    (nonce (disco-room--next-send-nonce))
+                                    (pending-content
+                                     (if (and attachments-list
+                                              (or (not (stringp text))
+                                                  (string-empty-p text)))
+                                         (format
+                                          "Uploading %d attachment%s…"
+                                          (length attachments-list)
+                                          (if (= (length attachments-list) 1)
+                                              ""
+                                            "s"))
+                                       text))
+                                    leg-settled-p)
+                               (disco-state-insert-pending-message
+                                channel-id nonce pending-content
+                                (disco-gateway-current-user-id) reply)
+                               (disco-room--request-render view)
+                               (cl-labels
+                                   ((failure
+                                      (error-data)
                                       (unless leg-settled-p
                                         (setq leg-settled-p t)
-                                        (disco-state-merge-message-response
-                                         channel-id response request-revision
-                                         nonce)
-                                        (when (room-active-p)
-                                          (with-current-buffer room-buffer
-                                            (when (disco-room--channel-message-by-id
-                                                   channel-id
-                                                   (alist-get 'id response))
-                                              (disco-room--observe-live-create
-                                               (alist-get 'id response)))))
-                                        (funcall on-success response)))))
-                                (condition-case dispatch-error
-                                    (if attachments-list
-                                        (disco-api-send-message-with-attachments-async
-                                         channel-id
-                                         :content
-                                         (and (stringp text)
-                                              (not (string-empty-p text))
-                                              text)
-                                         :reply-to-message-id reply
-                                         :allowed-mentions
-                                         (and (stringp text)
-                                              (not (string-empty-p text))
-                                              allowed-mentions)
-                                         :attachments attachments-list
-                                         :nonce nonce
-                                         :on-success #'success
-                                         :on-error #'failure)
-                                      (disco-api-send-message-async
-                                       channel-id text
-                                       :reply-to-message-id reply
-                                       :allowed-mentions
-                                       (and (stringp text)
-                                            (not (string-empty-p text))
-                                            allowed-mentions)
-                                       :nonce nonce
-                                       :on-success #'success
-                                       :on-error #'failure))
-                                  (error
-                                   (failure dispatch-error)
-                                   (signal (car dispatch-error)
-                                           (cdr dispatch-error))))))))
+                                        (disco-state-remove-pending-message
+                                         channel-id nonce)
+                                        (funcall on-error error-data)))
+                                    (success
+                                      (response)
+                                      (if (not (and (listp response)
+                                                    (alist-get 'id response)))
+                                          (failure
+                                           (list
+                                            'error
+                                            "Discord create-message returned no message"))
+                                        (unless leg-settled-p
+                                          (setq leg-settled-p t)
+                                          (disco-state-merge-message-response
+                                           channel-id response request-revision
+                                           nonce)
+                                          (when (room-active-p)
+                                            (with-current-buffer room-buffer
+                                              (when (disco-room--channel-message-by-id
+                                                     channel-id
+                                                     (alist-get 'id response))
+                                                (disco-room--observe-live-create
+                                                 (alist-get 'id response)))))
+                                          (funcall on-success response)))))
+                                 (condition-case dispatch-error
+                                     (if attachments-list
+                                         (disco-api-send-message-with-attachments-async
+                                          channel-id
+                                          :content
+                                          (and (stringp text)
+                                               (not (string-empty-p text))
+                                               text)
+                                          :reply-to-message-id reply
+                                          :allowed-mentions
+                                          (and (stringp text)
+                                               (not (string-empty-p text))
+                                               allowed-mentions)
+                                          :attachments attachments-list
+                                          :nonce nonce
+                                          :on-success #'success
+                                          :on-error #'failure)
+                                       (disco-api-send-message-async
+                                        channel-id text
+                                        :reply-to-message-id reply
+                                        :allowed-mentions
+                                        (and (stringp text)
+                                             (not (string-empty-p text))
+                                             allowed-mentions)
+                                        :nonce nonce
+                                        :on-success #'success
+                                        :on-error #'failure))
+                                   (error
+                                    (failure dispatch-error)
+                                    (signal (car dispatch-error)
+                                            (cdr dispatch-error))))))))
                         (pcase long-message-action
                           ('split
                            (let* ((chunks
@@ -6773,39 +6767,39 @@ When called with prefix argument, force draft edit in minibuffer first."
                                   (total (length chunks)))
                              (cl-labels
                                  ((send-next
-                                   (remaining sent-count)
-                                   (let ((chunk (car remaining))
-                                         (rest (cdr remaining))
-                                         (first-p (= sent-count 0)))
-                                     (send-one
-                                      chunk
-                                      (and first-p reply-to)
-                                      (and first-p attachments)
-                                      (lambda (_response)
-                                        (if rest
-                                            (progn
-                                              (setq recovery-slot
-                                                    (list
-                                                     :draft
-                                                     (mapconcat
-                                                      #'identity rest "\n\n")
-                                                     :pending-edit nil
-                                                     :pending-reply-to nil
-                                                     :attachment-token-seq 0
-                                                     :attachment-token-entries
-                                                     nil))
-                                              (send-next
-                                               rest (1+ sent-count)))
-                                          (settle-success
-                                           (format
-                                            "disco: sent %d split messages"
-                                            total))))
-                                      (lambda (error-data)
-                                        (settle-failure
-                                         recovery-slot error-data
-                                         (format
-                                          "disco: sent %d/%d split messages"
-                                          sent-count total)))))))
+                                    (remaining sent-count)
+                                    (let ((chunk (car remaining))
+                                          (rest (cdr remaining))
+                                          (first-p (= sent-count 0)))
+                                      (send-one
+                                       chunk
+                                       (and first-p reply-to)
+                                       (and first-p attachments)
+                                       (lambda (_response)
+                                         (if rest
+                                             (progn
+                                               (setq recovery-slot
+                                                     (list
+                                                      :draft
+                                                      (mapconcat
+                                                       #'identity rest "\n\n")
+                                                      :pending-edit nil
+                                                      :pending-reply-to nil
+                                                      :attachment-token-seq 0
+                                                      :attachment-token-entries
+                                                      nil))
+                                               (send-next
+                                                rest (1+ sent-count)))
+                                           (settle-success
+                                            (format
+                                             "disco: sent %d split messages"
+                                             total))))
+                                       (lambda (error-data)
+                                         (settle-failure
+                                          recovery-slot error-data
+                                          (format
+                                           "disco: sent %d/%d split messages"
+                                           sent-count total)))))))
                                (send-next chunks 0))))
                           ('file
                            (let* ((text-attachment
@@ -7155,33 +7149,33 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
     (appkit-request-sync view :part 'frame)
     (cl-labels
         ((room-active-p
-          ()
-          (disco-room--channel-buffer-p room-buffer target-channel-id view))
+           ()
+           (disco-room--channel-buffer-p room-buffer target-channel-id view))
          (finish-error
-          (error-data)
-          (unless settled-p
-            (setq settled-p t)
-            (when (room-active-p)
-              (with-current-buffer room-buffer
-                (setq disco-room--send-in-flight nil)
-                (disco-room--request-render view)
-                (message "disco: forward failed: %s"
-                         (disco-room--async-error-message error-data))))))
+           (error-data)
+           (unless settled-p
+             (setq settled-p t)
+             (when (room-active-p)
+               (with-current-buffer room-buffer
+                 (setq disco-room--send-in-flight nil)
+                 (disco-room--request-render view)
+                 (message "disco: forward failed: %s"
+                          (disco-room--async-error-message error-data))))))
          (finish-success
-          (response)
-          (if (not (and (listp response) (alist-get 'id response)))
-              (finish-error
-               (list 'error "disco: forward response has no message id"))
-            (unless settled-p
-              (setq settled-p t)
-              (disco-state-merge-message-response
-               target-channel-id response request-revision)
-              (when (room-active-p)
-                (with-current-buffer room-buffer
-                  (setq disco-room--send-in-flight nil)
-                  (disco-room--request-render view)
-                  (message "disco: forwarded message %s from channel %s"
-                           message-id source-channel-id)))))))
+           (response)
+           (if (not (and (listp response) (alist-get 'id response)))
+               (finish-error
+                (list 'error "disco: forward response has no message id"))
+             (unless settled-p
+               (setq settled-p t)
+               (disco-state-merge-message-response
+                target-channel-id response request-revision)
+               (when (room-active-p)
+                 (with-current-buffer room-buffer
+                   (setq disco-room--send-in-flight nil)
+                   (disco-room--request-render view)
+                   (message "disco: forwarded message %s from channel %s"
+                            message-id source-channel-id)))))))
       (condition-case err
           (disco-api-forward-message-async
            target-channel-id
@@ -7431,68 +7425,66 @@ _MSG is ignored because the transient resolves availability from point."
    ["Window"
     ("q" "Quit window" quit-window)]])
 
-(defvar disco-room-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-l") #'recenter-top-bottom)
-    (define-key map (kbd "TAB") #'disco-room-complete-mention)
-    (define-key map (kbd "<tab>") #'disco-room-complete-mention)
-    (define-key map (kbd "C-M-i") #'disco-room-complete-mention)
-    (define-key map (kbd "C-c g") #'disco-room-refresh)
-    (define-key map (kbd "C-c m") disco-room-message-prefix-map)
-    (define-key map (kbd "RET") #'disco-room-return-dwim)
-    (define-key map (kbd "M-RET") #'disco-room-input-preview)
-    (define-key map (kbd "C-c '") #'disco-room-edit-draft)
-    (define-key map (kbd "M-p") #'disco-room-draft-prev)
-    (define-key map (kbd "M-n") #'disco-room-draft-next)
-    (define-key map (kbd "M-r") #'disco-room-draft-history-search)
-    (define-key map (kbd "M-g s") #'disco-room-inplace-search)
-    (define-key map (kbd "M-g n") #'disco-room-inplace-search-next)
-    (define-key map (kbd "M-g p") #'disco-room-inplace-search-prev)
-    (define-key map (kbd "C-c C-r") #'disco-room-inplace-search-query)
-    (define-key map (kbd "C-c C-s") #'disco-room-inplace-search-query-forward)
-    (define-key map (kbd "C-c /") #'disco-room-filter-search)
-    (define-key map (kbd "C-c C-c") #'disco-room-filter-cancel)
-    (define-key map (kbd "C-c M-/") #'disco-room-search-channel)
-    (define-key map (kbd "C-c C-p s") #'disco-room-send-poll)
-    (define-key map (kbd "C-c C-p +") #'disco-room-vote-poll-answer)
-    (define-key map (kbd "C-c C-p -") #'disco-room-remove-poll-vote)
-    (define-key map (kbd "C-c C-p t") #'disco-room-toggle-poll-answer)
-    (define-key map (kbd "C-c C-p v") #'disco-room-submit-poll-vote)
-    (define-key map (kbd "C-c C-p c") #'disco-room-clear-poll-votes)
-    (define-key map (kbd "C-c C-p e") #'disco-room-expire-poll)
-    (define-key map (kbd "C-c M-p") #'disco-room-list-pinned-messages)
-    (define-key map (kbd "C-c C-P") #'disco-room-ack-channel-pins)
-    (define-key map (kbd "C-c RET") #'disco-room-send-message)
-    (define-key map (kbd "C-c C-a") #'disco-room-attach)
-    (define-key map (kbd "C-c C-f") #'disco-room-attach-file)
-    (define-key map (kbd "C-c C-i") #'disco-room-send-sticker)
-    (define-key map (kbd "C-c C-o") #'disco-room-input-options-transient)
-    (define-key map (kbd "C-c C-d") #'disco-room-remove-attachment-token-at-point)
-    (define-key map (kbd "C-c C-x") #'disco-room-clear-attachments)
-    (define-key map (kbd "C-c M-l") #'disco-room-list-attachments)
-    (define-key map (kbd "C-c M-e") #'disco-room-edit-attachment-description)
-    (define-key map (kbd "C-c M-r") #'disco-room-reorder-attachments)
-    (define-key map (kbd "C-c C-k") #'disco-room-cancel-reply)
-    (define-key map (kbd "\e\e") #'disco-room-cancel-reply)
-    (define-key map (kbd "C-M-c") #'disco-room-cancel-reply)
-    (define-key map (kbd "C-c C-g") #'disco-room-jump-to-message)
-    (define-key map (kbd "C-c C-w") #'disco-room-toggle-breakline)
-    (define-key map (kbd "C-c C-t m") #'disco-room-thread-create-from-message)
-    (define-key map (kbd "C-c C-t o") #'disco-room-thread-open-from-message-at-point)
-    (define-key map (kbd "C-c C-t c") #'disco-room-thread-create)
-    (define-key map (kbd "C-c C-t r") #'disco-room-thread-rename)
-    (define-key map (kbd "C-c C-t k") #'disco-room-thread-toggle-locked)
-    (define-key map (kbd "C-c C-t s") #'disco-room-thread-set-slowmode)
-    (define-key map (kbd "C-c C-t a") #'disco-room-thread-toggle-archived)
-    (define-key map (kbd "C-c C-t A") #'disco-room-thread-set-auto-archive-duration)
-    (define-key map (kbd "C-c C-t e") #'disco-room-thread-edit-settings)
-    (define-key map (kbd "C-c C-t u") #'disco-room-thread-set-muted)
-    (define-key map (kbd "C-c C-j") #'disco-room-thread-join)
-    (define-key map (kbd "C-c C-l") #'disco-room-thread-leave)
-    (define-key map (kbd "C-c M-v") #'disco-avatar-refetch)
-    (define-key map (kbd "C-c ?") #'disco-room-transient)
-    map)
-  "Keymap for `disco-room-mode'.")
+(defvar-keymap disco-room-mode-map
+  :doc "Keymap for `disco-room-mode'."
+  "C-l" #'recenter-top-bottom
+  "TAB" #'disco-room-complete-mention
+  "<tab>" #'disco-room-complete-mention
+  "C-M-i" #'disco-room-complete-mention
+  "C-c g" #'disco-room-refresh
+  "C-c m" disco-room-message-prefix-map
+  "RET" #'disco-room-return-dwim
+  "M-RET" #'disco-room-input-preview
+  "C-c '" #'disco-room-edit-draft
+  "M-p" #'disco-room-draft-prev
+  "M-n" #'disco-room-draft-next
+  "M-r" #'disco-room-draft-history-search
+  "M-g s" #'disco-room-inplace-search
+  "M-g n" #'disco-room-inplace-search-next
+  "M-g p" #'disco-room-inplace-search-prev
+  "C-c C-r" #'disco-room-inplace-search-query
+  "C-c C-s" #'disco-room-inplace-search-query-forward
+  "C-c /" #'disco-room-filter-search
+  "C-c C-c" #'disco-room-filter-cancel
+  "C-c M-/" #'disco-room-search-channel
+  "C-c C-p s" #'disco-room-send-poll
+  "C-c C-p +" #'disco-room-vote-poll-answer
+  "C-c C-p -" #'disco-room-remove-poll-vote
+  "C-c C-p t" #'disco-room-toggle-poll-answer
+  "C-c C-p v" #'disco-room-submit-poll-vote
+  "C-c C-p c" #'disco-room-clear-poll-votes
+  "C-c C-p e" #'disco-room-expire-poll
+  "C-c M-p" #'disco-room-list-pinned-messages
+  "C-c C-P" #'disco-room-ack-channel-pins
+  "C-c RET" #'disco-room-send-message
+  "C-c C-a" #'disco-room-attach
+  "C-c C-f" #'disco-room-attach-file
+  "C-c C-i" #'disco-room-send-sticker
+  "C-c C-o" #'disco-room-input-options-transient
+  "C-c C-d" #'disco-room-remove-attachment-token-at-point
+  "C-c C-x" #'disco-room-clear-attachments
+  "C-c M-l" #'disco-room-list-attachments
+  "C-c M-e" #'disco-room-edit-attachment-description
+  "C-c M-r" #'disco-room-reorder-attachments
+  "C-c C-k" #'disco-room-cancel-reply
+  "ESC ESC" #'disco-room-cancel-reply
+  "C-M-c" #'disco-room-cancel-reply
+  "C-c C-g" #'disco-room-jump-to-message
+  "C-c C-w" #'disco-room-toggle-breakline
+  "C-c C-t m" #'disco-room-thread-create-from-message
+  "C-c C-t o" #'disco-room-thread-open-from-message-at-point
+  "C-c C-t c" #'disco-room-thread-create
+  "C-c C-t r" #'disco-room-thread-rename
+  "C-c C-t k" #'disco-room-thread-toggle-locked
+  "C-c C-t s" #'disco-room-thread-set-slowmode
+  "C-c C-t a" #'disco-room-thread-toggle-archived
+  "C-c C-t A" #'disco-room-thread-set-auto-archive-duration
+  "C-c C-t e" #'disco-room-thread-edit-settings
+  "C-c C-t u" #'disco-room-thread-set-muted
+  "C-c C-j" #'disco-room-thread-join
+  "C-c C-l" #'disco-room-thread-leave
+  "C-c M-v" #'disco-avatar-refetch
+  "C-c ?" #'disco-room-transient)
 
 (defun disco-room--reset-view-local-state (&optional channel-id channel-name)
   "Reset controller state owned by one room view.

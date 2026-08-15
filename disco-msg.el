@@ -551,12 +551,10 @@ before copying."
   (disco-msg--render-inspect-buffer)
   (message "disco: refreshed message inspect"))
 
-(defvar disco-msg-inspect-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-msg-inspect-refresh)
-    (define-key map (kbd "q") #'quit-window)
-    map)
-  "Keymap for `disco-msg-inspect-mode'.")
+(defvar-keymap disco-msg-inspect-mode-map
+  :doc "Keymap for `disco-msg-inspect-mode'."
+  "g" #'disco-msg-inspect-refresh
+  "q" #'quit-window)
 
 (define-derived-mode disco-msg-inspect-mode special-mode "Disco-Message"
   "Major mode for message inspect buffers."
