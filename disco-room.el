@@ -8613,173 +8613,143 @@ When called interactively, empty input clears slowmode (sets to 0)."
     ("i" "Describe" disco-msg-describe-message)
     ("L" "Redisplay" disco-msg-redisplay)
     ("r" "Reply" disco-msg-reply
-     :inapt-if disco-room--reply-unavailable-reason)
+     :if-not disco-room--reply-unavailable-reason)
     ("f" "Forward" disco-msg-forward
-     :inapt-if disco-room--forward-unavailable-reason)
+     :if-not disco-room--forward-unavailable-reason)
     ("e" "Edit" disco-msg-edit
-     :inapt-if disco-room-menu--edit-inapt-reason)
+     :if-not (lambda ()
+               (disco-room--edit-start-unavailable-reason
+                (disco-room-menu--message-at-point))))
     ("d" "Delete" disco-msg-delete
-     :inapt-if disco-room-menu--delete-inapt-reason)
+     :if-not (lambda ()
+               (disco-room--delete-message-unavailable-reason
+                (disco-room-menu--message-at-point))))
     ("P" "Pin / unpin" disco-msg-toggle-pin
-     :inapt-if disco-room-menu--pin-inapt-reason)
+     :if-not (lambda ()
+               (disco-room--pin-message-unavailable-reason
+                (disco-room-menu--message-at-point))))
     ("!" "Add reaction" disco-msg-add-reaction
-     :inapt-if disco-room-menu--reaction-inapt-reason)
+     :if-not disco-room--reaction-unavailable-reason)
     ("+" "Toggle reaction" disco-msg-toggle-reaction
-     :inapt-if disco-room-menu--reaction-inapt-reason)
+     :if-not disco-room--reaction-unavailable-reason)
     ("-" "Remove reaction" disco-msg-remove-reaction
-     :inapt-if disco-room-menu--reaction-inapt-reason)
+     :if-not disco-room--reaction-unavailable-reason)
     ("T" "Open thread" disco-msg-open-thread
      :if-not disco-room--open-thread-from-message-unavailable-reason)]
+   ["Poll"
+    ("p" "Poll actions…" disco-room-poll-transient
+     :if (lambda ()
+           (disco-msg-poll (disco-room-menu--message-at-point))))]
    ["Media"
     ("o" "Open / play" appkit-media-card-open
-     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'open)))
+     :if-not (lambda () (appkit-media-card-action-inapt-reason 'open)))
     ("D" "Download / retry" appkit-media-card-download
-     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'download)))
+     :if-not (lambda () (appkit-media-card-action-inapt-reason 'download)))
     ("C" "Cancel download" appkit-media-card-cancel-download
-     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'cancel)))
+     :if-not (lambda () (appkit-media-card-action-inapt-reason 'cancel)))
     ("s" "Save as" appkit-media-card-save-as
-     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'save-as)))
+     :if-not (lambda () (appkit-media-card-action-inapt-reason 'save-as)))
     ("y" "Copy media URL" appkit-media-card-copy-url
-     :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'copy-url)))]])
+     :if-not (lambda () (appkit-media-card-action-inapt-reason 'copy-url)))]])
 
 (defun disco-room--operate-msg (_msg)
   "Open the message transient for the current room.
 
 _MSG is ignored because the transient resolves availability from point."
-  (disco-room-message-transient))
+  (call-interactively #'disco-room-message-transient))
 
-(defun disco-room-menu--attachment-action-inapt-reason (min-count)
-  "Return inapt text for attachment actions requiring MIN-COUNT items."
-  (disco-room--attachment-token-action-unavailable-reason min-count))
 
 (defun disco-room-menu--message-at-point ()
   "Return message at point, suppressing user errors for menu checks."
   (ignore-errors (disco-room--message-at-point)))
 
-(defun disco-room-menu--edit-inapt-reason ()
-  "Return inapt text for editing the message at point."
-  (disco-room--edit-start-unavailable-reason
-   (disco-room-menu--message-at-point)))
+(transient-define-prefix disco-room-poll-transient ()
+  "Transient for the poll at point."
+  :refresh-suffixes t
+  [["Vote"
+    :if (lambda ()
+          (not (disco-room--poll-vote-unavailable-reason
+                (disco-room-menu--message-at-point))))
+    ("t" "Toggle answer" disco-room-toggle-poll-answer :transient t)
+    ("s" "Submit staged vote" disco-room-submit-poll-vote
+     :if-not (lambda ()
+               (disco-room--poll-submit-unavailable-reason
+                (disco-room-menu--message-at-point))))]
+   ["Manage"
+    ("c" "Remove my vote" disco-room-clear-poll-votes
+     :if-not (lambda ()
+               (disco-room--poll-clear-unavailable-reason
+                (disco-room-menu--message-at-point))))
+    ("x" "End poll" disco-room-expire-poll
+     :if-not (lambda ()
+               (disco-room--poll-expire-unavailable-reason
+                (disco-room-menu--message-at-point))))]]
+  (interactive)
+  (unless (disco-msg-poll (disco-room-menu--message-at-point))
+    (user-error "disco: point is not on a poll"))
+  (transient-setup 'disco-room-poll-transient))
 
-(defun disco-room-menu--delete-inapt-reason ()
-  "Return inapt text for deleting the message at point."
-  (disco-room--delete-message-unavailable-reason
-   (disco-room-menu--message-at-point)))
-
-(defun disco-room-menu--pin-inapt-reason ()
-  "Return inapt text for toggling the message pin at point."
-  (disco-room--pin-message-unavailable-reason
-   (disco-room-menu--message-at-point)))
-
-(defun disco-room-menu--reaction-inapt-reason ()
-  "Return inapt text for reaction actions at point."
-  (disco-room--reaction-unavailable-reason
-   (disco-room-menu--message-at-point)))
-
-(defun disco-room-menu--poll-vote-inapt-reason ()
-  "Return inapt text for poll vote actions at point."
-  (disco-room--poll-vote-unavailable-reason
-   (disco-room-menu--message-at-point)))
-
-(defun disco-room-menu--poll-submit-inapt-reason ()
-  "Return inapt text for submitting a staged poll vote at point."
-  (disco-room--poll-submit-unavailable-reason
-   (disco-room-menu--message-at-point)))
-
-(defun disco-room-menu--poll-clear-inapt-reason ()
-  "Return inapt text for clearing a poll vote at point."
-  (disco-room--poll-clear-unavailable-reason
-   (disco-room-menu--message-at-point)))
-
-(defun disco-room-menu--poll-expire-inapt-reason ()
-  "Return inapt text for expiring a poll at point."
-  (disco-room--poll-expire-unavailable-reason
-   (disco-room-menu--message-at-point)))
 
 
 (transient-define-prefix disco-room-transient ()
   "Room command menu for disco.el."
   [["Timeline"
     ("g" "Refresh room" disco-room-refresh)
+    ("o" "Message actions..." disco-room-message-transient
+     :if disco-room-menu--message-at-point)
     ("c" "Send message" disco-room-send-message
-     :inapt-if disco-room--send-message-unavailable-reason)
+     :if-not disco-room--send-message-unavailable-reason)
     ("f" "Attach file" disco-room-attach-file
-     :inapt-if disco-room--attach-unavailable-reason)
+     :if-not disco-room--attach-unavailable-reason)
     ("D" "Remove attachment" disco-room-remove-attachment-token-at-point
-     :inapt-if (lambda ()
-                 (disco-room-menu--attachment-action-inapt-reason 1)))
+     :if-not (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
     ("x" "Clear attachments" disco-room-clear-attachments
-     :inapt-if (lambda ()
-                 (disco-room-menu--attachment-action-inapt-reason 1)))
+     :if-not (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
     ("v" "List attachments" disco-room-list-attachments
-     :inapt-if (lambda ()
-                 (disco-room-menu--attachment-action-inapt-reason 1)))
+     :if-not (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
     ("V" "Edit attachment desc" disco-room-edit-attachment-description
-     :inapt-if (lambda ()
-                 (disco-room-menu--attachment-action-inapt-reason 1)))
+     :if-not (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
     ("O" "Reorder attachments" disco-room-reorder-attachments
-     :inapt-if (lambda ()
-                 (disco-room-menu--attachment-action-inapt-reason 2)))
-    ("r" "Reply to message" disco-room-reply-to-message
-     :inapt-if disco-room--reply-unavailable-reason)
-    ("F" "Forward message" disco-room-forward-message
-     :inapt-if disco-room--forward-unavailable-reason)
+     :if-not (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 2)))
     ("k" "Cancel reply/edit" disco-room-cancel-reply
-     :inapt-if (lambda () (not (disco-room--composer-aux-active-p))))
-    ("e" "Edit at point" disco-room-edit-message
-     :inapt-if disco-room-menu--edit-inapt-reason)
-    ("d" "Delete at point" disco-room-delete-message
-     :inapt-if disco-room-menu--delete-inapt-reason)
-    ("!" "Add reaction" disco-room-add-reaction
-     :inapt-if disco-room-menu--reaction-inapt-reason)
-    ("+" "Toggle reaction" disco-room-toggle-reaction
-     :inapt-if disco-room-menu--reaction-inapt-reason)
-    ("-" "Remove reaction" disco-room-remove-reaction
-     :inapt-if disco-room-menu--reaction-inapt-reason)
+     :if disco-room--composer-aux-active-p)
     ("p" "Send poll" disco-room-send-poll
-     :inapt-if disco-room--poll-unavailable-reason)
+     :if-not disco-room--poll-unavailable-reason)
     ("i" "Send Sticker" disco-room-send-sticker
-     :inapt-if disco-room--sticker-unavailable-reason)
-    ("w" "Select answer" disco-room-vote-poll-answer
-     :inapt-if disco-room-menu--poll-vote-inapt-reason)
-    ("u" "Unselect answer" disco-room-remove-poll-vote
-     :inapt-if disco-room-menu--poll-vote-inapt-reason)
-    ("t" "Toggle staged answer" disco-room-toggle-poll-answer
-     :inapt-if disco-room-menu--poll-vote-inapt-reason)
-    ("W" "Submit staged vote" disco-room-submit-poll-vote
-     :inapt-if disco-room-menu--poll-submit-inapt-reason)
-    ("C" "Remove my vote" disco-room-clear-poll-votes
-     :inapt-if disco-room-menu--poll-clear-inapt-reason)
-    ("X" "End poll" disco-room-expire-poll
-     :inapt-if disco-room-menu--poll-expire-inapt-reason)
+     :if-not disco-room--sticker-unavailable-reason)
     ("B" "Browse pinned msgs" disco-room-list-pinned-messages)
     ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message
-     :inapt-if disco-room--thread-create-from-message-unavailable-reason)
-    ("o" "Open msg thread" disco-room-open-thread-from-message-at-point
-     :if-not disco-room--open-thread-from-message-unavailable-reason)
+     :if-not disco-room--thread-create-from-message-unavailable-reason)
     ("n" "Create detached" disco-room-create-thread
-     :inapt-if (lambda () (disco-room--thread-create-unavailable-reason :any)))
+     :if-not (lambda () (disco-room--thread-create-unavailable-reason :any)))
     ("R" "Rename thread" disco-room-rename-thread
-     :inapt-if disco-room--thread-update-unavailable-reason)
+     :if-not disco-room--thread-update-unavailable-reason)
     ("L" "Toggle locked" disco-room-toggle-thread-locked
-     :inapt-if disco-room--thread-update-unavailable-reason)
+     :if-not disco-room--thread-update-unavailable-reason)
     ("S" "Set slowmode" disco-room-set-thread-slowmode
-     :inapt-if disco-room--thread-update-unavailable-reason)
+     :if-not disco-room--thread-update-unavailable-reason)
     ("U" "Set auto-archive" disco-room-set-thread-auto-archive-duration
-     :inapt-if disco-room--thread-update-unavailable-reason)
+     :if-not disco-room--thread-update-unavailable-reason)
     ("E" "Edit thread settings" disco-room-edit-thread-settings
-     :inapt-if disco-room--thread-update-unavailable-reason)
+     :if-not disco-room--thread-update-unavailable-reason)
     ("M" "Set muted" disco-room-set-thread-muted
-     :inapt-if disco-room--thread-mute-unavailable-reason)
+     :if-not disco-room--thread-mute-unavailable-reason)
     ("j" "Join thread" disco-room-join-thread
-     :inapt-if disco-room--thread-join-unavailable-reason)
+     :if-not disco-room--thread-join-unavailable-reason)
     ("l" "Leave thread" disco-room-leave-thread
-     :inapt-if disco-room--thread-leave-unavailable-reason)
+     :if-not disco-room--thread-leave-unavailable-reason)
     ("a" "Toggle archived" disco-room-toggle-thread-archived
-     :inapt-if disco-room--thread-toggle-archived-unavailable-reason)
-    ("A" "Parent archived threads..." disco-room-open-parent-archived-threads)]
+     :if-not disco-room--thread-toggle-archived-unavailable-reason)
+    ("A" "Parent archived threads..." disco-room-open-parent-archived-threads
+     :if (lambda ()
+           (alist-get 'parent_id (disco-room--channel-object))))]
    ["Inspect"
     ("/" "Structured search..." disco-room-search-channel)
     ("f" "Filter search" disco-room-filter-search)
