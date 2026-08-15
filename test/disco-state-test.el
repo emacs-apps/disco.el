@@ -1160,6 +1160,69 @@
                            (alist-get 'content (cadr merged)))))))
     (disco-state-reset)))
 
+(ert-deftest disco-state-message-response-defers-to-newer-gateway-authority ()
+  (disco-state-reset)
+  (unwind-protect
+      (progn
+        (disco-state-put-messages
+         "chan" '(((id . "20") (content . "baseline"))))
+        (let ((request-revision (disco-state-message-revision "chan")))
+          (disco-state-upsert-message
+           "chan" '((id . "20") (content . "gateway update")))
+          (should-not
+           (disco-state-merge-message-response
+            "chan" '((id . "20") (content . "stale REST"))
+            request-revision))
+          (should
+           (equal "gateway update"
+                  (alist-get 'content
+                             (car (disco-state-messages "chan")))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-message-response-accepts-current-request ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((request-revision (disco-state-message-revision "chan")))
+        (should
+         (disco-state-merge-message-response
+          "chan" '((id . "20") (content . "REST"))
+          request-revision))
+        (should (equal "REST"
+                       (alist-get 'content
+                                  (car (disco-state-messages "chan"))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-message-response-replaces-its-optimistic-row ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((request-revision (disco-state-message-revision "chan")))
+        (disco-state-insert-pending-message
+         "chan" "local-nonce" "pending" "self")
+        (should
+         (disco-state-merge-message-response
+          "chan" '((id . "20") (content . "REST"))
+          request-revision "local-nonce"))
+        (should (equal '("20")
+                       (mapcar (lambda (message) (alist-get 'id message))
+                               (disco-state-messages "chan"))))
+        (should (equal "local-nonce"
+                       (alist-get 'nonce
+                                  (car (disco-state-messages "chan"))))))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-deletion-tombstone-covers-uncached-message ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((revision (disco-state-message-revision "chan")))
+        (disco-state-delete-message "chan" "filter-only")
+        (should
+         (disco-state-message-deleted-after-p
+          "chan" "filter-only" revision))
+        (should-not
+         (disco-state-message-deleted-after-p
+          "chan" "unrelated" revision)))
+    (disco-state-reset)))
+
 (provide 'disco-state-test)
 
 ;;; disco-state-test.el ends here

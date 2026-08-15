@@ -1071,6 +1071,50 @@ updates its native Gateway channel access proof."
          0)
        revision)))
 
+(defun disco-state-message-deleted-after-p
+    (channel-id message-id revision)
+  "Return non-nil when MESSAGE-ID was deleted after REVISION.
+
+An explicit deletion tombstone counts even when MESSAGE-ID was never present in
+the canonical channel cache."
+  (unless (integerp revision)
+    (error "disco: invalid message revision: %S" revision))
+  (and (disco-state--message-mutated-after-p
+        channel-id message-id revision)
+       (not
+        (seq-some
+         (lambda (message)
+           (equal (disco-state--normalize-id (alist-get 'id message))
+                  (disco-state--normalize-id message-id)))
+         (disco-state-messages channel-id)))))
+
+(defun disco-state-merge-message-response
+    (channel-id message request-revision &optional request-nonce)
+  "Merge one REST mutation MESSAGE unless newer authority already won.
+
+REQUEST-REVISION is captured before dispatch.  Gateway/local updates and
+deletions after it retain authority.  REQUEST-NONCE, when non-nil, correlates a
+create response with its optimistic row.  Return non-nil only when MESSAGE was
+accepted."
+  (let ((message-id (and (listp message) (alist-get 'id message))))
+    (unless message-id
+      (error "disco: message mutation response has no message id"))
+    (unless (integerp request-revision)
+      (error "disco: invalid message mutation request revision: %S"
+             request-revision))
+    (if (disco-state--message-mutated-after-p
+         channel-id message-id request-revision)
+        (progn
+          (when request-nonce
+            (disco-state-remove-pending-message channel-id request-nonce))
+          nil)
+      (let ((accepted-message (copy-tree message)))
+        (when request-nonce
+          (setf (alist-get 'nonce accepted-message)
+                (format "%s" request-nonce)))
+        (disco-state-upsert-message channel-id accepted-message)
+        t))))
+
 (defun disco-state-merge-message-page (channel-id messages request-revision)
   "Merge REST page MESSAGES into CHANNEL-ID at REQUEST-REVISION.
 
@@ -1094,7 +1138,7 @@ including deletions.  Return the resulting newest-first message list."
           (sort merged
                 (lambda (left right)
                   (disco-state-snowflake< (alist-get 'id right)
-                                           (alist-get 'id left)))))
+                                          (alist-get 'id left)))))
     (disco-state-put-messages channel-id merged)
     merged))
 
@@ -1151,7 +1195,7 @@ an older in-flight REST page from resurrecting a Gateway-deleted message."
           (seq-find (lambda (message)
                       (equal message-id
                              (disco-state--normalize-id
-                             (alist-get 'id message))))
+                              (alist-get 'id message))))
                     messages)))
     (unless (and channel-id message-id)
       (error "disco: message deletion requires channel and message ids"))
