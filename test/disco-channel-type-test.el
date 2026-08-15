@@ -42,6 +42,17 @@
   (should (equal '("⌜" "⌝") (disco-channel-title-brackets 17)))
   (should (equal '("" "") (disco-channel-title-brackets 4))))
 
+(ert-deftest disco-channel-title-delimiters-use-ordered-custom-rules ()
+  (should (get 'disco-title-bracket-rules 'custom-type))
+  (let ((disco-title-bracket-rules
+         (cons '(channel "#[" "]") disco-title-bracket-rules)))
+    (should
+     (equal "#[general]" (disco-channel-format-title 0 "general"))))
+  (let ((disco-title-bracket-rules
+         (cons
+          '((channel-type 5) "📣[" "]") disco-title-bracket-rules)))
+    (should (equal "📣[news]" (disco-channel-format-title 5 "news")))))
+
 (ert-deftest disco-title-compact-count-formats-trails ()
   (should (equal "999" (disco-title-compact-count 999)))
   (should (equal "1.2k" (disco-title-compact-count 1234)))

@@ -79,6 +79,14 @@ hidden.  Mention badges ~@N~ are right-aligned inside the row's delimiter;
 Disco does not infer a per-channel unread message count.  ~[read]~ means the
 local cursor reached ~last_message_id~.
 
+Customize ~disco-title-bracket-rules~ to replace or prepend ordered rules.
+Each rule is ~(SELECTOR OPEN CLOSE)~ and the first match wins.  A selector can
+be a presentation kind such as ~channel~, an exact Discord type such as
+~(channel-type 5)~, ~t~ as the fallback, or a predicate function.  OPEN may
+include a former type prefix: ~(channel "#[" "]")~ renders ~#[channel]~.
+Appkit measures the complete customized strings, so prefixes and multi-column
+Unicode delimiters retain row alignment.
+
 Root, thread, archived-thread, and search rows show a one-line image, video
 poster, or Sticker preview when its shared media cache is ready.
 Spoiler attachments stay textual.  Cache completion refreshes only the
