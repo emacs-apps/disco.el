@@ -80,6 +80,73 @@
                '("POST" "/channels/555/pins/ack" nil nil nil nil nil nil)
                captured)))))
 
+(ert-deftest disco-api-channel-pins-async-builds-pagination-query ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest args)
+                 (setq captured (list method endpoint args))
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-channel-pins-async
+            "555" :on-success #'ignore :on-error #'ignore)))
+      (should
+       (equal
+        '("GET" "/channels/555/messages/pins"
+          (:query (("limit" . "50"))
+                  :on-success ignore
+                  :on-error ignore))
+        captured))
+      (should
+       (eq 'request
+           (disco-api-channel-pins-async
+            "555"
+            :before "2026-08-16T00:00:00.000000+00:00"
+            :limit 20
+            :on-success #'ignore
+            :on-error #'ignore)))
+      (should
+       (equal
+        '("GET" "/channels/555/messages/pins"
+          (:query (("limit" . "20")
+                   ("before" . "2026-08-16T00:00:00.000000+00:00"))
+                  :on-success ignore
+                  :on-error ignore))
+        captured)))))
+
+(ert-deftest disco-api-pin-and-unpin-message-use-current-routes ()
+  (let (sync-calls async-calls)
+    (cl-letf (((symbol-function 'disco-api--request)
+               (lambda (method endpoint &optional payload query unauthenticated)
+                 (push (list method endpoint payload query unauthenticated) sync-calls)
+                 'sync))
+              ((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest options)
+                 (push (list method endpoint options) async-calls)
+                 'async)))
+      (should (eq 'sync (disco-api-pin-message "channel" "message")))
+      (should (eq 'sync (disco-api-unpin-message "channel" "message")))
+      (should
+       (eq 'async
+           (disco-api-pin-message-async
+            "channel" "message" :on-success #'identity :on-error #'ignore)))
+      (should
+       (eq 'async
+           (disco-api-unpin-message-async
+            "channel" "message" :on-success #'identity :on-error #'ignore)))
+      (should
+       (equal
+        '(("DELETE" "/channels/channel/messages/pins/message" nil nil nil)
+          ("PUT" "/channels/channel/messages/pins/message" nil nil nil))
+        sync-calls))
+      (should
+       (equal
+        '(("DELETE" "/channels/channel/messages/pins/message"
+           (:on-success identity :on-error ignore))
+          ("PUT" "/channels/channel/messages/pins/message"
+           (:on-success identity :on-error ignore)))
+        async-calls)))))
+
 (ert-deftest disco-api-ack-user-feature-builds-endpoint-and-payload ()
   (let (captured)
     (cl-letf (((symbol-function 'disco-api--request)
