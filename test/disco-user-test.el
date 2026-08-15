@@ -26,7 +26,11 @@
                              (bio . "Server about")))
     (badges . (((id . "staff") (description . "Discord Staff"))))
     (mutual_guilds . (((id . ,guild-id) (nick . "Server Alice"))))
-    (mutual_friends_count . 3)
+    (mutual_friends
+     .
+     (((id . "200") (username . "bob") (global_name . "Bob"))
+      ((id . "300") (username . "carol") (global_name . "Carol"))))
+    (mutual_friends_count . 2)
     (connected_accounts . (((type . "github") (name . "alice"))))))
 
 (ert-deftest disco-user-render-separates-server-and-global-profile ()
@@ -56,7 +60,7 @@
       (should (string-match-p "User profile" text))
       (should (string-match-p "Global about" text))
       (should (string-match-p "Discord Staff" text))
-      (should (string-match-p "Mutual friends: *3" text))
+      (should (string-match-p "Mutual friends: *2" text))
       (should (string-match-p "github: alice" text)))))
 
 (ert-deftest disco-user-render-keeps-inline-bio-fallbacks ()
@@ -205,7 +209,10 @@
       (cl-letf (((symbol-function 'disco-avatar-rounded-image)
                  (lambda (&rest _args) nil))
                 ((symbol-function 'disco-state-guilds)
-                 (lambda () '(((id . "99") (name . "Disco Guild")))))
+                 (lambda ()
+                   '(((id . "99")
+                      (name . "Disco Guild")
+                      (member_count . 1234)))))
                 ((symbol-function 'disco-state-presence)
                  (lambda (&rest _args) '((status . "online"))))
                 ((symbol-function 'disco-channel-directory-open)
@@ -218,6 +225,17 @@
           (should (string-match-p "Server Alice.*@alice" (nth 0 lines)))
           (should (string-match-p "Online" (nth 1 lines)))
           (should-not (string-match-p "^Identity$" text))
+          (should
+           (string-match-p
+            "\\[\\[Disco Guild · Server Alice .*1\\.2k\\]\\]" text))
+          (goto-char (point-min))
+          (search-forward "1.2k")
+          (should
+           (text-property-not-all
+            (line-beginning-position)
+            (line-end-position)
+            'display
+            nil))
           (while (and button
                       (not (button-get button 'disco-guild-id)))
             (setq button (next-button (button-end button))))
@@ -226,6 +244,43 @@
                          (button-get button 'disco-guild-id)))
           (button-activate button)
           (should (equal "99" opened)))))))
+
+(ert-deftest disco-user-mutual-friends-open-independent-profiles ()
+  (with-temp-buffer
+    (disco-user-mode)
+    (setq
+     disco-user--user-id "175928847299117063"
+     disco-user--guild-id "99"
+     disco-user--profile (disco-user-test--profile "175928847299117063" "Alice" "99"))
+    (let (opened)
+      (cl-letf (((symbol-function 'disco-avatar-rounded-image)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () '(((id . "99") (name . "Disco Guild")))))
+                ((symbol-function 'disco-state-presence) #'ignore)
+                ((symbol-function 'disco-user-open)
+                 (lambda (user &optional _guild-id)
+                   (setq opened user))))
+        (disco-user-render)
+        (let ((button (next-button (point-min))))
+          (while (and button
+                      (not (button-get button 'disco-user-object)))
+            (setq button (next-button (button-end button))))
+          (should button)
+          (should (equal "Bob · @bob" (button-label button)))
+          (should
+           (save-excursion
+             (goto-char button)
+             (string-match-p
+              "{Bob · @bob}"
+              (buffer-substring-no-properties
+               (line-beginning-position) (line-end-position)))))
+          (should
+           (equal
+            "200"
+            (alist-get 'id (button-get button 'disco-user-object))))
+          (button-activate button)
+          (should (equal "200" (alist-get 'id opened))))))))
 
 (provide 'disco-user-test)
 

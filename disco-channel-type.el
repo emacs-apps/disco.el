@@ -4,7 +4,8 @@
 
 ;;; Commentary:
 
-;; Shared Discord channel type metadata used by state, root, and room layers.
+;; Shared Discord channel type and title metadata used by state, root, room,
+;; and profile layers.
 
 ;;; Code:
 
@@ -15,82 +16,152 @@ Discord uses this flag on the limited channel objects included by the
 `CHANNEL_OBFUSCATION' Gateway capability.")
 
 (defconst disco-channel-type-spec-alist
-  '((0 :name "text"
-       :root-visible t
-       :open-mode timeline
-       :searchable t
-       :thread-parent t)
-    (1 :name "dm"
-       :root-visible t
-       :open-mode timeline
-       :searchable t
-       :private t
-       :dm-like t
-       :direct-message t)
-    (2 :name "voice"
-       :root-visible t
-       :open-mode timeline)
-    (3 :name "group-dm"
-       :root-visible t
-       :open-mode timeline
-       :searchable t
-       :private t
-       :dm-like t
-       :group-dm t)
-    (4 :name "category"
-       :structural t)
-    (5 :name "announcement"
-       :root-visible t
-       :open-mode timeline
-       :searchable t
-       :thread-parent t)
-    (6 :name "store")
-    (10 :name "announcement-thread"
-        :root-visible t
-        :open-mode timeline
-        :searchable t
-        :thread t)
-    (11 :name "public-thread"
-        :root-visible t
-        :open-mode timeline
-        :searchable t
-        :thread t)
-    (12 :name "private-thread"
-        :root-visible t
-        :open-mode timeline
-        :searchable t
-        :thread t)
-    (13 :name "stage"
-        :root-visible t
-        :open-mode timeline)
-    (14 :name "directory"
-        :root-visible t
-        :open-mode inspect
-        :inspect-note "Directory channel browsing is not implemented yet. Use this view to inspect the raw channel metadata.")
-    (15 :name "forum"
-        :root-visible t
-        :open-mode thread-directory
-        :thread-parent t
-        :thread-only-parent t
-        :forum-or-media t)
-    (16 :name "media"
-        :root-visible t
-        :open-mode thread-directory
-        :thread-parent t
-        :thread-only-parent t
-        :forum-or-media t)
-    (17 :name "lobby"
-        :root-visible t
-        :open-mode inspect
-        :inspect-note "Lobby channel timelines are not implemented yet. Use this view to inspect the channel and any linked lobby metadata.")
-    (18 :name "ephemeral-dm"
-        :root-visible t
-        :open-mode timeline
-        :searchable t
-        :private t
-        :dm-like t
-        :direct-message t))
+  '((0
+     :name "text"
+     :title-kind channel
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :thread-parent t)
+    (1
+     :name "dm"
+     :title-kind user
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :private t
+     :dm-like t
+     :direct-message t)
+    (2
+     :name "voice"
+     :title-kind voice
+     :root-visible t
+     :open-mode timeline)
+    (3
+     :name "group-dm"
+     :title-kind group
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :private t
+     :dm-like t
+     :group-dm t)
+    (4 :name "category" :title-kind none :structural t)
+    (5
+     :name "announcement"
+     :title-kind announcement
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :thread-parent t)
+    (6 :name "store" :title-kind media)
+    (10
+     :name "announcement-thread"
+     :title-kind thread
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :thread t)
+    (11
+     :name "public-thread"
+     :title-kind thread
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :thread t)
+    (12
+     :name "private-thread"
+     :title-kind private-thread
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :thread t)
+    (13
+     :name "stage"
+     :title-kind stage
+     :root-visible t
+     :open-mode timeline)
+    (14
+     :name "directory"
+     :title-kind directory
+     :root-visible t
+     :open-mode inspect
+     :inspect-note "Directory channel browsing is not implemented yet. Use this view to inspect the raw channel metadata.")
+    (15
+     :name "forum"
+     :title-kind forum
+     :root-visible t
+     :open-mode thread-directory
+     :thread-parent t
+     :thread-only-parent t
+     :forum-or-media t)
+    (16
+     :name "media"
+     :title-kind media
+     :root-visible t
+     :open-mode thread-directory
+     :thread-parent t
+     :thread-only-parent t
+     :forum-or-media t)
+    (17
+     :name "lobby"
+     :title-kind lobby
+     :root-visible t
+     :open-mode inspect
+     :inspect-note "Lobby channel timelines are not implemented yet. Use this view to inspect the channel and any linked lobby metadata.")
+    (18
+     :name "ephemeral-dm"
+     :title-kind ephemeral-user
+     :root-visible t
+     :open-mode timeline
+     :searchable t
+     :private t
+     :dm-like t
+     :direct-message t))
   "Declarative map of Discord channel type to capability plist.")
+
+(defconst disco-title-bracket-alist
+  '((user . ("{" "}"))
+    (ephemeral-user . ("⦃" "⦄"))
+    (group . ("(" ")"))
+    (guild . ("[[" "]]"))
+    (channel . ("[" "]"))
+    (announcement . ("⟪" "⟫"))
+    (thread . ("⟨" "⟩"))
+    (private-thread . ("⦇" "⦈"))
+    (voice . ("「" "」"))
+    (stage . ("『" "』"))
+    (forum . ("⟦" "⟧"))
+    (media . ("【" "】"))
+    (directory . ("〔" "〕"))
+    (lobby . ("⌜" "⌝"))
+    (none . ("" "")))
+  "Telega-style title brackets for Discord presentation domains.")
+
+(defun disco-title-brackets (kind)
+  "Return the registered presentation bracket pair for KIND."
+  (or (alist-get kind disco-title-bracket-alist)
+      (error "Unknown Disco title kind: %S" kind)))
+
+(defun disco-title-format (kind title)
+  "Wrap TITLE in the presentation brackets registered for KIND."
+  (unless (stringp title)
+    (error "Disco title must be a string: %S" title))
+  (let ((brackets (disco-title-brackets kind)))
+    (concat (car brackets) title (cadr brackets))))
+
+(defun disco-title-compact-count (value)
+  "Return non-negative numeric VALUE in compact title-trail form."
+  (let ((n (max 0 (or value 0))))
+    (cond
+     ((>= n 1000000)
+      (replace-regexp-in-string
+       "\\.0m\\'" "m" (format "%.1fm" (/ n 1000000.0))))
+     ((>= n 1000)
+      (replace-regexp-in-string
+       "\\.0k\\'" "k" (format "%.1fk" (/ n 1000.0))))
+     (t
+      (number-to-string n)))))
 
 (defun disco-channel-type-value (channel-or-type)
   "Return numeric channel type from CHANNEL-OR-TYPE."
@@ -133,6 +204,19 @@ Discord uses this flag on the limited channel objects included by the
 (defun disco-channel-group-dm-p (channel-or-type)
   "Return non-nil when CHANNEL-OR-TYPE is a group DM channel."
   (eq t (disco-channel-type-get channel-or-type :group-dm)))
+
+(defun disco-channel-title-kind (channel-or-type)
+  "Return the stable presentation title kind for CHANNEL-OR-TYPE."
+  (or (disco-channel-type-get channel-or-type :title-kind) 'channel))
+
+(defun disco-channel-title-brackets (channel-or-type)
+  "Return the presentation bracket pair for CHANNEL-OR-TYPE."
+  (disco-title-brackets (disco-channel-title-kind channel-or-type)))
+
+(defun disco-channel-format-title (channel-or-type title)
+  "Wrap TITLE according to the Discord CHANNEL-OR-TYPE domain."
+  (disco-title-format
+   (disco-channel-title-kind channel-or-type) title))
 
 (defun disco-channel-thread-p (channel-or-type)
   "Return non-nil when CHANNEL-OR-TYPE is a thread channel."

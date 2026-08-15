@@ -23,6 +23,7 @@
 (require 'appkit-view)
 (require 'disco-api)
 (require 'disco-avatar)
+(require 'disco-channel-type)
 (require 'disco-markdown)
 (require 'disco-runtime)
 (require 'disco-state)
@@ -98,14 +99,18 @@
          (not (string-match-p "\\`0+\\'" normalized))
          normalized)))
 
+(defun disco-user--guild-by-id (guild-id)
+  "Return the cached Guild object identified by GUILD-ID, or nil."
+  (when-let* ((guild-id (disco-user--normalize-id guild-id)))
+    (seq-find
+     (lambda (guild)
+       (equal
+        guild-id (disco-user--normalize-id (alist-get 'id guild))))
+     (disco-state-guilds))))
+
 (defun disco-user--guild ()
   "Return the current guild object, or nil."
-  (and disco-user--guild-id
-       (seq-find
-        (lambda (guild)
-          (equal disco-user--guild-id
-                 (disco-user--normalize-id (alist-get 'id guild))))
-        (disco-state-guilds))))
+  (disco-user--guild-by-id disco-user--guild-id))
 
 (defun disco-user--guild-member ()
   "Return the current profile's guild-member object, or cached fallback."
@@ -214,17 +219,13 @@
                               (seconds-to-time (/ milliseconds 1000.0))))
       (error nil))))
 
-(defun disco-user--guild-label (guild-id)
-  "Return a readable label for GUILD-ID."
-  (let* ((normalized (disco-user--normalize-id guild-id))
-         (guild
-          (seq-find
-           (lambda (candidate)
-             (equal normalized
-                    (disco-user--normalize-id (alist-get 'id candidate))))
-           (disco-state-guilds))))
-    (or (and guild (disco-user--present-string (alist-get 'name guild)))
-        normalized)))
+(defun disco-user--guild-member-count (guild)
+  "Return GUILD's cached member count, or nil when unavailable."
+  (let ((count
+         (and (listp guild)
+              (or (alist-get 'member_count guild)
+                  (alist-get 'approximate_member_count guild)))))
+    (and (integerp count) (>= count 0) count)))
 
 (defun disco-user--mutual-guilds ()
   "Return the current profile's mutual Guild objects."
@@ -237,23 +238,117 @@
   (disco-channel-directory-open (button-get button 'disco-guild-id)))
 
 (defun disco-user--insert-mutual-guilds ()
-  "Insert each mutual Guild as an independently navigable row."
+  "Insert each mutual Guild as an independently navigable Telega-style row."
   (when-let* ((guilds (disco-user--mutual-guilds)))
     (disco-user--insert-field "Mutual servers" (length guilds))
-    (dolist (guild guilds)
+    (dolist (mutual-guild guilds)
       (when-let* ((guild-id
-                   (disco-user--normalize-id (alist-get 'id guild))))
-        (insert "  ")
-        (insert-text-button
-         (or (disco-user--guild-label guild-id) guild-id)
-         'follow-link t
-         'action #'disco-user--open-mutual-guild
-         'disco-guild-id guild-id
-         'help-echo "Open this server's channel directory")
-        (when-let* ((nick (disco-user--present-string
-                           (alist-get 'nick guild))))
-          (insert (propertize (format " · %s" nick) 'face 'shadow)))
-        (insert "\n")))))
+                   (disco-user--normalize-id
+                    (alist-get 'id mutual-guild))))
+        (let* ((guild (disco-user--guild-by-id guild-id))
+               (name
+                (or (and guild
+                         (disco-user--present-string
+                          (alist-get 'name guild)))
+                    guild-id))
+               (nick
+                (disco-user--present-string
+                 (alist-get 'nick mutual-guild)))
+               (member-count (disco-user--guild-member-count guild))
+               (count-label
+                (and member-count
+                     (disco-title-compact-count member-count)))
+               (brackets (disco-title-brackets 'guild)))
+          (insert "  " (car brackets))
+          (insert-text-button name
+                              'follow-link
+                              t
+                              'action
+                              #'disco-user--open-mutual-guild
+                              'disco-guild-id
+                              guild-id
+                              'help-echo
+                              "Open this server's channel directory")
+          (when nick
+            (insert (propertize (format " · %s" nick) 'face 'shadow)))
+          (when count-label
+            (let* ((width
+                    (or (appkit-view-window-fill-column nil 2)
+                        fill-column
+                        80))
+                   (target
+                    (- width (string-width count-label)
+                       (string-width (cadr brackets)))))
+              (if (> target (appkit-view-current-column))
+                  (appkit-view-move-to-column target)
+                (insert " "))
+              (insert (propertize count-label 'face 'shadow))))
+          (insert (cadr brackets) "\n"))))))
+
+(defun disco-user--mutual-friends ()
+  "Return partial User objects for the current profile's mutual friends."
+  (let ((friends
+         (and (listp disco-user--profile)
+              (alist-get 'mutual_friends disco-user--profile))))
+    (and (listp friends) friends)))
+
+(defun disco-user--mutual-friend-label (friend)
+  "Return a readable display label for partial User object FRIEND."
+  (let ((display-name
+         (disco-user--present-string (alist-get 'global_name friend)))
+        (username
+         (disco-user--present-string (alist-get 'username friend)))
+        (user-id (disco-user--normalize-id (alist-get 'id friend))))
+    (or display-name
+        (and username (concat "@" username))
+        user-id
+        "Unknown user")))
+
+(defun disco-user--open-mutual-friend (button)
+  "Open the partial User object stored on mutual-friend BUTTON."
+  (when-let* ((friend (button-get button 'disco-user-object)))
+    (disco-user-open friend)))
+
+(defun disco-user--insert-mutual-friends ()
+  "Insert mutual-friend count and available user navigation rows."
+  (let* ((friends (disco-user--mutual-friends))
+         (reported-count
+          (and (listp disco-user--profile)
+               (alist-get 'mutual_friends_count disco-user--profile)))
+         (count
+          (if (integerp reported-count)
+              reported-count
+            (and friends (length friends)))))
+    (when (integerp count)
+      (disco-user--insert-field "Mutual friends" count))
+    (dolist (friend friends)
+      (when (and (listp friend)
+                 (disco-user--normalize-id (alist-get 'id friend)))
+        (let* ((display-name
+                (disco-user--present-string
+                 (alist-get 'global_name friend)))
+               (username
+                (disco-user--present-string
+                 (alist-get 'username friend)))
+               (label
+                (concat
+                 (disco-user--mutual-friend-label friend)
+                 (if (and display-name
+                          username
+                          (not (equal display-name username)))
+                     (format " · @%s" username)
+                   ""))))
+          (insert "  {")
+          (insert-text-button label
+                              'follow-link
+                              t
+                              'action
+                              #'disco-user--open-mutual-friend
+                              'disco-user-object
+                              friend
+                              'help-echo
+                              "Open this mutual friend's profile")
+          (insert "}\n"))))))
 
 (defun disco-user--badge-label ()
   "Return descriptions for global and guild profile badges."
@@ -362,12 +457,16 @@
                       (alist-get 'guild_member_profile disco-user--profile))))
            (when (or disco-user--guild-id member member-profile)
              (insert "\n")
-             (appkit-view-insert-heading-line "Server profile" :face 'bold)
+             (appkit-view-insert-heading-line
+              "Server profile"
+              :face 'bold)
              (disco-user--insert-field
-              "Server" (or (and (disco-user--guild)
-                                (alist-get 'name (disco-user--guild)))
-                           disco-user--guild-id))
-             (disco-user--insert-field "Nickname" (and member (alist-get 'nick member)))
+              "Server"
+              (or (and (disco-user--guild)
+                       (alist-get 'name (disco-user--guild)))
+                  disco-user--guild-id))
+             (disco-user--insert-field
+              "Nickname" (and member (alist-get 'nick member)))
              (disco-user--insert-field
               "Pronouns" (and member-profile
                               (alist-get 'pronouns member-profile)))
@@ -393,11 +492,7 @@
              (disco-user--insert-paragraph "About me" global-bio)))
          (disco-user--insert-field "Badges" (disco-user--badge-label))
          (disco-user--insert-mutual-guilds)
-         (let ((count (and (listp disco-user--profile)
-                           (alist-get 'mutual_friends_count
-                                      disco-user--profile))))
-           (when (integerp count)
-             (disco-user--insert-field "Mutual friends" count)))
+         (disco-user--insert-mutual-friends)
          (disco-user--insert-field
           "Connections" (disco-user--connections-label))
          (when (eq t (and (listp disco-user--profile)

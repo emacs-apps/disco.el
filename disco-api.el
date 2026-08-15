@@ -629,6 +629,7 @@ BODY-TYPE is forwarded to transport layer."
    :query
    (append
     '(("with_mutual_guilds" . "true")
+      ("with_mutual_friends" . "true")
       ("with_mutual_friends_count" . "true")
       ("type" . "modal"))
     (when guild-id
