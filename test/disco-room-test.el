@@ -1281,6 +1281,8 @@
     (should (eq (key-binding (kbd "C-c C-c") t) 'disco-room-filter-cancel))
     (should (eq (key-binding (kbd "C-c M-/") t) 'disco-room-search-channel))
     (should (eq (key-binding (kbd "C-c RET") t) 'disco-room-send-message))
+    (should (eq (key-binding (kbd "C-c M-p") t)
+                'disco-room-list-pinned-messages))
     (should-not (lookup-key disco-room-mode-map (kbd "C-c s")))
     (should-not (lookup-key disco-room-mode-map (kbd "C-c n")))
     (should-not (lookup-key disco-room-mode-map (kbd "C-c p")))
@@ -1309,6 +1311,7 @@
     (should (eq (key-binding (kbd "f") t) 'disco-msg-forward))
     (should (eq (key-binding (kbd "e") t) 'disco-msg-edit))
     (should (eq (key-binding (kbd "d") t) 'disco-msg-delete))
+    (should (eq (key-binding (kbd "P") t) 'disco-msg-toggle-pin))
     (should (eq (key-binding (kbd "i") t) 'disco-msg-describe-message))
     (should (eq (key-binding (kbd "L") t) 'disco-msg-redisplay))
     (should (eq (key-binding (kbd "!") t) 'disco-msg-add-reaction))
@@ -1326,6 +1329,7 @@
     (should (eq (key-binding (kbd "C-c m f") t) 'disco-msg-forward))
     (should (eq (key-binding (kbd "C-c m e") t) 'disco-msg-edit))
     (should (eq (key-binding (kbd "C-c m d") t) 'disco-msg-delete))
+    (should (eq (key-binding (kbd "C-c m P") t) 'disco-msg-toggle-pin))
     (should (eq (key-binding (kbd "C-c m i") t) 'disco-msg-describe-message))
     (should (eq (key-binding (kbd "C-c m L") t) 'disco-msg-redisplay))))
 
@@ -1355,6 +1359,7 @@
     (should (eq disco-msg-operate-function #'disco-room--operate-msg))
     (should (eq disco-msg-edit-function #'disco-room--edit-msg))
     (should (eq disco-msg-delete-function #'disco-room--delete-msg))
+    (should (eq disco-msg-toggle-pin-function #'disco-room--toggle-pin-on-msg))
     (should (eq disco-msg-open-thread-function #'disco-room--open-thread-from-message))
     (should (eq disco-msg-toggle-reaction-function #'disco-room--toggle-reaction-on-msg))
     (should (eq disco-msg-add-reaction-function #'disco-room--add-reaction-to-msg))
@@ -1727,6 +1732,127 @@
         (when (buffer-live-p preview-buf)
           (kill-buffer preview-buf))
         (delete-file path)))))
+
+(ert-deftest disco-room-pinned-messages-page-with-returned-timestamp ()
+  (let ((disco-runtime--app nil)
+        buffer
+        requests)
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "pins")
+       (name . "pins-room")
+       (type . 0)
+       (permissions . "2048")))
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (target &rest _args)
+                 (setq buffer target)))
+              ((symbol-function 'disco-api-channel-pins-async)
+               (lambda (channel-id &rest args)
+                 (push (cons channel-id args) requests)))
+              ((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (progn
+            (disco-room-list-pinned-messages "pins")
+            (should (buffer-live-p buffer))
+            (should (equal "pins" (caar requests)))
+            (should-not (plist-get (cdar requests) :before))
+            (funcall
+             (plist-get (cdar requests) :on-success)
+             '((items . (((pinned_at . "2026-08-16T02:00:00.000000+00:00")
+                          (message . ((id . "m2") (content . "second"))))
+                         ((pinned_at . "2026-08-16T01:00:00.000000+00:00")
+                          (message . ((id . "m1") (content . "first"))))))
+               (has_more . t)))
+            (with-current-buffer buffer
+              (should (equal '("m2" "m1")
+                             (mapcar #'disco-room-pinned-messages--entry-message-id
+                                     disco-room-pinned-messages--items)))
+              (should (equal "2026-08-16T01:00:00.000000+00:00"
+                             disco-room-pinned-messages--next-before))
+              (disco-room-pinned-messages-load-more))
+            (should (= 2 (length requests)))
+            (should
+             (equal "2026-08-16T01:00:00.000000+00:00"
+                    (plist-get (cdr (car requests)) :before)))
+            (funcall
+             (plist-get (cdr (car requests)) :on-success)
+             '((items . (((pinned_at . "2026-08-16T00:00:00.000000+00:00")
+                          (message . ((id . "m1") (content . "duplicate"))))
+                         ((pinned_at . "2026-08-15T23:00:00.000000+00:00")
+                          (message . ((id . "m0") (content . "oldest"))))))
+               (has_more . :false)))
+            (with-current-buffer buffer
+              (should (equal '("m2" "m1" "m0")
+                             (mapcar #'disco-room-pinned-messages--entry-message-id
+                                     disco-room-pinned-messages--items)))
+              (should-not disco-room-pinned-messages--has-more-p)
+              (appkit-sync-invalidations (appkit-current-view))
+              (should (string-match-p "second" (buffer-string)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-pinned-messages-refresh-rejects-stale-response ()
+  (let ((disco-runtime--app nil)
+        buffer
+        callbacks)
+    (disco-state-reset)
+    (disco-state-upsert-channel '((id . "pins") (type . 0) (permissions . "2048")))
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (target &rest _args)
+                 (setq buffer target)))
+              ((symbol-function 'disco-api-channel-pins-async)
+               (lambda (_channel-id &rest args)
+                 (push (plist-get args :on-success) callbacks)))
+              ((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (progn
+            (disco-room-list-pinned-messages "pins")
+            (with-current-buffer buffer
+              (disco-room-pinned-messages-refresh))
+            (funcall
+             (car (last callbacks))
+             '((items . (((pinned_at . "2026-08-16T00:00:00.000000+00:00")
+                          (message . ((id . "stale") (content . "stale"))))))
+               (has_more . :false)))
+            (with-current-buffer buffer
+              (should-not disco-room-pinned-messages--items))
+            (funcall
+             (car callbacks)
+             '((items . (((pinned_at . "2026-08-16T01:00:00.000000+00:00")
+                          (message . ((id . "current") (content . "current"))))))
+               (has_more . :false)))
+            (with-current-buffer buffer
+              (should (equal '("current")
+                             (mapcar #'disco-room-pinned-messages--entry-message-id
+                                     disco-room-pinned-messages--items)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-pinned-system-message-links-to-captured-channel ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "pins")
+    (let ((message
+           '((id . "notice")
+             (type . 6)
+             (author . ((username . "Alice")))
+             (content . "")))
+          opened-channel)
+      (cl-letf (((symbol-function 'disco-room-list-pinned-messages)
+                 (lambda (&optional channel-id)
+                   (setq opened-channel channel-id))))
+        (let ((inhibit-read-only t))
+          (disco-room--insert-system-divider-message message nil))
+        (goto-char (point-min))
+        (search-forward "View all pinned messages.")
+        (should (appkit-ui-action-at (point)))
+        (appkit-ui-activate-at (point))
+        (should (equal "pins" opened-channel))
+        (should
+         (equal "Alice pinned a message to this channel. View all pinned messages."
+                (disco-room--message-copy-text message)))))))
 
 (ert-deftest disco-room-ack-channel-pins-applies-state-on-success ()
   (with-temp-buffer
@@ -5408,6 +5534,88 @@
             (alist-get 'content
                        (disco-room--channel-message-by-id "chat" "300"))))))
 
+
+(ert-deftest disco-room-pin-message-requires-pin-messages-permission ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "pin-permission")
+    (let ((msg '((id . "m1") (pinned . :false))))
+      (should (equal "missing PIN_MESSAGES"
+                     (disco-room--pin-message-unavailable-reason msg)))
+      (should-error (disco-room--toggle-pin-on-msg msg) :type 'user-error))))
+
+(ert-deftest disco-room-pin-message-commits-current-success-only ()
+  (let ((disco-runtime--app nil)
+        callback
+        request)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "pin-success")
+            (disco-state-upsert-channel
+             '((id . "pin-success") (type . 0)
+               (permissions . "2251799813685248")))
+            (disco-state-put-messages
+             "pin-success"
+             '(((id . "m1") (channel_id . "pin-success")
+                (content . "hello") (pinned . :false))))
+            (let ((view (disco-room--ensure-view)))
+              (cl-letf (((symbol-function 'disco-api-pin-message-async)
+                         (lambda (_channel-id _message-id &rest options)
+                           (setq callback (plist-get options :on-success))))
+                        ((symbol-function 'appkit-request-sync)
+                         (lambda (owner &rest options)
+                           (setq request (cons owner options))))
+                        ((symbol-function 'message) #'ignore))
+                (disco-room-toggle-pin "m1")
+                (funcall callback nil))
+              (should (eq view (car request)))
+              (should (equal "m1" (plist-get (cdr request) :entry)))
+              (should (eq t (alist-get 'pinned
+                                       (disco-room--message-by-id "m1"))))))
+        (disco-runtime-stop)))))
+
+(ert-deftest disco-room-pin-message-supersedes-stale-toggle-callback ()
+  (let ((disco-runtime--app nil)
+        pin-callback
+        unpin-callback
+        (requests 0))
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "pin-race")
+            (disco-state-upsert-channel
+             '((id . "pin-race") (type . 0)
+               (permissions . "2251799813685248")))
+            (disco-state-put-messages
+             "pin-race"
+             '(((id . "m1") (channel_id . "pin-race")
+                (content . "hello") (pinned . :false))))
+            (disco-room--ensure-view)
+            (cl-letf (((symbol-function 'disco-api-pin-message-async)
+                       (lambda (_channel-id _message-id &rest options)
+                         (setq pin-callback (plist-get options :on-success))))
+                      ((symbol-function 'disco-api-unpin-message-async)
+                       (lambda (_channel-id _message-id &rest options)
+                         (setq unpin-callback (plist-get options :on-success))))
+                      ((symbol-function 'appkit-request-sync)
+                       (lambda (&rest _options) (cl-incf requests)))
+                      ((symbol-function 'message) #'ignore))
+              (disco-room-toggle-pin "m1")
+              (disco-room-toggle-pin "m1")
+              (should (functionp pin-callback))
+              (should (functionp unpin-callback))
+              (funcall pin-callback nil)
+              (should (= 0 requests))
+              (should (eq :false (alist-get 'pinned
+                                             (disco-room--message-by-id "m1"))))
+              (funcall unpin-callback nil)
+              (should (= 1 requests))
+              (should (eq :false (alist-get 'pinned
+                                             (disco-room--message-by-id "m1"))))))
+        (disco-runtime-stop)))))
 (provide 'disco-room-test)
 
 ;;; disco-room-test.el ends here

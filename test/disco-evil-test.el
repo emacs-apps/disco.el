@@ -53,6 +53,12 @@
               "g S" disco-channel-directory-clear-filter)
              (disco-root-archived-threads-mode-map
               "m" disco-root-archived-threads-load-more)
+             (disco-room-pinned-messages-mode-map
+              "RET" appkit-ui-activate)
+             (disco-room-pinned-messages-mode-map
+              "g r" disco-room-pinned-messages-refresh)
+             (disco-room-pinned-messages-mode-map
+              "m" disco-room-pinned-messages-load-more)
              (disco-root-channel-inspect-mode-map
               "g r" disco-root-channel-inspect-refresh)
              (disco-user-mode-map

@@ -49,6 +49,9 @@ return a string or nil.")
 (defvar-local disco-msg-delete-function nil
   "Buffer-local function deleting a message.")
 
+(defvar-local disco-msg-toggle-pin-function nil
+  "Buffer-local function toggling whether a message is pinned.")
+
 (defvar-local disco-msg-open-thread-function nil
   "Buffer-local function opening a starter thread for a message.")
 
@@ -584,6 +587,13 @@ Return the inspect buffer."
   "Delete MESSAGE in the current buffer context."
   (interactive (list (disco-msg-for-interactive)))
   (disco-msg--call-adapter disco-msg-delete-function message "deleting messages"))
+
+(defun disco-msg-toggle-pin (message)
+  "Toggle whether MESSAGE is pinned in the current buffer context."
+  (interactive (list (disco-msg-for-interactive)))
+  (disco-msg--call-adapter disco-msg-toggle-pin-function
+                           message
+                           "toggling message pins"))
 
 (defun disco-msg-open-thread (message)
   "Open starter thread associated with MESSAGE."

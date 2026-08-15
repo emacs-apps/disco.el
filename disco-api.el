@@ -1246,6 +1246,55 @@ ON-ERROR receives the transport error."
      :on-success on-success
      :on-error on-error)))
 
+(cl-defun disco-api-channel-pins-async
+    (channel-id &key before limit on-success on-error)
+  "Fetch pinned messages in CHANNEL-ID asynchronously.
+
+BEFORE is the final Message Pin's ISO8601 `pinned_at' timestamp from the
+preceding response.  LIMIT defaults to Discord's maximum page size of 50.
+ON-SUCCESS receives the paginated response object; ON-ERROR receives the
+transport error."
+  (let ((query `(("limit" . ,(number-to-string (or limit 50))))))
+    (when before
+      (setq query
+            (append query `(("before" . ,(format "%s" before))))))
+    (disco-api--request-async
+     "GET"
+     (format "/channels/%s/messages/pins" channel-id)
+     :query query
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-pin-message (channel-id message-id)
+  "Pin MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request
+   "PUT"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   nil nil nil))
+
+(cl-defun disco-api-pin-message-async (channel-id message-id &key on-success on-error)
+  "Pin MESSAGE-ID in CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "PUT"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-unpin-message (channel-id message-id)
+  "Unpin MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request
+   "DELETE"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   nil nil nil))
+
+(cl-defun disco-api-unpin-message-async (channel-id message-id &key on-success on-error)
+  "Unpin MESSAGE-ID in CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "DELETE"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api--normalize-id-list (ids)
   "Normalize IDS for an API list payload, preserving first-seen order."
   (let (result)

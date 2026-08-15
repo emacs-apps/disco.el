@@ -106,6 +106,7 @@ When nil, leave Evil's initial-state selection untouched."
     disco-msg-inspect-mode
     disco-user-mode
     disco-room-mode
+    disco-room-pinned-messages-mode
     disco-root-archived-threads-mode
     disco-root-channel-inspect-mode
     disco-root-mode)
@@ -115,6 +116,7 @@ When nil, leave Evil's initial-state selection untouched."
   '(disco-channel-directory-mode-map
     disco-msg-inspect-mode-map
     disco-user-mode-map
+    disco-room-pinned-messages-mode-map
     disco-root-archived-threads-mode-map
     disco-root-channel-inspect-mode-map
     disco-root-mode-map)
@@ -175,6 +177,13 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "g r") #'disco-root-archived-threads-refresh
     (kbd "m") #'disco-root-archived-threads-load-more
     (kbd "?") #'disco-root-view--transient)
+
+  (appkit-evil-define-keys
+      disco-evil--application-states 'disco-room-pinned-messages-mode-map
+    (kbd "RET") #'appkit-ui-activate
+    (kbd "<return>") #'appkit-ui-activate
+    (kbd "g r") #'disco-room-pinned-messages-refresh
+    (kbd "m") #'disco-room-pinned-messages-load-more)
 
   (appkit-evil-define-keys
       disco-evil--application-states 'disco-root-channel-inspect-mode-map
