@@ -97,7 +97,7 @@
               (lambda (entry)
                 (equal '(root unread channel "gateway-unread")
                        (appkit-directory-entry-key entry)))
-              (disco-root--tree-layout-entries surface)))
+              (disco-root--composite-entries surface)))
             (should-not (disco-root--tree-guild-expanded-p surface "g1")))))
     (disco-state-reset)))
 
@@ -146,7 +146,7 @@
               (should (memq 'structural queued-events))
               (should-not disco-root--refresh-in-flight)
               (should-not (disco-root--tree-guild-expanded-p surface "g1"))
-              (let ((entries (disco-root--tree-layout-entries surface)))
+              (let ((entries (disco-root--composite-entries surface)))
                 (should
                  (seq-find
                   (lambda (entry)
@@ -161,10 +161,10 @@
                   entries))))))
       (disco-state-reset))))
 
-(ert-deftest disco-root-activity-candidates-exclude-unresolved-and-hidden-channels ()
+(ert-deftest disco-root-header-channels-exclude-threads-unresolved-and-hidden ()
   (disco-state-reset)
   (unwind-protect
-      (let ((disco-root-activity-include-threads nil))
+      (progn
         (disco-state-set-guilds '(((id . "g1"))))
         (disco-state-put-channels
          "g1"
@@ -172,11 +172,13 @@
            ((id . "hidden") (guild_id . "g1") (type . 0)
             (permissions . "0"))
            ((id . "visible") (guild_id . "g1") (type . 0)
+            (permissions . "1024"))
+           ((id . "thread") (guild_id . "g1") (type . 11)
             (permissions . "1024"))))
         (should
          (equal '("visible")
                 (mapcar (lambda (channel) (alist-get 'id channel))
-                        (disco-root--collect-activity-candidates)))))
+                        (disco-root--collect-header-channels)))))
     (disco-state-reset)))
 
 (ert-deftest disco-root-thread-parent-candidates-honor-latest-gateway-access ()
@@ -229,7 +231,7 @@
                 ((symbol-function 'disco-root--sessions-summary-label) #'ignore)
                 ((symbol-function 'disco-root--voice-summary-label) #'ignore)
                 ((symbol-function 'disco-root--feature-badge-summary) #'ignore)
-                ((symbol-function 'disco-root--activity-metrics-by-view)
+                ((symbol-function 'disco-root--view-metrics)
                  (lambda ()
                    '((all :count 12 :unread 7)
                      (unread :count 3 :unread 7)
@@ -257,7 +259,7 @@
                 ((symbol-function 'disco-root--sessions-summary-label) #'ignore)
                 ((symbol-function 'disco-root--voice-summary-label) #'ignore)
                 ((symbol-function 'disco-root--feature-badge-summary) #'ignore)
-                ((symbol-function 'disco-root--activity-metrics-by-view)
+                ((symbol-function 'disco-root--view-metrics)
                  (lambda ()
                    (cl-incf metric-scans)
                    '((all :count 1 :unread 0)
@@ -644,7 +646,7 @@
           queued)
       (cl-letf (((symbol-function 'disco-root--render-fill-column)
                  (lambda (&optional _buffer) 80))
-                ((symbol-function 'disco-root-layout-render)
+                ((symbol-function 'disco-root-render-projection)
                  (lambda ()
                    (setq render-count (1+ render-count))
                    (disco-root-render)
@@ -719,7 +721,7 @@
   (with-temp-buffer
     (disco-root-mode)
     (let (reflowed preserved anchor updated)
-      (cl-letf (((symbol-function 'disco-root--reflow-layout)
+      (cl-letf (((symbol-function 'disco-root--reflow-view)
                  (lambda ()
                    (setq reflowed t)))
                 ((symbol-function 'appkit-position-render-preserving)
@@ -783,7 +785,7 @@
                  (lambda (_context) (setq projected t) nil))
                 ((symbol-function 'disco-directory-load-guild-async)
                  (lambda (&rest _args) (setq loaded t))))
-        (let ((entries (disco-root--tree-layout-entries surface)))
+        (let ((entries (disco-root--composite-entries surface)))
           (should (seq-find
                    (lambda (entry)
                      (equal '(root guild "g1")
@@ -810,7 +812,7 @@
                  (lambda (&rest _args) 0))
                 ((symbol-function 'disco-directory-guild-status)
                  (lambda (_guild-id) 'loaded)))
-        (let ((entries (disco-root--tree-layout-entries surface)))
+        (let ((entries (disco-root--composite-entries surface)))
           (should
            (equal
             '((root section unread)
@@ -861,7 +863,7 @@
                            (disco-guild-directory-context-section-key
                             context)))
                    nil)))
-        (disco-root--tree-layout-entries surface)
+        (disco-root--composite-entries surface)
         (should (equal '("g1") loaded))
         (should (equal '("g1") projected))))))
 
@@ -886,7 +888,7 @@
                 ((symbol-function 'disco-directory-load-guild-async)
                  (lambda (&rest _args)
                    (ert-fail "loading guild was requested again"))))
-        (let ((entries (disco-root--tree-layout-entries surface)))
+        (let ((entries (disco-root--composite-entries surface)))
           (should
            (seq-find
             (lambda (entry)
@@ -937,7 +939,7 @@
                 ((symbol-function 'disco-directory-load-guild-async)
                  (lambda (&rest _args)
                    (ert-fail "loaded guild was requested again"))))
-        (let ((entries (disco-root--tree-layout-entries surface)))
+        (let ((entries (disco-root--composite-entries surface)))
           (should
            (seq-find
             (lambda (entry)
@@ -1044,7 +1046,7 @@
                      :section-key '(root guild "g1")
                      :item-p t
                      :payload channel)))))
-        (let* ((before (disco-root--tree-layout-entries surface))
+        (let* ((before (disco-root--composite-entries surface))
                (before-occurrences
                 (disco-root--tree-channel-occurrence-keys before "c1")))
           (should
@@ -1057,7 +1059,7 @@
             (should (equal before-occurrences
                            (disco-root--tree-force-keys before))))
           (setq unread-p nil)
-          (let* ((after (disco-root--tree-layout-entries surface))
+          (let* ((after (disco-root--composite-entries surface))
                  (after-occurrences
                   (disco-root--tree-channel-occurrence-keys after "c1")))
             (should
@@ -1157,8 +1159,8 @@
                 ((symbol-function 'disco-state-guilds) #'ignore)
                 ((symbol-function 'disco-root--insert-activity-channel-line)
                  (lambda (&rest _args) (insert "rich\n"))))
-        (disco-root-layout-render-view-spec
-         (disco-root--build-tree-layout-view-spec))
+        (disco-root-render-spec
+         (disco-root--build-composite-render-spec))
         (should-not (next-button (point-min) t))
         (should-not
          (text-property-not-all (point-min) (point-max) 'mouse-face nil))
@@ -1287,7 +1289,7 @@
         (should full-refresh)
         (should-not index-refresh)))))
 
-(ert-deftest disco-root-build-tree-layout-view-spec-returns-directory-view-spec ()
+(ert-deftest disco-root-build-composite-render-spec-returns-directory-view-spec ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--view-mode 'all))
@@ -1299,8 +1301,8 @@
                  (lambda () nil))
                 ((symbol-function 'disco-state-guilds)
                  (lambda () nil)))
-        (let* ((view-spec (disco-root--build-tree-layout-view-spec))
-               (entries (disco-root-layout-view-spec-entries view-spec))
+        (let* ((view-spec (disco-root--build-composite-render-spec))
+               (entries (disco-root-render-spec-entries view-spec))
                (first-entry (car entries))
                (channel-entry
                 (seq-find
@@ -1308,11 +1310,11 @@
                    (equal '(root unread channel "u1")
                           (appkit-directory-entry-key entry)))
                  entries)))
-          (should (disco-root-layout-view-spec-p view-spec))
+          (should (disco-root-render-spec-p view-spec))
           (should (eq 'directory
-                      (disco-root-layout-view-spec-kind view-spec)))
+                      (disco-root-render-spec-kind view-spec)))
           (should (eq (appkit-directory-current-surface)
-                      (disco-root-layout-view-spec-directory-surface view-spec)))
+                      (disco-root-render-spec-directory-surface view-spec)))
           (should (eq 'section (appkit-directory-entry-role first-entry)))
           (should (equal '(root section unread)
                          (appkit-directory-entry-key first-entry)))
@@ -1320,11 +1322,13 @@
           (should (eq 'item (appkit-directory-entry-role channel-entry)))
           (should-not (appkit-directory-entry-group-key channel-entry)))))))
 
-(ert-deftest disco-root-archived-threads-list-spec-uses-layout-entry-inserter ()
+(ert-deftest disco-root-archived-threads-list-spec-uses-channel-inserter ()
   (with-temp-buffer
     (disco-root-archived-threads-mode)
-    (let ((disco-root--archived-parent-channel '((id . "p1") (type . 15) (name . "Forum")))
-          (disco-root--archived-threads-cache '(((id . "t1") (type . 11) (name . "Thread"))))
+    (let ((disco-root--archived-parent-channel
+           '((id . "p1") (type . 15) (name . "Forum")))
+          (disco-root--archived-threads-cache
+           '(((id . "t1") (type . 11) (name . "Thread"))))
           (disco-root--archived-last-errors nil))
       (cl-letf (((symbol-function 'disco-root--channel-label)
                  (lambda (&rest _args) "Forum"))
@@ -1333,12 +1337,10 @@
                 ((symbol-function 'disco-root--archived-any-source-has-more-p)
                  (lambda () t)))
         (let* ((spec (disco-root--archived-threads-list-spec))
-               (entries (appkit-view-list-spec-items spec))
-               (first-entry (car entries)))
-          (should (eq 'disco-root--insert-layout-entry
+               (first-channel (car (appkit-view-list-spec-items spec))))
+          (should (eq 'disco-root--insert-archived-thread-entry
                       (appkit-view-list-spec-item-inserter spec)))
-          (should (eq 'channel (disco-root-layout-entry-type first-entry)))
-          (should (eq 'archived-thread (disco-root-layout-entry-scope first-entry))))))))
+          (should (equal "t1" (alist-get 'id first-channel))))))))
 
 (ert-deftest disco-root-archived-thread-view-is-stable-and-refreshes-once ()
   (let ((disco-runtime--app nil)
@@ -1506,7 +1508,7 @@
   (save-window-excursion
     (with-temp-buffer
       (disco-root-mode)
-      (setq-local disco-root--layout 'search)
+      (setq-local disco-root--search-active-p t)
       (let* ((inhibit-read-only t)
              (disco-root--fill-column 80)
              (first '((id . "m1") (channel_id . "c1") (content . "first")))
@@ -1562,10 +1564,10 @@
              first-button
              second-button
              loaded-tabs)
-        (disco-root--insert-layout-entry first)
+        (disco-root--insert-render-entry first)
         (setq first-button (button-at (point-min)))
         (let ((start (point)))
-          (disco-root--insert-layout-entry second)
+          (disco-root--insert-render-entry second)
           (setq second-button (button-at start)))
         (should (eq (button-get first-button 'appkit-ui-action-row-object) first))
         (should (eq (button-get second-button 'appkit-ui-action-row-object) second))
@@ -1820,7 +1822,7 @@
     (should (equal "fixed by domain"
                    (disco-root--search-transient-format-channel-ids nil)))))
 
-(ert-deftest disco-root-search-layout-entries-preserve-section-metadata ()
+(ert-deftest disco-root-search-render-entries-preserve-actions-and-section-metadata ()
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--search-tabs
@@ -1829,35 +1831,29 @@
 			    :error nil
 			    :cursor nil
 			    :total-results 1)))
-    (let ((first-entry (car (disco-root--search-layout-entries))))
-      (should (eq 'search-section (disco-root-layout-entry-type first-entry)))
-      (should (equal "Messages" (disco-root-layout-entry-title first-entry)))
-      (should (= 1 (disco-root-layout-entry-loaded-count first-entry)))
-      (should (= 1 (disco-root-layout-entry-total-count first-entry)))
-      (should-not (disco-root-layout-entry-loading first-entry)))))
+    (let* ((entries (disco-root--search-render-entries))
+           (back-entry (car entries))
+           (section-entry
+            (seq-find (lambda (entry)
+                        (eq 'search-section
+                            (disco-root-render-entry-type entry)))
+                      entries)))
+      (should (eq 'search-action (disco-root-render-entry-type back-entry)))
+      (should (equal "Back to root" (disco-root-render-entry-label back-entry)))
+      (should (eq 'exit-search (disco-root-render-entry-action back-entry)))
+      (should (equal "Messages" (disco-root-render-entry-title section-entry)))
+      (should (= 1 (disco-root-render-entry-loaded-count section-entry)))
+      (should (= 1 (disco-root-render-entry-total-count section-entry)))
+      (should-not (disco-root-render-entry-loading section-entry)))))
 
-(ert-deftest disco-root-layout-entry-anchors-distinguish-duplicate-domain-rows ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (let ((channel '((id . "c1") (type . 1)))
-          (inhibit-read-only t)
-          keys)
-      (cl-letf (((symbol-function 'disco-root--insert-channel-line)
-                 (lambda (&rest _arguments) (insert "channel\n"))))
-        (dolist (entry (list (disco-root--entry-channel channel 2 'unread)
-                             (disco-root--entry-channel channel 2 'private)))
-          (let ((start (point)))
-            (disco-root--insert-layout-entry entry)
-            (push (get-text-property start 'disco-root-entry-key) keys))))
-      (should (equal '((channel unread "c1") (channel private "c1"))
-                     (nreverse keys)))
-      (should-not
-       (equal (disco-root-layout-entry-key
-               (disco-root--entry-search-message '((id . "m1")) 2 'messages))
-              (disco-root-layout-entry-key
-               (disco-root--entry-search-message '((id . "m1")) 2 'links)))))))
+(ert-deftest disco-root-search-entry-anchors-distinguish-tabs ()
+  (should-not
+   (equal (disco-root-render-entry-key
+           (disco-root--entry-search-message '((id . "m1")) 2 'messages))
+          (disco-root-render-entry-key
+           (disco-root--entry-search-message '((id . "m1")) 2 'links)))))
 
-(ert-deftest disco-root-build-search-layout-view-spec-renders-sections ()
+(ert-deftest disco-root-build-search-render-spec-renders-sections ()
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--search-active-p t)
@@ -1887,15 +1883,45 @@
       (cl-letf (((symbol-function 'disco-root--insert-search-message-line)
                  (lambda (_message _indent _tab)
                    (insert "  result-row\n"))))
-        (let ((view-spec (disco-root--build-search-layout-view-spec)))
-          (should (disco-root-layout-view-spec-p view-spec))
-          (should (eq 'list-spec (disco-root-layout-view-spec-kind view-spec)))
-          (disco-root-layout-render-view-spec view-spec))
+        (let ((view-spec (disco-root--build-search-render-spec)))
+          (should (disco-root-render-spec-p view-spec))
+          (should (eq 'list-spec (disco-root-render-spec-kind view-spec)))
+          (disco-root-render-spec view-spec))
         (should (string-match-p "Search \"foo\" in DMs" (buffer-string)))
         (should (string-match-p "Messages (1/1)" (buffer-string)))
         (should (string-match-p "Show more" (buffer-string)))
         (should (string-match-p "(loading...)" (buffer-string)))
         (should (string-match-p "(boom)" (buffer-string)))))))
+
+(ert-deftest disco-root-search-exit-restores-composite-and-stales-results ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (setq-local disco-root--search-active-p t)
+    (setq-local disco-root--search-generation 4)
+    (setq-local disco-root--search-tabs
+                '((messages :items (((id . "old"))) :loading t)))
+    (let ((tabs-before disco-root--search-tabs)
+          queued
+          rendered)
+      (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                 (lambda (&rest arguments) (setq queued arguments)))
+                ((symbol-function 'disco-root--build-composite-render-spec)
+                 (lambda ()
+                   (setq rendered 'composite)
+                   (disco-root-render-spec-create :kind 'list-spec)))
+                ((symbol-function 'disco-root--build-search-render-spec)
+                 (lambda ()
+                   (ert-fail "search projection rendered after exit")))
+                ((symbol-function 'message) #'ignore))
+        (disco-root-search-exit)
+        (should-not disco-root--search-active-p)
+        (should (= 5 disco-root--search-generation))
+        (should (equal '(nil t t) queued))
+        (disco-root-render-projection)
+        (should (eq 'composite rendered))
+        (disco-root--search-handle-error
+         4 '((messages)) '(:message "stale response"))
+        (should (eq tabs-before disco-root--search-tabs))))))
 
 (ert-deftest disco-root-search-dispatch-channel-domain-uses-guild-tabs-for-guild-channel ()
   (with-temp-buffer
@@ -2092,7 +2118,7 @@
               '((id . "orphan") (type . 11) (parent_id . "missing"))))))
     (disco-state-reset)))
 
-(ert-deftest disco-root-insert-channel-line-thread-post-uses-activity-preview-layout ()
+(ert-deftest disco-root-insert-channel-line-thread-post-uses-activity-preview-shape ()
   (with-temp-buffer
     (disco-root-mode)
     (let ((disco-root--fill-column 90)
@@ -2505,65 +2531,6 @@
         (should (equal "↳" (substring-no-properties (buffer-string)))))
     (disco-state-reset)))
 
-(ert-deftest disco-root-collect-activity-channels-default-excludes-threads ()
-  (disco-state-reset)
-  (unwind-protect
-      (with-temp-buffer
-        (disco-root-mode)
-        (let ((disco-root-activity-include-threads nil)
-              (guild-id "g1"))
-          (disco-state-set-guilds (list `((id . ,guild-id)
-                                          (name . "Guild One"))))
-          (disco-state-put-channels
-           guild-id
-           (list '((id . "c1")
-                   (guild_id . "g1")
-                   (type . 0)
-                   (permissions . "1024")
-                   (name . "general")
-                   (last_message_id . "10"))
-                 '((id . "t1")
-                   (guild_id . "g1")
-                   (type . 11)
-                   (permissions . "1024")
-                   (parent_id . "c1")
-                   (name . "hot-thread")
-                   (last_message_id . "11"))))
-          (let ((ids (mapcar (lambda (ch) (alist-get 'id ch))
-                             (disco-root--collect-activity-channels))))
-            (should (member "c1" ids))
-            (should-not (member "t1" ids)))))
-    (disco-state-reset)))
-
-(ert-deftest disco-root-collect-activity-channels-includes-threads-when-enabled ()
-  (disco-state-reset)
-  (unwind-protect
-      (with-temp-buffer
-        (disco-root-mode)
-        (let ((disco-root-activity-include-threads t)
-              (guild-id "g1"))
-          (disco-state-set-guilds (list `((id . ,guild-id)
-                                          (name . "Guild One"))))
-          (disco-state-put-channels
-           guild-id
-           (list '((id . "c1")
-                   (guild_id . "g1")
-                   (type . 0)
-                   (permissions . "1024")
-                   (name . "general")
-                   (last_message_id . "10"))
-                 '((id . "t1")
-                   (guild_id . "g1")
-                   (type . 11)
-                   (permissions . "1024")
-                   (parent_id . "c1")
-                   (name . "hot-thread")
-                   (last_message_id . "11"))))
-          (let ((ids (mapcar (lambda (ch) (alist-get 'id ch))
-                             (disco-root--collect-activity-channels))))
-            (should (member "c1" ids))
-            (should (member "t1" ids)))))
-    (disco-state-reset)))
 
 (ert-deftest disco-root-auto-fill-to-width-requests-geometry-sync-on-change ()
   (with-temp-buffer

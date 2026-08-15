@@ -145,8 +145,7 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "g u") #'disco-root-next-unread
     (kbd "s") #'disco-root-search
     (kbd "S") #'disco-root-search-transient
-    ;; Release the legacy layout shortcuts from Evil's auxiliary maps after
-    ;; package reloads.
+    ;; Release stale root shortcuts from Evil's auxiliary maps after reloads.
     (kbd "l") nil
     (kbd "L") nil
     (kbd "\\") #'disco-root-toggle-sort-mode

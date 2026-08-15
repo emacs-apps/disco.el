@@ -3,7 +3,7 @@
 
 * Dependencies
 
-- Emacs 27.1
+- Emacs 29.1
 - ~plz~ for HTTP
 - ~websocket~ for Gateway
 - Appkit 0.2.15 for views, chat, presentation, and media
@@ -24,7 +24,7 @@
 | ~disco-directory.el~ | guild and DM indexes |
 | ~disco-preview.el~ | latest-message preview hydration |
 | ~disco-gateway.el~ | Gateway transport and dispatch |
-| ~disco-root-layout.el~ | composite/search render specifications |
+| ~disco-root-render.el~ | composite/search render specifications |
 | ~disco-root-view.el~ | root row models and renderers |
 | ~disco-root.el~ | root controllers and live updates |
 | ~disco-channel-directory.el~ | per-guild browser |
