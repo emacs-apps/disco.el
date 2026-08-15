@@ -139,6 +139,8 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "<return>") #'disco-root-open-at-point
     (kbd "g r") #'disco-root-refresh
     (kbd "g G") #'disco-root-sync-gateway-context
+    (kbd "g s") #'disco-root-search
+    (kbd "g S") #'disco-root-search-transient
     (kbd "s") #'disco-root-search
     (kbd "S") #'disco-root-search-transient
     (kbd "\\") #'disco-root-toggle-sort-mode
@@ -155,6 +157,8 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "RET") #'disco-channel-directory-open-at-point
     (kbd "<return>") #'disco-channel-directory-open-at-point
     (kbd "g r") #'disco-channel-directory-refresh
+    (kbd "g s") #'disco-channel-directory-set-filter
+    (kbd "g S") #'disco-channel-directory-clear-filter
     (kbd "g b") #'disco-channel-directory-open-root
     (kbd "s") #'disco-channel-directory-set-filter
     (kbd "S") #'disco-channel-directory-clear-filter
@@ -197,7 +201,8 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "g p") #'disco-room-search-prev)
 
   ;; Timeline mode is inactive in the composer, so these keys cannot steal
-  ;; draft input.  Evil operators and motions retain their native meanings.
+  ;; draft input.  Evil operators and motions retain their native meanings
+  ;; except for the deliberate normal-state message deletion aliases below.
   (appkit-evil-define-keys
       disco-evil--application-states 'disco-room-timeline-mode-map
     (kbd "q") #'quit-window
@@ -211,6 +216,13 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "-") #'disco-msg-remove-reaction
     (kbd "T") #'disco-msg-open-thread
     (kbd "?") #'disco-room-transient)
+  ;; Like Telega's message buttons, timeline deletion is message-first:
+  ;; `D' and `d d' delete the current Discord message.  A `d' prefix is
+  ;; unavoidable here, so native `d{motion}' remains available only outside
+  ;; the timeline (including the composer).
+  (appkit-evil-define-keys 'normal 'disco-room-timeline-mode-map
+    (kbd "D") #'disco-msg-delete
+    (kbd "d d") #'disco-msg-delete)
   ;; Motion state has no native `o'; block the ordinary Emacs timeline action.
   (appkit-evil-define-keys 'motion 'disco-room-timeline-mode-map
     (kbd "o") #'undefined))
