@@ -169,7 +169,7 @@
                                (content . "fallback text")) t)
         (should (equal "fallback text" copied))))))
 
-(ert-deftest disco-msg-command-map-dispatches-through-buffer-local-adapters ()
+(ert-deftest disco-msg-commands-dispatch-through-buffer-local-adapters ()
   (with-temp-buffer
     (let ((msg '((id . "m1")))
           seen)
@@ -237,14 +237,7 @@
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
-(ert-deftest disco-msg-apply-command-map-preserves-existing-local-keymaps ()
-  (with-temp-buffer
-    (insert "ab")
-    (let ((inner-map (make-sparse-keymap)))
-      (add-text-properties 2 3 (list 'keymap inner-map))
-      (disco-msg-apply-command-map (point-min) (point-max))
-      (should (eq disco-msg-command-map (get-text-property 1 'keymap)))
-      (should (eq inner-map (get-text-property 2 'keymap))))))
+
 
 (provide 'disco-msg-test)
 

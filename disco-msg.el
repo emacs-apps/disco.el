@@ -73,36 +73,8 @@ return a string or nil.")
 (defvar-local disco-msg--inspect-guild-id nil
   "Guild id shown by the current msg inspect buffer.")
 
-(defvar disco-msg-command-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "c") #'disco-msg-copy-dwim)
-    (define-key map (kbd "l") #'disco-msg-copy-link)
-    (define-key map (kbd "n") #'disco-msg-next)
-    (define-key map (kbd "p") #'disco-msg-previous)
-    (define-key map (kbd "o") #'disco-msg-operate)
-    (define-key map (kbd "r") #'disco-msg-reply)
-    (define-key map (kbd "f") #'disco-msg-forward)
-    (define-key map (kbd "e") #'disco-msg-edit)
-    (define-key map (kbd "d") #'disco-msg-delete)
-    (define-key map (kbd "i") #'disco-msg-describe-message)
-    (define-key map (kbd "t") #'disco-msg-copy-text)
-    (define-key map (kbd "L") #'disco-msg-redisplay)
-    (define-key map (kbd "!") #'disco-msg-add-reaction)
-    (define-key map (kbd "+") #'disco-msg-toggle-reaction)
-    (define-key map (kbd "-") #'disco-msg-remove-reaction)
-    (define-key map (kbd "T") #'disco-msg-open-thread)
-    map)
-  "Default command map applied to rendered message spans.")
 
-(defun disco-msg-apply-command-map (start end)
-  "Apply `disco-msg-command-map' between START and END where no keymap exists."
-  (let ((pos start))
-    (while (< pos end)
-      (let ((next (or (next-single-char-property-change pos 'keymap nil end)
-                      end)))
-        (unless (get-text-property pos 'keymap)
-          (add-text-properties pos next (list 'keymap disco-msg-command-map)))
-        (setq pos next)))))
+
 
 (defun disco-msg--message-start-positions ()
   "Return visible message start positions in the current buffer."
