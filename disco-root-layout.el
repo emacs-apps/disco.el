@@ -1,10 +1,10 @@
-;;; disco-root-layout.el --- Root layout registry for disco.el -*- lexical-binding: t; -*-
+;;; disco-root-layout.el --- Root render specifications for disco.el -*- lexical-binding: t; -*-
 
 ;; Author: disco.el contributors
 
 ;;; Commentary:
 
-;; Layout definitions and customization entry points for root buffer views.
+;; Render specifications shared by the composite root and temporary search.
 
 ;;; Code:
 
@@ -13,10 +13,10 @@
 (require 'appkit-directory)
 (require 'appkit-view)
 
-(defcustom disco-root-default-layout 'tree
-  "Default root layout symbol used when opening the root buffer."
-  :type 'symbol
-  :group 'disco)
+(declare-function disco-root--build-search-layout-view-spec
+                  "disco-root-view" ())
+(declare-function disco-root--build-tree-layout-view-spec
+                  "disco-root-view" ())
 
 (defcustom disco-root-tree-unread-section-limit 40
   "Maximum unread rows shown by the home layout's quick unread section.
@@ -31,45 +31,24 @@ When nil, show all unread rows without truncation."
   :type '(set (const unread) (const private) (const guilds))
   :group 'disco)
 
-(defcustom disco-root-custom-layouts nil
-  "User-defined root layout specs.
-
-Each element is (NAME . PLIST), where NAME is a symbol and PLIST accepts:
-- `:label' string used in root header.
-- `:build' function symbol returning a `disco-root-layout-view-spec'.
-- `:update-mode' symbol `incremental' or `full'.
-- `:unread-mode' symbol such as `section', `summary', or `filter'.
-- `:refresh-headings' function called in incremental update mode.
-
-Custom entries can override built-in layouts when NAME matches."
-  :type 'sexp
-  :group 'disco)
+(defvar disco-root--search-active-p)
 
 (cl-defstruct (disco-root-layout-view-spec
                (:constructor disco-root-layout-view-spec-create))
   kind
-  before-render
   entries
-  entry-inserter
   list-spec
   directory-surface
-  force-keys
-  after-render)
+  force-keys)
 
 (cl-defstruct (disco-root-layout-entry
                (:constructor disco-root-layout-entry-create))
   key
   type
-  section
   title
-  count
-  guild
-  unread-count
   text
   face
-  channel
   indent
-  scope
   tab
   message
   label
@@ -78,136 +57,33 @@ Custom entries can override built-in layouts when NAME matches."
   total-count
   loading)
 
-(defconst disco-root-layout-builtin-specs
-  '((tree
-     :label "Home"
-     :build disco-root--build-tree-layout-view-spec
-     :update-mode incremental
-     :unread-mode section
-     :refresh-headings disco-root--refresh-heading-nodes)
-    (activity
-     :label "Activity"
-     :build disco-root--build-activity-layout-view-spec
-     :update-mode incremental
-     :unread-mode filter)
-    (search
-     :label "Search"
-     :build disco-root--build-search-layout-view-spec
-     :update-mode full
-     :unread-mode summary
-     :selectable nil))
-  "Built-in root layout specs.")
-
-(defun disco-root-layout-specs ()
-  "Return merged built-in and custom root layout specs as an alist."
-  (let ((specs (copy-tree disco-root-layout-builtin-specs)))
-    (dolist (entry disco-root-custom-layouts)
-      (when (and (consp entry)
-                 (symbolp (car entry))
-                 (listp (cdr entry)))
-        (let ((name (car entry))
-              (plist (cdr entry)))
-          (if-let* ((cell (assq name specs)))
-              (setcdr cell plist)
-            (setq specs (append specs (list (cons name plist))))))))
-    specs))
-
-(defun disco-root-layout-names ()
-  "Return ordered list of available root layout symbols."
-  (mapcar #'car (disco-root-layout-specs)))
-
-(defun disco-root-layout-selectable-p (layout)
-  "Return non-nil when LAYOUT is a user-selectable root presentation."
-  (let ((spec (disco-root-layout-spec layout)))
-    (not (and (plist-member spec :selectable)
-              (null (plist-get spec :selectable))))))
-
-(defun disco-root-selectable-layout-names ()
-  "Return ordered user-selectable root layout symbols."
-  (seq-filter #'disco-root-layout-selectable-p
-              (disco-root-layout-names)))
-
-(defun disco-root-layout--active-layout (&optional layout)
-  "Return explicit LAYOUT or currently active root layout symbol."
-  (or layout
-      (and (boundp 'disco-root--layout) disco-root--layout)
-      disco-root-default-layout))
-
-(defun disco-root-layout-spec (&optional layout)
-  "Return merged layout plist for LAYOUT (or active layout).
-
-Signal an error when the selected layout is not registered."
-  (let* ((name (disco-root-layout--active-layout layout))
-         (spec (alist-get name (disco-root-layout-specs) nil nil #'eq)))
-    (or spec
-        (error "Disco: root layout is not registered: %S" name))))
-
-(defun disco-root-layout-label (&optional layout)
-  "Return display label for LAYOUT (or active layout)."
-  (let* ((name (disco-root-layout--active-layout layout))
-         (label (plist-get (disco-root-layout-spec name) :label)))
-    (or label (symbol-name name))))
-
-(defun disco-root-layout-builder (&optional layout)
-  "Return view builder function symbol for LAYOUT (or active layout)."
-  (plist-get (disco-root-layout-spec layout) :build))
-
-(cl-defun disco-root-layout-list-spec-view-spec-create (list-spec &key after-render)
-  "Wrap LIST-SPEC in a root view spec with optional AFTER-RENDER callback."
+(defun disco-root-layout-list-spec-view-spec-create (list-spec)
+  "Wrap LIST-SPEC in a root view spec."
   (disco-root-layout-view-spec-create
    :kind 'list-spec
-   :list-spec list-spec
-   :after-render after-render))
-
-(cl-defun disco-root-layout-ewoc-entry-view-spec-create
-    (entries &key before-render entry-inserter after-render)
-  "Return one EWOC-backed root layout view spec for ENTRY list ENTRIES.
-
-When BEFORE-RENDER or ENTRY-INSERTER are omitted, use the standard root EWOC
-helpers so custom `:build' layouts can reuse the built-in home/activity entry
-pipeline without re-declaring private hooks.  AFTER-RENDER runs afterward."
-  (disco-root-layout-view-spec-create
-   :kind 'entries
-   :before-render (or before-render 'disco-root--prepare-ewoc-state)
-   :entries entries
-   :entry-inserter (or entry-inserter 'disco-root--ewoc-insert-entry)
-   :after-render after-render))
+   :list-spec list-spec))
 
 (cl-defun disco-root-layout-directory-view-spec-create
-    (surface entries &key force-keys after-render)
+    (surface entries &key force-keys)
   "Return one Appkit directory VIEW-SPEC for SURFACE and ENTRIES.
 
-FORCE-KEYS names retained directory rows whose rich renderers must run again.
-Unlike the legacy EWOC layouts, rendering this spec reconciles the existing
-surface without erasing its nodes or fold state."
+FORCE-KEYS names retained directory rows whose rich renderers must run again."
   (unless (appkit-directory-surface-p surface)
     (error "Disco: root directory layout requires an Appkit surface"))
   (disco-root-layout-view-spec-create
    :kind 'directory
    :entries entries
    :directory-surface surface
-   :force-keys force-keys
-   :after-render after-render))
+   :force-keys force-keys))
 
 (defun disco-root-layout-render-view-spec (view-spec)
-  "Render VIEW-SPEC in current root buffer.
-
-VIEW-SPEC is a `disco-root-layout-view-spec' object produced by a layout
-builder."
+  "Render VIEW-SPEC in the current root buffer."
   (when (disco-root-layout-view-spec-p view-spec)
     (let ((inhibit-read-only t))
-      (when-let* ((before-render
-                   (disco-root-layout-view-spec-before-render view-spec)))
-        (funcall before-render))
       (pcase (disco-root-layout-view-spec-kind view-spec)
         ('list-spec
          (when-let* ((list-spec (disco-root-layout-view-spec-list-spec view-spec)))
            (appkit-view-render-list-spec list-spec)))
-        ('entries
-         (when-let* ((entry-inserter
-                      (disco-root-layout-view-spec-entry-inserter view-spec)))
-           (dolist (entry (or (disco-root-layout-view-spec-entries view-spec) '()))
-             (funcall entry-inserter entry))))
         ('directory
          (appkit-directory-reconcile
           (or (disco-root-layout-view-spec-directory-surface view-spec)
@@ -217,35 +93,17 @@ builder."
         (_
          (error "Unknown root layout view spec kind: %S"
                 (disco-root-layout-view-spec-kind view-spec))))
-      (when-let* ((after-render
-                   (disco-root-layout-view-spec-after-render view-spec)))
-        (funcall after-render)))
-    t))
+      t)))
 
-(defun disco-root-layout-render (&optional layout)
-  "Render LAYOUT (or active layout) in the current root buffer."
-  (let* ((name (disco-root-layout--active-layout layout))
-         (builder (disco-root-layout-builder name)))
-    (unless (functionp builder)
-      (error "Disco: root layout %S has no callable builder" name))
-    (let ((view-spec (funcall builder)))
-      (unless (disco-root-layout-view-spec-p view-spec)
-        (error "Disco: root layout %S returned an invalid view spec" name))
-      (disco-root-layout-render-view-spec view-spec))))
-
-(defun disco-root-layout-update-mode (&optional layout)
-  "Return update mode for LAYOUT (or active layout)."
-  (or (plist-get (disco-root-layout-spec layout) :update-mode)
-      'incremental))
-
-(defun disco-root-layout-unread-mode (&optional layout)
-  "Return unread lens mode for LAYOUT (or active layout)."
-  (or (plist-get (disco-root-layout-spec layout) :unread-mode)
-      'summary))
-
-(defun disco-root-layout-refresh-headings-function (&optional layout)
-  "Return optional heading refresher for LAYOUT (or active layout)."
-  (plist-get (disco-root-layout-spec layout) :refresh-headings))
+(defun disco-root-layout-render ()
+  "Render the composite root or its active temporary search projection."
+  (let* ((builder (if disco-root--search-active-p
+                      #'disco-root--build-search-layout-view-spec
+                    #'disco-root--build-tree-layout-view-spec))
+         (view-spec (funcall builder)))
+    (unless (disco-root-layout-view-spec-p view-spec)
+      (error "Disco: root builder returned an invalid view spec"))
+    (disco-root-layout-render-view-spec view-spec)))
 
 (provide 'disco-root-layout)
 

@@ -5,13 +5,12 @@
 ;;; Commentary:
 
 ;; Account-level dashboard showing unread channels, DMs, and lazily expanded
-;; guild channel trees on one composite Appkit directory surface.  Activity
-;; and search remain switchable legacy layouts.
+;; guild channel trees on one canonical Appkit directory surface.  Search is a
+;; temporary projection with an explicit exit path.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'ewoc)
 (require 'pp)
 (autoload 'org-read-date "org" nil nil)
 (require 'transient)
@@ -115,20 +114,9 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--pre-unread-view-mode 'all
   "Most recent non-unread `disco-root--view-mode' value.")
 
-(defvar-local disco-root--layout 'tree
-  "Current root layout symbol.")
+(defvar-local disco-root--search-active-p nil
+  "Non-nil while root displays the temporary search projection.")
 
-(defvar-local disco-root--ewoc nil
-  "EWOC used to render the current root list incrementally.")
-
-(defvar-local disco-root--channel-node-table nil
-  "Hash table mapping channel IDs to root EWOC node lists.")
-
-(defvar-local disco-root--section-node-table nil
-  "Hash table mapping section symbols to EWOC nodes.")
-
-(defvar-local disco-root--guild-node-table nil
-  "Hash table mapping guild IDs to EWOC nodes.")
 
 (defvar-local disco-root--rendering nil
   "Non-nil while a root render transaction is rebuilding the buffer.")
@@ -142,8 +130,6 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--fill-column nil
   "Effective root layout width used for the latest render pass.")
 
-(defconst disco-root--section-order '(unread private guilds)
-  "Known top-level section symbols for root buffer rendering.")
 
 (defconst disco-root--activity-icon-slot-width 4
   "Reserved icon slot width (columns) in activity rows.")
@@ -218,8 +204,6 @@ directory surface, so it survives layout changes and application sessions.")
 (defvar-local disco-root--search-thread-table nil
   "Hash table thread-id -> thread object from the active search session.")
 
-(defvar-local disco-root--search-prev-layout nil
-  "Most recent non-search layout before activating root search view.")
 
 (defcustom disco-root-search-tab-limit 10
   "Default number of search results to request per root search tab."
@@ -324,13 +308,13 @@ by default to keep root refresh and resize reflow responsive."
     (date-time . "%d.%m.%y %a %H:%M"))
   "Activity timestamp formats, inspired by `telega-date-format-alist'."
   :type '(alist :key-type
-		(choice (const :tag "If date is today" today)
-			(const :tag "If date is this week" this-week)
-			(const :tag "If date is older" old)
-			(const :tag "Time only" time)
-			(const :tag "Date only" date)
-			(const :tag "Date and time" date-time))
-		:value-type string)
+          (choice (const :tag "If date is today" today)
+                  (const :tag "If date is this week" this-week)
+                  (const :tag "If date is older" old)
+                  (const :tag "Time only" time)
+                  (const :tag "Date only" date)
+                  (const :tag "Date and time" date-time))
+          :value-type string)
   :group 'disco)
 
 (defcustom disco-root-activity-time-column-width 9
@@ -355,7 +339,7 @@ The default fits the longest built-in date format plus its status symbol."
 (defcustom disco-root-auto-fill-margin-columns 1
   "Additional margin columns reserved when computing root fill width."
   :type '(choice (const :tag "No extra margin" nil)
-		 integer)
+          integer)
   :group 'disco)
 
 (defcustom disco-root-debug-log-enabled nil
@@ -444,55 +428,32 @@ process, so late callbacks cannot affect a replacement account session.")
   "Return non-nil when EVENT-TYPE should trigger root updates."
   (memq event-type
         '(ready message-create message-ack
-		channel-create channel-update channel-delete channel-update-partial
-		channel-sync
-		channel-unread-update passive-update-v1 passive-update-v2
-		channel-pins-update channel-pins-ack
-		channel-statuses channel-info channel-member-count-update
-		last-messages conversation-summary-update
-		presence-update sessions-replace
-		voice-state-update voice-channel-status-update voice-channel-start-time-update
-		guild-create guild-update guild-delete guild-sync
-		user-guild-settings-update
-		guild-feature-ack user-non-channel-ack notification-center-items-ack
-		thread-create thread-update thread-delete thread-list-sync)))
+          channel-create channel-update channel-delete channel-update-partial
+          channel-sync
+          channel-unread-update passive-update-v1 passive-update-v2
+          channel-pins-update channel-pins-ack
+          channel-statuses channel-info channel-member-count-update
+          last-messages conversation-summary-update
+          presence-update sessions-replace
+          voice-state-update voice-channel-status-update voice-channel-start-time-update
+          guild-create guild-update guild-delete guild-sync
+          user-guild-settings-update
+          guild-feature-ack user-non-channel-ack notification-center-items-ack
+          thread-create thread-update thread-delete thread-list-sync)))
 
 (defun disco-root--live-event-structural-p (event-type)
   "Return non-nil when EVENT-TYPE requires a full root reconcile."
   (memq event-type
         '(channel-create channel-update channel-delete channel-sync
-			 guild-create guild-update guild-delete guild-sync
-			 user-guild-settings-update
-			 thread-create thread-update thread-delete thread-list-sync)))
+          guild-create guild-update guild-delete guild-sync
+          user-guild-settings-update
+          thread-create thread-update thread-delete thread-list-sync)))
 
 (defun disco-root--live-event-header-p (event-type)
   "Return non-nil when EVENT-TYPE affects root header state only."
   (memq event-type
         '(ready guild-feature-ack user-non-channel-ack notification-center-items-ack
-		sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
-
-(defun disco-root-set-layout (layout)
-  "Select user-facing root LAYOUT and synchronize its projection.
-
-Search is a transient workflow rather than a selectable presentation."
-  (interactive
-   (let* ((layouts (disco-root-selectable-layout-names))
-          (default (or (and (memq disco-root--layout layouts)
-                            disco-root--layout)
-                       (and (memq disco-root-default-layout layouts)
-                            disco-root-default-layout))))
-     (list
-      (intern
-       (completing-read
-        "Root layout: "
-        (mapcar #'symbol-name layouts)
-        nil t nil nil (and default (symbol-name default)))))))
-  (unless (memq layout (disco-root-selectable-layout-names))
-    (user-error "disco: root layout is not selectable: %s" layout))
-  (setq disco-root--layout layout)
-  (disco-root--queue-live-update nil t t)
-  (appkit-sync-invalidations (appkit-current-view))
-  (message "disco: root layout -> %s" (disco-root-layout-label layout)))
+          sessions-replace voice-state-update passive-update-v1 passive-update-v2)))
 
 (defun disco-root--set-view-mode (mode)
   "Set root visibility MODE and keep unread-lens restore state."
@@ -501,33 +462,25 @@ Search is a transient workflow rather than a selectable presentation."
     (setq disco-root--pre-unread-view-mode mode)))
 
 (defun disco-root-toggle-unread-lens ()
-  "Toggle unread lens for current layout.
-
-The home layout toggles unread quick section visibility.  Other layouts toggle
-between current view mode and unread-only filter."
+  "Toggle the composite root's unread quick section."
   (interactive)
-  (if (eq (disco-root--ensure-layout) 'tree)
-      (let ((expanded (not (disco-root--section-expanded-p 'unread))))
-        (disco-root--set-section-expanded 'unread expanded)
-        (disco-root--queue-live-update nil t t)
-        (when-let* ((view (appkit-current-view)))
-          (appkit-sync-invalidations view))
-        (message "disco: home unread section %s"
-                 (if expanded "expanded" "collapsed")))
-    (if (eq disco-root--view-mode 'unread)
-        (disco-root--set-view-mode disco-root--pre-unread-view-mode)
-      (disco-root--set-view-mode 'unread))
+  (when disco-root--search-active-p
+    (user-error "disco: exit search before changing the unread lens"))
+  (let ((expanded (not (disco-root--section-expanded-p 'unread))))
+    (disco-root--set-section-expanded 'unread expanded)
     (disco-root--queue-live-update nil t t)
-    (appkit-sync-invalidations (appkit-current-view))
-    (message "disco: root view mode -> %s" disco-root--view-mode)))
+    (when-let* ((view (appkit-current-view)))
+      (appkit-sync-invalidations view))
+    (message "disco: home unread section %s"
+             (if expanded "expanded" "collapsed"))))
 
 (defun disco-root--render-preserving-position ()
-  "Project root while preserving semantic point and viewport positions."
+  "Render root while preserving the active projection's position."
   (appkit-position-render-preserving
    #'disco-root-render
-   :anchor-property (if (eq (disco-root--ensure-layout) 'tree)
-                        appkit-directory-key-property
-                      'disco-root-entry-key)
+   :anchor-property (if disco-root--search-active-p
+                        'disco-root-entry-key
+                      appkit-directory-key-property)
    :preserve-window-start t)
   (disco-root--update-window-points))
 
@@ -556,7 +509,6 @@ nil `switch-to-buffer-preserve-window-point' in passive windows."
 Live window points remain independent and are restored by `appkit-position'."
   (disco-root--hack-window-points point))
 
-
 (defun disco-root--search-domain-equal-p (left right)
   "Return non-nil when LEFT and RIGHT describe the same search domain."
   (and (eq (disco-root--search-domain-kind left)
@@ -584,7 +536,7 @@ Live window points remain independent and are restored by `appkit-position'."
 
 (defun disco-root--search-current-domain-at-point ()
   "Infer the most relevant root search domain from point context."
-  (or (when (and (eq (disco-root--ensure-layout) 'search)
+  (or (when (and disco-root--search-active-p
                  disco-root--search-domain)
         disco-root--search-domain)
       (disco-root--search-current-channel-domain)
@@ -1103,7 +1055,6 @@ Live window points remain independent and are restored by `appkit-position'."
       (setq copy (plist-put copy :sort-order 'desc)))
     copy))
 
-
 (defun disco-root--search-ensure-draft ()
   "Ensure current root buffer has initialized draft search state."
   (unless disco-root--search-domain
@@ -1343,23 +1294,24 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   (disco-root--search-sync-query-display)
   disco-root--search-query-spec)
 
+(defun disco-root--search-activate ()
+  "Activate and dispatch the current root search draft."
+  (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
+  (setq-local disco-root--search-generation (1+ disco-root--search-generation))
+  (disco-root--search-reset-tab-states)
+  (setq-local disco-root--search-active-p t)
+  (disco-root--search-render-if-visible)
+  (disco-root--search-dispatch disco-root--search-generation
+                               (disco-root--search-request-tabs nil)))
+
 (defun disco-root--search-start-current-draft ()
   "Execute root search using the current draft domain and spec."
   (disco-root--search-ensure-draft)
   (unless (disco-root--search-effective-spec-p disco-root--search-query-spec)
     (user-error "disco: set a search query or filter first"))
   (disco-root--search-sync-query-display)
-  (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
-  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
-  (setq-local disco-root--search-generation (1+ disco-root--search-generation))
-  (setq-local disco-root--search-prev-layout
-              (unless (eq disco-root--layout 'search)
-                disco-root--layout))
-  (disco-root--search-reset-tab-states)
-  (setq disco-root--layout 'search)
-  (disco-root--search-render-if-visible)
-  (disco-root--search-dispatch disco-root--search-generation
-                               (disco-root--search-request-tabs nil))
+  (disco-root--search-activate)
   (message "disco: searching in %s"
            (disco-root--search-domain-label disco-root--search-domain)))
 
@@ -1860,8 +1812,9 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
     ("L" "Set archive fetch limit"
      disco-root-menu-set-thread-archive-fetch-limit)]
    ["View"
-    ("l" "Choose layout..." disco-root-set-layout)
-    ("s" "Search..." disco-root-search-transient)
+    ("s" "Search..." disco-root-search)
+    ("S" "Advanced search..." disco-root-search-transient)
+    ("b" "Exit search" disco-root-search-exit)
     ("U" "Toggle unread lens" disco-root-toggle-unread-lens)]
    ["Inspect"
     ("H" "HTTP queue" disco-http-describe-queue)
@@ -2017,7 +1970,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
 (defun disco-root--search-render-if-visible ()
   "Request a coalesced projection sync when search layout is visible."
   (when (and (eq major-mode 'disco-root-mode)
-             (eq (disco-root--ensure-layout) 'search))
+             disco-root--search-active-p)
     (disco-root--queue-live-update nil t nil)))
 
 (defun disco-root--search-filter-messages (messages)
@@ -2182,10 +2135,25 @@ replacement view."
                      #'disco-root--search-handle-error
                      generation tabs-alist err)))))))
 
-(defun disco-root-search-refresh ()
-  "Rerun current root search query in the active search domain."
+(defun disco-root-search-exit ()
+  "Leave the temporary search projection and restore the composite root."
   (interactive)
-  (unless (and disco-root--search-domain
+  (unless disco-root--search-active-p
+    (user-error "disco: root search is not active"))
+  (setq-local disco-root--search-active-p nil
+              disco-root--search-in-flight nil
+              disco-root--search-generation (1+ disco-root--search-generation))
+  (disco-root--queue-live-update nil t t)
+  (when-let* ((view (appkit-current-view)))
+    (appkit-sync-invalidations view))
+  (message "disco: search closed"))
+
+
+(defun disco-root-search-refresh ()
+  "Rerun the active temporary root search."
+  (interactive)
+  (unless (and disco-root--search-active-p
+               disco-root--search-domain
                (disco-root--search-effective-spec-p disco-root--search-query-spec))
     (user-error "disco: no active root search"))
   (setq-local disco-root--search-query-spec
@@ -2204,7 +2172,7 @@ replacement view."
   "Load the next page of results for exact search TAB."
   (unless tab
     (user-error "disco: no search tab to load"))
-  (unless (and (eq (disco-root--ensure-layout) 'search)
+  (unless (and disco-root--search-active-p
                disco-root--search-domain)
     (user-error "disco: no active root search"))
   (disco-root--search-dispatch (or disco-root--search-generation 0)
@@ -2213,10 +2181,10 @@ replacement view."
            (downcase (disco-root--search-tab-label tab))))
 
 (defun disco-root-search (query domain)
-  "Search root buffer DOMAIN for QUERY and show results in search layout."
+  "Search root buffer DOMAIN for QUERY in a temporary projection."
   (interactive
    (let* ((domain (disco-root--read-search-domain))
-          (initial (and (eq (disco-root--ensure-layout) 'search)
+          (initial (and disco-root--search-active-p
                         disco-root--search-query
                         (disco-root--search-domain-equal-p domain disco-root--search-domain)
                         disco-root--search-query)))
@@ -2229,17 +2197,7 @@ replacement view."
     (setq-local disco-root--search-domain (copy-tree domain))
     (setq-local disco-root--search-query-spec
                 (disco-root--search-parse-query normalized-query domain))
-    (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
-    (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
-    (setq-local disco-root--search-generation (1+ disco-root--search-generation))
-    (setq-local disco-root--search-prev-layout
-                (unless (eq disco-root--layout 'search)
-                  disco-root--layout))
-    (disco-root--search-reset-tab-states)
-    (setq disco-root--layout 'search)
-    (disco-root--search-render-if-visible)
-    (disco-root--search-dispatch disco-root--search-generation
-                                 (disco-root--search-request-tabs nil))
+    (disco-root--search-activate)
     (message "disco: searching %s in %s"
              normalized-query
              (disco-root--search-domain-label domain))))
@@ -2418,25 +2376,19 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
   (message "disco: root debug log cleared"))
 
 (defun disco-root--reflow-layout ()
-  "Reflow currently rendered root layout without rebuilding model lists."
+  "Reflow the active root projection without changing its model."
   (let ((inhibit-read-only t))
-    (cond
-     ((and (eq major-mode 'disco-root-mode)
-           (eq (disco-root--ensure-layout) 'tree))
-      (setq disco-root--tree-force-all-rows-p t)
-      (disco-root-render))
-     ((and (eq major-mode 'disco-root-mode)
-           disco-root--ewoc)
-      (ewoc-refresh disco-root--ewoc))
-     (t
-      (disco-root-render)))))
+    (when (and (eq major-mode 'disco-root-mode)
+               (not disco-root--search-active-p))
+      (setq disco-root--tree-force-all-rows-p t))
+    (disco-root-render)))
 
 (defun disco-root--reflow-preserving-position ()
   "Reflow root while preserving semantic point and viewport positions."
   (appkit-position-render-preserving
    #'disco-root--reflow-layout
    :anchor-property (if (and (eq major-mode 'disco-root-mode)
-                             (eq (disco-root--ensure-layout) 'tree))
+                             (not disco-root--search-active-p))
                         appkit-directory-key-property
                       'disco-root-entry-key)
    :preserve-window-start t)
@@ -2541,277 +2493,20 @@ With FORCE non-nil, reproject even if width has not changed."
     (user-error "disco: point is not on a root section")))
 
 (defun disco-root-tab-dwim ()
-  "Toggle a section, enter a guild, or move to the next channel row."
+  "Act on the composite root or advance through search actions."
   (interactive)
-  (if (and (eq major-mode 'disco-root-mode)
-           (eq (disco-root--ensure-layout) 'tree))
-      (appkit-directory-tab-dwim)
-    (cond
-     ((disco-root--toggle-node-at-point))
-     ((disco-root--line-guild-id)
-      (disco-channel-directory-open (disco-root--line-guild-id)))
-     (t
-      (disco-root-button-forward 1)))))
-
-(defun disco-root--refresh-channel-node (channel-id)
-  "Refresh one CHANNEL-ID row in EWOC.
-
-Return one of symbols:
-- `updated' when at least one visible row was patched.
-- `missing' when CHANNEL-ID has no visible EWOC nodes.
-- `stale' when node exists but backing state can no longer patch it."
-  (let* ((nodes (and channel-id
-                     disco-root--channel-node-table
-                     (gethash channel-id disco-root--channel-node-table)))
-         (result
-          (cond
-           ((or (null channel-id)
-                (null disco-root--ewoc)
-                (null nodes))
-            'missing)
-           (t
-            (let ((channel (disco-state-channel channel-id))
-                  updated)
-              (if (and channel (disco-root--displayable-channel-p channel))
-                  (progn
-                    (let ((inhibit-read-only t))
-                      (dolist (node (if (listp nodes) nodes (list nodes)))
-                        (let ((entry (copy-sequence (ewoc-data node))))
-                          (setf (disco-root-layout-entry-channel entry) channel)
-                          (ewoc-set-data node entry)
-                          (ewoc-invalidate disco-root--ewoc node)
-                          (setq updated t))))
-                    (if updated 'updated 'missing))
-                'stale))))))
-    (when (disco-root--debug-log-verbose-p)
-      (disco-root--debug-log "refresh-channel %s -> %s" channel-id result))
-    result))
-
-(defun disco-root--channel-node-list (channel-id)
-  "Return normalized EWOC node list for CHANNEL-ID."
-  (let ((nodes (and channel-id
-                    disco-root--channel-node-table
-                    (gethash channel-id disco-root--channel-node-table))))
-    (cond
-     ((null nodes) nil)
-     ((listp nodes) nodes)
-     (t (list nodes)))))
-
-(defun disco-root--activity-channel-node (channel-id)
-  "Return primary activity EWOC node for CHANNEL-ID, or nil."
-  (car (disco-root--channel-node-list channel-id)))
-
-(defun disco-root--move-channel-node-before (channel-id node before-node)
-  "Move CHANNEL-ID NODE before BEFORE-NODE, returning resulting node."
-  (if (or (null node)
-          (null disco-root--ewoc)
-          (eq node before-node))
-      node
-    (let ((entry (copy-sequence (ewoc-data node))))
-      (ewoc-delete disco-root--ewoc node)
-      (setq node (if before-node
-                     (ewoc-enter-before disco-root--ewoc before-node entry)
-                   (ewoc-enter-last disco-root--ewoc entry)))
-      (when channel-id
-        (puthash channel-id (list node) disco-root--channel-node-table))
-      node)))
-
-(defun disco-root--activity-channel-before-p (left right)
-  "Return non-nil when LEFT should be ordered before RIGHT in activity view."
-  (pcase disco-root--sort-mode
-    ('name
-     (string-lessp (disco-root--channel-display-name left)
-                   (disco-root--channel-display-name right)))
-    (_
-     (let ((left-score (disco-root--channel-activity-score left))
-           (right-score (disco-root--channel-activity-score right)))
-       (if (= left-score right-score)
-           (string-lessp (disco-root--channel-display-name left)
-                         (disco-root--channel-display-name right))
-         (> left-score right-score))))))
-
-(defun disco-root--activity-node-channel (node)
-  "Return channel object stored in activity EWOC NODE, or nil."
-  (when node
-    (let ((entry (ewoc-data node)))
-      (when (eq (disco-root-layout-entry-type entry) 'channel)
-        (disco-root-layout-entry-channel entry)))))
-
-(defun disco-root--activity-node-prev-channel (node)
-  "Return previous activity channel node before NODE, or nil."
-  (let ((probe (and node (ewoc-prev disco-root--ewoc node))))
-    (while (and probe (null (disco-root--activity-node-channel probe)))
-      (setq probe (ewoc-prev disco-root--ewoc probe)))
-    probe))
-
-(defun disco-root--activity-node-next-channel (node)
-  "Return next activity channel node after NODE, or nil."
-  (let ((probe (and node (ewoc-next disco-root--ewoc node))))
-    (while (and probe (null (disco-root--activity-node-channel probe)))
-      (setq probe (ewoc-next disco-root--ewoc probe)))
-    probe))
-
-(defun disco-root--activity-reposition-existing-node (channel-id channel node)
-  "Reposition CHANNEL-ID NODE for CHANNEL using local neighbor checks."
-  (let* ((prev-node (disco-root--activity-node-prev-channel node))
-         (next-node (disco-root--activity-node-next-channel node))
-         (prev-channel (and prev-node (disco-root--activity-node-channel prev-node)))
-         (next-channel (and next-node (disco-root--activity-node-channel next-node)))
-         target-before
-         move-to-end)
-    (cond
-     ((and prev-channel
-           (disco-root--activity-channel-before-p channel prev-channel))
-      (setq target-before prev-node)
-      (let ((probe (disco-root--activity-node-prev-channel prev-node)))
-        (while (and probe
-                    (disco-root--activity-channel-before-p
-                     channel
-                     (disco-root--activity-node-channel probe)))
-          (setq target-before probe)
-          (setq probe (disco-root--activity-node-prev-channel probe)))))
-     ((and next-channel
-           (disco-root--activity-channel-before-p next-channel channel))
-      (let ((probe next-node))
-        (while (and probe
-                    (disco-root--activity-channel-before-p
-                     (disco-root--activity-node-channel probe)
-                     channel))
-          (setq probe (disco-root--activity-node-next-channel probe)))
-        (setq target-before probe)
-        (setq move-to-end (null probe)))))
-    (when (or (and target-before (not (eq target-before node)))
-              move-to-end)
-      (disco-root--move-channel-node-before channel-id node target-before))))
-
-(defun disco-root--activity-reorder-channel-node (channel-id)
-  "Reposition CHANNEL-ID node in activity EWOC.
-
-Return `missing-visible' when a visible channel has no EWOC node."
-  (let* ((channel (and channel-id (disco-state-channel channel-id)))
-         (visible (and channel (disco-root--activity-channel-eligible-p channel)))
-         (node (and channel-id (disco-root--activity-channel-node channel-id))))
-    (cond
-     ((and visible node)
-      (disco-root--activity-reposition-existing-node channel-id channel node)
-      'moved)
-     ((and visible (null node))
-      'missing-visible)
-     ((and (not visible) node)
-      (ewoc-delete disco-root--ewoc node)
-      (remhash channel-id disco-root--channel-node-table)
-      'removed)
-     (t
-      'unchanged))))
-
-(defun disco-root--activity-reorder-visible-nodes (&optional channel-ids)
-  "Reorder activity rows to match current sort/filter state.
-
-When CHANNEL-IDS is non-nil, only reposition those rows and return non-nil
-if structural reconciliation is required."
-  (when (and disco-root--ewoc
-             (eq (disco-root--ensure-layout) 'activity))
-    (if channel-ids
-        (let ((dirty-ids (seq-uniq (delq nil channel-ids) #'equal))
-              missing-visible)
-          (dolist (channel-id dirty-ids)
-            (when (eq (disco-root--activity-reorder-channel-node channel-id)
-                      'missing-visible)
-              (setq missing-visible t)))
-          (when (disco-root--debug-log-verbose-p)
-            (disco-root--debug-log
-             "activity-reorder dirty=%s missing=%s"
-             dirty-ids
-             (and missing-visible t)))
-          missing-visible)
-      (let ((cursor (ewoc-nth disco-root--ewoc 0)))
-        (dolist (channel (disco-root--collect-activity-channels))
-          (let* ((channel-id (alist-get 'id channel))
-                 (node (and channel-id
-                            (disco-root--activity-channel-node channel-id))))
-            (when node
-              (unless (eq node cursor)
-                (setq node (disco-root--move-channel-node-before channel-id
-                                                                 node
-                                                                 cursor)))
-              (setq cursor (ewoc-next disco-root--ewoc node)))))
-        (when (disco-root--debug-log-verbose-p)
-          (disco-root--debug-log "activity-reorder full"))
-        nil))))
-
-(defun disco-root--count-visible-unread-channels ()
-  "Return count of unread channels visible under current root view mode."
-  (let ((seen (make-hash-table :test #'equal))
-        (count 0))
-    (cl-labels
-        ((mark (channel)
-           (let ((channel-id (alist-get 'id channel)))
-             (when (and channel-id
-                        (not (gethash channel-id seen))
-                        (disco-root--channel-visible-in-view-p channel)
-                        (disco-root--channel-has-unread-p channel))
-               (puthash channel-id t seen)
-               (setq count (1+ count))))))
-      (dolist (channel (disco-state-private-channels))
-        (mark channel))
-      (dolist (guild (or (disco-state-guilds) '()))
-        (let ((guild-id (alist-get 'id guild)))
-          (dolist (channel (or (disco-state-guild-channels guild-id) '()))
-            (mark channel))
-          (dolist (thread (or (disco-state-guild-threads guild-id) '()))
-            (mark thread)))))
-    count))
-
-(defun disco-root--refresh-section-node (section count)
-  "Patch SECTION header EWOC node COUNT in place when present."
-  (let ((node (and (hash-table-p disco-root--section-node-table)
-                   (gethash section disco-root--section-node-table))))
-    (when (and node disco-root--ewoc)
-      (let ((entry (copy-sequence (ewoc-data node))))
-        (setf (disco-root-layout-entry-count entry) count)
-        (ewoc-set-data node entry)
-        (ewoc-invalidate disco-root--ewoc node)
-        t))))
-
-(defun disco-root--refresh-section-nodes ()
-  "Refresh unread/private/guild section counters incrementally."
-  (when (hash-table-p disco-root--section-node-table)
-    (disco-root--refresh-section-node 'unread
-                                      (disco-root--count-visible-unread-channels))
-    (disco-root--refresh-section-node 'private
-                                      (length
-                                       (seq-filter #'disco-root--channel-visible-in-view-p
-                                                   (disco-state-private-channels))))
-    (disco-root--refresh-section-node 'guilds
-                                      (length (or (disco-state-guilds) '())))))
-
-(defun disco-root--refresh-guild-node (guild-id)
-  "Patch one guild header node by GUILD-ID, returning non-nil on update."
-  (let ((node (and guild-id
-                   (hash-table-p disco-root--guild-node-table)
-                   (gethash guild-id disco-root--guild-node-table))))
-    (when (and node disco-root--ewoc)
-      (let ((guild (disco-root--guild-by-id guild-id)))
-        (when guild
-          (let ((entry (copy-sequence (ewoc-data node))))
-            (setf (disco-root-layout-entry-guild entry) guild)
-            (setf (disco-root-layout-entry-unread-count entry)
-                  (disco-root--guild-unread-total guild-id t))
-            (ewoc-set-data node entry)
-            (ewoc-invalidate disco-root--ewoc node)
-            t))))))
-
-(defun disco-root--refresh-heading-nodes (channel-ids)
-  "Patch section and guild heading rows related to CHANNEL-IDS."
-  (let (guild-ids)
-    (dolist (channel-id channel-ids)
-      (let ((channel (disco-state-channel channel-id)))
-        (when channel
-          (when-let* ((guild-id (alist-get 'guild_id channel)))
-            (cl-pushnew guild-id guild-ids :test #'equal)))))
-    (disco-root--refresh-section-nodes)
-    (dolist (guild-id guild-ids)
-      (disco-root--refresh-guild-node guild-id))))
+  (cond
+   ((and (eq major-mode 'disco-root-mode)
+         (not disco-root--search-active-p))
+    (appkit-directory-tab-dwim))
+   ((and (eq major-mode 'disco-root-mode)
+         disco-root--search-active-p)
+    (forward-button 1 t t))
+   ((disco-root--toggle-node-at-point))
+   ((disco-root--line-guild-id)
+    (disco-channel-directory-open (disco-root--line-guild-id)))
+   (t
+    (disco-root-button-forward 1))))
 
 (defun disco-root--live-updatable-buffer-mode-p ()
   "Return non-nil when current buffer supports root-style live updates."
@@ -2901,83 +2596,28 @@ When HEADER-P is non-nil, the root header is invalidated too."
            :preserve-window-start t
            :after-restore #'disco-root--update-window-points)))
        ((eq major-mode 'disco-root-mode)
-        (let* ((layout (disco-root--ensure-layout))
-               (layout-update-mode (disco-root-layout-update-mode layout)))
-          (disco-root--debug-log
-           "sync-invalidations layout=%s view=%s dirty=%d structural=%s header=%s geometry=%s"
-           layout
-           disco-root--view-mode
-           (length dirty-channel-ids)
-           (and needs-structural t)
-           (and needs-header t)
-           (and needs-geometry t))
-          (cond
-           ((eq layout 'tree)
+        (disco-root--debug-log
+         "sync-invalidations projection=%s view=%s dirty=%d structural=%s header=%s geometry=%s"
+         (if disco-root--search-active-p 'search 'root)
+         disco-root--view-mode
+         (length dirty-channel-ids)
+         (and needs-structural t)
+         (and needs-header t)
+         (and needs-geometry t))
+        (if disco-root--search-active-p
             (cond
-             ((or needs-structural needs-geometry dirty-channel-ids)
-              (setq disco-root--tree-force-channel-ids dirty-channel-ids
-                    disco-root--tree-force-all-rows-p
-                    (and needs-geometry t))
-              (disco-root--debug-log
-               "sync-invalidations -> tree-reconcile dirty=%d force-all=%s"
-               (length dirty-channel-ids)
-               (and disco-root--tree-force-all-rows-p t))
+             ((or needs-structural needs-geometry)
               (disco-root--render-preserving-position))
              (needs-header
-              (disco-root--refresh-header-line))))
-           (needs-structural
-            (disco-root--debug-log "sync-invalidations -> structural")
-            (disco-root--render-preserving-position))
-           ((and needs-geometry (null dirty-channel-ids) (not needs-header))
-            (disco-root--debug-log "sync-invalidations -> geometry")
-            (disco-root--reflow-preserving-position))
-           (needs-geometry
-            (disco-root--debug-log "sync-invalidations -> geometry+state")
-            (disco-root--render-preserving-position))
-           ((eq layout 'search)
-            (disco-root--debug-log "sync-invalidations -> search-static")
-            (when needs-header
               (disco-root--refresh-header-line)))
-           ((and (eq layout-update-mode 'full)
-                 (or dirty-channel-ids needs-header))
-            (disco-root--debug-log "sync-invalidations -> full-render")
-            (if (and needs-header (null dirty-channel-ids))
-                (disco-root--refresh-header-line)
-              (disco-root--render-preserving-position)))
-           ((and dirty-channel-ids
-                 (eq disco-root--view-mode 'unread))
-            (disco-root--debug-log "sync-invalidations -> unread-render")
+          (cond
+           ((or needs-structural needs-geometry dirty-channel-ids)
+            (setq disco-root--tree-force-channel-ids dirty-channel-ids
+                  disco-root--tree-force-all-rows-p
+                  (and needs-geometry t))
             (disco-root--render-preserving-position))
-           (t
-            (disco-root--debug-log "sync-invalidations -> incremental")
-            (let ((position-snapshot
-                   (appkit-position-capture
-                    :anchor-property 'disco-root-entry-key
-                    :preserve-window-start t)))
-              (with-silent-modifications
-                (dolist (channel-id dirty-channel-ids)
-                  (when (eq (disco-root--refresh-channel-node channel-id) 'stale)
-                    (setq needs-structural t)
-                    (disco-root--debug-log
-                     "sync-invalidations -> structural(stale %s)" channel-id)))
-                (when (and (not needs-structural)
-                           dirty-channel-ids
-                           (eq layout 'activity))
-                  (when (disco-root--activity-reorder-visible-nodes
-                         dirty-channel-ids)
-                    (setq needs-structural t)
-                    (disco-root--debug-log
-                     "sync-invalidations -> structural(activity-reorder)")))
-                (when dirty-channel-ids
-                  (disco-root--refresh-active-layout-headings dirty-channel-ids))
-                (when (or needs-header dirty-channel-ids)
-                  (disco-root--refresh-header-line))
-                (when (and (not needs-structural) position-snapshot)
-                  (appkit-position-restore position-snapshot)
-                  (disco-root--update-window-points))))
-            (when needs-structural
-              (disco-root--debug-log "sync-invalidations -> structural-reconcile")
-              (disco-root--render-preserving-position))))))))))
+           (needs-header
+            (disco-root--refresh-header-line)))))))))
 
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
@@ -3093,7 +2733,7 @@ When HEADER-P is non-nil, the root header is invalidated too."
   "Refresh root projections whose one-line previews use RESOURCES."
   (when resources
     (if (and (eq major-mode 'disco-root-mode)
-             (eq (disco-root--ensure-layout) 'search))
+             disco-root--search-active-p)
         (disco-root--queue-live-update nil t nil)
       (when-let* ((channel-ids
                    (disco-root--one-line-resource-channel-ids resources)))
@@ -3227,15 +2867,6 @@ When HEADER-P is non-nil, the root header is invalidated too."
   (appkit-sync-invalidations (appkit-current-view))
   (message "disco: root view mode -> %s" disco-root--view-mode))
 
-(defun disco-root--refresh-active-layout-headings (channel-ids)
-  "Patch heading rows for current layout using CHANNEL-IDS context."
-  (if-let* ((refresh-fn (disco-root-layout-refresh-headings-function
-                         (disco-root--ensure-layout))))
-      (funcall refresh-fn channel-ids)
-    (pcase (disco-root--ensure-layout)
-      ('activity nil)
-      (_
-       (disco-root--refresh-heading-nodes channel-ids)))))
 
 (defun disco-root--feature-badge-summary ()
   "Return compact summary string for read-state feature badge counters."
@@ -3348,23 +2979,20 @@ When HEADER-P is non-nil, the root header is invalidated too."
      "  ")))
 
 (defun disco-root--filters-line ()
-  "Return filter-chip line inspired by telega root view."
-  (if (eq (disco-root--ensure-layout) 'search)
+  "Return the search summary or composite-root filter chips."
+  (if disco-root--search-active-p
       (disco-root--search-summary-line)
-    (let* ((layout-label
-            (disco-root-layout-label (disco-root--ensure-layout)))
-           (sort-label
-            (pcase disco-root--sort-mode
-              ('activity "Recent")
-              ('name "Name")
-              (_ (capitalize (symbol-name disco-root--sort-mode)))))
-           (metrics (disco-root--activity-metrics-by-view)))
+    (let ((sort-label
+           (pcase disco-root--sort-mode
+             ('activity "Recent")
+             ('name "Name")
+             (_ (capitalize (symbol-name disco-root--sort-mode)))))
+          (metrics (disco-root--activity-metrics-by-view)))
       (string-join
        (list (disco-root--filter-chip 'all "Main" metrics)
              (disco-root--filter-chip 'unread "Important" metrics)
              (disco-root--filter-chip 'dms "DMs" metrics)
-             (propertize (format "%s · %s" layout-label sort-label)
-                         'face 'shadow))
+             (propertize sort-label 'face 'shadow))
        "    "))))
 
 (defun disco-root--gateway-status-face (status)
@@ -3415,32 +3043,29 @@ When HEADER-P is non-nil, the root header is invalidated too."
   (force-mode-line-update t))
 
 (defun disco-root-render ()
-  "Render root dashboard from in-memory state."
+  "Render the composite root or active temporary search."
   (if disco-root--rendering
       (setq disco-root--render-pending t)
     (let ((disco-root--rendering t))
       (unwind-protect
-          (let* ((inhibit-read-only t)
-                 (buffer-undo-list t)
-                 (layout (disco-root--ensure-layout)))
+          (let ((inhibit-read-only t)
+                (buffer-undo-list t))
             (setq-local disco-root--fill-column (disco-root--render-fill-column))
             (disco-root--debug-log
-             "render layout=%s view=%s fill=%s"
-             layout
+             "render projection=%s view=%s fill=%s"
+             (if disco-root--search-active-p 'search 'root)
              disco-root--view-mode
              disco-root--fill-column)
-            (unless (eq layout 'tree)
+            (when disco-root--search-active-p
               (disco-root--retire-tree-directory-surface)
-              (erase-buffer)
-              (disco-root--clear-ewoc-state))
-            (disco-root-layout-render layout)
+              (erase-buffer))
+            (disco-root-layout-render)
             (disco-root--refresh-header-line)
             (when-let* ((surface
-                         (and (eq layout 'tree)
+                         (and (not disco-root--search-active-p)
                               (appkit-directory-current-surface))))
               (setq-local disco-root--tree-fold-state
-                          (appkit-directory-surface-fold-state
-                           surface))))
+                          (appkit-directory-surface-fold-state surface))))
         (setq disco-root--tree-force-channel-ids nil
               disco-root--tree-force-all-rows-p nil)
         (when disco-root--render-pending
@@ -3503,7 +3128,7 @@ When QUIET is non-nil, suppress minibuffer status messages."
 
 With prefix argument FULL, explicitly refresh every guild channel snapshot."
   (interactive "P")
-  (if (and (eq (disco-root--ensure-layout) 'search)
+  (if (and disco-root--search-active-p
            disco-root--search-domain
            (disco-root--search-effective-spec-p disco-root--search-query-spec))
       (disco-root-search-refresh)
@@ -3514,51 +3139,37 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
       (message "disco: refreshing guild and DM index...")
       (disco-directory-refresh-index-async))))
 
-(defvar disco-root-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-root-refresh)
-    (define-key map (kbd "G") #'disco-root-sync-gateway-context)
-    (define-key map (kbd "A") #'disco-root-list-archived-threads)
-    (define-key map (kbd "\\") #'disco-root-toggle-sort-mode)
-    (define-key map (kbd "v") #'disco-root-cycle-view-mode)
-    (define-key map (kbd "U") #'disco-root-toggle-unread-lens)
-    (define-key map (kbd "s") #'disco-root-search-transient)
-    (define-key map (kbd "t") #'disco-root-toggle-section-at-point)
-    (define-key map (kbd "RET") #'disco-root-open-at-point)
-    (define-key map (kbd "<return>") #'disco-root-open-at-point)
-    (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
-    (define-key map (kbd "n") #'disco-root-button-forward)
-    (define-key map (kbd "p") #'disco-root-button-backward)
-    (define-key map (kbd "TAB") #'disco-root-tab-dwim)
-    (define-key map (kbd "<backtab>") #'disco-root-button-backward)
-    (define-key map (kbd "u") #'disco-root-next-unread)
-    (define-key map (kbd "?") #'disco-root-transient)
-    (define-key map (kbd "q") #'quit-window)
-    map)
-  "Keymap for `disco-root-mode'.")
+(defvar-keymap disco-root-mode-map
+  :doc "Keymap for `disco-root-mode'."
+  "g" #'disco-root-refresh
+  "G" #'disco-root-sync-gateway-context
+  "A" #'disco-root-list-archived-threads
+  "\\" #'disco-root-toggle-sort-mode
+  "v" #'disco-root-cycle-view-mode
+  "U" #'disco-root-toggle-unread-lens
+  "s" #'disco-root-search
+  "S" #'disco-root-search-transient
+  "RET" #'disco-root-open-at-point
+  "<return>" #'disco-root-open-at-point
+  "<mouse-1>" #'disco-root-mouse-open-at-point
+  "n" #'disco-root-button-forward
+  "p" #'disco-root-button-backward
+  "TAB" #'disco-root-tab-dwim
+  "<backtab>" #'disco-root-button-backward
+  "u" #'disco-root-next-unread
+  "?" #'disco-root-transient
+  "q" #'quit-window)
 
 (defun disco-root--reset-session-controller-state ()
   "Reset root state owned by the current application session.
 
-Presentation choices such as the active layout, lens, sort order, and tree
-expansion belong to the buffer and deliberately survive a transport session
-restart.  Search results and projection indexes are session-owned and must be
-rebuilt against the new application state."
-  (when (eq disco-root--layout 'search)
-    (setq-local disco-root--layout
-                (or (and (memq disco-root--search-prev-layout
-                               (disco-root-layout-names))
-                         disco-root--search-prev-layout)
-                    disco-root-default-layout)))
-  (disco-root--ensure-layout)
+Presentation lenses, sorting, and tree expansion survive transport restarts.
+Temporary search results and projection indexes do not."
   (unless (hash-table-p disco-root--tree-fold-state)
     (setq-local disco-root--tree-fold-state (make-hash-table :test #'equal)))
+  (setq-local disco-root--search-active-p nil)
   (setq-local disco-root--tree-force-channel-ids nil)
   (setq-local disco-root--tree-force-all-rows-p nil)
-  (setq-local disco-root--ewoc nil)
-  (setq-local disco-root--channel-node-table (make-hash-table :test #'equal))
-  (setq-local disco-root--section-node-table (make-hash-table :test #'eq))
-  (setq-local disco-root--guild-node-table (make-hash-table :test #'equal))
   (setq-local disco-root--gateway-handler nil)
   (setq-local disco-root--directory-handler nil)
   (setq-local disco-root--preview-handler nil)
@@ -3576,18 +3187,13 @@ rebuilt against the new application state."
   (setq-local disco-root--search-generation 0)
   (setq-local disco-root--search-in-flight nil)
   (setq-local disco-root--search-channel-table (make-hash-table :test #'equal))
-  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal))
-  (setq-local disco-root--search-prev-layout nil))
+  (setq-local disco-root--search-thread-table (make-hash-table :test #'equal)))
 
 (defun disco-root--reset-controller-state ()
   "Initialize buffer-local root presentation and session state."
   (setq-local disco-root--sort-mode 'activity)
   (setq-local disco-root--view-mode 'all)
   (setq-local disco-root--pre-unread-view-mode 'all)
-  (unless (disco-root-layout-selectable-p disco-root-default-layout)
-    (error "Disco: default root layout is not selectable: %S"
-           disco-root-default-layout))
-  (setq-local disco-root--layout disco-root-default-layout)
   (setq-local disco-root--tree-fold-state (make-hash-table :test #'equal))
   (disco-root--reset-session-controller-state))
 
@@ -3637,6 +3243,8 @@ rebuilt against the new application state."
       #'disco-root--attach-live-updates
       disco-root-view-load-more-function
       #'disco-root-search-load-more
+      disco-root-view-exit-search-function
+      #'disco-root-search-exit
       disco-root-view-queue-live-update-function
       #'disco-root--queue-live-update
       disco-root-view-transient-function

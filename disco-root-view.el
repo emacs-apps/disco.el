@@ -4,15 +4,13 @@
 
 ;;; Commentary:
 
-;; Root-specific view state, row models, inserters, EWOC rendering, and layout
-;; builders. This keeps `disco-root.el' focused on controller, live-update,
-;; and buffer lifecycle logic while `appkit-view.el' continues to provide
-;; reusable generic UI primitives.
+;; Root-specific projection state, row models, inserters, and builders.  This
+;; keeps `disco-root.el' focused on controller, live-update, and buffer
+;; lifecycle logic while `appkit-view.el' provides reusable UI primitives.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'ewoc)
 (require 'seq)
 (require 'subr-x)
 (require 'time-date)
@@ -51,15 +49,10 @@
 (defvar disco-root--search-tab-label-alist)
 (defvar disco-root--search-channel-table)
 (defvar disco-root--search-thread-table)
-(defvar disco-root--section-order)
 (defvar disco-root--tree-fold-state)
 (defvar disco-root--tree-force-channel-ids)
 (defvar disco-root--tree-force-all-rows-p)
-(defvar disco-root--ewoc)
-(defvar disco-root--channel-node-table)
-(defvar disco-root--section-node-table)
-(defvar disco-root--guild-node-table)
-(defvar disco-root--layout)
+(defvar disco-root--search-active-p)
 (defvar disco-root--sort-mode)
 (defvar disco-root--fill-column)
 (defvar disco-root--activity-icon-slot-width)
@@ -69,7 +62,6 @@
 (defvar disco-root--session-cache-reset-in-progress)
 (defvar disco-root--extra-info-provider-error-cache)
 (defvar disco-root-extra-info-functions)
-(defvar disco-root-default-layout)
 (defvar disco-root-guild-icon-size)
 (defvar disco-root-show-guild-icons)
 (defvar disco-root-activity-context-width)
@@ -84,6 +76,10 @@
 (defvar disco-thread-archive-fetch-limit)
 
 (declare-function disco-root--section-expanded-p "disco-root" (section))
+(declare-function disco-root--set-section-expanded
+                  "disco-root" (section expanded))
+(declare-function disco-root--sync-invalidations
+                  "disco-root" (view invalidations))
 (declare-function disco-root--toggle-node-at-point "disco-root" ())
 (declare-function disco-root-render "disco-root" ())
 (declare-function disco-channel-directory-open "disco-channel-directory" (guild-id))
@@ -99,6 +95,9 @@
 
 (defvar disco-root-view-load-more-function nil
   "Function used by root search rows to load more results.")
+
+(defvar disco-root-view-exit-search-function nil
+  "Function used by root search rows to restore the composite root.")
 
 (defvar disco-root-view-queue-live-update-function nil
   "Function used by root view helpers to queue projection updates.")
@@ -150,6 +149,12 @@ Signal a user-facing error when the root controller callback is missing."
    'load-more
    tab))
 
+(defun disco-root-view--exit-search ()
+  "Restore the composite root through the controller."
+  (disco-root-view--call-controller
+   disco-root-view-exit-search-function
+   'exit-search))
+
 (defun disco-root-view--queue-live-update (channel-ids &optional structural-p header-p)
   "Queue a controller update for CHANNEL-IDS.
 When STRUCTURAL-P is non-nil, request a full projection.  When HEADER-P is
@@ -166,11 +171,6 @@ non-nil, also invalidate the root header."
    disco-root-view-transient-function
    'transient))
 
-(defun disco-root--ensure-layout ()
-  "Return the active root layout, signaling when it is not registered."
-  (unless (memq disco-root--layout (disco-root-layout-names))
-    (error "disco: root layout is not registered: %S" disco-root--layout))
-  disco-root--layout)
 
 (defun disco-root--search-domain-kind (domain)
   "Return kind symbol from root search DOMAIN plist."
@@ -216,7 +216,7 @@ non-nil, also invalidate the root header."
 
 (defun disco-root--search-current-channel-domain ()
   "Return current channel-scoped search domain inferred from point, or nil."
-  (or (when (and (eq (disco-root--ensure-layout) 'search)
+  (or (when (and disco-root--search-active-p
                  (eq (disco-root--search-domain-kind disco-root--search-domain) 'channel))
         disco-root--search-domain)
       (when-let* ((channel-id (disco-root--line-channel-id))
@@ -1611,11 +1611,6 @@ current sort mode."
               (push-unique thread))))))
     (nreverse result)))
 
-(defun disco-root--collect-activity-channels ()
-  "Return unique channels for activity layout under current filter mode."
-  (disco-root--sort-channels
-   (seq-filter #'disco-root--channel-visible-in-view-p
-               (disco-root--collect-activity-candidates))))
 
 (defun disco-root--tree-unread-section-channels (unread-channels)
   "Return home quick-section channels from UNREAD-CHANNELS."
@@ -1665,40 +1660,10 @@ Higher score means channel should appear earlier in activity mode."
                                    (disco-root--channel-display-name b))
                    (> a-score b-score)))))))))
 
-(defun disco-root--entry-text (text &optional key)
-  "Return one plain text layout entry for TEXT."
-  (disco-root-layout-entry-create
-   :key (or key (list 'text text))
-   :type 'text :text text))
-
 (defun disco-root--entry-blank (&optional key)
   "Return one blank layout entry."
   (disco-root-layout-entry-create :key key :type 'blank))
 
-(defun disco-root--entry-section (section title &optional count)
-  "Return one section layout entry."
-  (disco-root-layout-entry-create :key (list 'section section)
-                                  :type 'section
-                                  :section section
-                                  :title title
-                                  :count count))
-
-(defun disco-root--entry-guild (guild unread-count)
-  "Return one guild layout entry."
-  (disco-root-layout-entry-create :key (list 'guild (alist-get 'id guild))
-                                  :type 'guild
-                                  :guild guild
-                                  :unread-count unread-count))
-
-(defun disco-root--entry-channel (channel indent &optional scope)
-  "Return one channel layout entry for CHANNEL at INDENT in SCOPE."
-  (let ((scope (or scope 'root)))
-    (disco-root-layout-entry-create
-     :key (list 'channel scope (alist-get 'id channel))
-     :type 'channel
-     :channel channel
-     :indent indent
-     :scope scope)))
 
 (defun disco-root--entry-search-section (tab title loaded-count &optional total-count loading)
   "Return one search-section layout entry."
@@ -1735,35 +1700,6 @@ Higher score means channel should appear earlier in activity mode."
                                   :action action
                                   :tab tab))
 
-(defun disco-root--section-label-row (section title &optional count)
-  "Return label row model for one root SECTION heading."
-  (let* ((expanded (disco-root--section-expanded-p section))
-         (indicator (if expanded "▾" "▸")))
-    (appkit-view-label-row-create
-     :label (or title "Section")
-     :prefix (format "%s " indicator)
-     :suffix (if (numberp count) (format "  %d" count) "")
-     :face 'disco-root-section-heading
-     :line-properties (list 'disco-root-row-type 'section
-                            'disco-root-section section)
-     :help-echo "RET or TAB toggles this section"
-     :mouse-face 'highlight)))
-
-(defun disco-root--guild-label-row (guild unread-count)
-  "Return navigation row model for GUILD with UNREAD-COUNT."
-  (let* ((guild-id (alist-get 'id guild))
-         (label (disco-root--guild-label guild unread-count 'root)))
-    (appkit-view-label-row-create
-     :label label
-     :prefix "  "
-     :suffix "  ›"
-     :icon-inserter (lambda ()
-                      (disco-root--insert-guild-icon guild))
-     :icon-separator " "
-     :face (and (> unread-count 0) 'bold)
-     :line-properties (list 'disco-root-row-type 'guild
-                            'disco-root-guild-id guild-id)
-     :help-echo "RET or TAB opens this guild's channel directory")))
 
 (defun disco-root--search-section-label-row (title loaded-count &optional total-count loading)
   "Return label row model for one search section heading."
@@ -1802,6 +1738,8 @@ Higher score means channel should appear earlier in activity mode."
 (defun disco-root--activate-search-action (entry)
   "Activate exact root search action ENTRY."
   (pcase (disco-root-layout-entry-action entry)
+    ('exit-search
+     (disco-root-view--exit-search))
     ('load-more
      (disco-root-view--load-more (disco-root-layout-entry-tab entry)))
     (action
@@ -1821,15 +1759,8 @@ Higher score means channel should appear earlier in activity mode."
      :mouse-face (appkit-view-label-row-mouse-face row))))
 
 (defun disco-root--layout-entry-label-row (entry)
-  "Return label row model for renderable root layout ENTRY, or nil."
+  "Return label row model for one search ENTRY, or nil."
   (pcase (disco-root-layout-entry-type entry)
-    ('section
-     (disco-root--section-label-row (disco-root-layout-entry-section entry)
-                                    (disco-root-layout-entry-title entry)
-                                    (disco-root-layout-entry-count entry)))
-    ('guild
-     (disco-root--guild-label-row (disco-root-layout-entry-guild entry)
-                                  (or (disco-root-layout-entry-unread-count entry) 0)))
     ('search-section
      (disco-root--search-section-label-row (disco-root-layout-entry-title entry)
                                            (or (disco-root-layout-entry-loaded-count entry) 0)
@@ -1859,85 +1790,14 @@ Higher score means channel should appear earlier in activity mode."
              (disco-root-layout-entry-message entry)
              (or (disco-root-layout-entry-indent entry) 2)
              (disco-root-layout-entry-tab entry)))
-           ('text
-            (insert (or (disco-root-layout-entry-text entry) "") "\n"))
            ('blank
             (insert "\n"))
-           ('channel
-            (disco-root--insert-channel-line
-             (disco-root-layout-entry-channel entry)
-             (or (disco-root-layout-entry-indent entry) 0)
-             (or (disco-root-layout-entry-scope entry) 'root)))
            (_
             (error "Unknown root layout entry type: %S"
                    (disco-root-layout-entry-type entry)))))))
     (when-let* ((key (disco-root-layout-entry-key entry)))
       (put-text-property start (point) 'disco-root-entry-key key))))
 
-(defun disco-root--ewoc-printer (entry)
-  "Pretty-printer for one root EWOC ENTRY."
-  (disco-root--insert-layout-entry entry))
-
-(defun disco-root--ewoc-insert-text (text)
-  "Insert one plain TEXT row in root EWOC."
-  (ewoc-enter-last disco-root--ewoc
-                   (disco-root--entry-text text)))
-
-(defun disco-root--ewoc-insert-section (section title &optional count)
-  "Insert one clickable SECTION row with TITLE and optional COUNT."
-  (let ((node (ewoc-enter-last disco-root--ewoc
-                               (disco-root--entry-section section title count))))
-    (when (hash-table-p disco-root--section-node-table)
-      (puthash section node disco-root--section-node-table))
-    node))
-
-(defun disco-root--ewoc-insert-guild (guild unread-count)
-  "Insert one navigable GUILD row with UNREAD-COUNT badge."
-  (let* ((node (ewoc-enter-last disco-root--ewoc
-                                (disco-root--entry-guild guild unread-count)))
-         (guild-id (alist-get 'id guild)))
-    (when (and guild-id
-               (hash-table-p disco-root--guild-node-table))
-      (puthash guild-id node disco-root--guild-node-table))
-    node))
-
-(defun disco-root--ewoc-insert-blank ()
-  "Insert one blank row in root EWOC."
-  (ewoc-enter-last disco-root--ewoc (disco-root--entry-blank)))
-
-(defun disco-root--ewoc-insert-channel (channel indent &optional scope)
-  "Insert CHANNEL row at INDENT into root EWOC and index node by channel ID."
-  (let* ((entry (disco-root--entry-channel channel indent (or scope 'root)))
-         (node (ewoc-enter-last disco-root--ewoc entry))
-         (channel-id (alist-get 'id channel)))
-    (when channel-id
-      (let ((existing (gethash channel-id disco-root--channel-node-table)))
-        (puthash channel-id
-                 (cons node (if (listp existing)
-                                existing
-                              (and existing (list existing))))
-                 disco-root--channel-node-table)))
-    node))
-
-(defun disco-root--ewoc-insert-entry (entry)
-  "Insert one generic EWOC ENTRY and update node indexes as needed."
-  (pcase (disco-root-layout-entry-type entry)
-    ('section
-     (disco-root--ewoc-insert-section (disco-root-layout-entry-section entry)
-                                      (disco-root-layout-entry-title entry)
-                                      (disco-root-layout-entry-count entry)))
-    ('guild
-     (disco-root--ewoc-insert-guild (disco-root-layout-entry-guild entry)
-                                    (or (disco-root-layout-entry-unread-count entry) 0)))
-    ('channel
-     (disco-root--ewoc-insert-channel (disco-root-layout-entry-channel entry)
-                                      (or (disco-root-layout-entry-indent entry) 0)
-                                      (or (disco-root-layout-entry-scope entry) 'root)))
-    ((or 'text 'blank 'search-section 'search-message 'search-note 'search-action)
-     (ewoc-enter-last disco-root--ewoc entry))
-    (_
-     (error "Unknown EWOC entry type: %S"
-            (disco-root-layout-entry-type entry)))))
 
 (defun disco-root--guild-by-id (guild-id)
   "Return guild object for GUILD-ID from current state."
@@ -2121,11 +1981,9 @@ Return plist with keys :threads and :errors for this page only."
                     (disco-root--dedupe-threads page-threads))
           :errors (nreverse errors))))
 
-(defun disco-root--channel-list-entries (channels indent scope)
-  "Return channel layout entries for CHANNELS at INDENT in SCOPE."
-  (mapcar (lambda (channel)
-            (disco-root--entry-channel channel indent scope))
-          (or channels '())))
+(defun disco-root--insert-archived-thread-entry (channel)
+  "Insert one archived thread CHANNEL in a root-related list buffer."
+  (disco-root--insert-channel-line channel 2 'archived-thread))
 
 (defun disco-root--archived-threads-list-spec ()
   "Return list spec for the current archived-thread buffer."
@@ -2140,8 +1998,8 @@ Return plist with keys :threads and :errors for this page only."
                       (disco-root--archived-source-status-string))
      :loading-note (unless (disco-root--archived-any-source-has-more-p)
                      "(no more archived pages)")
-     :items (disco-root--channel-list-entries threads 2 'archived-thread)
-     :item-inserter #'disco-root--insert-layout-entry
+     :items threads
+     :item-inserter #'disco-root--insert-archived-thread-entry
      :empty-text "(no archived threads)"
      :footer-lines (when errors
                      (append (list "Errors:")
@@ -2388,7 +2246,7 @@ SCOPE is forwarded to extra-info providers."
   "Move point to next channel row by N steps."
   (interactive "p")
   (if (and (eq major-mode 'disco-root-mode)
-           (eq disco-root--layout 'tree))
+           (not disco-root--search-active-p))
       (dotimes (_ (max 1 (or n 1)))
         (appkit-directory-next-item))
     (let ((steps (max 1 (or n 1)))
@@ -2410,7 +2268,7 @@ SCOPE is forwarded to extra-info providers."
   "Move point to previous channel row by N steps."
   (interactive "p")
   (if (and (eq major-mode 'disco-root-mode)
-           (eq disco-root--layout 'tree))
+           (not disco-root--search-active-p))
       (dotimes (_ (max 1 (or n 1)))
         (appkit-directory-previous-item))
     (let ((steps (max 1 (or n 1)))
@@ -2429,17 +2287,14 @@ SCOPE is forwarded to extra-info providers."
         (message "disco: no previous channel")))))
 
 (defun disco-root-open-at-point ()
-  "Open or toggle the actionable row at point.
-
-The composite tree delegates exact activation to its Appkit directory
-surface.  Search actions also require exact point; only the legacy activity
-layout retains fall-forward navigation."
+  "Open or toggle the exact actionable row at point."
   (interactive)
   (cond
    ((and (eq major-mode 'disco-root-mode)
-         (eq disco-root--layout 'tree))
+         (not disco-root--search-active-p))
     (appkit-directory-activate))
-   ((eq disco-root--layout 'search)
+   ((and (eq major-mode 'disco-root-mode)
+         disco-root--search-active-p)
     (if (button-at (point))
         (push-button (point))
       (user-error "disco: no search action at point")))
@@ -2453,22 +2308,13 @@ layout retains fall-forward navigation."
        (channel-id
         (disco-root--open-channel channel-id))
        (t
-        (let* ((positions (disco-root--channel-line-positions))
-               (next (disco-root--next-position-after
-                      positions
-                      (line-beginning-position))))
-          (if next
-              (progn
-                (goto-char next)
-                (disco-root--open-channel
-                 (disco-root--line-channel-id next)))
-            (user-error "disco: no openable channel at point")))))))))
+        (user-error "disco: no openable channel at point")))))))
 
 (defun disco-root-next-unread ()
   "Jump to next channel row with unread state."
   (interactive)
   (if (and (eq major-mode 'disco-root-mode)
-           (eq disco-root--layout 'tree))
+           (not disco-root--search-active-p))
       (appkit-directory-next-unread)
     (let* ((positions
             (disco-root--channel-line-positions
@@ -2484,25 +2330,15 @@ layout retains fall-forward navigation."
   "Handle mouse EVENT by opening or toggling row at clicked point."
   (interactive "e")
   (if (and (eq major-mode 'disco-root-mode)
-           (eq disco-root--layout 'tree))
+           (not disco-root--search-active-p))
       (appkit-directory-mouse-activate event)
     (mouse-set-point event)
-    (if (eq disco-root--layout 'search)
+    (if (and (eq major-mode 'disco-root-mode)
+             disco-root--search-active-p)
         (when (button-at (point))
           (push-button (point)))
       (disco-root-open-at-point))))
 
-(defun disco-root--clear-ewoc-state ()
-  "Clear root EWOC and node indexes for non-EWOC layouts."
-  (setq disco-root--channel-node-table (make-hash-table :test #'equal))
-  (setq disco-root--section-node-table (make-hash-table :test #'eq))
-  (setq disco-root--guild-node-table (make-hash-table :test #'equal))
-  (setq disco-root--ewoc nil))
-
-(defun disco-root--prepare-ewoc-state ()
-  "Reset root EWOC and node indexes before layout rendering."
-  (disco-root--clear-ewoc-state)
-  (setq disco-root--ewoc (ewoc-create #'disco-root--ewoc-printer nil nil t)))
 
 (defun disco-root--tree-section-key (section)
   "Return the stable composite root key for SECTION."
@@ -2809,7 +2645,6 @@ layout retains fall-forward navigation."
          (or (appkit-directory-current-surface)
              (appkit-directory-initialize
               :fold-state disco-root--tree-fold-state))))
-    (disco-root--clear-ewoc-state)
     (appkit-directory-configure
      surface
      :entry-inserter #'disco-root--tree-entry-inserter
@@ -2833,26 +2668,9 @@ layout retains fall-forward navigation."
      surface entries
      :force-keys (disco-root--tree-force-keys entries))))
 
-(defun disco-root--activity-layout-entries ()
-  "Return EWOC layout entries for the activity-sorted channel list layout."
-  (let ((channels (disco-root--collect-activity-channels))
-        items)
-    (if channels
-        (dolist (channel channels)
-          (push (disco-root--entry-channel channel 2 'activity)
-                items))
-      (push (disco-root--entry-text "  (no visible channels)"
-                                    '(activity empty))
-            items))
-    (nreverse items)))
-
-(defun disco-root--build-activity-layout-view-spec ()
-  "Return view spec for the activity-sorted channel list layout."
-  (disco-root-layout-ewoc-entry-view-spec-create
-   (disco-root--activity-layout-entries)))
 
 (defun disco-root--search-layout-entries ()
-  "Return root layout ENTRY list for the current root search layout."
+  "Return entries for the active temporary root search."
   (let (result)
     (dolist (tab disco-root--search-tab-order)
       (let* ((state (disco-root--search-tab-state tab))
@@ -2861,49 +2679,55 @@ layout retains fall-forward navigation."
              (error (plist-get state :error))
              (cursor (plist-get state :cursor))
              (total (plist-get state :total-results)))
-        (push (disco-root--entry-search-section
-               tab
-               (disco-root--search-tab-label tab)
-               (length items)
-               total
-               loading)
-              result)
-        (cond
-         (items
-          (dolist (message items)
-            (push (disco-root--entry-search-message message 2 tab)
+        ;; Like Telega's root search, keep the primary result section visible
+        ;; and suppress empty optional sections after they settle.
+        (when (or (eq tab 'messages) items loading error cursor)
+          (push (disco-root--entry-search-section
+                 tab
+                 (disco-root--search-tab-label tab)
+                 (length items)
+                 total
+                 loading)
+                result)
+          (cond
+           (items
+            (dolist (message items)
+              (push (disco-root--entry-search-message message 2 tab)
+                    result)))
+           (loading
+            (push (disco-root--entry-search-note "  (loading...)" 'shadow tab)
+                  result))
+           (error
+            (push (disco-root--entry-search-note (format "  (%s)" error)
+                                                 'font-lock-warning-face tab)
+                  result))
+           (t
+            (push (disco-root--entry-search-note "  (no results)" 'shadow tab)
                   result)))
-         (loading
-          (push (disco-root--entry-search-note "  (loading...)" 'shadow tab)
-                result))
-         (error
-          (push (disco-root--entry-search-note (format "  (%s)" error)
-                                               'font-lock-warning-face tab)
-                result))
-         (t
-          (push (disco-root--entry-search-note "  (no results)" 'shadow tab)
-                result)))
-        (when cursor
-          (push (disco-root--entry-search-action "Show more" 'load-more tab)
-                result))
-        (push (disco-root--entry-blank (list 'search-blank tab)) result)))
-    (nreverse result)))
+          (when cursor
+            (push (disco-root--entry-search-action "Show more" 'load-more tab)
+                  result))
+          (push (disco-root--entry-blank (list 'search-blank tab)) result))))
+    (nconc (list (disco-root--entry-search-action
+                  "Back to root" 'exit-search nil)
+                 (disco-root--entry-blank '(search back-separator)))
+           (nreverse result))))
 
 (defun disco-root--build-search-layout-list-spec ()
-  "Return list spec for the current root search layout."
-  (if (not (and disco-root--search-domain
-                (disco-root--search-effective-spec-p disco-root--search-query-spec)))
-      (appkit-view-list-spec-create
-       :title "Search root with s"
-       :empty-text "  (no active search)")
+  "Return list spec for the active temporary root search."
+  (let ((content (plist-get disco-root--search-query-spec :content)))
     (appkit-view-list-spec-create
-     :title (format "Search results in %s"
+     :title (format "Search%s in %s"
+                    (if (and (stringp content)
+                             (not (string-empty-p content)))
+                        (format " \"%s\"" content)
+                      "")
                     (disco-root--search-domain-label disco-root--search-domain))
      :items (disco-root--search-layout-entries)
      :item-inserter #'disco-root--insert-layout-entry)))
 
 (defun disco-root--build-search-layout-view-spec ()
-  "Return view spec for the current root search session layout."
+  "Return view spec for the active temporary root search."
   (disco-root-layout-list-spec-view-spec-create
    (disco-root--build-search-layout-list-spec)))
 

@@ -12,7 +12,7 @@
 (source "gnu")
 (source 'melpa)
 
-(depends-on "emacs" "27.1")
+(depends-on "emacs" "29.1")
 (depends-on "plz" "0.8")
 (depends-on "websocket" "1.16")
 (depends-on "transient" "0.5.0")

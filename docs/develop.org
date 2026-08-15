@@ -24,53 +24,13 @@
 | ~disco-directory.el~ | guild and DM indexes |
 | ~disco-preview.el~ | latest-message preview hydration |
 | ~disco-gateway.el~ | Gateway transport and dispatch |
-| ~disco-root-layout.el~ | layout registry and view specs |
+| ~disco-root-layout.el~ | composite/search render specifications |
 | ~disco-root-view.el~ | root row models and renderers |
 | ~disco-root.el~ | root controllers and live updates |
 | ~disco-channel-directory.el~ | per-guild browser |
 | ~disco-room.el~ | room render and send |
 | ~disco-company.el~ | composer completion |
 
-* Custom layouts
-
-Use ~:build~ when a custom layout should return a view spec.  Pair it
-with ~:update-mode full~ and a ~list-spec~:
-
-#+begin_src emacs-lisp
-(defun my-disco-root-build-dm-focus ()
-  (let ((channels (disco-root--visible-private-channels)))
-    (disco-root-layout-list-spec-view-spec-create
-     (appkit-view-list-spec-create
-      :title "DM Focus"
-      :summary (format "Visible DMs: %d" (length channels))
-      :items channels
-      :item-inserter (lambda (channel)
-                       (disco-root--insert-channel-line channel 2 'activity))
-      :empty-text "(no visible private channels)"))))
-
-(setq disco-root-custom-layouts
-      '((dm-focus
-         :label "DM Focus"
-         :build my-disco-root-build-dm-focus
-         :update-mode full
-         :unread-mode filter
-         :toggle-hint "next channel")))
-#+end_src
-
-For an EWOC-backed layout that reuses the home and activity entry
-pipeline, return an ~items~ view spec:
-
-#+begin_src emacs-lisp
-(defun my-disco-root-build-people-ewoc ()
-  (disco-root-layout-ewoc-entry-view-spec-create
-   (mapcar (lambda (channel)
-             (disco-root-layout-entry-create
-              :type 'channel
-              :channel channel
-              :indent 2
-              :scope 'root))
-           (disco-root--visible-private-channels))))
-#+end_src
 
 * Design notes
 
