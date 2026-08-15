@@ -19,6 +19,7 @@
 (require 'appkit-invalidation)
 (require 'appkit-transaction)
 (require 'appkit-view)
+(require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-customize)
 (require 'disco-directory)
@@ -54,6 +55,18 @@
 
 (defvar-local disco-channel-directory--guild-id nil
   "Guild ID owned by the current channel-directory buffer.")
+
+(defvar-local disco-channel-directory--guild-profile nil
+  "Extended Guild Profile owned by this directory view.")
+
+(defvar-local disco-channel-directory--profile-loading nil
+  "Non-nil while this directory is loading its Guild Profile.")
+
+(defvar-local disco-channel-directory--profile-error nil
+  "Guild Profile error text shown without hiding cached Guild data.")
+
+(defvar-local disco-channel-directory--profile-owner nil
+  "Opaque owner of the active Guild Profile request.")
 
 (defvar-local disco-channel-directory--pending-focus-channel-id nil
   "Channel ID to focus after its guild snapshot becomes renderable.")
@@ -113,8 +126,10 @@
    (disco-state-guilds)))
 
 (defun disco-channel-directory--guild-name ()
-  "Return the display name for the current directory guild."
-  (or (alist-get 'name (disco-channel-directory--guild))
+  "Return the display name for the current directory Guild."
+  (or (and (listp disco-channel-directory--guild-profile)
+           (alist-get 'name disco-channel-directory--guild-profile))
+      (alist-get 'name (disco-channel-directory--guild))
       disco-channel-directory--guild-id
       "Unknown guild"))
 
@@ -127,6 +142,25 @@
   (list 'channel-directory
         (or (disco-channel-directory--normalize-id guild-id)
             (error "Disco: channel-directory view requires a guild id"))))
+
+(defun disco-channel-directory--view-current-p (view guild-id)
+  "Return non-nil when VIEW still owns GUILD-ID's directory."
+  (and (appkit-view-live-p view)
+       (with-current-buffer (appkit-view-buffer view)
+         (and (derived-mode-p 'disco-channel-directory-mode)
+              (eq view (appkit-current-view))
+              (equal guild-id disco-channel-directory--guild-id)
+              (equal (appkit-view-id view)
+                     (disco-channel-directory--view-id guild-id))))))
+
+(defun disco-channel-directory--profile-current-p
+    (view buffer guild-id owner)
+  "Return non-nil when OWNER still loads GUILD-ID for VIEW and BUFFER."
+  (and (buffer-live-p buffer)
+       (eq buffer (appkit-view-buffer view))
+       (disco-channel-directory--view-current-p view guild-id)
+       (with-current-buffer buffer
+         (eq owner disco-channel-directory--profile-owner))))
 
 (defun disco-channel-directory--guild-snapshot-resource-key ()
   "Return the Appkit resource key for the current guild channel snapshot."
@@ -184,10 +218,130 @@
   (disco-guild-directory-thread-parent-key
    (disco-channel-directory--projection-context) parent-id))
 
+(defun disco-channel-directory--overview-value (field)
+  "Return Guild Profile or cached Guild value for FIELD."
+  (or (and (listp disco-channel-directory--guild-profile)
+           (alist-get field disco-channel-directory--guild-profile))
+      (alist-get field (disco-channel-directory--guild))))
+
+(defun disco-channel-directory--overview-label (label value)
+  "Return one compact overview row for LABEL and VALUE."
+  (concat (propertize (format "%-10s" (concat label ":")) 'face 'bold)
+          value))
+
+(defun disco-channel-directory--overview-metrics ()
+  "Return a compact server metrics string, or nil."
+  (let* ((members
+          (disco-channel-directory--overview-value 'member_count))
+         (online
+          (disco-channel-directory--overview-value 'online_count))
+         (tier
+          (disco-channel-directory--overview-value 'premium_tier))
+         (boosts
+          (disco-channel-directory--overview-value
+           'premium_subscription_count))
+         (joined (alist-get 'joined_at (disco-channel-directory--guild)))
+         (parts
+          (delq nil
+                (list
+                 (and (integerp members)
+                      (format "%d members" members))
+                 (and (integerp online)
+                      (format "%d online" online))
+                 (and (integerp tier)
+                      (format "Boost level %d" tier))
+                 (and (integerp boosts)
+                      (format "%d boosts" boosts))
+                 (and (stringp joined)
+                      (format "Joined %s"
+                              (substring joined 0 (min 10 (length joined)))))))))
+    (and parts (string-join parts " · "))))
+
+(defun disco-channel-directory--overview-traits ()
+  "Return the Guild Profile trait labels, or nil."
+  (when-let* ((traits
+               (and (listp disco-channel-directory--guild-profile)
+                    (alist-get 'traits
+                               disco-channel-directory--guild-profile)))
+              ((listp traits)))
+    (let ((labels
+           (delq nil
+                 (mapcar
+                  (lambda (trait)
+                    (and (listp trait) (alist-get 'label trait)))
+                  traits))))
+      (and labels (string-join labels " · ")))))
+
+(defun disco-channel-directory--overview-entry
+    (suffix label &optional face help-echo)
+  "Return one stable overview entry identified by SUFFIX and showing LABEL."
+  (appkit-directory-entry-create
+   :key (list 'guild-overview disco-channel-directory--guild-id suffix)
+   :role 'note
+   :section-key (list 'guild-overview disco-channel-directory--guild-id)
+   :label label
+   :face face
+   :stamp label
+   :help-echo help-echo))
+
+(defun disco-channel-directory--overview-entries ()
+  "Return compact Guild context rows prepended to the channel directory."
+  (let* ((description
+          (disco-channel-directory--overview-value 'description))
+         (metrics (disco-channel-directory--overview-metrics))
+         (traits (disco-channel-directory--overview-traits))
+         (width (max 20 (or disco-channel-directory--fill-column 80)))
+         entries)
+    (when (and (stringp description) (not (string-empty-p description)))
+      (let ((short
+             (truncate-string-to-width
+              description (max 10 (- width 10)) nil nil "…")))
+        (push
+         (disco-channel-directory--overview-entry
+          'description
+          (disco-channel-directory--overview-label "About" short)
+          nil description)
+         entries)))
+    (when metrics
+      (push
+       (disco-channel-directory--overview-entry
+        'metrics
+        (disco-channel-directory--overview-label "Server" metrics)
+        'shadow)
+       entries))
+    (when traits
+      (push
+       (disco-channel-directory--overview-entry
+        'traits
+        (disco-channel-directory--overview-label "Traits" traits))
+       entries))
+    (when disco-channel-directory--profile-loading
+      (push
+       (disco-channel-directory--overview-entry
+        'loading "Loading server details…" 'shadow)
+       entries))
+    (when disco-channel-directory--profile-error
+      (push
+       (disco-channel-directory--overview-entry
+        'error disco-channel-directory--profile-error 'error)
+       entries))
+    (when entries
+      (setq entries (nreverse entries))
+      (append
+       entries
+       (list
+        (appkit-directory-entry-create
+         :key (list 'guild-overview
+                    disco-channel-directory--guild-id 'spacer)
+         :role 'spacer
+         :stamp 'guild-overview-spacer))))))
+
 (defun disco-channel-directory--project-entries ()
-  "Project lifecycle state through the shared guild projector."
-  (disco-guild-directory-project
-   (disco-channel-directory--projection-context)))
+  "Project Guild overview and lifecycle state into one canonical surface."
+  (append
+   (disco-channel-directory--overview-entries)
+   (disco-guild-directory-project
+    (disco-channel-directory--projection-context))))
 
 
 (defun disco-channel-directory--usable-width ()
@@ -476,6 +630,61 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
          force-channel-ids structure-p position-p)
     (appkit-sync-invalidations (appkit-current-view))))
 
+(defun disco-channel-directory--request-profile (view &optional force)
+  "Load VIEW's Guild Profile, retrying when FORCE is non-nil."
+  (when (and (disco-channel-directory--view-current-p
+              view disco-channel-directory--guild-id)
+             (or force
+                 (and (null disco-channel-directory--guild-profile)
+                      (not disco-channel-directory--profile-loading))))
+    (let* ((buffer (current-buffer))
+           (guild-id disco-channel-directory--guild-id)
+           (owner (gensym "disco-guild-profile-")))
+      (setq disco-channel-directory--profile-owner owner
+            disco-channel-directory--profile-loading t
+            disco-channel-directory--profile-error nil)
+      (disco-channel-directory--queue-view-update view :structure t)
+      (condition-case request-error
+          (disco-api-guild-profile-async
+           guild-id
+           :on-success
+           (lambda (profile)
+             (when (disco-channel-directory--profile-current-p
+                    view buffer guild-id owner)
+               (with-current-buffer buffer
+                 (setq disco-channel-directory--guild-profile
+                       (and (consp profile) profile)
+                       disco-channel-directory--profile-loading nil
+                       disco-channel-directory--profile-error
+                       (unless (consp profile)
+                         "Server details returned an invalid response")
+                       disco-channel-directory--profile-owner nil)
+                 (disco-channel-directory--queue-view-update
+                  view :structure t))))
+           :on-error
+           (lambda (error-data)
+             (when (disco-channel-directory--profile-current-p
+                    view buffer guild-id owner)
+               (with-current-buffer buffer
+                 (setq disco-channel-directory--profile-loading nil
+                       disco-channel-directory--profile-error
+                       (format "Unable to load server details: %s"
+                               (error-message-string error-data))
+                       disco-channel-directory--profile-owner nil)
+                 (disco-channel-directory--queue-view-update
+                  view :structure t)))))
+        (error
+         (when (disco-channel-directory--profile-current-p
+                view buffer guild-id owner)
+           (setq disco-channel-directory--profile-loading nil
+                 disco-channel-directory--profile-error
+                 (format "Unable to load server details: %s"
+                         (error-message-string request-error))
+                 disco-channel-directory--profile-owner nil)
+           (disco-channel-directory--queue-view-update
+            view :structure t))))
+      owner)))
+
 (defun disco-channel-directory--schedule-deferred-sync (view)
   "Schedule VIEW to consume invalidations deferred while it was hidden."
   (when (and disco-channel-directory--deferred-reconcile-p
@@ -660,6 +869,8 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
       (user-error "Disco: this guild is no longer available"))
     (disco-directory-load-guild-async
      disco-channel-directory--guild-id :force t)
+    (when-let* ((view (appkit-current-view)))
+      (disco-channel-directory--request-profile view t))
     (message "Disco: refreshing %s channels…"
              (disco-channel-directory--guild-name))))
 
@@ -913,6 +1124,10 @@ VIEW defaults to the current buffer's Appkit view."
   (setq-local buffer-undo-list t)
   (setq-local switch-to-buffer-preserve-window-point nil)
   (setq-local disco-channel-directory--pending-focus-channel-id nil)
+  (setq-local disco-channel-directory--guild-profile nil)
+  (setq-local disco-channel-directory--profile-loading nil)
+  (setq-local disco-channel-directory--profile-error nil)
+  (setq-local disco-channel-directory--profile-owner nil)
   (setq-local disco-channel-directory--filter nil)
   (setq-local disco-channel-directory--unread-only nil)
   (setq-local disco-channel-directory--fill-column nil)
@@ -988,6 +1203,7 @@ VIEW defaults to the current buffer's Appkit view."
       (disco-channel-directory--attach-live-updates)
       (disco-channel-directory--reflow-to-width
        (disco-channel-directory--usable-width))
+      (disco-channel-directory--request-profile view)
       (disco-channel-directory--request-reconcile nil t nil view)
       (disco-directory-load-guild-async guild-id)
       (when fresh-p

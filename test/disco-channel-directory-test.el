@@ -1230,6 +1230,8 @@
                (lambda () (push 'attach order)))
               ((symbol-function 'disco-channel-directory--reflow-to-width)
                (lambda (_width) (push 'reflow order)))
+              ((symbol-function 'disco-channel-directory--request-profile)
+               (lambda (&rest _args) (push 'profile order)))
               ((symbol-function 'disco-channel-directory--request-reconcile)
                (lambda (&rest _args) (push 'request order)))
               ((symbol-function 'disco-directory-load-guild-async)
@@ -1248,7 +1250,7 @@
             (disco-channel-directory-open "g1")
             (should (equal "g1" loaded))
             (should (buffer-live-p displayed))
-            (should (equal '(pop attach reflow request load sync)
+            (should (equal '(pop attach reflow profile request load sync)
                            (nreverse order)))
             (with-current-buffer displayed
               (let ((view (appkit-current-view)))
@@ -1262,6 +1264,74 @@
           (kill-buffer displayed))
         (when (appkit-app-p disco-runtime--app)
           (appkit-stop-app disco-runtime--app))))))
+
+(ert-deftest disco-channel-directory-projects-compact-guild-overview ()
+  (with-temp-buffer
+    (disco-channel-directory-mode)
+    (setq disco-channel-directory--guild-id "g1"
+          disco-channel-directory--fill-column 100
+          disco-channel-directory--guild-profile
+          '((name . "Guild One")
+            (description . "A server for precise Emacs clients.")
+            (member_count . 125)
+            (online_count . 42)
+            (premium_tier . 2)
+            (premium_subscription_count . 18)
+            (traits . (((label . "Community"))
+                       ((label . "Verified"))))))
+    (cl-letf (((symbol-function 'disco-state-guild)
+               (lambda (_guild-id)
+                 '((id . "g1")
+                   (name . "Guild One")
+                   (joined_at . "2024-04-05T10:20:30+00:00")))))
+      (let* ((entries (disco-channel-directory--overview-entries))
+             (labels (mapcar #'appkit-directory-entry-label entries)))
+        (appkit-directory-reconcile
+         (appkit-directory-surface) entries)
+        (should
+         (equal '(note note note spacer)
+                (mapcar #'appkit-directory-entry-role entries)))
+        (should (string-match-p "About:.*precise Emacs" (nth 0 labels)))
+        (should
+         (string-match-p "125 members.*42 online.*Boost level 2"
+                         (nth 1 labels)))
+        (should (string-match-p "Community.*Verified" (nth 2 labels)))))))
+
+(ert-deftest disco-channel-directory-profile-rejects-stale-response ()
+  (with-temp-buffer
+    (disco-channel-directory-mode)
+    (setq disco-channel-directory--guild-id "g1")
+    (let ((buffer (current-buffer))
+          requests)
+      (cl-letf (((symbol-function
+                  'disco-channel-directory--view-current-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function
+                  'disco-channel-directory--profile-current-p)
+                 (lambda (_view candidate-buffer guild-id owner)
+                   (and (eq candidate-buffer buffer)
+                        (equal guild-id "g1")
+                        (eq owner
+                            disco-channel-directory--profile-owner))))
+                ((symbol-function
+                  'disco-channel-directory--queue-view-update)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'disco-api-guild-profile-async)
+                 (lambda (_guild-id &rest options)
+                   (push (plist-get options :on-success) requests)
+                   'request)))
+        (disco-channel-directory--request-profile 'view)
+        (disco-channel-directory--request-profile 'view t)
+        (funcall (nth 1 requests) '((name . "Stale")))
+        (should-not disco-channel-directory--guild-profile)
+        (should disco-channel-directory--profile-loading)
+        (funcall (nth 0 requests) '((name . "Current")))
+        (should
+         (equal "Current"
+                (alist-get 'name
+                           disco-channel-directory--guild-profile)))
+        (should-not disco-channel-directory--profile-loading)
+        (should-not disco-channel-directory--profile-owner)))))
 
 (provide 'disco-channel-directory-test)
 

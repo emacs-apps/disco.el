@@ -52,6 +52,10 @@
 (declare-function disco-msg-remove-reaction "disco-msg" ())
 (declare-function disco-msg-reply "disco-msg" ())
 (declare-function disco-msg-toggle-reaction "disco-msg" ())
+(declare-function disco-user-button-backward "disco-user" ())
+(declare-function disco-user-copy-id "disco-user" ())
+(declare-function disco-user-open-chat "disco-user" ())
+(declare-function disco-user-refresh "disco-user" ())
 (declare-function disco-room-inplace-search "disco-room-search" ())
 (declare-function disco-room-refresh "disco-room" ())
 (declare-function disco-room-search-next "disco-room-search" (&optional n))
@@ -79,10 +83,6 @@
 (declare-function evil-set-initial-state "evil-core" (mode state))
 (declare-function turn-off-evil-snipe-mode "evil-snipe" ())
 (declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
-
-(eval-when-compile
-  (unless (require 'evil nil t)
-    (defun evil-set-initial-state (&rest _args) nil)))
 
 (defgroup disco-evil nil
   "Optional native Evil integration for disco.el."
@@ -249,6 +249,11 @@ When nil, leave Evil's initial-state selection untouched."
       (add-hook (intern (format "%s-hook" mode))
                 #'disco-evil--disable-snipe))))
 
+(defun disco-evil--snipe-mode-changed ()
+  "Reject Evil Snipe when it activates in a read-only Disco buffer."
+  (when (memq major-mode disco-evil--application-modes)
+    (disco-evil--disable-snipe)))
+
 (defun disco-evil--refresh-live-buffers ()
   "Refresh Evil projections in existing Disco application buffers."
   (dolist (buffer (buffer-list))
@@ -269,15 +274,22 @@ Safe to call multiple times."
     (disco-evil--set-initial-states)
     (disco-evil--define-readonly-keys)
     (disco-evil--define-room-keys)
-    (when (featurep 'evil-snipe)
-      (disco-evil--install-snipe-hooks))
+    (disco-evil--install-snipe-hooks)
     (disco-evil--refresh-live-buffers)))
 
-(with-eval-after-load 'evil
-  (disco-evil-setup))
+(defun disco-evil--after-library-load (_file)
+  "Install Evil integration as soon as the optional Evil library loads."
+  (when (featurep 'evil)
+    (remove-hook 'after-load-functions #'disco-evil--after-library-load)
+    (disco-evil-setup)))
 
-(with-eval-after-load 'evil-snipe
-  (disco-evil--install-snipe-hooks))
+(if (featurep 'evil)
+    (disco-evil-setup)
+  (add-hook 'after-load-functions #'disco-evil--after-library-load))
+
+(add-hook 'evil-snipe-mode-hook #'disco-evil--snipe-mode-changed)
+(add-hook 'evil-snipe-override-mode-hook
+          #'disco-evil--snipe-mode-changed)
 
 (provide 'disco-evil)
 

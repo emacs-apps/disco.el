@@ -193,6 +193,40 @@
         (should (equal "99" (cadr captured)))
         (should (equal "42" (get-text-property (point-min) 'disco-user-id)))))))
 
+(ert-deftest disco-user-render-compacts-identity-and-opens-mutual-guild ()
+  (with-temp-buffer
+    (disco-user-mode)
+    (setq disco-user--user-id "175928847299117063"
+          disco-user--guild-id "99"
+          disco-user--profile
+          (disco-user-test--profile
+           "175928847299117063" "Alice" "99"))
+    (let (opened)
+      (cl-letf (((symbol-function 'disco-avatar-rounded-image)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'disco-state-guilds)
+                 (lambda () '(((id . "99") (name . "Disco Guild")))))
+                ((symbol-function 'disco-state-presence)
+                 (lambda (&rest _args) '((status . "online"))))
+                ((symbol-function 'disco-channel-directory-open)
+                 (lambda (guild-id) (setq opened guild-id))))
+        (disco-user-render)
+        (let* ((text (buffer-substring-no-properties
+                      (point-min) (point-max)))
+               (lines (split-string text "\n"))
+               (button (next-button (point-min))))
+          (should (string-match-p "Server Alice.*@alice" (nth 0 lines)))
+          (should (string-match-p "Online" (nth 1 lines)))
+          (should-not (string-match-p "^Identity$" text))
+          (while (and button
+                      (not (button-get button 'disco-guild-id)))
+            (setq button (next-button (button-end button))))
+          (should button)
+          (should (equal "99"
+                         (button-get button 'disco-guild-id)))
+          (button-activate button)
+          (should (equal "99" opened)))))))
+
 (provide 'disco-user-test)
 
 ;;; disco-user-test.el ends here
