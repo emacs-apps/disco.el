@@ -8294,31 +8294,31 @@ _MSG is ignored because the transient resolves availability from point."
     ("k" "Cancel reply/edit" disco-room-cancel-reply
      :inapt-if (lambda () (not (disco-room--composer-aux-active-p))))
     ("e" "Edit at point" disco-room-edit-message
-     :inapt-if #'disco-room-menu--edit-inapt-reason)
+     :inapt-if disco-room-menu--edit-inapt-reason)
     ("d" "Delete at point" disco-room-delete-message
-     :inapt-if #'disco-room-menu--delete-inapt-reason)
+     :inapt-if disco-room-menu--delete-inapt-reason)
     ("!" "Add reaction" disco-room-add-reaction
-     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+     :inapt-if disco-room-menu--reaction-inapt-reason)
     ("+" "Toggle reaction" disco-room-toggle-reaction
-     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+     :inapt-if disco-room-menu--reaction-inapt-reason)
     ("-" "Remove reaction" disco-room-remove-reaction
-     :inapt-if #'disco-room-menu--reaction-inapt-reason)
+     :inapt-if disco-room-menu--reaction-inapt-reason)
     ("p" "Send poll" disco-room-send-poll
      :inapt-if disco-room--poll-unavailable-reason)
     ("i" "Send Sticker" disco-room-send-sticker
      :inapt-if disco-room--sticker-unavailable-reason)
     ("w" "Select answer" disco-room-vote-poll-answer
-     :inapt-if #'disco-room-menu--poll-vote-inapt-reason)
+     :inapt-if disco-room-menu--poll-vote-inapt-reason)
     ("u" "Unselect answer" disco-room-remove-poll-vote
-     :inapt-if #'disco-room-menu--poll-vote-inapt-reason)
+     :inapt-if disco-room-menu--poll-vote-inapt-reason)
     ("t" "Toggle staged answer" disco-room-toggle-poll-answer
-     :inapt-if #'disco-room-menu--poll-vote-inapt-reason)
+     :inapt-if disco-room-menu--poll-vote-inapt-reason)
     ("W" "Submit staged vote" disco-room-submit-poll-vote
-     :inapt-if #'disco-room-menu--poll-submit-inapt-reason)
+     :inapt-if disco-room-menu--poll-submit-inapt-reason)
     ("C" "Remove my vote" disco-room-clear-poll-votes
-     :inapt-if #'disco-room-menu--poll-clear-inapt-reason)
+     :inapt-if disco-room-menu--poll-clear-inapt-reason)
     ("X" "End poll" disco-room-expire-poll
-     :inapt-if #'disco-room-menu--poll-expire-inapt-reason)
+     :inapt-if disco-room-menu--poll-expire-inapt-reason)
     ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message
