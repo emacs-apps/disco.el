@@ -620,6 +620,22 @@ BODY-TYPE is forwarded to transport layer."
   "Fetch current user object."
   (disco-api--request "GET" "/users/@me" nil nil nil))
 
+(cl-defun disco-api-user-profile-async
+    (user-id &key guild-id on-success on-error)
+  "Fetch USER-ID's profile, optionally in GUILD-ID, asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/users/%s/profile" user-id)
+   :query
+   (append
+    '(("with_mutual_guilds" . "true")
+      ("with_mutual_friends_count" . "true")
+      ("type" . "modal"))
+    (when guild-id
+      `(("guild_id" . ,(format "%s" guild-id)))))
+   :on-success on-success
+   :on-error on-error))
+
 (defun disco-api-gateway ()
   "Fetch gateway connection object containing websocket URL."
   (disco-api--request "GET" "/gateway" nil nil t))
@@ -646,6 +662,16 @@ BODY-TYPE is forwarded to transport layer."
   (disco-api--request-async
    "GET"
    "/users/@me/channels"
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-create-private-channel-async
+    (user-id &key on-success on-error)
+  "Create or return the one-to-one private channel with USER-ID."
+  (disco-api--request-async
+   "POST"
+   "/users/@me/channels"
+   :payload `((recipients . [,(format "%s" user-id)]))
    :on-success on-success
    :on-error on-error))
 

@@ -34,6 +34,7 @@
 (require 'disco-markdown)
 (require 'disco-media)
 (require 'disco-avatar)
+(require 'disco-user)
 (require 'disco-company)
 (require 'disco-room)
 (require 'disco-root)
@@ -47,6 +48,7 @@
     disco-room-mode
     disco-root-archived-threads-mode
     disco-root-channel-inspect-mode
+    disco-user-mode
     disco-root-mode)
   "Major modes whose buffers contain account-scoped Disco client data.")
 
