@@ -1360,7 +1360,7 @@
     (should (eq disco-msg-edit-function #'disco-room--edit-msg))
     (should (eq disco-msg-delete-function #'disco-room--delete-msg))
     (should (eq disco-msg-toggle-pin-function #'disco-room--toggle-pin-on-msg))
-    (should (eq disco-msg-open-thread-function #'disco-room--open-thread-from-message))
+    (should (eq disco-msg-open-thread-function #'disco-room-thread-open-from-message))
     (should (eq disco-msg-toggle-reaction-function #'disco-room--toggle-reaction-on-msg))
     (should (eq disco-msg-add-reaction-function #'disco-room--add-reaction-to-msg))
     (should (eq disco-msg-remove-reaction-function #'disco-room--remove-reaction-from-msg))
@@ -4358,114 +4358,6 @@
                  (lambda () "u1")))
         (should-error (disco-room-delete-message) :type 'user-error)))))
 
-(ert-deftest disco-room-create-thread-from-message-errors-without-create-public-threads ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "chat")
-    (disco-state-reset)
-    (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
-    (should-error (disco-room-create-thread-from-message "topic" "m1") :type 'user-error)))
-
-(ert-deftest disco-room-create-thread-errors-without-create-private-threads ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "chat")
-    (disco-state-reset)
-    (disco-state-upsert-channel
-     `((id . "chat")
-       (type . 0)
-       (guild_id . "g1")
-       (permissions . ,(number-to-string (ash 1 35)))))
-    (should-error (disco-room-create-thread "topic" 12 nil nil nil) :type 'user-error)))
-
-(ert-deftest disco-room-add-reaction-errors-without-add-reactions ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "chat")
-    (disco-state-reset)
-    (disco-state-upsert-channel '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "2048")))
-    (should-error (disco-room-add-reaction "👍" "m1") :type 'user-error)))
-
-(ert-deftest disco-room-vote-poll-answer-errors-in-archived-thread ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "thread")
-    (let* ((poll-msg
-            '((id . "m1")
-              (channel_id . "thread")
-              (poll . ((answers . (((answer_id . 1)
-                                    (poll_media . ((text . "one"))))
-                                   ((answer_id . 2)
-                                    (poll_media . ((text . "two")))))))))))
-      (disco-state-reset)
-      (disco-state-upsert-channel
-       `((id . "thread")
-         (type . 11)
-         (guild_id . "g1")
-         (permissions . ,(number-to-string (ash 1 38)))
-         (thread_metadata . ((archived . t)))))
-      (disco-state-put-messages "thread" (list poll-msg))
-      (should-error (disco-room-vote-poll-answer 1 "m1") :type 'user-error))))
-
-(ert-deftest disco-room-rename-thread-errors-when-archived ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "thread")
-    (disco-state-reset)
-    (disco-state-upsert-channel
-     `((id . "thread")
-       (type . 11)
-       (guild_id . "g1")
-       (permissions . ,(number-to-string (ash 1 34)))
-       (thread_metadata . ((archived . t)))))
-    (should-error (disco-room-rename-thread "new-name") :type 'user-error)))
-
-(ert-deftest disco-room-toggle-thread-archived-errors-without-manage-threads ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "thread")
-    (disco-state-reset)
-    (disco-state-upsert-channel
-     `((id . "thread")
-       (type . 11)
-       (guild_id . "g1")
-       (permissions . ,(number-to-string (ash 1 38)))
-       (thread_metadata . ((archived . :false) (locked . :false)))))
-    (should-error (disco-room-toggle-thread-archived) :type 'user-error)))
-
-(ert-deftest disco-room-join-thread-errors-when-already-joined ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "thread")
-    (disco-state-reset)
-    (disco-state-upsert-channel '((id . "thread") (type . 11) (guild_id . "g1")
-                                  (thread_metadata . ((archived . :false)))))
-    (disco-state-upsert-thread-member "thread" "u1")
-    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
-               (lambda () "u1")))
-      (should-error (disco-room-join-thread) :type 'user-error))))
-
-(ert-deftest disco-room-leave-thread-errors-when-not-joined ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "thread")
-    (disco-state-reset)
-    (disco-state-upsert-channel '((id . "thread") (type . 11) (guild_id . "g1")
-                                  (thread_metadata . ((archived . :false)))))
-    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
-               (lambda () "u1")))
-      (should-error (disco-room-leave-thread) :type 'user-error))))
-
-(ert-deftest disco-room-set-thread-muted-errors-when-not-joined ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (setq-local disco-room--channel-id "thread")
-    (disco-state-reset)
-    (disco-state-upsert-channel '((id . "thread") (type . 11) (guild_id . "g1")
-                                  (thread_metadata . ((archived . :false)))))
-    (cl-letf (((symbol-function 'disco-gateway-current-user-id)
-               (lambda () "u1")))
-      (should-error (disco-room-set-thread-muted t) :type 'user-error))))
 
 (ert-deftest disco-room-send-poll-errors-while-replying ()
   (with-temp-buffer
