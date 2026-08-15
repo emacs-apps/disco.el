@@ -69,6 +69,10 @@
           (disco-reset-test--make-mode-buffer
            " *disco-reset-channel-inspect*" 'disco-root-channel-inspect-mode
            "OLD_ACCOUNT_SECRET channel"))
+         (user-buffer
+          (disco-reset-test--make-mode-buffer
+           " *disco-reset-user*" 'disco-user-mode
+           "OLD_ACCOUNT_SECRET user"))
          (tracked-history-buffer
           (disco-reset-test--make-mode-buffer
            " *renamed-disco-history*" 'special-mode
@@ -93,7 +97,7 @@
            "FOREIGN_SENTINEL"))
          (account-buffers
           (list root-buffer room-buffer directory-buffer archived-buffer
-                message-inspect-buffer channel-inspect-buffer
+                message-inspect-buffer channel-inspect-buffer user-buffer
                 tracked-history-buffer fixed-history-buffer
                 preview-buffer rate-limit-buffer debug-buffer
                 markdown-buffer))

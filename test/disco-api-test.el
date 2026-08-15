@@ -748,6 +748,48 @@
            :on-error ignore))
         captured)))))
 
+(ert-deftest disco-api-user-profile-async-retains-guild-context ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest options)
+                 (setq captured (list method endpoint options))
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-user-profile-async
+            "42"
+            :guild-id "99"
+            :on-success #'identity
+            :on-error #'ignore)))
+      (should
+       (equal
+        '("GET" "/users/42/profile"
+          (:query (("with_mutual_guilds" . "true")
+                   ("with_mutual_friends_count" . "true")
+                   ("type" . "modal")
+                   ("guild_id" . "99"))
+           :on-success identity
+           :on-error ignore))
+        captured)))))
+
+(ert-deftest disco-api-create-private-channel-async-uses-one-recipient ()
+  (let (captured)
+    (cl-letf (((symbol-function 'disco-api--request-async)
+               (lambda (method endpoint &rest options)
+                 (setq captured (list method endpoint options))
+                 'request)))
+      (should
+       (eq 'request
+           (disco-api-create-private-channel-async
+            "42" :on-success #'identity :on-error #'ignore)))
+      (should
+       (equal
+        '("POST" "/users/@me/channels"
+          (:payload ((recipients . ["42"]))
+           :on-success identity
+           :on-error ignore))
+        captured)))))
+
 (provide 'disco-api-test)
 
 ;;; disco-api-test.el ends here

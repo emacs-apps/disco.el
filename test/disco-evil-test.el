@@ -57,6 +57,10 @@
               "m" disco-root-archived-threads-load-more)
              (disco-root-channel-inspect-mode-map
               "g r" disco-root-channel-inspect-refresh)
+             (disco-user-mode-map
+              "g r" disco-user-refresh)
+             (disco-user-mode-map
+              "Y" disco-user-copy-id)
              (disco-msg-inspect-mode-map
               "g r" disco-msg-inspect-refresh)))
     (pcase-let ((`(,map-symbol ,key ,command) case))

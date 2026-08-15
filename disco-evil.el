@@ -107,6 +107,7 @@ When nil, leave Evil's initial-state selection untouched."
 (defconst disco-evil--application-modes
   '(disco-channel-directory-mode
     disco-msg-inspect-mode
+    disco-user-mode
     disco-room-mode
     disco-root-archived-threads-mode
     disco-root-channel-inspect-mode
@@ -116,6 +117,7 @@ When nil, leave Evil's initial-state selection untouched."
 (defconst disco-evil--readonly-maps
   '(disco-channel-directory-mode-map
     disco-msg-inspect-mode-map
+    disco-user-mode-map
     disco-root-archived-threads-mode-map
     disco-root-channel-inspect-mode-map
     disco-root-mode-map)
@@ -190,7 +192,15 @@ When nil, leave Evil's initial-state selection untouched."
 
   (appkit-evil-define-keys
       disco-evil--application-states 'disco-msg-inspect-mode-map
-    (kbd "g r") #'disco-msg-inspect-refresh))
+    (kbd "g r") #'disco-msg-inspect-refresh)
+
+  (appkit-evil-define-keys
+      disco-evil--application-states 'disco-user-mode-map
+    (kbd "g r") #'disco-user-refresh
+    (kbd "m") #'disco-user-open-chat
+    (kbd "Y") #'disco-user-copy-id
+    (kbd "TAB") #'forward-button
+    (kbd "<backtab>") #'disco-user-button-backward))
 
 (defun disco-evil--define-room-keys ()
   "Install room-wide and timeline-only modal bindings."

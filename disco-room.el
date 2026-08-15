@@ -47,6 +47,9 @@
 (require 'disco-room-search)
 (require 'disco-runtime)
 
+(autoload 'disco-user-open "disco-user" nil t)
+(declare-function disco-user-open "disco-user" (user-or-id &optional guild-id))
+
 (declare-function disco-api--validate-message-content-length "disco-api-normalize"
                   (content field-name))
 (declare-function disco-company--teardown-room-buffer "disco-company" ())
@@ -2799,6 +2802,29 @@ source message, not the synthetic starter row itself."
        (disco-room--message-author msg)
        "unknown")))
 
+(defun disco-room--insert-message-author (msg label face)
+  "Insert MSG sender LABEL using FACE as an actionable user title."
+  (let* ((user (copy-tree (disco-room--message-effective-author msg)))
+         (user-id (and (listp user)
+                       (disco-msg-normalize-id (alist-get 'id user))))
+         (guild-id
+          (disco-msg-normalize-id
+           (or (alist-get 'guild_id msg) disco-room--guild-id))))
+    (if user-id
+        (appkit-ui-insert-action-button
+         label
+         (lambda () (disco-user-open user guild-id))
+         :face face
+         :help-echo "Open sender profile"
+         :properties
+         (list 'read-only t
+               'front-sticky '(read-only)
+               'rear-nonsticky '(read-only)
+               'disco-user-id user-id))
+      (let ((start (point)))
+        (insert label)
+        (add-text-properties start (point) (list 'face face))))))
+
 (defun disco-room--avatar-placeholder (msg)
   "Return text avatar placeholder for MSG author (for example `[AB]')."
   (let* ((name (disco-room--message-author msg))
@@ -4801,7 +4827,6 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
            (reply (disco-room--reply-preview msg))
            (message-id (alist-get 'id msg))
            line-start
-           author-start
            section-prefix-state)
       (when (and (stringp insert-date)
                  (not (string-empty-p insert-date)))
@@ -4851,9 +4876,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
           (setq section-prefix-state
                 (appkit-ui-make-prefix-state body-first-prefix body-rest-prefix))
           (let ((header-start (point)))
-            (setq author-start (point))
-            (insert author)
-            (add-text-properties author-start (point) (list 'face author-face))
+            (disco-room--insert-message-author msg author author-face)
             (let ((time-span
                    (disco-room--insert-right-aligned-text
                     short-time
