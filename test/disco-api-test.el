@@ -765,6 +765,7 @@
        (equal
         '("GET" "/users/42/profile"
           (:query (("with_mutual_guilds" . "true")
+                   ("with_mutual_friends" . "true")
                    ("with_mutual_friends_count" . "true")
                    ("type" . "modal")
                    ("guild_id" . "99"))

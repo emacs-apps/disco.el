@@ -65,11 +65,19 @@ Its first action is ~Back to root~; optional empty result sections disappear
 after loading, while each live section keeps its own loading and ~Show more~
 state.  In Evil normal/motion state, ~l~ and ~L~ retain their native motions.
 
-Private channels (DM, group DM, ephemeral DM) appear in root.  Guild
-channels without ~VIEW_CHANNEL~ are hidden.  Channel labels show
-unread state and mention badges ~[@N]~, not per-channel unread
-message counts.  ~[read]~ means the local cursor reached
-~last_message_id~.
+Private channels (DM, group DM, ephemeral DM) appear in root.  Each row uses
+one whole-row delimiter around its complete context.  Stable Discord types
+select the delimiter: ={user}= for DM, =⦃user⦄= for ephemeral DM, =(group)=
+for group DM, =[[guild]]= for a Guild container, and
+=[guild > category > channel]= for an ordinary Guild channel.  Specialized
+channels use =⟪announcement⟫=, =⟨thread⟩=, =⦇private thread⦈=, =「voice」=,
+=『stage』=, =⟦forum⟧=, =【media】=, =〔directory〕=, and =⌜lobby⌝=.  Category is
+only an unbracketed path fragment, not a conversation row.  Redundant leading
+type glyphs such as =#=, =◎=, and =↳= are omitted; cached user avatars and
+Guild identity icons remain.  Guild channels without ~VIEW_CHANNEL~ are
+hidden.  Mention badges ~@N~ are right-aligned inside the row's delimiter;
+Disco does not infer a per-channel unread message count.  ~[read]~ means the
+local cursor reached ~last_message_id~.
 
 Root, thread, archived-thread, and search rows show a one-line image, video
 poster, or Sticker preview when its shared media cache is ready.
@@ -130,9 +138,12 @@ from another server preserves both pages and their asynchronous state.
 | ~q~ | close the page |
 
 The extended profile also includes available badges, mutual servers, mutual
-friend count, connected accounts, presence, and the account creation date.
-Each mutual server name is an action that opens its channel directory.
-Discord may redact these fields for private or blocked profiles.
+friends, connected accounts, presence, and the account creation date.  Mutual
+servers use compact =[server ... members]= rows with a right-aligned cached
+member count when available; each server name opens its channel directory.
+Each available mutual friend uses a ={name · @username}= row that opens that
+user's independent profile page.  Discord may return only the friend count
+when detailed profile data is private or unavailable.
 
 * Rooms
 

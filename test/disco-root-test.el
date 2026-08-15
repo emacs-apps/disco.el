@@ -1184,7 +1184,7 @@
         (should (= 3 (length queued)))
         (should-not (fboundp 'disco-root--ensure-guild-channel-permissions))))))
 
-(ert-deftest disco-root-unread-guild-channel-keeps-guild-icon-scope ()
+(ert-deftest disco-root-unread-guild-channel-keeps-guild-identity-icon ()
   (with-temp-buffer
     (let ((channel '((id . "c1") (guild_id . "g1") (type . 0)))
           (guild '((id . "g1") (name . "Guild")))
@@ -1195,12 +1195,13 @@
                  (lambda (candidate)
                    (push (alist-get 'id candidate) guild-icons)
                    (insert "G"))))
-        (disco-root--insert-activity-icon channel 'unread)
+        (let ((inserter
+               (disco-root--activity-icon-inserter channel 'unread)))
+          (should inserter)
+          (funcall inserter))
         (should (equal '("g1") guild-icons))
-        (erase-buffer)
-        (disco-root--insert-activity-icon channel 'directory)
-        (should (equal "#" (buffer-string)))
-        (should (equal '("g1") guild-icons))))))
+        (should-not
+         (disco-root--activity-icon-inserter channel 'directory))))))
 
 (ert-deftest disco-root-dm-icon-uses-shared-rounded-avatar-api ()
   (with-temp-buffer
@@ -1223,7 +1224,7 @@
                  (lambda (image &rest _args)
                    (setq inserted-image image)
                    (insert "A"))))
-        (disco-root--insert-activity-icon channel 'dm)
+        (funcall (disco-root--activity-icon-inserter channel 'dm))
         (should (equal other requested-user))
         (should (= disco-root-guild-icon-size requested-size))
         (should (eq 'avatar-image inserted-image))
@@ -2148,9 +2149,70 @@
                 (author . ((username . "alice"))))))
             (disco-root--insert-channel-line
              (disco-state-channel "th1") 2 'thread-post)
-            (should (string-match-p "\\[Thread title | bug *\\]" (buffer-string)))
-            (should (string-match-p "alice> hello world" (buffer-string))))
+            (should
+             (string-match-p
+              "⟨Thread title | bug *⟩" (buffer-string)))
+            (should
+             (string-match-p "alice> hello world" (buffer-string))))
         (disco-state-reset)))))
+
+(ert-deftest disco-root-channel-rows-put-one-type-bracket-around-context ()
+  (cl-letf (((symbol-function 'disco-msg-channel-last-cached-message)
+             #'ignore)
+            ((symbol-function
+              'disco-state-channel-effective-unread-count)
+             (lambda (_channel) 7))
+            ((symbol-function 'disco-root--channel-has-unread-p)
+             #'ignore)
+            ((symbol-function 'disco-root--activity-preview-line)
+             (lambda (&rest _args) ""))
+            ((symbol-function
+              'disco-root--channel-last-activity-time-label)
+             (lambda (&rest _args) "")))
+    (dolist (case
+             '((1 "Alice" "{" "}")
+               (3 "Study group" "(" ")")
+               (0 "general" "[" "]")))
+      (let* ((type (nth 0 case))
+             (name (nth 1 case))
+             (open (nth 2 case))
+             (close (nth 3 case))
+             (row
+              (disco-root--channel-one-line-row
+               `((id . "channel") (type . ,type) (name . ,name)))))
+        (should
+         (equal open (appkit-view-one-line-row-context-open row)))
+        (should
+         (equal close (appkit-view-one-line-row-context-close row)))
+        (should (equal name (appkit-view-one-line-row-context row)))
+        (should
+         (equal "@7" (appkit-view-one-line-row-context-trail row)))
+        (should
+         (eq
+          'disco-root-unread-badge
+          (appkit-view-one-line-row-context-trail-face row)))))))
+
+(ert-deftest disco-root-guild-row-aligns-unread-inside-double-brackets ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((inhibit-read-only t)
+          (disco-root--fill-column 80))
+      (cl-letf (((symbol-function 'disco-root--insert-guild-icon)
+                 (lambda (_guild) (insert "G"))))
+        (disco-root--tree-entry-inserter
+         nil
+         (appkit-directory-entry-create
+          :payload '((id . "g1") (name . "Emacs CN"))
+          :properties
+          (list
+           disco-root-directory-row-kind-property
+           'guild
+           'disco-root-guild-unread-count
+           12)))))
+    (should
+     (string-match-p "G *\\[\\[Emacs CN *12\\]\\]" (buffer-string)))
+    (should
+     (text-property-not-all (point-min) (point-max) 'display nil))))
 
 (ert-deftest disco-root-private-channel-display-name-prefers-non-self-recipient ()
   (cl-letf (((symbol-function 'disco-gateway-current-user-id)
@@ -2520,17 +2582,10 @@
                        channel scope))))))))
     (disco-state-reset)))
 
-(ert-deftest disco-root-thread-directory-row-uses-thread-icon-not-guild-icon ()
-  (disco-state-reset)
-  (unwind-protect
-      (with-temp-buffer
-        (disco-state-set-guilds '(((id . "g1") (name . "Guild"))))
-        (disco-root--insert-activity-icon
-         '((id . "th1") (guild_id . "g1") (type . 11))
-         'timeline-thread)
-        (should (equal "↳" (substring-no-properties (buffer-string)))))
-    (disco-state-reset)))
-
+(ert-deftest disco-root-thread-directory-row-omits-redundant-type-icon ()
+  (should-not
+   (disco-root--activity-icon-inserter
+    '((id . "th1") (guild_id . "g1") (type . 11)) 'timeline-thread)))
 
 (ert-deftest disco-root-auto-fill-to-width-requests-geometry-sync-on-change ()
   (with-temp-buffer
@@ -2688,6 +2743,7 @@
                (lambda (_channel) t)))
       (let ((label (disco-root--channel-label channel)))
         (should (string-match-p "@3" label))
+        (should (string-prefix-p "[general" label))
         (should-not (string-match-p "•" label))
         (should-not (string-match-p "\\[read\\]" label))))))
 

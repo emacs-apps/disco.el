@@ -1011,13 +1011,17 @@ thread-page loading may hydrate that preview with one best-effort guild search."
       (push status parts))
     (when (numberp message-count)
       (push (format "%s msg%s"
-                    (disco-root--human-count message-count)
-                    (if (= message-count 1) "" "s"))
+                    (disco-title-compact-count message-count)
+                    (if (= message-count 1)
+                        ""
+                      "s"))
             parts))
     (when (numberp member-count)
       (push (format "%s member%s"
-                    (disco-root--human-count member-count)
-                    (if (= member-count 1) "" "s"))
+                    (disco-title-compact-count member-count)
+                    (if (= member-count 1)
+                        ""
+                      "s"))
             parts))
     (when parts
       (string-join (nreverse parts) " · "))))
@@ -1086,18 +1090,6 @@ The label stays message-oriented and avoids transport-status placeholders."
     (_
      (disco-root--activity-secondary-label channel))))
 
-(defun disco-root--human-count (value)
-  "Return VALUE formatted in compact human-readable form."
-  (let ((n (max 0 (or value 0))))
-    (cond
-     ((>= n 1000000)
-      (replace-regexp-in-string "\\.0m\\'" "m"
-                                (format "%.1fm" (/ n 1000000.0))))
-     ((>= n 1000)
-      (replace-regexp-in-string "\\.0k\\'" "k"
-                                (format "%.1fk" (/ n 1000.0))))
-     (t
-      (number-to-string n)))))
 
 (defun disco-root--snowflake-epoch-seconds (snowflake)
   "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
@@ -1222,46 +1214,32 @@ When MESSAGE is non-nil, use it as cached preview source."
             (disco-preview-request-channel channel))
           (disco-root--activity-preview-label channel scope)))))
 
-(defun disco-root--insert-activity-icon (channel &optional scope)
-  "Insert activity icon for CHANNEL.
+(defun disco-root--activity-icon-inserter (channel &optional scope)
+  "Return an identity icon inserter for CHANNEL under SCOPE, or nil.
 
-Guild rows use real guild icons when available, with fixed text fallback.
-SCOPE distinguishes guild activity rows from channel-directory rows."
-  (let ((guild (and (alist-get 'guild_id channel)
-                    (disco-root--guild-by-id (alist-get 'guild_id channel))))
-        (channel-type (alist-get 'type channel))
-        (start (point)))
+Guild activity keeps its Guild identity and direct messages keep a cached
+user avatar.  Channel-type glyphs are omitted because the context delimiters
+already encode the stable Discord type."
+  (let ((guild
+         (and (alist-get 'guild_id channel)
+              (disco-root--guild-by-id
+               (alist-get 'guild_id channel)))))
     (cond
      ((and guild (memq scope '(activity unread)))
-      (if disco-root-show-guild-icons
-          (disco-root--insert-guild-icon guild)
-        (insert (disco-root--guild-icon-fallback guild))))
-     ((eq channel-type 1)
-      (let* ((user (disco-root--private-channel-avatar-user channel))
-             (image (and user
-                         (disco-avatar-rounded-image
-                          user disco-root-guild-icon-size)))
-             (display-image (and image (disco-root--scaled-image image))))
-        (if display-image
-            (insert-image display-image "@")
-          (insert "@"))))
-     ((eq channel-type 3)
-      (insert "◎"))
-     ((disco-state-channel-thread-p channel)
-      (insert "↳"))
-     ((eq channel-type 2)
-      (insert "◉"))
-     ((eq channel-type 13)
-      (insert "◆"))
-     ((eq channel-type 15)
-      (insert "▤"))
-     ((eq channel-type 16)
-      (insert "▦"))
-     ((eq channel-type 14)
-      (insert "◇"))
-     (t
-      (insert "#")))
-    (add-text-properties start (point) (list 'face 'shadow))))
+      (lambda ()
+        (let ((start (point)))
+          (if disco-root-show-guild-icons
+              (disco-root--insert-guild-icon guild)
+            (insert (disco-root--guild-icon-fallback guild)))
+          (add-text-properties start (point) (list 'face 'shadow)))))
+     ((disco-channel-direct-message-p channel)
+      (when-let* ((user
+                   (disco-root--private-channel-avatar-user channel))
+                  (image
+                   (disco-avatar-rounded-image
+                    user disco-root-guild-icon-size))
+                  (display-image (disco-root--scaled-image image)))
+        (lambda () (insert-image display-image " ")))))))
 
 (defun disco-root--preview-parts (preview-text message)
   "Return structured sender and body fragments for PREVIEW-TEXT and MESSAGE."
@@ -1282,7 +1260,9 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
 (defun disco-root--channel-one-line-row (channel &optional scope)
   "Return one-line row model for CHANNEL under SCOPE."
   (let* ((channel-id (alist-get 'id channel))
-         (latest-message (disco-msg-channel-last-cached-message channel))
+         (brackets (disco-channel-title-brackets channel))
+         (latest-message
+          (disco-msg-channel-last-cached-message channel))
          (preview-message
           (if (eq scope 'thread-post)
               (disco-thread-starter-message channel)
@@ -1298,9 +1278,12 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
                         (disco-root--thread-browser-time-label channel scope latest-message)
                       (disco-root--channel-last-activity-time-label channel latest-message))))
     (appkit-view-one-line-row-create
-     :icon-inserter (lambda ()
-                      (disco-root--insert-activity-icon channel scope))
+     :icon-inserter (disco-root--activity-icon-inserter channel scope)
      :context (disco-root--activity-context-label channel scope)
+     :context-open (car brackets)
+     :context-close (cadr brackets)
+     :context-trail (and (> mention-count 0) (format "@%d" mention-count))
+     :context-trail-face 'disco-root-unread-badge
      :preview
      (disco-media-message-one-line-preview
       preview-message (plist-get preview-parts :text)
@@ -1324,18 +1307,24 @@ SCOPE distinguishes guild activity rows from channel-directory rows."
   "Insert one activity-style CHANNEL row with INDENT under SCOPE.
 
 WIDTH overrides the root buffer's responsive fill column."
-  (appkit-view-insert-one-line-row
-   (disco-root--channel-one-line-row channel scope)
-   :indent indent
-   :width (max 60 (or width
-                      disco-root--fill-column
-                      (disco-root--compute-fill-column)))
-   :icon-slot-width
-   (max 2
-        (ceiling (* disco-root--activity-icon-slot-width
-                    (disco-root--text-scale-factor))))
-   :context-width-spec disco-root-activity-context-width
-   :time-slot-width disco-root-activity-time-column-width))
+  (let ((row (disco-root--channel-one-line-row channel scope)))
+    (appkit-view-insert-one-line-row
+     row
+     :indent indent
+     :width
+     (max 60
+          (or width
+              disco-root--fill-column
+              (disco-root--compute-fill-column)))
+     :icon-slot-width
+     (if (appkit-view-one-line-row-icon-inserter row)
+         (max 2
+              (ceiling
+               (* disco-root--activity-icon-slot-width
+                  (disco-root--text-scale-factor))))
+       0)
+     :context-width-spec disco-root-activity-context-width
+     :time-slot-width disco-root-activity-time-column-width)))
 
 (defun disco-root--search-message-seconds (message)
   "Return MESSAGE timestamp as float seconds, or nil on parse failure."
@@ -1367,18 +1356,21 @@ WIDTH overrides the root buffer's responsive fill column."
   (let* ((message-id (alist-get 'id message))
          (channel-id (alist-get 'channel_id message))
          (channel (disco-root--search-channel channel-id))
-         (preview-text (or (disco-msg-preview-line message)
-                           (disco-msg-preview-content message)
-                           "(message)"))
-         (preview-parts (disco-root--preview-parts preview-text message)))
+         (brackets
+          (and channel (disco-channel-title-brackets channel)))
+         (preview-text
+          (or (disco-msg-preview-line message)
+              (disco-msg-preview-content message)
+              "(message)"))
+         (preview-parts
+          (disco-root--preview-parts preview-text message)))
     (appkit-view-one-line-row-create
-     :icon-inserter (lambda ()
-                      (if channel
-                          (disco-root--insert-activity-icon channel)
-                        (let ((start (point)))
-                          (insert "[?]")
-                          (add-text-properties start (point) (list 'face 'shadow)))))
-     :context (disco-root--search-context-label channel)
+     :icon-inserter
+     (and channel (disco-root--activity-icon-inserter channel))
+     :context
+     (disco-root--search-context-label channel)
+     :context-open (and brackets (car brackets))
+     :context-close (and brackets (cadr brackets))
      :preview
      (disco-media-message-one-line-preview
       message (plist-get preview-parts :text)
@@ -1416,9 +1408,12 @@ WIDTH overrides the root buffer's responsive fill column."
      :width (max 60 (or disco-root--fill-column
                         (disco-root--compute-fill-column)))
      :icon-slot-width
-     (max 2
-          (ceiling (* disco-root--activity-icon-slot-width
-                      (disco-root--text-scale-factor))))
+     (if (appkit-view-one-line-row-icon-inserter row)
+         (max 2
+              (ceiling
+               (* disco-root--activity-icon-slot-width
+                  (disco-root--text-scale-factor))))
+       0)
      :context-width-spec disco-root-activity-context-width
      :time-slot-width disco-root-activity-time-column-width)
     (appkit-ui-make-action-row
@@ -1435,55 +1430,45 @@ SCOPE is a symbol describing where the row is rendered."
         (mention-count (disco-state-channel-effective-unread-count channel))
         (has-unread (disco-root--channel-has-unread-p channel))
         base-label)
-    (let ((state-suffix
-           (cond
-            ((> mention-count 0)
-             (propertize (format "  @%d" mention-count)
-                         'face 'disco-root-unread-badge))
-            (has-unread
-             (propertize "  •" 'face 'disco-root-unread-badge))
-            (t "")))
-          (trail-suffix
-           (if (eq scope 'activity)
-               ""
-             (let ((trail (disco-root--format-trail-tags
-                           (disco-root--channel-static-trail-tags channel))))
-               (if trail
-                   (concat " " trail)
-                 "")))))
-      (setq base-label
+    (let* ((state-suffix
             (cond
-             ((disco-channel-direct-message-p channel-type)
-              (format "@  %s%s%s" name state-suffix trail-suffix))
-             ((disco-channel-group-dm-p channel-type)
-              (format "◎  %s%s%s" name state-suffix trail-suffix))
+             ((> mention-count 0)
+              (propertize (format "  @%d" mention-count)
+                          'face
+                          'disco-root-unread-badge))
+             (has-unread
+              (propertize "  •" 'face 'disco-root-unread-badge))
              (t
-              (pcase channel-type
-                ((or 10 11 12)
-                 (let ((tags (disco-root--thread-status-tags channel)))
-                   (format "↳  %s%s%s%s"
-                           name
-                           (if (string-empty-p tags)
-                               ""
-                             (format " (%s)" tags))
-                           state-suffix
-                           trail-suffix)))
-                ((or 0 5)
-                 (let* ((thread-count (disco-root--thread-count-under-parent channel))
-                        (suffix (if (> thread-count 0)
-                                    (format " (%d threads)" thread-count)
-                                  "")))
-                   (format "#  %s%s%s%s"
-                           name suffix state-suffix trail-suffix)))
-                (15 (format "▤  %s%s%s" name state-suffix trail-suffix))
-                (16 (format "▦  %s%s%s" name state-suffix trail-suffix))
-                (2 (format "◉  %s%s%s" name state-suffix trail-suffix))
-                (13 (format "◆  %s%s%s" name state-suffix trail-suffix))
-                (14 (format "◇  %s%s%s" name state-suffix trail-suffix))
-                (17 (format "○  %s%s%s" name state-suffix trail-suffix))
-                (_
-                 (format "?%s  %s%s%s"
-                         channel-type name state-suffix trail-suffix)))))))
+              "")))
+           (trail-suffix
+            (if (eq scope 'activity)
+                ""
+              (let ((trail
+                     (disco-root--format-trail-tags
+                      (disco-root--channel-static-trail-tags
+                       channel))))
+                (if trail
+                    (concat " " trail)
+                  ""))))
+           (type-suffix
+            (pcase channel-type
+              ((or 10 11 12)
+               (let ((tags (disco-root--thread-status-tags channel)))
+                 (if (string-empty-p tags)
+                     ""
+                   (format " (%s)" tags))))
+              ((or 0 5)
+               (let ((thread-count
+                      (disco-root--thread-count-under-parent
+                       channel)))
+                 (if (> thread-count 0)
+                     (format " (%d threads)" thread-count)
+                   "")))
+              (_ ""))))
+      (setq base-label
+            (disco-channel-format-title
+             channel
+             (concat name type-suffix state-suffix trail-suffix))))
     (disco-root--append-extra-info
      base-label
      'channel
@@ -1499,11 +1484,15 @@ SCOPE is a symbol describing where the row is rendered."
   (let* ((guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
          (guild-id (alist-get 'id guild))
          (base-label
-          (concat guild-name
-                  (if (> unread-count 0)
-                      (propertize (format "  %d" unread-count)
-                                  'face 'disco-root-unread-badge)
-                    ""))))
+          (disco-title-format
+           'guild
+           (concat
+            guild-name
+            (if (> unread-count 0)
+                (propertize (format "  %d" unread-count)
+                            'face
+                            'disco-root-unread-badge)
+              "")))))
     (disco-root--append-extra-info
      base-label
      'guild
@@ -2433,9 +2422,15 @@ SCOPE is forwarded to extra-info providers."
                   (disco-directory-guild-status guild-id))
      :help-echo "RET or TAB toggles this guild's channels"
      :properties
-     (list disco-root-directory-row-kind-property 'guild
-           'disco-root-row-type 'guild
-           'disco-root-guild-id guild-id))))
+     (list
+      disco-root-directory-row-kind-property
+      'guild
+      'disco-root-row-type
+      'guild
+      'disco-root-guild-id
+      guild-id
+      'disco-root-guild-unread-count
+      unread-count))))
 
 (defun disco-root--tree-guild-context (surface guild-id)
   "Return shared guild projector context for GUILD-ID in root SURFACE."
@@ -2544,12 +2539,42 @@ SCOPE is forwarded to extra-info providers."
 
 (defun disco-root--tree-entry-inserter (_surface entry)
   "Render root-owned non-item directory ENTRY, returning non-nil if handled."
-  (when (eq (plist-get (appkit-directory-entry-properties entry)
-                       disco-root-directory-row-kind-property)
-            'guild)
-    (let ((guild (appkit-directory-entry-payload entry)))
-      (disco-root--insert-guild-icon guild)
-      (insert " " (or (appkit-directory-entry-label entry) "") "\n"))
+  (when (eq
+         (plist-get
+          (appkit-directory-entry-properties entry)
+          disco-root-directory-row-kind-property)
+         'guild)
+    (let* ((guild (appkit-directory-entry-payload entry))
+           (properties (appkit-directory-entry-properties entry))
+           (unread-count
+            (or (plist-get properties 'disco-root-guild-unread-count)
+                0))
+           (brackets (disco-title-brackets 'guild)))
+      (appkit-view-insert-one-line-row
+       (appkit-view-one-line-row-create
+        :icon-inserter
+        (lambda () (disco-root--insert-guild-icon guild))
+        :context
+        (or (alist-get 'name guild) "(unnamed-guild)")
+        :context-open
+        (car brackets)
+        :context-close
+        (cadr brackets)
+        :context-trail
+        (and (> unread-count 0) (number-to-string unread-count))
+        :context-trail-face 'disco-root-unread-badge
+        :preview
+        (appkit-ui-one-line-preview-create :text ""))
+       :width
+       (max 60
+            (or disco-root--fill-column
+                (disco-root--compute-fill-column)))
+       :icon-slot-width
+       (max 2
+            (ceiling
+             (* disco-root--activity-icon-slot-width
+                (disco-root--text-scale-factor))))
+       :context-width-spec disco-root-activity-context-width))
     t))
 
 (defun disco-root--tree-item-inserter (_surface entry)
