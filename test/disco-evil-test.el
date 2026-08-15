@@ -14,11 +14,15 @@
     (should (eq (key-binding (kbd "g j")) #'disco-root-button-forward))
     (should (eq (key-binding (kbd "g u")) #'disco-root-next-unread))
     (should (eq (key-binding (kbd "n")) #'evil-search-next))
+    (should (eq (key-binding (kbd "s")) #'disco-root-search))
+    (should (eq (key-binding (kbd "S")) #'disco-root-search-transient))
     (should (eq (key-binding (kbd "l")) #'evil-forward-char))
     (should (eq (key-binding (kbd "L")) #'evil-window-bottom))
     (evil-motion-state)
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))
-    (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))))
+    (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))
+    (should (eq (key-binding (kbd "s")) #'disco-root-search))
+    (should (eq (key-binding (kbd "S")) #'disco-root-search-transient))))
 
 (ert-deftest disco-evil-emacs-state-retains-ordinary-root-map ()
   (with-temp-buffer
@@ -26,9 +30,11 @@
     (evil-emacs-state)
     (should (eq (key-binding (kbd "g")) #'disco-root-refresh))
     (should (eq (key-binding (kbd "n")) #'disco-root-button-forward))
+    (should (eq (key-binding (kbd "s")) #'disco-root-search))
+    (should (eq (key-binding (kbd "S")) #'disco-root-search-transient))
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))))
 
-(ert-deftest disco-evil-setup-releases-legacy-root-layout-bindings ()
+(ert-deftest disco-evil-setup-releases-stale-root-shortcuts ()
   (appkit-evil-define-keys '(normal motion) 'disco-root-mode-map
     (kbd "l") #'ignore
     (kbd "L") #'ignore)

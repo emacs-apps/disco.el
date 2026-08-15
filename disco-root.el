@@ -38,7 +38,7 @@
 (require 'disco-thread)
 (require 'disco-permission)
 (require 'disco-preview)
-(require 'disco-root-layout)
+(require 'disco-root-render)
 (require 'disco-root-view)
 (require 'disco-channel-directory)
 (require 'disco-runtime)
@@ -128,17 +128,17 @@ Supported values: `all', `unread', and `dms'.")
   "Cached expensive state-derived portions of the root header line.")
 
 (defvar-local disco-root--fill-column nil
-  "Effective root layout width used for the latest render pass.")
+  "Effective root render width used for the latest pass.")
 
 
 (defconst disco-root--activity-icon-slot-width 4
   "Reserved icon slot width (columns) in activity rows.")
 
 (defvar-local disco-root--tree-fold-state nil
-  "Persistent Appkit fold overrides for the composite tree layout.
+  "Persistent Appkit fold overrides for the composite tree.
 
 This table belongs to root presentation state rather than to an individual
-directory surface, so it survives layout changes and application sessions.")
+directory surface, so it survives application sessions.")
 
 (defvar-local disco-root--tree-force-channel-ids nil
   "Channel IDs whose visible tree occurrences must be redrawn.")
@@ -291,13 +291,6 @@ Same semantics as `telega-chat-button-width':
   :type 'string
   :group 'disco)
 
-(defcustom disco-root-activity-include-threads nil
-  "When non-nil, include thread channels in activity layout.
-
-Thread-heavy guilds can create very large activity lists, so this is off
-by default to keep root refresh and resize reflow responsive."
-  :type 'boolean
-  :group 'disco)
 
 (defcustom disco-root-activity-time-format-alist
   '((today . "%H:%M")
@@ -1968,7 +1961,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   (and tab (assq tab tabs-alist)))
 
 (defun disco-root--search-render-if-visible ()
-  "Request a coalesced projection sync when search layout is visible."
+  "Request a coalesced projection sync while search is visible."
   (when (and (eq major-mode 'disco-root-mode)
              disco-root--search-active-p)
     (disco-root--queue-live-update nil t nil)))
@@ -2234,7 +2227,7 @@ buffer without CHANNEL, use the channel at point."
           (setq-local disco-root--search-query "")
           (disco-root--search-sync-query-display)))
       (with-current-buffer buf
-        (disco-root-search-transient)))))
+        (call-interactively #'disco-root-search-transient)))))
 
 (defun disco-root--debug-log-enabled-p ()
   "Return non-nil when root debug logging is enabled."
@@ -2375,7 +2368,7 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
       (erase-buffer)))
   (message "disco: root debug log cleared"))
 
-(defun disco-root--reflow-layout ()
+(defun disco-root--reflow-view ()
   "Reflow the active root projection without changing its model."
   (let ((inhibit-read-only t))
     (when (and (eq major-mode 'disco-root-mode)
@@ -2386,7 +2379,7 @@ With prefix ENABLE, turn logging on when positive, otherwise off."
 (defun disco-root--reflow-preserving-position ()
   "Reflow root while preserving semantic point and viewport positions."
   (appkit-position-render-preserving
-   #'disco-root--reflow-layout
+   #'disco-root--reflow-view
    :anchor-property (if (and (eq major-mode 'disco-root-mode)
                              (not disco-root--search-active-p))
                         appkit-directory-key-property
@@ -2938,15 +2931,15 @@ When HEADER-P is non-nil, the root header is invalidated too."
       (format "voice %d · %d room%s"
               user-count channel-count (if (= channel-count 1) "" "s")))))
 
-(defun disco-root--activity-metrics-by-view ()
-  "Return alist MODE -> plist metrics for activity header chips."
+(defun disco-root--view-metrics ()
+  "Return alist MODE -> plist metrics for root header chips."
   (let ((all-count 0)
         (all-unread 0)
         (unread-count 0)
         (unread-unread 0)
         (dms-count 0)
         (dms-unread 0))
-    (dolist (channel (disco-root--collect-activity-candidates))
+    (dolist (channel (disco-root--collect-header-channels))
       (let ((own-unread (disco-state-channel-own-unread-count channel)))
         (setq all-count (1+ all-count))
         (setq all-unread (+ all-unread own-unread))
@@ -2987,7 +2980,7 @@ When HEADER-P is non-nil, the root header is invalidated too."
              ('activity "Recent")
              ('name "Name")
              (_ (capitalize (symbol-name disco-root--sort-mode)))))
-          (metrics (disco-root--activity-metrics-by-view)))
+          (metrics (disco-root--view-metrics)))
       (string-join
        (list (disco-root--filter-chip 'all "Main" metrics)
              (disco-root--filter-chip 'unread "Important" metrics)
@@ -3059,7 +3052,7 @@ When HEADER-P is non-nil, the root header is invalidated too."
             (when disco-root--search-active-p
               (disco-root--retire-tree-directory-surface)
               (erase-buffer))
-            (disco-root-layout-render)
+            (disco-root-render-projection)
             (disco-root--refresh-header-line)
             (when-let* ((surface
                          (and (not disco-root--search-active-p)

@@ -31,7 +31,7 @@
 (require 'appkit-invalidation)
 (require 'disco-runtime)
 (require 'disco-state)
-(require 'disco-root-layout)
+(require 'disco-root-render)
 (require 'disco-guild-directory)
 
 (defvar disco-root--archived-parent-channel)
@@ -66,7 +66,6 @@
 (defvar disco-root-show-guild-icons)
 (defvar disco-root-activity-context-width)
 (defvar disco-root-activity-context-separator)
-(defvar disco-root-activity-include-threads)
 (defvar disco-root-activity-time-format-alist)
 (defvar disco-root-activity-time-column-width)
 (defvar disco-root-auto-fill-margin-columns)
@@ -1049,7 +1048,7 @@ thread-page loading may hydrate that preview with one best-effort guild search."
      (disco-root--activity-primary-label channel))))
 
 (defun disco-root--activity-primary-label (channel)
-  "Return activity-layout primary label for CHANNEL."
+  "Return the primary activity-row label for CHANNEL."
   (let* ((parts (delq nil
                       (list (disco-root--channel-guild-name channel)
                             (disco-root--channel-category-name channel)
@@ -1531,17 +1530,10 @@ SCOPE is a symbol describing where the row is rendered."
   (and (disco-root--displayable-channel-p channel)
        (disco-root--channel-visible-in-mode-p channel disco-root--view-mode)))
 
-(defun disco-root--activity-channel-base-eligible-p (channel)
-  "Return non-nil when CHANNEL is eligible for activity regardless of filter."
+(defun disco-root--header-channel-eligible-p (channel)
+  "Return non-nil when CHANNEL belongs in root header metrics."
   (and (disco-root--displayable-channel-p channel)
-       (or disco-root-activity-include-threads
-           (not (disco-state-channel-thread-p channel)))))
-
-(defun disco-root--activity-channel-eligible-p (channel)
-  "Return non-nil when CHANNEL should appear in activity layout."
-  (and (or disco-root-activity-include-threads
-           (not (disco-state-channel-thread-p channel)))
-       (disco-root--channel-visible-in-view-p channel)))
+       (not (disco-state-channel-thread-p channel))))
 
 (defun disco-root--private-channels-sorted ()
   "Return private channels sorted by recency (newest first)."
@@ -1588,8 +1580,8 @@ current sort mode."
             (push-unique thread)))))
     (disco-root--sort-channels (nreverse result))))
 
-(defun disco-root--collect-activity-candidates ()
-  "Return unique channels eligible for activity independent of view filter."
+(defun disco-root--collect-header-channels ()
+  "Return unique non-thread channels included in root header metrics."
   (let ((seen (make-hash-table :test #'equal))
         result)
     (cl-labels
@@ -1597,18 +1589,15 @@ current sort mode."
            (let ((channel-id (alist-get 'id channel)))
              (when (and channel-id
                         (not (gethash channel-id seen))
-                        (disco-root--activity-channel-base-eligible-p channel))
+                        (disco-root--header-channel-eligible-p channel))
                (puthash channel-id t seen)
                (push channel result)))))
       (dolist (channel (disco-state-private-channels))
         (push-unique channel))
       (dolist (guild (or (disco-state-guilds) '()))
-        (let ((guild-id (alist-get 'id guild)))
-          (dolist (channel (or (disco-state-guild-channels guild-id) '()))
-            (push-unique channel))
-          (when disco-root-activity-include-threads
-            (dolist (thread (or (disco-state-guild-threads guild-id) '()))
-              (push-unique thread))))))
+        (dolist (channel
+                 (or (disco-state-guild-channels (alist-get 'id guild)) '()))
+          (push-unique channel))))
     (nreverse result)))
 
 
@@ -1633,9 +1622,9 @@ When VISIBLE-ONLY is non-nil, only count channels visible in current view."
     (disco-state-channels-unread-total channels)))
 
 (defun disco-root--channel-activity-score (channel)
-  "Return sortable activity score for CHANNEL.
+  "Return the recency-sort score for CHANNEL.
 
-Higher score means channel should appear earlier in activity mode."
+Higher scores sort before lower scores."
   (+ (* 1000 (disco-state-channel-unread-count (alist-get 'id channel)))
      (if (stringp (alist-get 'last_message_id channel))
          (string-to-number (alist-get 'last_message_id channel))
@@ -1661,13 +1650,13 @@ Higher score means channel should appear earlier in activity mode."
                    (> a-score b-score)))))))))
 
 (defun disco-root--entry-blank (&optional key)
-  "Return one blank layout entry."
-  (disco-root-layout-entry-create :key key :type 'blank))
+  "Return one blank render entry."
+  (disco-root-render-entry-create :key key :type 'blank))
 
 
 (defun disco-root--entry-search-section (tab title loaded-count &optional total-count loading)
-  "Return one search-section layout entry."
-  (disco-root-layout-entry-create :key (list 'search-section tab)
+  "Return one search-section render entry."
+  (disco-root-render-entry-create :key (list 'search-section tab)
                                   :type 'search-section
                                   :tab tab
                                   :title title
@@ -1676,8 +1665,8 @@ Higher score means channel should appear earlier in activity mode."
                                   :loading loading))
 
 (defun disco-root--entry-search-message (message indent &optional tab)
-  "Return one search-message layout entry."
-  (disco-root-layout-entry-create :key (list 'search-message tab
+  "Return one search-message render entry."
+  (disco-root-render-entry-create :key (list 'search-message tab
                                              (alist-get 'id message))
                                   :type 'search-message
                                   :message message
@@ -1685,16 +1674,16 @@ Higher score means channel should appear earlier in activity mode."
                                   :tab tab))
 
 (defun disco-root--entry-search-note (text &optional face tab)
-  "Return one search-note layout entry for TAB."
-  (disco-root-layout-entry-create :key (list 'search-note tab)
+  "Return one search-note render entry for TAB."
+  (disco-root-render-entry-create :key (list 'search-note tab)
                                   :type 'search-note
                                   :text text
                                   :face face
                                   :tab tab))
 
 (defun disco-root--entry-search-action (label action tab)
-  "Return one search-action layout entry."
-  (disco-root-layout-entry-create :key (list 'search-action tab action)
+  "Return one search-action render entry."
+  (disco-root-render-entry-create :key (list 'search-action tab action)
                                   :type 'search-action
                                   :label label
                                   :action action
@@ -1737,20 +1726,20 @@ Higher score means channel should appear earlier in activity mode."
 
 (defun disco-root--activate-search-action (entry)
   "Activate exact root search action ENTRY."
-  (pcase (disco-root-layout-entry-action entry)
+  (pcase (disco-root-render-entry-action entry)
     ('exit-search
      (disco-root-view--exit-search))
     ('load-more
-     (disco-root-view--load-more (disco-root-layout-entry-tab entry)))
+     (disco-root-view--load-more (disco-root-render-entry-tab entry)))
     (action
      (user-error "disco: unsupported search action: %S" action))))
 
 (defun disco-root--insert-search-action-line (entry)
   "Insert one exact actionable root search ENTRY."
   (let* ((row (disco-root--search-action-label-row
-               (disco-root-layout-entry-label entry)
-               (disco-root-layout-entry-action entry)
-               (disco-root-layout-entry-tab entry)))
+               (disco-root-render-entry-label entry)
+               (disco-root-render-entry-action entry)
+               (disco-root-render-entry-tab entry)))
          (start (point)))
     (appkit-view-insert-label-row row)
     (appkit-ui-make-action-row
@@ -1758,44 +1747,44 @@ Higher score means channel should appear earlier in activity mode."
      :help-echo (appkit-view-label-row-help-echo row)
      :mouse-face (appkit-view-label-row-mouse-face row))))
 
-(defun disco-root--layout-entry-label-row (entry)
+(defun disco-root--render-entry-label-row (entry)
   "Return label row model for one search ENTRY, or nil."
-  (pcase (disco-root-layout-entry-type entry)
+  (pcase (disco-root-render-entry-type entry)
     ('search-section
-     (disco-root--search-section-label-row (disco-root-layout-entry-title entry)
-                                           (or (disco-root-layout-entry-loaded-count entry) 0)
-                                           (disco-root-layout-entry-total-count entry)
-                                           (disco-root-layout-entry-loading entry)))
+     (disco-root--search-section-label-row (disco-root-render-entry-title entry)
+                                           (or (disco-root-render-entry-loaded-count entry) 0)
+                                           (disco-root-render-entry-total-count entry)
+                                           (disco-root-render-entry-loading entry)))
     ('search-note
-     (disco-root--search-note-label-row (disco-root-layout-entry-text entry)
-                                        (disco-root-layout-entry-face entry)))
+     (disco-root--search-note-label-row (disco-root-render-entry-text entry)
+                                        (disco-root-render-entry-face entry)))
     ('search-action
-     (disco-root--search-action-label-row (disco-root-layout-entry-label entry)
-                                          (disco-root-layout-entry-action entry)
-                                          (disco-root-layout-entry-tab entry)))
+     (disco-root--search-action-label-row (disco-root-render-entry-label entry)
+                                          (disco-root-render-entry-action entry)
+                                          (disco-root-render-entry-tab entry)))
     (_ nil)))
 
-(defun disco-root--insert-layout-entry (entry)
-  "Insert one root layout ENTRY into the current buffer."
+(defun disco-root--insert-render-entry (entry)
+  "Insert one root render ENTRY into the current buffer."
   (let ((start (point)))
-    (pcase (disco-root-layout-entry-type entry)
+    (pcase (disco-root-render-entry-type entry)
       ('search-action
        (disco-root--insert-search-action-line entry))
       (_
-       (if-let* ((row (disco-root--layout-entry-label-row entry)))
+       (if-let* ((row (disco-root--render-entry-label-row entry)))
            (appkit-view-insert-label-row row)
-         (pcase (disco-root-layout-entry-type entry)
+         (pcase (disco-root-render-entry-type entry)
            ('search-message
             (disco-root--insert-search-message-line
-             (disco-root-layout-entry-message entry)
-             (or (disco-root-layout-entry-indent entry) 2)
-             (disco-root-layout-entry-tab entry)))
+             (disco-root-render-entry-message entry)
+             (or (disco-root-render-entry-indent entry) 2)
+             (disco-root-render-entry-tab entry)))
            ('blank
             (insert "\n"))
            (_
-            (error "Unknown root layout entry type: %S"
-                   (disco-root-layout-entry-type entry)))))))
-    (when-let* ((key (disco-root-layout-entry-key entry)))
+            (error "Unknown root render entry type: %S"
+                   (disco-root-render-entry-type entry)))))))
+    (when-let* ((key (disco-root-render-entry-key entry)))
       (put-text-property start (point) 'disco-root-entry-key key))))
 
 
@@ -2081,12 +2070,10 @@ Return plist with keys :threads and :errors for this page only."
   (disco-root--render-channel-inspect-buffer)
   (message "disco: refreshed channel inspect"))
 
-(defvar disco-root-channel-inspect-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-root-channel-inspect-refresh)
-    (define-key map (kbd "q") #'quit-window)
-    map)
-  "Keymap for `disco-root-channel-inspect-mode'.")
+(defvar-keymap disco-root-channel-inspect-mode-map
+  :doc "Keymap for `disco-root-channel-inspect-mode'."
+  "g" #'disco-root-channel-inspect-refresh
+  "q" #'quit-window)
 
 (define-derived-mode disco-root-channel-inspect-mode special-mode "Disco-Inspect"
   "Major mode for channel inspect buffers."
@@ -2164,19 +2151,17 @@ Return plist with keys :threads and :errors for this page only."
                  (length page-threads)
                  (length disco-root--archived-threads-cache))))))
 
-(defvar disco-root-archived-threads-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'disco-root-archived-threads-refresh)
-    (define-key map (kbd "m") #'disco-root-archived-threads-load-more)
-    (define-key map (kbd "n") #'disco-root-button-forward)
-    (define-key map (kbd "p") #'disco-root-button-backward)
-    (define-key map (kbd "RET") #'disco-root-open-at-point)
-    (define-key map (kbd "<return>") #'disco-root-open-at-point)
-    (define-key map [mouse-1] #'disco-root-mouse-open-at-point)
-    (define-key map (kbd "?") #'disco-root-view--transient)
-    (define-key map (kbd "q") #'quit-window)
-    map)
-  "Keymap for `disco-root-archived-threads-mode'.")
+(defvar-keymap disco-root-archived-threads-mode-map
+  :doc "Keymap for `disco-root-archived-threads-mode'."
+  "g" #'disco-root-archived-threads-refresh
+  "m" #'disco-root-archived-threads-load-more
+  "n" #'disco-root-button-forward
+  "p" #'disco-root-button-backward
+  "RET" #'disco-root-open-at-point
+  "<return>" #'disco-root-open-at-point
+  "<mouse-1>" #'disco-root-mouse-open-at-point
+  "?" #'disco-root-view--transient
+  "q" #'quit-window)
 
 (define-derived-mode disco-root-archived-threads-mode special-mode "Disco-Archived"
   "Major mode for archived thread listing buffers."
@@ -2478,7 +2463,7 @@ SCOPE is forwarded to extra-info providers."
             (disco-guild-directory-project
              (disco-root--tree-guild-context surface guild-id))))))
 
-(defun disco-root--tree-layout-entries (&optional surface)
+(defun disco-root--composite-entries (&optional surface)
   "Return the visible flat entries for the composite root tree SURFACE."
   (setq surface (or surface
                     (appkit-directory-current-surface)
@@ -2638,7 +2623,7 @@ SCOPE is forwarded to extra-info providers."
     (disco-root-render)))
 
 (defun disco-root--ensure-tree-directory-surface ()
-  "Return the sole Appkit directory surface owned by the root tree layout."
+  "Return the sole Appkit directory surface owned by the composite root."
   (unless (hash-table-p disco-root--tree-fold-state)
     (setq-local disco-root--tree-fold-state (make-hash-table :test #'equal)))
   (let ((surface
@@ -2660,16 +2645,16 @@ SCOPE is forwarded to extra-info providers."
   (when-let* ((fold-state (appkit-directory-retire)))
     (setq-local disco-root--tree-fold-state fold-state)))
 
-(defun disco-root--build-tree-layout-view-spec ()
+(defun disco-root--build-composite-render-spec ()
   "Return a keyed Appkit directory view spec for the composite root tree."
   (let* ((surface (disco-root--ensure-tree-directory-surface))
-         (entries (disco-root--tree-layout-entries surface)))
-    (disco-root-layout-directory-view-spec-create
+         (entries (disco-root--composite-entries surface)))
+    (disco-root-render-directory-spec-create
      surface entries
      :force-keys (disco-root--tree-force-keys entries))))
 
 
-(defun disco-root--search-layout-entries ()
+(defun disco-root--search-render-entries ()
   "Return entries for the active temporary root search."
   (let (result)
     (dolist (tab disco-root--search-tab-order)
@@ -2713,7 +2698,7 @@ SCOPE is forwarded to extra-info providers."
                  (disco-root--entry-blank '(search back-separator)))
            (nreverse result))))
 
-(defun disco-root--build-search-layout-list-spec ()
+(defun disco-root--build-search-list-spec ()
   "Return list spec for the active temporary root search."
   (let ((content (plist-get disco-root--search-query-spec :content)))
     (appkit-view-list-spec-create
@@ -2723,13 +2708,13 @@ SCOPE is forwarded to extra-info providers."
                         (format " \"%s\"" content)
                       "")
                     (disco-root--search-domain-label disco-root--search-domain))
-     :items (disco-root--search-layout-entries)
-     :item-inserter #'disco-root--insert-layout-entry)))
+     :items (disco-root--search-render-entries)
+     :item-inserter #'disco-root--insert-render-entry)))
 
-(defun disco-root--build-search-layout-view-spec ()
+(defun disco-root--build-search-render-spec ()
   "Return view spec for the active temporary root search."
-  (disco-root-layout-list-spec-view-spec-create
-   (disco-root--build-search-layout-list-spec)))
+  (disco-root-render-list-spec-create
+   (disco-root--build-search-list-spec)))
 
 
 (provide 'disco-root-view)

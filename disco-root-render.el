@@ -1,4 +1,4 @@
-;;; disco-root-layout.el --- Root render specifications for disco.el -*- lexical-binding: t; -*-
+;;; disco-root-render.el --- Root render specifications for disco.el -*- lexical-binding: t; -*-
 
 ;; Author: disco.el contributors
 
@@ -13,13 +13,13 @@
 (require 'appkit-directory)
 (require 'appkit-view)
 
-(declare-function disco-root--build-search-layout-view-spec
+(declare-function disco-root--build-search-render-spec
                   "disco-root-view" ())
-(declare-function disco-root--build-tree-layout-view-spec
+(declare-function disco-root--build-composite-render-spec
                   "disco-root-view" ())
 
 (defcustom disco-root-tree-unread-section-limit 40
-  "Maximum unread rows shown by the home layout's quick unread section.
+  "Maximum unread rows shown by the composite root's quick unread section.
 
 When nil, show all unread rows without truncation."
   :type '(choice (const :tag "No limit" nil)
@@ -33,16 +33,16 @@ When nil, show all unread rows without truncation."
 
 (defvar disco-root--search-active-p)
 
-(cl-defstruct (disco-root-layout-view-spec
-               (:constructor disco-root-layout-view-spec-create))
+(cl-defstruct (disco-root-render-spec
+               (:constructor disco-root-render-spec-create))
   kind
   entries
   list-spec
   directory-surface
   force-keys)
 
-(cl-defstruct (disco-root-layout-entry
-               (:constructor disco-root-layout-entry-create))
+(cl-defstruct (disco-root-render-entry
+               (:constructor disco-root-render-entry-create))
   key
   type
   title
@@ -57,54 +57,54 @@ When nil, show all unread rows without truncation."
   total-count
   loading)
 
-(defun disco-root-layout-list-spec-view-spec-create (list-spec)
+(defun disco-root-render-list-spec-create (list-spec)
   "Wrap LIST-SPEC in a root view spec."
-  (disco-root-layout-view-spec-create
+  (disco-root-render-spec-create
    :kind 'list-spec
    :list-spec list-spec))
 
-(cl-defun disco-root-layout-directory-view-spec-create
+(cl-defun disco-root-render-directory-spec-create
     (surface entries &key force-keys)
   "Return one Appkit directory VIEW-SPEC for SURFACE and ENTRIES.
 
 FORCE-KEYS names retained directory rows whose rich renderers must run again."
   (unless (appkit-directory-surface-p surface)
-    (error "Disco: root directory layout requires an Appkit surface"))
-  (disco-root-layout-view-spec-create
+    (error "Disco: root directory render requires an Appkit surface"))
+  (disco-root-render-spec-create
    :kind 'directory
    :entries entries
    :directory-surface surface
    :force-keys force-keys))
 
-(defun disco-root-layout-render-view-spec (view-spec)
+(defun disco-root-render-spec (view-spec)
   "Render VIEW-SPEC in the current root buffer."
-  (when (disco-root-layout-view-spec-p view-spec)
+  (when (disco-root-render-spec-p view-spec)
     (let ((inhibit-read-only t))
-      (pcase (disco-root-layout-view-spec-kind view-spec)
+      (pcase (disco-root-render-spec-kind view-spec)
         ('list-spec
-         (when-let* ((list-spec (disco-root-layout-view-spec-list-spec view-spec)))
+         (when-let* ((list-spec (disco-root-render-spec-list-spec view-spec)))
            (appkit-view-render-list-spec list-spec)))
         ('directory
          (appkit-directory-reconcile
-          (or (disco-root-layout-view-spec-directory-surface view-spec)
+          (or (disco-root-render-spec-directory-surface view-spec)
               (appkit-directory-surface))
-          (or (disco-root-layout-view-spec-entries view-spec) '())
-          :force-keys (disco-root-layout-view-spec-force-keys view-spec)))
+          (or (disco-root-render-spec-entries view-spec) '())
+          :force-keys (disco-root-render-spec-force-keys view-spec)))
         (_
-         (error "Unknown root layout view spec kind: %S"
-                (disco-root-layout-view-spec-kind view-spec))))
+         (error "Unknown root render spec kind: %S"
+                (disco-root-render-spec-kind view-spec))))
       t)))
 
-(defun disco-root-layout-render ()
+(defun disco-root-render-projection ()
   "Render the composite root or its active temporary search projection."
   (let* ((builder (if disco-root--search-active-p
-                      #'disco-root--build-search-layout-view-spec
-                    #'disco-root--build-tree-layout-view-spec))
+                      #'disco-root--build-search-render-spec
+                    #'disco-root--build-composite-render-spec))
          (view-spec (funcall builder)))
-    (unless (disco-root-layout-view-spec-p view-spec)
+    (unless (disco-root-render-spec-p view-spec)
       (error "Disco: root builder returned an invalid view spec"))
-    (disco-root-layout-render-view-spec view-spec)))
+    (disco-root-render-spec view-spec)))
 
-(provide 'disco-root-layout)
+(provide 'disco-root-render)
 
-;;; disco-root-layout.el ends here
+;;; disco-root-render.el ends here
