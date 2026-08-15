@@ -3,9 +3,8 @@
 ;;; Commentary:
 
 ;; Disco's ordinary maps remain the Emacs-state interface.  This optional
-;; integration defines a separate modal vocabulary: application refresh and
-;; navigation use `gr' and `gj'/`gk', preserving native Evil prefixes such as
-;; `gg'.  It does not depend on evil-collection.
+;; integration keeps native Evil motions and defines only deliberate
+;; application actions.  It does not depend on evil-collection.
 
 ;;; Code:
 
@@ -81,8 +80,6 @@
 (declare-function disco-root-search-transient "disco-root" ())
 (declare-function disco-root-view--transient "disco-root-view" ())
 (declare-function evil-set-initial-state "evil-core" (mode state))
-(declare-function turn-off-evil-snipe-mode "evil-snipe" ())
-(declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
 
 (defgroup disco-evil nil
   "Optional native Evil integration for disco.el."
@@ -142,14 +139,8 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "<return>") #'disco-root-open-at-point
     (kbd "g r") #'disco-root-refresh
     (kbd "g G") #'disco-root-sync-gateway-context
-    (kbd "g j") #'disco-root-button-forward
-    (kbd "g k") #'disco-root-button-backward
-    (kbd "g u") #'disco-root-next-unread
     (kbd "s") #'disco-root-search
     (kbd "S") #'disco-root-search-transient
-    ;; Release stale root shortcuts from Evil's auxiliary maps after reloads.
-    (kbd "l") nil
-    (kbd "L") nil
     (kbd "\\") #'disco-root-toggle-sort-mode
     (kbd "v") #'disco-root-cycle-view-mode
     (kbd "U") #'disco-root-toggle-unread-lens
@@ -164,9 +155,6 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "RET") #'disco-channel-directory-open-at-point
     (kbd "<return>") #'disco-channel-directory-open-at-point
     (kbd "g r") #'disco-channel-directory-refresh
-    (kbd "g j") #'disco-channel-directory-next-channel
-    (kbd "g k") #'disco-channel-directory-previous-channel
-    (kbd "g u") #'disco-channel-directory-next-unread
     (kbd "g b") #'disco-channel-directory-open-root
     (kbd "s") #'disco-channel-directory-set-filter
     (kbd "S") #'disco-channel-directory-clear-filter
@@ -181,8 +169,6 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "RET") #'disco-root-open-at-point
     (kbd "<return>") #'disco-root-open-at-point
     (kbd "g r") #'disco-root-archived-threads-refresh
-    (kbd "g j") #'disco-root-button-forward
-    (kbd "g k") #'disco-root-button-backward
     (kbd "m") #'disco-root-archived-threads-load-more
     (kbd "?") #'disco-root-view--transient)
 
@@ -211,48 +197,25 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "g p") #'disco-room-search-prev)
 
   ;; Timeline mode is inactive in the composer, so these keys cannot steal
-  ;; draft input.  Operators retain native Evil meanings unless an explicit
-  ;; message action has a familiar modal spelling such as `dd'.
+  ;; draft input.  Evil operators and motions retain their native meanings.
   (appkit-evil-define-keys
       disco-evil--application-states 'disco-room-timeline-mode-map
     (kbd "q") #'quit-window
     (kbd "r") #'disco-msg-reply
-    (kbd "d d") #'disco-msg-delete
     (kbd "R") #'disco-msg-forward
-    (kbd "E") #'disco-msg-edit
-    (kbd "o") #'disco-msg-operate
-    (kbd "i") #'disco-msg-describe-message
+    (kbd "i") #'disco-msg-edit
     (kbd "Y") #'disco-msg-copy-dwim
     (kbd "g y") #'disco-msg-copy-link
-    (kbd "g j") #'disco-msg-next
-    (kbd "g k") #'disco-msg-previous
     (kbd "!") #'disco-msg-add-reaction
     (kbd "+") #'disco-msg-toggle-reaction
     (kbd "-") #'disco-msg-remove-reaction
     (kbd "T") #'disco-msg-open-thread
     (kbd "?") #'disco-room-transient)
-  (add-hook 'disco-room-timeline-mode-hook
-            #'appkit-evil-normalize-keymaps))
+  ;; Motion state has no native `o'; block the ordinary Emacs timeline action.
+  (appkit-evil-define-keys 'motion 'disco-room-timeline-mode-map
+    (kbd "o") #'undefined))
 
-(defun disco-evil--disable-snipe ()
-  "Disable Evil Snipe in a read-only Disco application buffer."
-  (when (fboundp 'turn-off-evil-snipe-mode)
-    (turn-off-evil-snipe-mode))
-  (when (fboundp 'turn-off-evil-snipe-override-mode)
-    (turn-off-evil-snipe-override-mode)))
 
-(defun disco-evil--install-snipe-hooks ()
-  "Keep read-only Disco bindings above Evil Snipe local overrides."
-  (when disco-evil-enable-integration
-    (dolist (mode (delq 'disco-room-mode
-                        (copy-sequence disco-evil--application-modes)))
-      (add-hook (intern (format "%s-hook" mode))
-                #'disco-evil--disable-snipe))))
-
-(defun disco-evil--snipe-mode-changed ()
-  "Reject Evil Snipe when it activates in a read-only Disco buffer."
-  (when (memq major-mode disco-evil--application-modes)
-    (disco-evil--disable-snipe)))
 
 (defun disco-evil--refresh-live-buffers ()
   "Refresh Evil projections in existing Disco application buffers."
@@ -260,9 +223,6 @@ When nil, leave Evil's initial-state selection untouched."
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (when (memq major-mode disco-evil--application-modes)
-          (when (and (featurep 'evil-snipe)
-                     (not (eq major-mode 'disco-room-mode)))
-            (disco-evil--disable-snipe))
           (appkit-evil-normalize-keymaps))))))
 
 ;;;###autoload
@@ -274,22 +234,10 @@ Safe to call multiple times."
     (disco-evil--set-initial-states)
     (disco-evil--define-readonly-keys)
     (disco-evil--define-room-keys)
-    (disco-evil--install-snipe-hooks)
     (disco-evil--refresh-live-buffers)))
 
-(defun disco-evil--after-library-load (_file)
-  "Install Evil integration as soon as the optional Evil library loads."
-  (when (featurep 'evil)
-    (remove-hook 'after-load-functions #'disco-evil--after-library-load)
-    (disco-evil-setup)))
-
-(if (featurep 'evil)
-    (disco-evil-setup)
-  (add-hook 'after-load-functions #'disco-evil--after-library-load))
-
-(add-hook 'evil-snipe-mode-hook #'disco-evil--snipe-mode-changed)
-(add-hook 'evil-snipe-override-mode-hook
-          #'disco-evil--snipe-mode-changed)
+(with-eval-after-load 'evil
+  (disco-evil-setup))
 
 (provide 'disco-evil)
 

@@ -11,8 +11,8 @@
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))
     (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))
     (should (eq (key-binding (kbd "g r")) #'disco-root-refresh))
-    (should (eq (key-binding (kbd "g j")) #'disco-root-button-forward))
-    (should (eq (key-binding (kbd "g u")) #'disco-root-next-unread))
+    (should (eq (key-binding (kbd "g j")) #'evil-next-visual-line))
+    (should (eq (key-binding (kbd "g u")) #'evil-downcase))
     (should (eq (key-binding (kbd "n")) #'evil-search-next))
     (should (eq (key-binding (kbd "s")) #'disco-root-search))
     (should (eq (key-binding (kbd "S")) #'disco-root-search-transient))
@@ -34,23 +34,11 @@
     (should (eq (key-binding (kbd "S")) #'disco-root-search-transient))
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))))
 
-(ert-deftest disco-evil-setup-releases-stale-root-shortcuts ()
-  (appkit-evil-define-keys '(normal motion) 'disco-root-mode-map
-    (kbd "l") #'ignore
-    (kbd "L") #'ignore)
-  (disco-evil-setup)
-  (with-temp-buffer
-    (disco-root-mode)
-    (evil-normal-state)
-    (should (eq (key-binding (kbd "l")) #'evil-forward-char))
-    (should (eq (key-binding (kbd "L")) #'evil-window-bottom))))
 
 (ert-deftest disco-evil-readonly-surfaces-use-modal-action-keys ()
   (dolist (case
            '((disco-channel-directory-mode-map
               "RET" disco-channel-directory-open-at-point)
-             (disco-channel-directory-mode-map
-              "g j" disco-channel-directory-next-channel)
              (disco-channel-directory-mode-map
               "s" disco-channel-directory-set-filter)
              (disco-root-archived-threads-mode-map
@@ -79,17 +67,31 @@
     (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))
     (should (eq (key-binding (kbd "g r")) #'disco-room-refresh))
     (should (eq (key-binding (kbd "g s")) #'disco-room-inplace-search))
-    (disco-room-timeline-mode 1)
+    (appkit-chatbuf-use-timeline-mode #'disco-room-timeline-mode)
     (should (eq (key-binding (kbd "r")) #'disco-msg-reply))
-    (should (eq (key-binding (kbd "d d")) #'disco-msg-delete))
     (should (eq (key-binding (kbd "R")) #'disco-msg-forward))
-    (should (eq (key-binding (kbd "E")) #'disco-msg-edit))
+    (should (eq (key-binding (kbd "i")) #'disco-msg-edit))
     (should (eq (key-binding (kbd "Y")) #'disco-msg-copy-dwim))
-    (should (eq (key-binding (kbd "g y")) #'disco-msg-copy-link))
-    (should (eq (key-binding (kbd "g j")) #'disco-msg-next))
-    (should (eq (key-binding (kbd "g k")) #'disco-msg-previous))
+    (dolist (binding
+             '(("e" . evil-forward-word-end)
+               ("l" . evil-forward-char)
+               ("n" . evil-search-next)
+               ("p" . evil-paste-after)
+               ("d" . evil-delete)
+               ("E" . evil-forward-WORD-end)
+               ("o" . evil-open-below)
+               ("g j" . evil-next-visual-line)
+               ("g k" . evil-previous-visual-line)
+               ("g u" . evil-downcase)
+               ("g i" . evil-insert-resume)))
+      (should (eq (key-binding (kbd (car binding))) (cdr binding))))
     (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))
-    (disco-room-timeline-mode -1)
+    (evil-motion-state)
+    (appkit-evil-normalize-keymaps)
+    (should (eq (key-binding (kbd "E")) #'evil-forward-WORD-end))
+    (should (eq (key-binding (kbd "o")) #'undefined))
+    (evil-normal-state)
+    (appkit-chatbuf-use-timeline-mode nil)
     (should-not (eq (key-binding (kbd "r")) #'disco-msg-reply))))
 
 (ert-deftest disco-evil-room-emacs-state-retains-timeline-single-keys ()
@@ -101,6 +103,8 @@
     (should (eq (key-binding (kbd "d")) #'disco-msg-delete))
     (should (eq (key-binding (kbd "f")) #'disco-msg-forward))
     (should-not (lookup-key disco-room-timeline-mode-map (kbd "R")))))
+
+
 
 (provide 'disco-evil-test)
 
