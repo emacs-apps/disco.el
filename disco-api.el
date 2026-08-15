@@ -592,6 +592,12 @@ BODY-TYPE is forwarded to transport layer."
                            (or retry-after "unknown")))
                        (setq attempt (1+ attempt))
                        (schedule-next (or retry-after 1.0))))
+                    ((= status 0)
+                     (emit-error
+                      status body
+                      (or (plist-get response :error-message)
+                          (disco-api--http-error-message
+                           status raw-body body))))
                     (t
                      (emit-error
                       status body
