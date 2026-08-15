@@ -1090,30 +1090,24 @@ VIEW defaults to the current buffer's Appkit view."
               #'disco-channel-directory--window-size-change)
     (setq disco-channel-directory--window-size-hook-installed t)))
 
-(defvar disco-channel-directory-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "g") #'disco-channel-directory-refresh)
-    (define-key map (kbd "/") #'disco-channel-directory-set-filter)
-    (define-key map (kbd "C-c C-k") #'disco-channel-directory-clear-filter)
-    (define-key map (kbd "U") #'disco-channel-directory-toggle-unread-only)
-    (define-key map (kbd "RET") #'disco-channel-directory-open-at-point)
-    (define-key map (kbd "<return>")
-      #'disco-channel-directory-open-at-point)
-    (define-key map (kbd "TAB") #'disco-channel-directory-tab-dwim)
-    (define-key map (kbd "<backtab>")
-      #'disco-channel-directory-previous-channel)
-    (define-key map (kbd "t") #'disco-channel-directory-toggle-at-point)
-    (define-key map (kbd "A")
-      #'disco-channel-directory-open-archived-at-point)
-    (define-key map (kbd "n") #'disco-channel-directory-next-channel)
-    (define-key map (kbd "p") #'disco-channel-directory-previous-channel)
-    (define-key map (kbd "u") #'disco-channel-directory-next-unread)
-    (define-key map (kbd "b") #'disco-channel-directory-open-root)
-    (define-key map [mouse-1]
-      #'disco-channel-directory-mouse-open-at-point)
-    map)
-  "Keymap for `disco-channel-directory-mode'.")
+(defvar-keymap disco-channel-directory-mode-map
+  :doc "Keymap for `disco-channel-directory-mode'."
+  :parent special-mode-map
+  "g" #'disco-channel-directory-refresh
+  "/" #'disco-channel-directory-set-filter
+  "C-c C-k" #'disco-channel-directory-clear-filter
+  "U" #'disco-channel-directory-toggle-unread-only
+  "RET" #'disco-channel-directory-open-at-point
+  "<return>" #'disco-channel-directory-open-at-point
+  "TAB" #'disco-channel-directory-tab-dwim
+  "<backtab>" #'disco-channel-directory-previous-channel
+  "t" #'disco-channel-directory-toggle-at-point
+  "A" #'disco-channel-directory-open-archived-at-point
+  "n" #'disco-channel-directory-next-channel
+  "p" #'disco-channel-directory-previous-channel
+  "u" #'disco-channel-directory-next-unread
+  "b" #'disco-channel-directory-open-root
+  "<mouse-1>" #'disco-channel-directory-mouse-open-at-point)
 
 (define-derived-mode disco-channel-directory-mode special-mode
   "Disco-Directory"
