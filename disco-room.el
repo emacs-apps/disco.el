@@ -2967,6 +2967,18 @@ message id and render that context before jumping."
                    (disco-state-channel-thread-p channel))
           channel)))))
 
+(defun disco-room--open-thread-from-message-unavailable-reason (&optional msg)
+  "Return reason opening a starter thread from MSG is unavailable, or nil."
+  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+         (message-id (and (listp msg) (alist-get 'id msg))))
+    (cond
+     ((not (listp msg))
+      "point is not on a message")
+     ((not (stringp message-id))
+      "message has no id")
+     ((not (disco-room--message-has-thread-p msg))
+      (format "message %s has no starter thread" message-id)))))
+
 (defun disco-room--open-thread-from-message (msg)
   "Open starter thread associated with MSG."
   (let* ((message-id (alist-get 'id msg))
@@ -2978,8 +2990,9 @@ message id and render that context before jumping."
          (target-thread-name (or (and (listp thread) (alist-get 'name thread))
                                  (and (stringp message-id)
                                       (format "thread:%s" message-id)))))
-    (unless (disco-room--message-has-thread-p msg)
-      (user-error "disco: message %s has no starter thread" message-id))
+    (when-let* ((reason (disco-room--open-thread-from-message-unavailable-reason
+                         msg)))
+      (user-error "disco: %s" reason))
     (unless target-thread-id
       (user-error "disco: cannot resolve starter thread id from message %s" message-id))
     (disco-room-open target-thread-id
@@ -8615,7 +8628,8 @@ When called interactively, empty input clears slowmode (sets to 0)."
      :inapt-if disco-room-menu--reaction-inapt-reason)
     ("-" "Remove reaction" disco-msg-remove-reaction
      :inapt-if disco-room-menu--reaction-inapt-reason)
-    ("T" "Open thread" disco-msg-open-thread)]
+    ("T" "Open thread" disco-msg-open-thread
+     :if-not disco-room--open-thread-from-message-unavailable-reason)]
    ["Media"
     ("o" "Open / play" appkit-media-card-open
      :inapt-if (lambda () (appkit-media-card-action-inapt-reason 'open)))
@@ -8743,7 +8757,8 @@ _MSG is ignored because the transient resolves availability from point."
    ["Thread"
     ("m" "Create from message" disco-room-create-thread-from-message
      :inapt-if disco-room--thread-create-from-message-unavailable-reason)
-    ("o" "Open msg thread" disco-room-open-thread-from-message-at-point)
+    ("o" "Open msg thread" disco-room-open-thread-from-message-at-point
+     :if-not disco-room--open-thread-from-message-unavailable-reason)
     ("n" "Create detached" disco-room-create-thread
      :inapt-if (lambda () (disco-room--thread-create-unavailable-reason :any)))
     ("R" "Rename thread" disco-room-rename-thread
