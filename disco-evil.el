@@ -73,6 +73,7 @@
 (declare-function disco-root-toggle-sort-mode "disco-root" ())
 (declare-function disco-root-toggle-unread-lens "disco-root" ())
 (declare-function disco-root-transient "disco-root" ())
+(declare-function disco-root-search "disco-root" (query domain))
 (declare-function disco-root-search-transient "disco-root" ())
 (declare-function disco-root-view--transient "disco-root-view" ())
 (declare-function evil-set-initial-state "evil-core" (mode state))
@@ -142,7 +143,12 @@ When nil, leave Evil's initial-state selection untouched."
     (kbd "g j") #'disco-root-button-forward
     (kbd "g k") #'disco-root-button-backward
     (kbd "g u") #'disco-root-next-unread
-    (kbd "s") #'disco-root-search-transient
+    (kbd "s") #'disco-root-search
+    (kbd "S") #'disco-root-search-transient
+    ;; Release the legacy layout shortcuts from Evil's auxiliary maps after
+    ;; package reloads.
+    (kbd "l") nil
+    (kbd "L") nil
     (kbd "\\") #'disco-root-toggle-sort-mode
     (kbd "v") #'disco-root-cycle-view-mode
     (kbd "U") #'disco-root-toggle-unread-lens

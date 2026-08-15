@@ -28,6 +28,17 @@
     (should (eq (key-binding (kbd "n")) #'disco-root-button-forward))
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))))
 
+(ert-deftest disco-evil-setup-releases-legacy-root-layout-bindings ()
+  (appkit-evil-define-keys '(normal motion) 'disco-root-mode-map
+    (kbd "l") #'ignore
+    (kbd "L") #'ignore)
+  (disco-evil-setup)
+  (with-temp-buffer
+    (disco-root-mode)
+    (evil-normal-state)
+    (should (eq (key-binding (kbd "l")) #'evil-forward-char))
+    (should (eq (key-binding (kbd "L")) #'evil-window-bottom))))
+
 (ert-deftest disco-evil-readonly-surfaces-use-modal-action-keys ()
   (dolist (case
            '((disco-channel-directory-mode-map

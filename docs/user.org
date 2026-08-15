@@ -27,7 +27,7 @@ it, or customize ~disco-evil-initial-state~.
 | Surface | Normal / motion keys |
 |---------+----------------------|
 | all read-only views | ~q~ / ~ZZ~ close; ~ZQ~ uses ~evil-quit~ |
-| root | ~RET~ open, ~g r~ refresh, ~g j~ / ~g k~ move, ~g u~ unread, ~s~ search |
+| root | ~RET~ open, ~g r~ refresh, ~g j~ / ~g k~ move, ~g u~ unread, ~s~ search, ~S~ advanced search |
 | guild directory | ~RET~ open, ~g r~ refresh, ~g j~ / ~g k~ move, ~g u~ unread, ~s~ / ~S~ set or clear filter |
 | room | ~g r~ refresh, ~g s~ search, ~g n~ / ~g p~ continue search |
 | room timeline | ~r~ reply, ~d d~ delete, ~R~ forward, ~E~ edit, ~o~ actions, ~Y~ copy, ~g y~ copy link |
@@ -53,12 +53,13 @@ refreshes the index; ~C-u g~ refreshes every guild directory.
 | ~v~ | cycle all / unread / DMs |
 | ~U~ | unread lens |
 | ~A~ | archived threads for the selected parent |
-| ~? l~ | choose a root presentation |
+| ~s~ / ~S~ | search / advanced structured search |
 
-Home and Activity are selectable root presentations; custom layouts can add
-more.  Search is a separate ~s~ workflow and is never entered by layout
-selection.  Activity excludes thread rows by default; set
-~disco-root-activity-include-threads~ to include them.
+Root has one composite presentation: unread shortcuts, direct messages, and
+lazily expanded guild trees.  Search temporarily replaces that projection.
+Its first action is ~Back to root~; optional empty result sections disappear
+after loading, while each live section keeps its own loading and ~Show more~
+state.  In Evil normal/motion state, ~l~ and ~L~ retain their native motions.
 
 Private channels (DM, group DM, ephemeral DM) appear in root.  Guild
 channels without ~VIEW_CHANNEL~ are hidden.  Channel labels show
@@ -66,8 +67,8 @@ unread state and mention badges ~[@N]~, not per-channel unread
 message counts.  ~[read]~ means the local cursor reached
 ~last_message_id~.
 
-Activity, thread, archived-thread, and search rows show a one-line image,
-video poster, or Sticker preview when its shared media cache is ready.
+Root, thread, archived-thread, and search rows show a one-line image, video
+poster, or Sticker preview when its shared media cache is ready.
 Spoiler attachments stay textual.  Cache completion refreshes only the
 dependent channel rows; failed or unsupported images retain the ordinary
 message summary.
@@ -264,11 +265,8 @@ In a thread room:
 
 | Variable | Meaning |
 |----------+---------|
-| ~disco-root-default-layout~ | starting root layout |
-| ~disco-root-custom-layouts~ | user layout specs |
-| ~disco-root-activity-include-threads~ | list threads in activity |
-| ~disco-root-activity-context-width~ | activity left-context width |
-| ~disco-root-activity-time-format-alist~ | activity timestamp buckets |
+| ~disco-root-activity-context-width~ | root row context width |
+| ~disco-root-activity-time-format-alist~ | root row timestamp buckets |
 | ~disco-root-week-start-day~ | week start for those buckets |
 | ~disco-root-activity-time-column-width~ | reserved time column |
 | ~disco-root-auto-fill-on-window-size-change~ | reflow on resize |
