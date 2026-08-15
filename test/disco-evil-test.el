@@ -11,6 +11,9 @@
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))
     (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))
     (should (eq (key-binding (kbd "g r")) #'disco-root-refresh))
+    (should (eq (key-binding (kbd "g s")) #'disco-root-search))
+    (should (eq (key-binding (kbd "g S"))
+                #'disco-root-search-transient))
     (should (eq (key-binding (kbd "g j")) #'evil-next-visual-line))
     (should (eq (key-binding (kbd "g u")) #'evil-downcase))
     (should (eq (key-binding (kbd "n")) #'evil-search-next))
@@ -22,6 +25,9 @@
     (should (eq (key-binding (kbd "RET")) #'disco-root-open-at-point))
     (should (eq (key-binding (kbd "g g")) #'evil-goto-first-line))
     (should (eq (key-binding (kbd "s")) #'disco-root-search))
+    (should (eq (key-binding (kbd "g s")) #'disco-root-search))
+    (should (eq (key-binding (kbd "g S"))
+                #'disco-root-search-transient))
     (should (eq (key-binding (kbd "S")) #'disco-root-search-transient))))
 
 (ert-deftest disco-evil-emacs-state-retains-ordinary-root-map ()
@@ -41,6 +47,10 @@
               "RET" disco-channel-directory-open-at-point)
              (disco-channel-directory-mode-map
               "s" disco-channel-directory-set-filter)
+             (disco-channel-directory-mode-map
+              "g s" disco-channel-directory-set-filter)
+             (disco-channel-directory-mode-map
+              "g S" disco-channel-directory-clear-filter)
              (disco-root-archived-threads-mode-map
               "m" disco-root-archived-threads-load-more)
              (disco-root-channel-inspect-mode-map
@@ -72,12 +82,14 @@
     (should (eq (key-binding (kbd "R")) #'disco-msg-forward))
     (should (eq (key-binding (kbd "i")) #'disco-msg-edit))
     (should (eq (key-binding (kbd "Y")) #'disco-msg-copy-dwim))
+    (should (eq (key-binding (kbd "D")) #'disco-msg-delete))
+    (should (eq (key-binding (kbd "d d")) #'disco-msg-delete))
+    (should-not (eq (key-binding (kbd "d")) #'evil-delete))
     (dolist (binding
              '(("e" . evil-forward-word-end)
                ("l" . evil-forward-char)
                ("n" . evil-search-next)
                ("p" . evil-paste-after)
-               ("d" . evil-delete)
                ("E" . evil-forward-WORD-end)
                ("o" . evil-open-below)
                ("g j" . evil-next-visual-line)
@@ -92,6 +104,8 @@
     (should (eq (key-binding (kbd "o")) #'undefined))
     (evil-normal-state)
     (appkit-chatbuf-use-timeline-mode nil)
+    (should (eq (key-binding (kbd "d")) #'evil-delete))
+    (should-not (eq (key-binding (kbd "d d")) #'disco-msg-delete))
     (should-not (eq (key-binding (kbd "r")) #'disco-msg-reply))))
 
 (ert-deftest disco-evil-room-emacs-state-retains-timeline-single-keys ()
