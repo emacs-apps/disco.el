@@ -1288,9 +1288,9 @@
     (should (eq (key-binding (kbd "ESC ESC") t) 'disco-room-cancel-reply))
     (should (eq (key-binding (kbd "C-M-c") t) 'disco-room-cancel-reply))
     (should-not (lookup-key disco-room-mode-map (kbd "C-c C-/")))
-    (should (eq (key-binding (kbd "C-c C-e") t) 'disco-room-input-formatting-set))
+    (should-not (lookup-key disco-room-mode-map (kbd "C-c C-e")))
     (should (eq (key-binding (kbd "C-c C-o") t) 'disco-room-input-options-transient))
-    (should (eq (key-binding (kbd "C-c C-v") t) 'disco-room-attach-clipboard))
+    (should-not (lookup-key disco-room-mode-map (kbd "C-c C-v")))
     (should (eq (key-binding (kbd "C-c M-v") t) 'disco-avatar-refetch))
     (should-not (lookup-key disco-room-mode-map (kbd "M-<")))
     (should-not (lookup-key disco-room-mode-map (kbd "M->")))
@@ -1329,7 +1329,7 @@
     (should (eq (key-binding (kbd "C-c m i") t) 'disco-msg-describe-message))
     (should (eq (key-binding (kbd "C-c m L") t) 'disco-msg-redisplay))))
 
-(ert-deftest disco-room-msg-layer-adapters-and-message-properties-are-installed ()
+(ert-deftest disco-room-msg-layer-adapters-and-message-properties-are-installed-without-row-keymap ()
   (with-temp-buffer
     (disco-state-reset)
     (disco-room-mode)
@@ -1363,13 +1363,13 @@
     (goto-char (point-min))
     (search-forward "hello")
     (backward-char 2)
-    (should (eq disco-msg-command-map (get-text-property (point) 'keymap)))
+    (should-not (get-text-property (point) 'keymap))
     (should (equal "m1" (get-text-property (point) 'disco-message-id)))
     (should (equal "chat" (get-text-property (point) 'disco-message-channel-id)))
     (should (equal "g1" (get-text-property (point) 'disco-message-guild-id)))
     (should (equal "m1" (alist-get 'id (disco-msg-at (point)))))))
 
-(ert-deftest disco-room-message-command-map-does-not-clobber-link-keymaps ()
+(ert-deftest disco-room-message-links-retain-their-keymaps ()
   (with-temp-buffer
     (disco-state-reset)
     (disco-room-mode)
@@ -1392,9 +1392,7 @@
     (backward-char 2)
     (should (equal "https://example.com"
                    (get-text-property (point) 'disco-markdown-url)))
-    (should (keymapp (get-text-property (point) 'keymap)))
-    (should-not (eq disco-msg-command-map
-                    (get-text-property (point) 'keymap)))))
+    (should (keymapp (get-text-property (point) 'keymap)))))
 
 (ert-deftest disco-room-message-navigation-uses-msg-next-and-previous ()
   (with-temp-buffer
@@ -5067,7 +5065,7 @@
                 ((symbol-function 'disco-room--channel-buffer-p)
                  (lambda (&rest _arguments) t))
                 ((symbol-function 'appkit-request-sync) #'ignore)
-                ((symbol-function 'disco-state-upsert-message) #'ignore)
+                ((symbol-function 'disco-state-merge-message-response) #'ignore)
                 ((symbol-function 'disco-room--request-render) #'ignore)
                 ((symbol-function 'disco-api-send-message-async)
                  (lambda (_channel-id _content &rest options)
@@ -5080,6 +5078,335 @@
            (format_type . 1)))
         (should (equal sent-ids '("9007199254740993123")))
         (should-not disco-room--send-in-flight)))))
+
+(ert-deftest disco-room-edit-permission-is-author-only-and-fails-closed ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (cl-letf (((symbol-function 'disco-room--room-send-restriction-reason)
+               (lambda (&rest _arguments) nil)))
+      (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+                 (lambda () "self")))
+        (should-not
+         (disco-room--edit-permission-reason
+          '((id . "own") (author . ((id . "self"))))))
+        (should
+         (equal "only your own messages can be edited"
+                (disco-room--edit-permission-reason
+                 '((id . "other") (author . ((id . "other"))))))))
+      (cl-letf (((symbol-function 'disco-gateway-current-user-id)
+                 (lambda () nil)))
+        (should
+         (equal "only your own messages can be edited"
+                (disco-room--edit-permission-reason
+                 '((id . "unknown") (author . ((id . "self"))))))))
+      (should
+       (equal "message ownership is unavailable"
+              (disco-room--edit-permission-reason nil))))))
+
+(ert-deftest disco-room-deleted-aux-target-preserves-current-draft ()
+  (dolist (context '((nil "m1") ((:type edit :message-id "m1") nil)))
+    (with-temp-buffer
+      (disco-room-mode)
+      (appkit-chatbuf-input-state-set "keep this draft")
+      (disco-room--set-composer-aux-state (car context) (cadr context))
+      (should
+       (disco-room--retire-deleted-composer-context "m1"))
+      (should-not (appkit-chatbuf-aux-state))
+      (should (equal "keep this draft"
+                     (appkit-chatbuf-string-plain-text
+                      (disco-room--current-draft)))))))
+
+(ert-deftest disco-room-synchronous-attachment-setup-error-settles-send-once ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (let* ((path (make-temp-file "disco-room-sync-attach"))
+           (draft
+            (concat
+             "hello "
+             (disco-room--attachment-input-object-string
+              (disco-room--make-attachment-input-object path)))))
+      (unwind-protect
+          (progn
+            (disco-room--set-draft draft)
+            (disco-room--set-composer-aux-state nil "reply")
+            (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+                       #'ignore)
+                      ((symbol-function 'disco-permission-ensure-channel)
+                       (lambda (&rest _arguments) t))
+                      ((symbol-function 'disco-room--channel-object)
+                       (lambda () '((id . "chat"))))
+                      ((symbol-function 'disco-room--ensure-view)
+                       (lambda () 'view))
+                      ((symbol-function 'disco-room--channel-buffer-p)
+                       (lambda (&rest _arguments) t))
+                      ((symbol-function 'appkit-request-sync) #'ignore)
+                      ((symbol-function 'disco-room--request-render) #'ignore)
+                      ((symbol-function 'disco-room--update-frame) #'ignore)
+                      ((symbol-function 'disco-api-send-message-with-attachments-async)
+                       (lambda (&rest _arguments)
+                         (error "attachment normalization exploded")))
+                      ((symbol-function 'message) #'ignore))
+              (should-error (disco-room-send-message) :type 'error))
+            (should-not disco-room--send-in-flight)
+            (should (eq 'reply (appkit-chatbuf-aux-type)))
+            (should (equal "hello "
+                           (disco-room--draft-without-attachment-tokens)))
+            (should (equal path
+                           (plist-get
+                            (car (disco-room--attachments-from-draft))
+                            :path)))
+            (should-not (disco-state-messages "chat")))
+        (delete-file path)))))
+
+(ert-deftest disco-room-send-callbacks-have-one-terminal-winner ()
+  (with-temp-buffer
+    (disco-state-reset)
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (disco-room--set-draft "sent draft")
+    (let (success error)
+      (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+                 #'ignore)
+                ((symbol-function 'disco-permission-ensure-channel)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'disco-room--channel-object)
+                 (lambda () '((id . "chat"))))
+                ((symbol-function 'disco-room--ensure-view)
+                 (lambda () 'view))
+                ((symbol-function 'disco-room--channel-buffer-p)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'appkit-request-sync) #'ignore)
+                ((symbol-function 'disco-room--request-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'disco-api-send-message-async)
+                 (lambda (_channel-id _content &rest options)
+                   (setq success (plist-get options :on-success)
+                         error (plist-get options :on-error))))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-send-message)
+        (funcall success
+                 '((id . "server") (channel_id . "chat")
+                   (content . "sent draft")))
+        (funcall error '(:message "late failure")))
+      (should-not disco-room--send-in-flight)
+      (should (equal '("server")
+                     (mapcar (lambda (message) (alist-get 'id message))
+                             (disco-state-messages "chat"))))
+      (should (equal "" (disco-room--current-draft))))))
+
+(ert-deftest disco-room-late-send-failure-never-overwrites-new-draft ()
+  (with-temp-buffer
+    (disco-state-reset)
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat")
+    (disco-room--set-draft "old draft")
+    (let (failure)
+      (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+                 #'ignore)
+                ((symbol-function 'disco-permission-ensure-channel)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'disco-room--channel-object)
+                 (lambda () '((id . "chat"))))
+                ((symbol-function 'disco-room--ensure-view)
+                 (lambda () 'view))
+                ((symbol-function 'disco-room--channel-buffer-p)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'appkit-request-sync) #'ignore)
+                ((symbol-function 'disco-room--request-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'disco-api-send-message-async)
+                 (lambda (_channel-id _content &rest options)
+                   (setq failure (plist-get options :on-error))))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-send-message)
+        (disco-room--set-draft "new draft")
+        (funcall failure '(:message "late failure")))
+      (should-not disco-room--send-in-flight)
+      (should (equal "new draft" (disco-room--current-draft))))))
+
+(ert-deftest disco-room-operation-slot-drops-reply-target-deleted-in-flight ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "chat")
+    (disco-state-put-messages
+     "chat" '(((id . "m1") (channel_id . "chat") (content . "target"))))
+    (disco-room--set-draft "reply draft")
+    (disco-room--set-composer-aux-state nil "m1")
+    (let* ((slot (disco-room--composer-operation-slot))
+           (revision (disco-room--clear-composer-operation-slot)))
+      (disco-state-delete-message "chat" "m1")
+      (should (disco-room--restore-composer-operation-slot revision slot t))
+      (should (equal "reply draft" (disco-room--current-draft)))
+      (should-not disco-room--pending-reply-to)
+      (should-not (appkit-chatbuf-aux-active-p)))))
+
+(ert-deftest disco-room-operation-slot-drops-edit-target-deleted-in-flight ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "chat")
+    (disco-state-put-messages
+     "chat" '(((id . "m1") (channel_id . "chat") (content . "target"))))
+    (disco-room--set-draft "edited draft")
+    (disco-room--set-composer-aux-state
+     (list :type 'edit :message-id "m1"
+           :saved-state (list :draft "older draft" :reply-to nil))
+     nil)
+    (let* ((slot (disco-room--composer-operation-slot))
+           (revision (disco-room--clear-composer-operation-slot)))
+      (disco-state-delete-message "chat" "m1")
+      (should (disco-room--restore-composer-operation-slot revision slot t))
+      (should (equal "edited draft" (disco-room--current-draft)))
+      (should-not disco-room--pending-edit)
+      (should-not (appkit-chatbuf-aux-active-p)))))
+
+(ert-deftest disco-room-operation-slot-retains-unmutated-filter-only-reply ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "chat")
+    (disco-room--set-draft "filtered reply")
+    (disco-room--set-composer-aux-state nil "filter-only")
+    (let* ((slot (disco-room--composer-operation-slot))
+           (revision (disco-room--clear-composer-operation-slot)))
+      (should (disco-room--restore-composer-operation-slot revision slot t))
+      (should (equal "filter-only" disco-room--pending-reply-to))
+      (should (eq 'reply (appkit-chatbuf-aux-type))))))
+
+(ert-deftest disco-room-deleted-send-response-does-not-advance-live-frontier ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "chat")
+    (setq disco-room--remote-latest-message-id "100")
+    (disco-room--set-draft "sent draft")
+    (let (success)
+      (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+                 #'ignore)
+                ((symbol-function 'disco-permission-ensure-channel)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'disco-room--channel-object)
+                 (lambda () '((id . "chat"))))
+                ((symbol-function 'disco-room--ensure-view)
+                 (lambda () 'view))
+                ((symbol-function 'disco-room--channel-buffer-p)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'appkit-request-sync) #'ignore)
+                ((symbol-function 'disco-room--request-render) #'ignore)
+                ((symbol-function 'disco-room--update-frame) #'ignore)
+                ((symbol-function 'disco-api-send-message-async)
+                 (lambda (_channel-id _content &rest options)
+                   (setq success (plist-get options :on-success))))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-send-message)
+        (disco-state-delete-message "chat" "200")
+        (funcall success
+                 '((id . "200") (channel_id . "chat")
+                   (content . "stale response"))))
+      (should (equal "100" disco-room--remote-latest-message-id))
+      (should-not (disco-room--channel-message-by-id "chat" "200"))
+      (should-not (disco-state-messages "chat")))))
+
+(ert-deftest disco-room-deleted-poll-response-does-not-advance-live-frontier ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "chat")
+    (setq disco-room--remote-latest-message-id "100")
+    (let (success)
+      (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+                 #'ignore)
+                ((symbol-function 'disco-permission-ensure-channel)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'disco-room--channel-object)
+                 (lambda () '((id . "chat"))))
+                ((symbol-function 'disco-room--ensure-view)
+                 (lambda () 'view))
+                ((symbol-function 'disco-room--channel-buffer-p)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'appkit-request-sync) #'ignore)
+                ((symbol-function 'disco-room--request-render) #'ignore)
+                ((symbol-function 'disco-api-create-message-async)
+                 (lambda (_channel-id &rest options)
+                   (setq success (plist-get options :on-success))))
+                ((symbol-function 'message) #'ignore))
+        (disco-room-send-poll "Question" '("one" "two"))
+        (disco-state-delete-message "chat" "200")
+        (funcall success
+                 '((id . "200") (channel_id . "chat")
+                   (content . "") (poll . ((question . ((text . "Question"))))))))
+      (should (equal "100" disco-room--remote-latest-message-id))
+      (should-not (disco-room--channel-message-by-id "chat" "200")))))
+
+(ert-deftest disco-room-poll-expire-captures-revision-after-confirmation ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "chat")
+    (disco-state-put-messages
+     "chat" (list (disco-room-test-poll-message "chat")))
+    (let ((disco-room-poll-confirm-expire t))
+      (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+                 #'ignore)
+                ((symbol-function 'disco-permission-ensure-channel)
+                 (lambda (&rest _arguments) t))
+                ((symbol-function 'disco-room--channel-object)
+                 (lambda () '((id . "chat"))))
+                ((symbol-function 'disco-room--ensure-view)
+                 (lambda () 'view))
+                ((symbol-function 'disco-room--channel-buffer-p)
+                 (lambda (&rest _arguments) nil))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _arguments)
+                   (disco-state-upsert-message
+                    "chat"
+                    '((id . "p1") (channel_id . "chat")
+                      (content . "updated during confirmation")))
+                   t))
+                ((symbol-function 'disco-api-expire-poll-async)
+                 (lambda (_channel-id _message-id &rest options)
+                   (funcall
+                    (plist-get options :on-success)
+                    '((id . "p1") (channel_id . "chat")
+                      (content . "expired response"))))))
+        (disco-room-expire-poll "p1")))
+    (should
+     (equal "expired response"
+            (alist-get 'content
+                       (disco-room--channel-message-by-id "chat" "p1"))))))
+
+(ert-deftest disco-room-forward-captures-revision-after-access-probe ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (disco-room-test-setup-channel "chat")
+    (cl-letf (((symbol-function 'disco-room--ensure-action-available)
+               #'ignore)
+              ((symbol-function 'disco-permission-ensure-channel)
+               (lambda (&rest _arguments) t))
+              ((symbol-function 'disco-room--channel-object)
+               (lambda () '((id . "chat"))))
+              ((symbol-function 'disco-room--resolve-target-channel)
+               (lambda (_channel-id) '((id . "source"))))
+              ((symbol-function 'disco-room--ensure-jump-permissions)
+               (lambda (&rest _arguments)
+                 (disco-state-upsert-message
+                  "chat"
+                  '((id . "300") (channel_id . "chat")
+                    (content . "updated during probe")))))
+              ((symbol-function 'disco-room--ensure-view)
+               (lambda () 'view))
+              ((symbol-function 'disco-room--channel-buffer-p)
+               (lambda (&rest _arguments) nil))
+              ((symbol-function 'appkit-request-sync) #'ignore)
+              ((symbol-function 'disco-api-forward-message-async)
+               (lambda (_target-channel-id _message-id _source-channel-id
+                        &rest options)
+                 (funcall
+                  (plist-get options :on-success)
+                  '((id . "300") (channel_id . "chat")
+                    (content . "forward response"))))))
+      (disco-room-forward-message "source-message" "source" nil t))
+    (should
+     (equal "forward response"
+            (alist-get 'content
+                       (disco-room--channel-message-by-id "chat" "300"))))))
 
 (provide 'disco-room-test)
 
