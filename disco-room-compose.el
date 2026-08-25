@@ -1,0 +1,2332 @@
+;;; disco-room-compose.el --- Composer and send flows for Disco rooms -*- lexical-binding: t; -*-
+
+;;; Commentary:
+
+;; Room-local composer state, draft and attachment editing, send/edit/reply
+;; operations, and their asynchronous reconciliation.  The room facade retains
+;; lifecycle, history, Gateway dispatch, and timeline projection ownership.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'seq)
+(require 'subr-x)
+(require 'transient)
+
+(require 'appkit-core)
+(require 'appkit-media)
+(require 'appkit-chatbuf)
+(require 'disco-api)
+(require 'disco-company)
+(require 'disco-customize)
+(require 'disco-gateway)
+(require 'disco-ins)
+(require 'disco-media)
+(require 'disco-msg)
+(require 'disco-permission)
+(require 'disco-state)
+(require 'disco-sticker)
+(require 'disco-thread)
+
+(declare-function disco-api--validate-message-content-length "disco-api-normalize" (content field-name))
+(declare-function disco-room--async-error-message "disco-room" (err))
+(declare-function disco-room--author-face "disco-room-render" (message))
+(declare-function disco-room--channel-buffer-p "disco-room" (buffer channel-id view))
+(declare-function disco-room--channel-message-by-id "disco-room" (channel-id message-id))
+(declare-function disco-room--channel-object "disco-room" ())
+(declare-function disco-room--ensure-jump-permissions "disco-room" (channel-id &optional channel))
+(declare-function disco-room--ensure-view "disco-room" ())
+(declare-function disco-room--latest-message-id "disco-room" ())
+(declare-function disco-room--line-fill-column "disco-room-render" ())
+(declare-function disco-room--lottie-sticker-at-point "disco-room" ())
+(declare-function disco-room--message-at-point "disco-room" ())
+(declare-function disco-room--message-author "disco-room-render" (message))
+(declare-function disco-room--message-author-id "disco-room-render" (message))
+(declare-function disco-room--message-by-id "disco-room" (message-id))
+(declare-function disco-room--message-effective-attachments "disco-room-render" (message))
+(declare-function disco-room--message-id-at-point "disco-room" ())
+(declare-function disco-room--observe-live-create "disco-room" (message-id))
+(declare-function disco-room--request-render "disco-room" (view))
+(declare-function disco-room--resolve-target-channel "disco-room" (channel-id))
+(declare-function disco-room--typing-indicator-text "disco-room" ())
+(declare-function disco-room--update-frame "disco-room" (&optional channel draft))
+(declare-function disco-room-complete-mention "disco-company" ())
+
+(defvar disco-api--message-content-limit)
+(defvar disco-room--channel-id)
+(defvar disco-room--channel-name)
+(defvar disco-room--guild-id)
+
+;;; Composer state
+
+(defvar-local disco-room--pending-reply-to nil)
+(defvar-local disco-room--pending-edit nil)
+
+(defvar-local disco-room--send-in-flight nil)
+(defvar-local disco-room--sticker-picker-pending nil
+  "Non-nil while this room is loading catalogs for an explicit Sticker pick.")
+
+(defvar disco-room--send-nonce-counter 0
+  "Monotonic low bits for client-generated Discord message nonces.")
+
+(defun disco-room--next-send-nonce ()
+  "Return a unique snowflake-shaped nonce for exact send reconciliation."
+  (setq disco-room--send-nonce-counter
+        (logand (1+ disco-room--send-nonce-counter) (1- (ash 1 22))))
+  (number-to-string
+   (+ (ash (- (truncate (* 1000 (float-time)))
+              (* disco-state-discord-epoch-seconds 1000))
+           22)
+      disco-room--send-nonce-counter)))
+
+(defvar-local disco-room--pending-attachments nil)
+(defvar-local disco-room--attachment-token-table nil)
+(defvar-local disco-room--attachment-token-seq 0)
+
+(defvar-local disco-room--preview-buffer-owner-p nil
+  "Non-nil when this buffer is a Disco composer-preview projection.")
+
+(put 'disco-room--preview-buffer-owner-p 'permanent-local t)
+
+(defconst disco-room--preview-buffer-name "*disco-room-preview*"
+  "Preferred display name for the composer preview buffer.")
+
+(defvar disco-room--preview-buffer nil
+  "Live explicitly owned composer preview buffer, including after a rename.")
+
+(defconst disco-room--attachment-token-regexp "\\[file:\\([0-9]+\\)\\]"
+  "Regexp used to match attachment tokens in room draft input.")
+
+(defconst disco-room--input-object-kind-attachment 'attachment
+  "Structured input object kind used for queued file attachments.")
+
+(defvar disco-room-draft-history-search-history nil
+  "Minibuffer history for room draft-history searches.")
+
+(defun disco-room-compose--clear-session-cache-memory ()
+  "Clear account-scoped composer cache bookkeeping."
+  (setq disco-room--preview-buffer nil
+        disco-room-draft-history-search-history nil))
+
+;;; Composer availability
+
+(defun disco-room-compose-reset ()
+  "Reset composer-local state in the current room buffer."
+  (disco-room--set-composer-aux-state nil nil)
+  (disco-room--sync-shared-input-options-state)
+  (setq-local disco-room--send-in-flight nil
+              disco-room--sticker-picker-pending nil
+              disco-room--pending-attachments nil
+              disco-room--attachment-token-table
+              (make-hash-table :test #'equal)
+              disco-room--attachment-token-seq 0))
+
+(defun disco-room--required-send-permissions (&optional channel)
+  "Return permission list required to send message in CHANNEL.
+
+When CHANNEL is nil, use current room channel."
+  (if (disco-thread-channel-p (or channel (disco-room--channel-object)))
+      '(send-messages-in-threads)
+    '(send-messages)))
+
+(defun disco-room--composer-missing-permissions (&optional channel)
+  "Return missing send permissions that should hide room composer for CHANNEL.
+
+When computed permissions are unavailable, return nil to avoid false
+negatives."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (and channel
+         (disco-permission-channel-known-p channel)
+         (disco-permission-channel-missing
+          channel
+          (disco-room--required-send-permissions channel)
+          nil))))
+
+(defun disco-room--system-user-dm-restriction-reason (&optional channel)
+  "Return read-only reason for official system-user DM CHANNEL, or nil."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (channel-type (and (listp channel) (alist-get 'type channel)))
+         (recipients (and (listp channel) (alist-get 'recipients channel)))
+         (recipient (and (equal channel-type 1) (car recipients))))
+    (when (and (listp recipient)
+               (alist-get 'system recipient))
+      "official Discord system DMs are read-only")))
+
+(defun disco-room--thread-send-restriction-reason (&optional channel)
+  "Return thread-local send restriction reason for CHANNEL, or nil."
+  (let ((channel (or channel (disco-room--channel-object))))
+    (when (disco-thread-channel-p channel)
+      (let ((tags (delq nil (list (and (disco-thread-archived-p channel) "archived")
+                                  (and (disco-thread-locked-p channel) "locked")))))
+        (when tags
+          (format "current thread is %s" (mapconcat #'identity tags ", ")))))))
+
+(defun disco-room--room-send-restriction-reason (&optional extra-permissions channel)
+  "Return send restriction reason for current room CHANNEL, or nil.
+
+EXTRA-PERMISSIONS augments the base send permission set for this room."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (system-dm-reason (disco-room--system-user-dm-restriction-reason channel))
+         (thread-reason (disco-room--thread-send-restriction-reason channel))
+         (permissions (append (disco-room--required-send-permissions channel)
+                              (or extra-permissions '())))
+         (missing (and channel
+                       (disco-permission-channel-known-p channel)
+                       (disco-permission-channel-missing channel permissions nil))))
+    (or system-dm-reason
+        thread-reason
+        (when missing
+          (format "missing %s"
+                  (mapconcat #'disco-permission-display-name missing ", "))))))
+
+(defun disco-room--composer-visible-p (&optional channel)
+  "Return non-nil when room composer should be shown for CHANNEL."
+  (not (disco-room--room-send-restriction-reason nil channel)))
+
+(defun disco-room--composer-hidden-status-line (&optional channel)
+  "Return read-only status line when room composer is hidden for CHANNEL."
+  (when-let* ((reason (disco-room--room-send-restriction-reason nil channel)))
+    (format "(read-only room; composer hidden: %s)" reason)))
+
+(defun disco-room--current-composer-aux-state ()
+  "Return current room-local composer aux plist, or nil."
+  (cond
+   ((and (listp disco-room--pending-edit)
+         (eq (plist-get disco-room--pending-edit :type) 'edit))
+    (let ((message-id (plist-get disco-room--pending-edit :message-id)))
+      (list :aux-type 'edit
+            :aux-msg (disco-room--composer-context-message message-id)
+            :message-id message-id)))
+   (disco-room--pending-reply-to
+    (list :aux-type 'reply
+          :aux-msg (disco-room--composer-context-message disco-room--pending-reply-to)
+          :message-id disco-room--pending-reply-to))
+   (t nil)))
+
+(defun disco-room--composer-reply-message-id ()
+  "Return target message id for active composer reply, or nil."
+  (when (eq (plist-get (appkit-chatbuf-aux-state) :aux-type) 'reply)
+    (plist-get (appkit-chatbuf-aux-state) :message-id)))
+
+(defun disco-room--composer-edit-active-p ()
+  "Return non-nil when room composer is editing an existing message."
+  (eq (plist-get (appkit-chatbuf-aux-state) :aux-type) 'edit))
+
+(defun disco-room--composer-edit-message-id ()
+  "Return target message id for active composer edit, or nil."
+  (and (disco-room--composer-edit-active-p)
+       (plist-get (appkit-chatbuf-aux-state) :message-id)))
+
+(defun disco-room--composer-aux-active-p ()
+  "Return non-nil when room composer currently has reply/edit context."
+  (not (null (appkit-chatbuf-aux-state))))
+
+(defun disco-room--composer-aux-context-name ()
+  "Return human-readable name for active composer aux context, or nil."
+  (pcase (plist-get (appkit-chatbuf-aux-state) :aux-type)
+    ('edit "editing a message")
+    ('reply "replying to a message")
+    (_ nil)))
+
+(defun disco-room--message-owned-by-current-user-p (msg &optional unknown-value)
+  "Return non-nil when MSG belongs to current user.
+
+If ownership cannot be determined, return UNKNOWN-VALUE."
+  (let* ((author-id (and (listp msg) (disco-room--message-author-id msg)))
+         (self-id (disco-gateway-current-user-id)))
+    (if (or (null author-id) (null self-id))
+        unknown-value
+      (equal (format "%s" author-id) (format "%s" self-id)))))
+
+(defun disco-room--edit-permission-reason (&optional msg)
+  "Return edit permission/restriction reason for MSG, or nil."
+  (or (disco-room--room-send-restriction-reason
+       nil (disco-room--channel-object))
+      (cond
+       ((not (consp msg))
+        "message ownership is unavailable")
+       ((not (disco-room--message-owned-by-current-user-p msg nil))
+        "only your own messages can be edited"))))
+
+(defun disco-room--attach-unavailable-reason ()
+  "Return reason attach-file action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason '(attach-files))
+      (when (disco-room--composer-edit-active-p)
+        "attachments are unavailable while editing a message")))
+
+(defun disco-room--reply-unavailable-reason ()
+  "Return reason reply action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason '(read-message-history))
+      (when (disco-room--composer-edit-active-p)
+        "cancel the active edit before starting a reply")))
+
+(defun disco-room--forward-unavailable-reason ()
+  "Return reason forward action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason)
+      (when-let* ((aux (disco-room--composer-aux-context-name)))
+        (format "cancel %s before forwarding" aux))))
+
+(defun disco-room--edit-start-unavailable-reason (&optional msg)
+  "Return reason entering composer edit mode for MSG is unavailable, or nil."
+  (or (when (disco-room--composer-edit-active-p)
+        "already editing a message")
+      (when (disco-room--composer-reply-message-id)
+        "cancel the active reply before editing a message")
+      (disco-room--edit-permission-reason msg)))
+
+(defun disco-room--attachment-token-count ()
+  "Return number of queued attachment refs in current draft."
+  (length (disco-room--attachments-from-draft (disco-room--current-draft))))
+
+(defun disco-room--attachment-token-action-unavailable-reason (&optional min-count)
+  "Return reason attachment actions are unavailable, or nil.
+
+MIN-COUNT optionally requires at least that many queued attachments."
+  (or (when (disco-room--composer-edit-active-p)
+        "attachments are unavailable while editing a message")
+      (let ((count (disco-room--attachment-token-count)))
+        (cond
+         ((<= (or min-count 1) 0)
+          nil)
+         ((zerop count)
+          "no queued attachments")
+         ((and (integerp min-count) (< count min-count))
+          (format "need at least %d queued attachments" min-count))))))
+
+(defun disco-room--send-message-unavailable-reason ()
+  "Return reason send-message action is unavailable, or nil."
+  (let* ((draft (disco-room--current-draft))
+         (has-attachments (not (null (disco-room--attachments-from-draft draft))))
+         (reply-to (disco-room--composer-reply-message-id))
+         (edit-message-id (disco-room--composer-edit-message-id))
+         (edit-message (and edit-message-id
+                            (disco-room--composer-context-message edit-message-id))))
+    (if edit-message-id
+        (or (disco-room--edit-permission-reason edit-message)
+            (when has-attachments
+              "attachments are unavailable while editing a message"))
+      (disco-room--room-send-restriction-reason
+       (append (when has-attachments '(attach-files))
+               (when reply-to '(read-message-history)))))))
+
+(defun disco-room--channel-permission-reason (permissions &optional channel)
+  "Return missing-permission reason for PERMISSIONS on CHANNEL, or nil."
+  (let* ((channel (or channel (disco-room--channel-object)))
+         (missing (and channel
+                       (disco-permission-channel-known-p channel)
+                       (disco-permission-channel-missing channel permissions nil))))
+    (when missing
+      (format "missing %s"
+              (mapconcat #'disco-permission-display-name missing ", ")))))
+
+(defun disco-room--sticker-unavailable-reason ()
+  "Return reason sending a Sticker is unavailable, or nil."
+  (disco-room--room-send-restriction-reason))
+
+(defun disco-room--delete-message-unavailable-reason (&optional msg)
+  "Return reason delete-message action is unavailable for MSG, or nil."
+  (when (listp msg)
+    (let* ((channel (disco-room--channel-object))
+           (missing-manage
+            (and channel
+                 (disco-permission-channel-known-p channel)
+                 (not (disco-room--message-owned-by-current-user-p msg t))
+                 (disco-permission-channel-missing channel '(manage-messages) nil))))
+      (when missing-manage
+        (format "missing %s"
+                (mapconcat #'disco-permission-display-name missing-manage ", "))))))
+
+(defun disco-room--ensure-action-available (reason action)
+  "Signal `user-error' when ACTION is unavailable for REASON."
+  (when reason
+    (user-error "disco: cannot %s: %s" action reason)))
+
+(defun disco-room--copy-attachment-token-table ()
+  "Return deep copy of current attachment token table as alist entries."
+  (let (entries)
+    (when (hash-table-p disco-room--attachment-token-table)
+      (maphash (lambda (token-id entry)
+                 (push (cons token-id (copy-tree entry)) entries))
+               disco-room--attachment-token-table))
+    (nreverse entries)))
+
+(defun disco-room--restore-attachment-token-table (entries)
+  "Replace current attachment token table with ENTRIES alist copy."
+  (unless (hash-table-p disco-room--attachment-token-table)
+    (setq disco-room--attachment-token-table (make-hash-table :test #'equal)))
+  (clrhash disco-room--attachment-token-table)
+  (dolist (entry entries)
+    (puthash (car entry) (copy-tree (cdr entry)) disco-room--attachment-token-table)))
+
+;;; Composer operation ownership
+
+(defun disco-room--composer-edit-saved-state ()
+  "Capture composer state to be restored after edit cancel/success."
+  (list :draft (appkit-chatbuf-copy-string (disco-room--current-draft))
+        :reply-to (disco-room--composer-reply-message-id)
+        :attachment-token-seq disco-room--attachment-token-seq
+        :attachment-token-entries (disco-room--copy-attachment-token-table)))
+
+(defun disco-room--composer-edit-restore-state (state &optional defer-live-update-p)
+  "Restore composer STATE captured by `disco-room--composer-edit-saved-state'.
+
+When DEFER-LIVE-UPDATE-P is non-nil, update controller state only.  The owning
+Appkit view will project the restored composer during its next sync."
+  (let ((draft (appkit-chatbuf-copy-string (plist-get state :draft))))
+    (disco-room--set-composer-aux-state nil (plist-get state :reply-to))
+    (setq disco-room--attachment-token-seq
+          (or (plist-get state :attachment-token-seq) 0))
+    (disco-room--restore-attachment-token-table
+     (plist-get state :attachment-token-entries))
+    (disco-room--apply-draft-state
+     draft
+     :reset-history-p t
+     :defer-live-update-p defer-live-update-p)))
+
+(defun disco-room--composer-edit-clear (&optional restore-state defer-live-update-p)
+  "Clear active composer edit.
+
+When RESTORE-STATE is non-nil, also restore the saved draft/reply/attachment
+state that was present before edit mode was entered.  DEFER-LIVE-UPDATE-P is
+forwarded to the controller-only restore path used by asynchronous callbacks."
+  (when (disco-room--composer-edit-active-p)
+    (let ((saved-state (plist-get disco-room--pending-edit :saved-state)))
+      (disco-room--set-composer-aux-state nil nil)
+      (when restore-state
+        (disco-room--composer-edit-restore-state
+         saved-state defer-live-update-p)))
+    t))
+
+(defun disco-room--composer-operation-slot ()
+  "Capture the complete client-owned composer slot for one mutation."
+  (list :draft (appkit-chatbuf-copy-string (disco-room--current-draft))
+        :pending-edit (copy-tree disco-room--pending-edit)
+        :pending-reply-to disco-room--pending-reply-to
+        :message-revision
+        (disco-state-message-revision disco-room--channel-id)
+        :attachment-token-seq disco-room--attachment-token-seq
+        :attachment-token-entries (disco-room--copy-attachment-token-table)))
+
+(defun disco-room--clear-composer-operation-slot ()
+  "Clear input and aux as one mutation boundary and return its revision."
+  (disco-room--clear-draft)
+  (disco-room--set-composer-aux-state nil nil)
+  (appkit-chatbuf-composer-revision))
+
+(defun disco-room--restore-composer-operation-slot
+    (revision slot &optional defer-live-update-p)
+  "Restore SLOT only while Appkit composer REVISION remains pristine.
+
+When DEFER-LIVE-UPDATE-P is non-nil, update controller state only.  Return
+non-nil exactly when restoration wins.  Reply/edit targets deleted after SLOT
+was captured are not restored, but their draft and attachments remain
+recoverable."
+  (when (= revision (appkit-chatbuf-composer-revision))
+    (let* ((pending-edit (copy-tree (plist-get slot :pending-edit)))
+           (pending-reply-to (plist-get slot :pending-reply-to))
+           (message-revision (plist-get slot :message-revision)))
+      (cl-labels
+          ((deleted-after-capture-p
+             (message-id)
+             (and message-id
+                  (disco-state-message-deleted-after-p
+                   disco-room--channel-id message-id message-revision))))
+        (when (deleted-after-capture-p
+               (plist-get pending-edit :message-id))
+          (setq pending-edit nil))
+        (when (deleted-after-capture-p pending-reply-to)
+          (setq pending-reply-to nil))
+        (when-let* ((saved-state (plist-get pending-edit :saved-state))
+                    (saved-reply-to (plist-get saved-state :reply-to)))
+          (when (deleted-after-capture-p saved-reply-to)
+            (setf (plist-get saved-state :reply-to) nil))))
+      (setq disco-room--attachment-token-seq
+            (or (plist-get slot :attachment-token-seq) 0))
+      (disco-room--restore-attachment-token-table
+       (plist-get slot :attachment-token-entries))
+      (disco-room--set-composer-aux-state pending-edit pending-reply-to)
+      (disco-room--apply-draft-state
+       (appkit-chatbuf-copy-string (plist-get slot :draft))
+       :reset-history-p t
+       :defer-live-update-p defer-live-update-p)
+      t)))
+
+(defun disco-room--composer-context-message (message-id)
+  "Return cached local message object for MESSAGE-ID, or nil."
+  (and message-id (disco-room--message-by-id message-id)))
+
+(defun disco-room--composer-context-text (aux-state)
+  "Return the unified composer context card for AUX-STATE."
+  (when aux-state
+    (let* ((aux-type (plist-get aux-state :aux-type))
+           (message-id (plist-get aux-state :message-id))
+           (msg (or (disco-room--composer-context-message message-id)
+                    (plist-get aux-state :aux-msg)))
+           (author (and msg (disco-room--message-author msg)))
+           (author-face (and msg (disco-room--author-face msg)))
+           (subject
+            (if (and (stringp author) (not (string-empty-p author)))
+                (propertize author 'face author-face)
+              "message"))
+           (title
+            (pcase aux-type
+              ('edit "Editing message")
+              ('reply (concat "Reply to " subject))
+              (_ "")))
+           (preview (string-trim
+                     (or (and msg (disco-msg-preview-content msg)) ""))))
+      (appkit-chatbuf-aux-render
+       :title title
+       :preview
+       (disco-media-message-one-line-preview
+        msg
+        (if (string-empty-p preview)
+            "Message preview unavailable"
+          preview)
+        :attachments
+        (and msg (disco-room--message-effective-attachments msg)))
+       :cancel-action #'disco-room-cancel-reply
+       :cancel-help
+       (format "Cancel %s (C-c C-k)"
+               (if (eq aux-type 'edit) "edit" "reply"))
+       :accent-face author-face
+       :width (disco-room--line-fill-column)))))
+
+(defun disco-room--composer-enter-edit (msg)
+  "Enter composer edit mode for MSG."
+  (let* ((message-id (alist-get 'id msg))
+         (old-content (or (alist-get 'content msg) ""))
+         (saved-state (disco-room--composer-edit-saved-state)))
+    (unless (and message-id (not (string-empty-p (format "%s" message-id))))
+      (user-error "disco: message id is unavailable for edit"))
+    (when (disco-room--composer-edit-active-p)
+      (disco-room--composer-edit-clear t))
+    (disco-room--set-composer-aux-state
+     (list :type 'edit
+           :message-id message-id
+           :saved-state saved-state)
+     nil)
+    (disco-room--apply-draft-state old-content :reset-history-p t)
+    (setq disco-room--attachment-token-seq 0)
+    (when (hash-table-p disco-room--attachment-token-table)
+      (clrhash disco-room--attachment-token-table))
+    (disco-room--update-frame)
+    (appkit-chatbuf-focus-input)
+    (message "disco: editing message %s in composer" message-id)))
+
+;;; Draft and structured attachments
+
+(defun disco-room--current-draft ()
+  "Return current room draft string, preserving text properties."
+  (appkit-chatbuf-input-state))
+
+(defun disco-room--attachment-input-object-p (object)
+  "Return non-nil when OBJECT is a queued attachment input object."
+  (and (listp object)
+       (eq (plist-get object :kind) disco-room--input-object-kind-attachment)))
+
+(cl-defun disco-room--make-attachment-input-object (path &key description filename content-type)
+  "Build one structured attachment input object for PATH."
+  (unless (and (stringp path) (not (string-empty-p path)))
+    (user-error "disco: attachment object requires a file path"))
+  (let* ((resolved-filename (or filename (file-name-nondirectory path)))
+         (trimmed-description (and (stringp description)
+                                   (not (string-empty-p (string-trim description)))
+                                   (string-trim description))))
+    (list :kind disco-room--input-object-kind-attachment
+          :path path
+          :filename resolved-filename
+          :description trimmed-description
+          :content-type content-type)))
+
+(defun disco-room--attachment-input-object-display-text (attachment)
+  "Return visible composer text for ATTACHMENT input object."
+  (let* ((path (plist-get attachment :path))
+         (filename
+          (or (plist-get attachment :filename)
+              (and path (file-name-nondirectory path))
+              "unnamed"))
+         (content-type (plist-get attachment :content-type))
+         (image-p
+          (or (and (stringp content-type)
+                   (string-prefix-p "image/" content-type))
+              (appkit-media-image-file-name-p filename)))
+         (image
+          (and image-p
+               (appkit-media-file-present-p path)
+               (appkit-media-one-line-preview-image-from-file path)))
+         (preview
+          (and image (appkit-media-image-display-string image "▧")))
+         (size
+          (and (appkit-media-file-present-p path)
+               (file-size-human-readable
+                (file-attribute-size (file-attributes path))))))
+    (concat (if image-p "[image] " "[file] ")
+            (if preview (concat preview " ") "")
+            (propertize filename 'help-echo path)
+            (if size (format " (%s)" size) ""))))
+
+(defun disco-room--attachment-input-object-string (attachment)
+  "Return one propertized draft string representing ATTACHMENT."
+  (let* ((object (copy-tree attachment))
+         (text (disco-room--attachment-input-object-display-text object)))
+    (appkit-chatbuf-input-object-string text object)))
+
+(defun disco-room--insert-attachment-input-object (attachment)
+  "Insert ATTACHMENT as one structured composer object at point."
+  (let ((object (copy-tree attachment)))
+    ;; Do not insert the leading separator into an existing atomic object when
+    ;; point was placed unexpectedly inside its intangible display span.
+    (when-let* ((bounds (appkit-chatbuf-input-object-bounds-at-point)))
+      (unless (= (point) (car bounds))
+        (goto-char (cdr bounds))))
+    (when (and (appkit-chatbuf-point-in-input-p)
+               (> (point) (or (appkit-chatbuf-input-start-position) (point-min)))
+               (let ((before (char-before)))
+                 (and before (not (memq before '(?\s ?\t ?\n))))))
+      (appkit-chatbuf-input-insert " "))
+    (appkit-chatbuf-input-insert
+     (disco-room--attachment-input-object-display-text object)
+     :object object)
+    (when (let ((after (char-after)))
+            (and after (not (memq after '(?\s ?\t ?\n)))))
+      (appkit-chatbuf-input-insert " "))
+    object))
+
+(defun disco-room--attachment-input-object-to-attachment (object)
+  "Convert structured attachment OBJECT into upload plist."
+  (when (disco-room--attachment-input-object-p object)
+    (let ((attachment
+           (list :path (plist-get object :path)
+                 :filename (or (plist-get object :filename)
+                               (file-name-nondirectory
+                                (or (plist-get object :path) ""))))))
+      (when-let* ((description (plist-get object :description)))
+        (setq attachment (plist-put attachment :description description)))
+      (when-let* ((content-type (plist-get object :content-type)))
+        (setq attachment (plist-put attachment :content-type content-type)))
+      attachment)))
+
+(defun disco-room--attachment-label (attachment prefix)
+  "Return one user-facing label for ATTACHMENT using PREFIX."
+  (let* ((path (or (plist-get attachment :path) ""))
+         (filename (or (plist-get attachment :filename)
+                       (and (not (string-empty-p path))
+                            (file-name-nondirectory path))
+                       "missing"))
+         (description (or (plist-get attachment :description) "")))
+    (if (string-empty-p description)
+        (format "%s %s" prefix filename)
+      (format "%s %s - %s" prefix filename description))))
+
+(defun disco-room--draft-substring-delete (draft start end)
+  "Return DRAFT with region START..END removed, preserving properties."
+  (concat (substring draft 0 start)
+          (substring draft end)))
+
+(defun disco-room--draft-substring-replace (draft start end replacement)
+  "Return DRAFT with region START..END replaced by REPLACEMENT."
+  (concat (substring draft 0 start)
+          replacement
+          (substring draft end)))
+
+(defun disco-room--attachment-refs (&optional draft)
+  "Return ordered attachment refs found in DRAFT."
+  (let* ((text (or draft (disco-room--current-draft)))
+         (len (length text))
+         (pos 0)
+         (refs '()))
+    (while (< pos len)
+      (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
+        (if (disco-room--attachment-input-object-p object)
+            (let* ((end (appkit-chatbuf-next-input-object-change
+                         pos text len))
+                   (object-copy (copy-tree object))
+                   (attachment (disco-room--attachment-input-object-to-attachment object-copy)))
+              (push (list :type 'object
+                          :start pos
+                          :end end
+                          :object object-copy
+                          :attachment attachment
+                          :label (disco-room--attachment-label attachment "[file]"))
+                    refs)
+              (setq pos end))
+          (let* ((next-object
+                  (appkit-chatbuf-next-input-object-change pos text len))
+                 (chunk (substring-no-properties text pos next-object))
+                 (chunk-pos 0))
+            (while (string-match disco-room--attachment-token-regexp chunk chunk-pos)
+              (let* ((token-id (match-string 1 chunk))
+                     (attachment (copy-tree (or (disco-room--attachment-by-token-id token-id)
+                                                (list :token-id token-id))))
+                     (start (+ pos (match-beginning 0)))
+                     (end (+ pos (match-end 0))))
+                (push (list :type 'token
+                            :start start
+                            :end end
+                            :token-id token-id
+                            :attachment attachment
+                            :label (disco-room--attachment-label
+                                    attachment
+                                    (disco-room--attachment-token-text token-id)))
+                      refs))
+              (setq chunk-pos (match-end 0)))
+            (setq pos next-object)))))
+    (nreverse refs)))
+
+(defun disco-room--choose-attachment-ref (prompt)
+  "Prompt for one queued attachment ref using PROMPT."
+  (let* ((refs (disco-room--attachment-refs))
+         (labels (mapcar (lambda (ref) (plist-get ref :label)) refs))
+         (picked (completing-read prompt labels nil t)))
+    (or (seq-find (lambda (ref)
+                    (equal (plist-get ref :label) picked))
+                  refs)
+        (user-error "disco: invalid attachment selection"))))
+
+(defun disco-room--attachment-ref-string (ref)
+  "Return serialized draft text for attachment REF."
+  (pcase (plist-get ref :type)
+    ('object
+     (disco-room--attachment-input-object-string
+      (or (plist-get ref :object)
+          (disco-room--make-attachment-input-object
+           (plist-get (plist-get ref :attachment) :path)
+           :filename (plist-get (plist-get ref :attachment) :filename)
+           :description (plist-get (plist-get ref :attachment) :description)
+           :content-type (plist-get (plist-get ref :attachment) :content-type)))))
+    (_
+     (disco-room--attachment-token-text (plist-get ref :token-id)))))
+
+(defun disco-room--draft-input-objects (&optional draft)
+  "Return ordered structured input objects found in DRAFT."
+  (let* ((text (or draft (disco-room--current-draft)))
+         (len (length text))
+         (pos 0)
+         (objects '()))
+    (while (< pos len)
+      (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
+        (if object
+            (let ((end (appkit-chatbuf-next-input-object-change
+                        pos text len)))
+              (push (copy-tree object) objects)
+              (setq pos end))
+          (setq pos (appkit-chatbuf-next-input-object-change
+                     pos text len)))))
+    (nreverse objects)))
+
+(defun disco-room--next-attachment-token-id ()
+  "Return next unique attachment token id for current room buffer."
+  (setq disco-room--attachment-token-seq (1+ (or disco-room--attachment-token-seq 0)))
+  (number-to-string disco-room--attachment-token-seq))
+
+(defun disco-room--attachment-token-text (token-id)
+  "Return textual draft token representation for TOKEN-ID."
+  (format "[file:%s]" token-id))
+
+(defun disco-room--attachment-token-ids-in-text (text)
+  "Return attachment token ids found in TEXT, preserving first-seen order."
+  (let ((pos 0)
+        (ids '())
+        (seen (make-hash-table :test #'equal)))
+    (while (and (stringp text)
+                (< pos (length text))
+                (string-match disco-room--attachment-token-regexp text pos))
+      (let ((token-id (match-string 1 text)))
+        (unless (gethash token-id seen)
+          (puthash token-id t seen)
+          (push token-id ids)))
+      (setq pos (match-end 0)))
+    (nreverse ids)))
+
+(defun disco-room--attachment-by-token-id (token-id)
+  "Return attachment plist by TOKEN-ID from current room token table."
+  (and disco-room--attachment-token-table
+       (gethash token-id disco-room--attachment-token-table)))
+
+(defun disco-room--parse-draft-input (&optional draft)
+  "Parse DRAFT into plain content, structured objects, and attachment uploads."
+  (let* ((text (or draft (disco-room--current-draft)))
+         (len (length text))
+         (pos 0)
+         (content-parts '())
+         (objects '())
+         (attachments '())
+         (token-ids '())
+         (seen-token-ids (make-hash-table :test #'equal)))
+    (while (< pos len)
+      (let ((object (get-text-property pos appkit-chatbuf-input-object-property text)))
+        (if object
+            (let* ((end (appkit-chatbuf-next-input-object-change
+                         pos text len))
+                   (object-copy (copy-tree object)))
+              (push object-copy objects)
+              (when-let* ((attachment
+                           (disco-room--attachment-input-object-to-attachment object-copy)))
+                (push attachment attachments))
+              (setq pos end))
+          (let* ((end (appkit-chatbuf-next-input-object-change
+                       pos text len))
+                 (chunk (substring-no-properties text pos end))
+                 (content-chunk
+                  (replace-regexp-in-string disco-room--attachment-token-regexp "" chunk)))
+            (push content-chunk content-parts)
+            (dolist (token-id (disco-room--attachment-token-ids-in-text chunk))
+              (unless (gethash token-id seen-token-ids)
+                (puthash token-id t seen-token-ids)
+                (push token-id token-ids)
+                (when-let* ((attachment (disco-room--attachment-by-token-id token-id)))
+                  (push (copy-tree attachment) attachments))))
+            (setq pos end)))))
+    (list :content (mapconcat #'identity (nreverse content-parts) "")
+          :objects (nreverse objects)
+          :attachments (nreverse attachments)
+          :token-ids (nreverse token-ids))))
+
+(defun disco-room--attachments-from-draft (&optional draft)
+  "Return ordered attachment list referenced by DRAFT."
+  (plist-get (disco-room--parse-draft-input draft) :attachments))
+
+(defun disco-room--draft-without-attachment-tokens (&optional draft)
+  "Return DRAFT plain content with attachment placeholders removed."
+  (plist-get (disco-room--parse-draft-input draft) :content))
+
+(defun disco-room--sync-pending-attachments-from-draft (&optional draft)
+  "Refresh `disco-room--pending-attachments' using parsed DRAFT references."
+  (setq disco-room--pending-attachments
+        (disco-room--attachments-from-draft draft)))
+
+(defun disco-room--prune-unused-attachment-tokens (&optional draft)
+  "Remove token table entries that are not referenced in DRAFT."
+  (let ((alive (make-hash-table :test #'equal)))
+    (dolist (token-id (plist-get (disco-room--parse-draft-input draft) :token-ids))
+      (puthash token-id t alive))
+    (when disco-room--attachment-token-table
+      (maphash
+       (lambda (token-id _attachment)
+         (unless (gethash token-id alive)
+           (remhash token-id disco-room--attachment-token-table)))
+       disco-room--attachment-token-table))))
+
+(defun disco-room--apply-input-text-properties ()
+  "Normalize current draft text properties after redraws and edits."
+  (appkit-chatbuf-input-apply-text-properties)
+  (when-let* ((bounds (appkit-chatbuf-input-region-bounds)))
+    (with-silent-modifications
+      (add-text-properties
+       (car bounds) (cdr bounds)
+       '(disco-room-input t)))))
+
+(defun disco-room--sync-draft-from-buffer ()
+  "Sync shared chatbuf draft cache from editable input region."
+  (let ((text (plist-get (appkit-chatbuf-input-state-sync)
+                         :value)))
+    (disco-room--prune-unused-attachment-tokens text)
+    (disco-room--sync-pending-attachments-from-draft text)))
+
+(cl-defun disco-room--apply-draft-state
+    (text &key reset-history-p defer-live-update-p)
+  "Apply draft TEXT to cache/live input and return update metadata.
+
+When a visible tail input exists and attachment-derived footer state is
+unchanged, update the live input directly in telega-like fashion.  Otherwise,
+callers can use the returned metadata to decide whether a frame refresh is
+needed.  When DEFER-LIVE-UPDATE-P is non-nil, only controller state changes;
+an Appkit sync must project the resulting composer."
+  (let ((old-attachments (copy-tree disco-room--pending-attachments))
+        (live-input-p (and (not defer-live-update-p)
+                           (not (appkit-chatbuf-rendering-p))
+                           (appkit-chatbuf-input-start-position))))
+    (let ((draft
+           (appkit-chatbuf-input-state-set
+            text
+            :reset-history-p reset-history-p)))
+      (disco-room--prune-unused-attachment-tokens draft)
+      (disco-room--sync-pending-attachments-from-draft draft)
+      (let ((attachments-changed-p
+             (not (equal old-attachments disco-room--pending-attachments))))
+        (when (and live-input-p (not attachments-changed-p))
+          (appkit-chatbuf-with-generated-update
+            (appkit-chatbuf-input-replace draft)
+            (disco-room--apply-input-text-properties)))
+        (list :draft (appkit-chatbuf-copy-string draft)
+              :attachments-changed-p attachments-changed-p
+              :live-input-updated-p (and live-input-p
+                                         (not attachments-changed-p)))))))
+
+(defun disco-room--set-draft (text)
+  "Set room draft TEXT and refresh composer surfaces as needed."
+  (let ((result (disco-room--apply-draft-state text)))
+    (when (plist-get result :attachments-changed-p)
+      (disco-room--update-frame))))
+
+(defun disco-room--clear-draft ()
+  "Clear room draft and reset draft history navigation state."
+  (let ((result (disco-room--apply-draft-state "" :reset-history-p t)))
+    (when (plist-get result :attachments-changed-p)
+      (disco-room--update-frame))))
+
+(defun disco-room-draft-prev (&optional n)
+  "Replace draft with N previous entries from draft history."
+  (interactive "p")
+  (let ((result (appkit-chatbuf-input-history-prev-value
+                 (disco-room--current-draft)
+                 n)))
+    (pcase (plist-get result :status)
+      ('ok
+       (disco-room--set-draft (plist-get result :value)))
+      (_
+       (message "disco: draft history is empty")))))
+
+(defun disco-room-draft-next (&optional n)
+  "Replace draft with N newer entries from draft history."
+  (interactive "p")
+  (let ((result (appkit-chatbuf-input-history-next-value n)))
+    (pcase (plist-get result :status)
+      ('ok
+       (disco-room--set-draft (plist-get result :value)))
+      (_
+       (message "disco: already at latest draft")))))
+
+(defun disco-room-edit-draft ()
+  "Edit current room draft in minibuffer and re-render room."
+  (interactive)
+  (when (appkit-chatbuf-string-has-objects-p (disco-room--current-draft))
+    (user-error "disco: minibuffer draft editing is unavailable for structured input objects"))
+  (let ((updated (read-from-minibuffer
+                  "Draft: "
+                  (appkit-chatbuf-string-plain-text (disco-room--current-draft)))))
+    (appkit-chatbuf-input-history-reset)
+    (disco-room--set-draft updated)))
+
+;;; Composer footer and input binding
+
+(defun disco-room--input-footer-context-text ()
+  "Return extra context lines shown above the room composer."
+  (concat
+   (or (disco-room--composer-context-text
+        (appkit-chatbuf-aux-state))
+       "")
+   (if disco-room--pending-attachments
+       (format "Queued attachments: %s\n"
+               (mapconcat #'identity
+                          (disco-room--pending-attachment-labels)
+                          ", "))
+     "")))
+
+(defun disco-room--input-footer-text ()
+  "Build read-only EWOC footer text shown above the room prompt."
+  (let ((context-text (disco-room--input-footer-context-text))
+        (typing-text (disco-room--typing-indicator-text)))
+    (if (not (disco-room--composer-visible-p))
+        ""
+      (let ((text
+             (concat
+              "\n"
+              (if (string-empty-p context-text)
+                  ""
+                context-text)
+              (if (and (stringp typing-text)
+                       (not (string-empty-p typing-text)))
+                  (propertize (concat typing-text "\n")
+                              'face 'disco-room-typing-indicator)
+                ""))))
+        (add-text-properties
+         0 (length text)
+         '(read-only t
+           front-sticky (read-only)
+           rear-nonsticky (read-only))
+         text)
+        text))))
+
+(defun disco-room--prompt-text ()
+  "Return visible prompt text for the current room buffer."
+  ">>> ")
+
+(defun disco-room--sync-shared-aux-state ()
+  "Mirror room reply/edit context into shared chatbuf aux state."
+  (if-let* ((aux-state (disco-room--current-composer-aux-state)))
+      (appkit-chatbuf-aux-set aux-state)
+    (appkit-chatbuf-aux-reset)))
+
+(defun disco-room--set-composer-aux-state (pending-edit pending-reply-to)
+  "Set room composer PENDING-EDIT and PENDING-REPLY-TO, then sync aux state."
+  (setq disco-room--pending-edit pending-edit
+        disco-room--pending-reply-to pending-reply-to)
+  (disco-room--sync-shared-aux-state))
+
+(defun disco-room--current-input-options-state ()
+  "Return current room-local input-options plist for shared chatbuf state."
+  (list :send-on-return disco-room-send-on-return
+        :long-message-action disco-room-long-message-action
+        :allowed-mentions (copy-tree disco-room-allowed-mentions)
+        :reply-mention-replied-user disco-room-reply-mention-replied-user))
+
+(defun disco-room--input-options-state ()
+  "Return composer input-options plist from shared chatbuf state, or nil."
+  (appkit-chatbuf-input-options-state))
+
+(defun disco-room--input-option-send-on-return ()
+  "Return effective send-on-return option from shared chatbuf state."
+  (eq t (plist-get (disco-room--input-options-state) :send-on-return)))
+
+(defun disco-room--input-option-long-message-action ()
+  "Return effective long-message action from shared chatbuf state."
+  (plist-get (disco-room--input-options-state) :long-message-action))
+
+(defun disco-room--input-option-allowed-mentions ()
+  "Return effective allowed-mentions option from shared chatbuf state."
+  (let ((state (disco-room--input-options-state)))
+    (when (plist-member state :allowed-mentions)
+      (copy-tree (plist-get state :allowed-mentions)))))
+
+(defun disco-room--input-option-reply-mention-replied-user ()
+  "Return effective reply-mention option from shared chatbuf state."
+  (eq t (plist-get (disco-room--input-options-state)
+                   :reply-mention-replied-user)))
+
+(defun disco-room--sync-shared-input-options-state ()
+  "Mirror room-local input option state into shared chatbuf state."
+  (appkit-chatbuf-input-options-set
+   (disco-room--current-input-options-state)))
+
+(defun disco-room--set-input-options-state (options)
+  "Set room-local input OPTIONS and sync shared chatbuf state.
+
+OPTIONS should be a plist using the same keys as
+`disco-room--current-input-options-state'.  Missing keys fall back to the
+current effective input-options state.  Return the normalized state plist."
+  (let* ((current (or (disco-room--input-options-state)
+                      (disco-room--current-input-options-state)))
+         (send-on-return (if (plist-member options :send-on-return)
+                             (plist-get options :send-on-return)
+                           (plist-get current :send-on-return)))
+         (long-message-action (if (plist-member options :long-message-action)
+                                  (plist-get options :long-message-action)
+                                (plist-get current :long-message-action)))
+         (allowed-mentions (if (plist-member options :allowed-mentions)
+                               (copy-tree (plist-get options :allowed-mentions))
+                             (copy-tree (plist-get current :allowed-mentions))))
+         (reply-mention-replied-user
+          (if (plist-member options :reply-mention-replied-user)
+              (plist-get options :reply-mention-replied-user)
+            (plist-get current :reply-mention-replied-user))))
+    (setq-local disco-room-send-on-return send-on-return
+                disco-room-long-message-action long-message-action
+                disco-room-allowed-mentions allowed-mentions
+                disco-room-reply-mention-replied-user reply-mention-replied-user)
+    (disco-room--sync-shared-input-options-state)
+    (disco-room--current-input-options-state)))
+
+(defun disco-room--update-input-options-state (updater)
+  "Apply UPDATER to current effective input-options state and sync the result."
+  (disco-room--set-input-options-state
+   (funcall updater (or (disco-room--input-options-state)
+                        (disco-room--current-input-options-state)))))
+
+(defun disco-room--bind-input-region-from-footer ()
+  "Ensure the persistent tail input region exists and matches current draft."
+  (appkit-chatbuf-init-state disco-room-input-history-size)
+  (disco-room--sync-shared-aux-state)
+  (disco-room--sync-shared-input-options-state)
+  (appkit-chatbuf-bind-input-region
+   :visible-p (disco-room--composer-visible-p)
+   :prompt (disco-room--prompt-text)
+   :input-text (disco-room--current-draft)
+   :post-bind-function #'disco-room--apply-input-text-properties))
+
+(defun disco-room--pending-attachment-labels ()
+  "Return compact filename labels for pending composer attachments."
+  (let ((labels
+         (mapcar
+          (lambda (item)
+            (let* ((token-id (plist-get item :token-id))
+                   (path (or (plist-get item :path) ""))
+                   (filename (if (string-empty-p path)
+                                 "missing"
+                               (file-name-nondirectory path)))
+                   (description (or (plist-get item :description) ""))
+                   (token-label (cond
+                                 (token-id
+                                  (disco-room--attachment-token-text token-id))
+                                 ((disco-room--attachment-input-object-p item)
+                                  "[file]")
+                                 (t "[file:?]"))))
+              (if (string-empty-p description)
+                  (format "%s %s" token-label filename)
+                (format "%s %s - %s" token-label filename description))))
+          (or disco-room--pending-attachments '()))))
+    (if (> (length labels) 3)
+        (append (seq-take labels 3)
+                (list (format "+%d more" (- (length labels) 3))))
+      labels)))
+
+(defun disco-room--append-attachment-token-to-draft (token-id)
+  "Append attachment TOKEN-ID marker to current draft input."
+  (let* ((token-text (disco-room--attachment-token-text token-id))
+         (draft (disco-room--current-draft))
+         (separator (if (or (string-empty-p draft)
+                            (string-match-p "[ \t\n]\\'" draft))
+                        ""
+                      " ")))
+    (disco-room--set-draft (concat draft separator token-text))))
+
+(defun disco-room--remove-first-token-from-draft (draft token-id)
+  "Return DRAFT with first TOKEN-ID marker removed."
+  (let* ((token-text (disco-room--attachment-token-text token-id))
+         (regexp (regexp-quote token-text)))
+    (if (string-match regexp draft)
+        (concat (substring draft 0 (match-beginning 0))
+                (substring draft (match-end 0)))
+      draft)))
+
+(defun disco-room--attachment-token-bounds-at-point ()
+  "Return bounds of attachment token around point in input region, or nil."
+  (let ((bounds (appkit-chatbuf-input-region-bounds))
+        (pos (point))
+        found)
+    (when (and bounds (appkit-chatbuf-point-in-input-p pos))
+      (save-excursion
+        (goto-char (car bounds))
+        (while (and (not found)
+                    (re-search-forward disco-room--attachment-token-regexp (cdr bounds) t))
+          (when (and (<= (match-beginning 0) pos)
+                     (<= pos (match-end 0)))
+            (setq found (cons (match-beginning 0) (match-end 0))))))
+      found)))
+
+(defun disco-room--attachment-object-bounds-at-point ()
+  "Return bounds of attachment input object around point, or nil."
+  (let ((object (appkit-chatbuf-input-object-at-point)))
+    (when (disco-room--attachment-input-object-p object)
+      (appkit-chatbuf-input-object-bounds-at-point))))
+
+(defun disco-room--rewrite-draft-attachment-order (ordered-refs)
+  "Rewrite current draft so ORDERED-REFS becomes the attachment sequence."
+  (let* ((text-only (string-trim-right
+                     (disco-room--draft-without-attachment-tokens
+                      (disco-room--current-draft))))
+         (parts (if (string-empty-p text-only)
+                    nil
+                  (list text-only))))
+    (dolist (ref ordered-refs)
+      (when parts
+        (setq parts (append parts '(" "))))
+      (setq parts (append parts (list (disco-room--attachment-ref-string ref)))))
+    (disco-room--set-draft (if parts (apply #'concat parts) ""))))
+
+(defun disco-room-remove-attachment-token-at-point ()
+  "Remove queued attachment at point, or prompt for one when needed."
+  (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--attachment-token-action-unavailable-reason 1)
+   "remove attachments")
+  (let ((object-bounds (disco-room--attachment-object-bounds-at-point))
+        (token-bounds (disco-room--attachment-token-bounds-at-point)))
+    (cond
+     (object-bounds
+      (delete-region (car object-bounds) (cdr object-bounds))
+      (disco-room--sync-draft-from-buffer)
+      (disco-room--update-frame)
+      (message "disco: removed attachment"))
+     (token-bounds
+      (let* ((token-text (buffer-substring-no-properties (car token-bounds) (cdr token-bounds)))
+             (token-id (and (string-match disco-room--attachment-token-regexp token-text)
+                            (match-string 1 token-text))))
+        (delete-region (car token-bounds) (cdr token-bounds))
+        (disco-room--sync-draft-from-buffer)
+        (when token-id
+          (remhash token-id disco-room--attachment-token-table))
+        (disco-room--update-frame)
+        (message "disco: removed attachment %s" (or token-id ""))))
+     (t
+      (let* ((ref (disco-room--choose-attachment-ref "Remove attachment: "))
+             (type (plist-get ref :type))
+             (start (plist-get ref :start))
+             (end (plist-get ref :end))
+             (draft (disco-room--current-draft))
+             (updated (disco-room--draft-substring-delete draft start end)))
+        (when (eq type 'token)
+          (remhash (plist-get ref :token-id) disco-room--attachment-token-table))
+        (disco-room--set-draft updated)
+        (message "disco: removed %s" (plist-get ref :label)))))))
+
+(defun disco-room-list-attachments ()
+  "List queued attachments for current draft."
+  (interactive)
+  (disco-room--ensure-action-available
+   (when (disco-room--composer-edit-active-p)
+     "attachments are unavailable while editing a message")
+   "list attachments")
+  (let ((refs (disco-room--attachment-refs)))
+    (if (null refs)
+        (message "disco: no queued attachments")
+      (message "disco: %s"
+               (mapconcat (lambda (ref) (plist-get ref :label)) refs " | ")))))
+
+(defun disco-room-edit-attachment-description ()
+  "Edit description of one queued attachment."
+  (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--attachment-token-action-unavailable-reason 1)
+   "edit attachment descriptions")
+  (let* ((ref (disco-room--choose-attachment-ref "Edit attachment: "))
+         (attachment (copy-tree (or (plist-get ref :attachment)
+                                    (user-error "disco: attachment not found"))))
+         (current (or (plist-get attachment :description) ""))
+         (next-input (read-string
+                      (format "Description for %s (empty clears): "
+                              (plist-get ref :label))
+                      current))
+         (next (string-trim next-input)))
+    (setq attachment
+          (plist-put attachment :description (unless (string-empty-p next) next)))
+    (pcase (plist-get ref :type)
+      ('token
+       (puthash (plist-get ref :token-id)
+                (plist-put attachment :token-id (plist-get ref :token-id))
+                disco-room--attachment-token-table)
+       (disco-room--sync-pending-attachments-from-draft))
+      ('object
+       (let ((replacement
+              (disco-room--attachment-input-object-string
+               (disco-room--make-attachment-input-object
+                (plist-get attachment :path)
+                :filename (plist-get attachment :filename)
+                :description (plist-get attachment :description)
+                :content-type (plist-get attachment :content-type)))))
+         (disco-room--set-draft
+          (disco-room--draft-substring-replace
+           (disco-room--current-draft)
+           (plist-get ref :start)
+           (plist-get ref :end)
+           replacement)))))
+    (disco-room--update-frame)
+    (if (string-empty-p next)
+        (message "disco: cleared description for %s" (plist-get ref :label))
+      (message "disco: updated description for %s" (plist-get ref :label)))))
+
+(defun disco-room-reorder-attachments ()
+  "Reorder one queued attachment in the current draft."
+  (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--attachment-token-action-unavailable-reason 2)
+   "reorder attachments")
+  (let* ((refs (disco-room--attachment-refs))
+         (count (length refs)))
+    (when (< count 2)
+      (user-error "disco: need at least two attachments to reorder"))
+    (let* ((ref (disco-room--choose-attachment-ref "Move attachment: "))
+           (current-index (or (cl-position ref refs :test #'equal)
+                              (user-error "disco: attachment not found in draft")))
+           (target-index-input
+            (read-number
+             (format "Move %s from %d to position (1-%d): "
+                     (plist-get ref :label)
+                     (1+ current-index)
+                     count)
+             (1+ current-index)))
+           (target-index (max 0 (min (1- count) (1- target-index-input))))
+           (without-ref (seq-remove (lambda (it) (equal it ref)) refs))
+           (prefix (seq-take without-ref target-index))
+           (suffix (seq-drop without-ref target-index))
+           (next-order (append prefix (list ref) suffix)))
+      (disco-room--rewrite-draft-attachment-order next-order)
+      (message "disco: moved %s to position %d"
+               (plist-get ref :label)
+               (1+ target-index)))))
+
+(defun disco-room--message-id-required-at-point ()
+  "Return message ID at point, or signal user error."
+  (or (disco-room--message-id-at-point)
+      (user-error "disco: point is not on a message")))
+
+(defun disco-room--forward-source-message (source-channel-id message-id)
+  "Resolve SOURCE-CHANNEL-ID/MESSAGE-ID to a message object, or nil."
+  (let ((channel-id (disco-msg-normalize-id source-channel-id))
+        (target-id (disco-msg-normalize-id message-id)))
+    (when (and channel-id target-id)
+      (or (seq-find (lambda (msg)
+                      (equal (disco-msg-normalize-id (alist-get 'id msg))
+                             target-id))
+                    (or (disco-state-messages channel-id) '()))
+          (disco-api-channel-message channel-id target-id)))))
+
+(defun disco-room--forward-only-select-values (prompt choices)
+  "Read one or more values from CHOICES with PROMPT.
+
+CHOICES is an alist of (LABEL . VALUE). Empty input means no selection."
+  (if (null choices)
+      nil
+    (let* ((labels (mapcar #'car choices))
+           (picked (completing-read-multiple
+                    (format "%s (RET to skip)" prompt)
+                    labels
+                    nil
+                    t
+                    nil
+                    nil
+                    ""))
+           (normalized
+            (delq nil
+                  (mapcar (lambda (label)
+                            (let ((text (string-trim (or label ""))))
+                              (unless (string-empty-p text)
+                                text)))
+                          picked)))
+           values)
+      (dolist (label normalized)
+        (let ((entry (assoc label choices)))
+          (unless entry
+            (user-error "disco: invalid forward-only selection `%s'" label))
+          (push (cdr entry) values)))
+      (delete-dups (nreverse values)))))
+
+(defun disco-room--read-forward-only-from-message (source-message)
+  "Read `forward_only' payload by selecting embeds/attachments from SOURCE-MESSAGE."
+  (let* ((embeds (or (alist-get 'embeds source-message) '()))
+         (attachments (or (alist-get 'attachments source-message) '()))
+         (embed-choices nil)
+         (attachment-choices nil)
+         (idx 0)
+         payload)
+    (dolist (embed embeds)
+      (let* ((kind (or (alist-get 'type embed) "embed"))
+             (title (string-trim (or (alist-get 'title embed)
+                                     (alist-get 'description embed)
+                                     (alist-get 'url embed)
+                                     "(no title)")))
+             (label (format "#%d [%s] %s" idx kind title)))
+        (push (cons label idx) embed-choices)
+        (setq idx (1+ idx))))
+    (setq embed-choices (nreverse embed-choices))
+    (dolist (attachment attachments)
+      (let* ((attachment-id (disco-msg-normalize-id (alist-get 'id attachment)))
+             (filename (or (alist-get 'filename attachment) "(unnamed)"))
+             (label (and attachment-id
+                         (format "%s %s" attachment-id filename))))
+        (when (and label attachment-id)
+          (push (cons label attachment-id) attachment-choices))))
+    (setq attachment-choices (nreverse attachment-choices))
+    (unless (or embed-choices attachment-choices)
+      (user-error "disco: source message has no embeds or attachments to subset"))
+    (let ((picked-embed-indices
+           (disco-room--forward-only-select-values
+            "Pick embeds to forward (comma list): "
+            embed-choices))
+          (picked-attachment-ids
+           (disco-room--forward-only-select-values
+            "Pick attachments to forward (comma list): "
+            attachment-choices)))
+      (when picked-embed-indices
+        (push `(embed_indices . ,(vconcat picked-embed-indices)) payload))
+      (when picked-attachment-ids
+        (push `(attachment_ids . ,(vconcat picked-attachment-ids)) payload))
+      (unless payload
+        (user-error "disco: forward-only selection is empty"))
+      (nreverse payload))))
+
+(defun disco-room--read-forward-only (&optional source-channel-id message-id)
+  "Read optional forward_only selection from minibuffer prompts."
+  (when (y-or-n-p "Forward only selected embeds/attachments? ")
+    (let ((source-message (disco-room--forward-source-message
+                           source-channel-id
+                           message-id)))
+      (unless source-message
+        (user-error "disco: source message unavailable for forward-only"))
+      (disco-room--read-forward-only-from-message source-message))))
+
+(defun disco-room--send-allowed-mentions (&optional replying-p)
+  "Return normalized allowed_mentions payload for outgoing message send/edit.
+
+When REPLYING-P is non-nil and reply-mention is enabled, include
+`replied_user'."
+  (let* ((allowed-mentions (disco-room--input-option-allowed-mentions))
+         (base
+          (pcase allowed-mentions
+            ('none '((parse . [])))
+            ('all '((parse . ["users" "roles" "everyone"])))
+            ((pred listp)
+             (if (cl-every #'consp allowed-mentions)
+                 (copy-tree allowed-mentions)
+               (user-error "disco: disco-room-allowed-mentions custom value must be an alist")))
+            (_ nil))))
+    (when (and replying-p
+               (disco-room--input-option-reply-mention-replied-user))
+      (let ((value t))
+        (if (listp base)
+            (let ((cell (assq 'replied_user base)))
+              (if cell
+                  (setcdr cell value)
+                (setq base (append base `((replied_user . ,value))))))
+          (setq base `((replied_user . ,value))))))
+    base))
+
+(defun disco-room-draft-history-search (regexp)
+  "Load one draft-history entry matching REGEXP."
+  (interactive
+   (list (read-regexp "Draft history search (regexp): "
+                      nil
+                      'disco-room-draft-history-search-history)))
+  (let* ((entries (cl-delete-duplicates
+                   (appkit-chatbuf-input-history-elements)
+                   :test #'equal))
+         (matches (seq-filter (lambda (entry)
+                                (and (stringp entry)
+                                     (string-match-p regexp entry)))
+                              entries)))
+    (cond
+     ((null matches)
+      (message "disco: no draft history entry matches %s" regexp))
+     (t
+      (let ((picked (if (= 1 (length matches))
+                        (car matches)
+                      (completing-read "Matching draft: " matches nil t nil nil
+                                       (car matches)))))
+        (appkit-chatbuf-input-history-reset)
+        (disco-room--set-draft picked)
+        (message "disco: loaded draft history match"))))))
+
+(defun disco-room--owned-preview-buffer ()
+  "Return the explicitly owned composer preview buffer, creating it if needed."
+  (or (and (buffer-live-p disco-room--preview-buffer)
+           (buffer-local-value 'disco-room--preview-buffer-owner-p
+                               disco-room--preview-buffer)
+           disco-room--preview-buffer)
+      (let* ((named (get-buffer disco-room--preview-buffer-name))
+             (buffer
+              (if (and (buffer-live-p named)
+                       (buffer-local-value
+                        'disco-room--preview-buffer-owner-p named))
+                  named
+                ;; A display-name collision never transfers ownership of an
+                ;; ordinary user buffer to Disco.
+                (generate-new-buffer disco-room--preview-buffer-name))))
+        (with-current-buffer buffer
+          (setq-local disco-room--preview-buffer-owner-p t))
+        (setq disco-room--preview-buffer buffer))))
+
+;;; Input options and attachment commands
+
+(defun disco-room-input-preview ()
+  "Show parsed preview of the current composer input."
+  (interactive)
+  (let* ((draft (disco-room--current-draft))
+         (parsed (disco-room--parse-draft-input draft))
+         (content (string-trim-right (or (plist-get parsed :content) "")))
+         (attachments (or (plist-get parsed :attachments) '()))
+         (buf (disco-room--owned-preview-buffer))
+         (mode-label (pcase (plist-get (appkit-chatbuf-aux-state) :aux-type)
+                       ('edit "edit")
+                       ('reply "reply")
+                       (_ "message"))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Room: %s\n" (or disco-room--channel-name disco-room--channel-id "(unknown)")))
+        (insert (format "Composer mode: %s\n" mode-label))
+        (insert (format "Structured objects: %d\n" (length (or (plist-get parsed :objects) '()))))
+        (insert (format "Attachments: %d\n\n" (length attachments)))
+        (insert "Content:\n")
+        (insert (if (string-empty-p content)
+                    "(empty)\n"
+                  (concat content "\n")))
+        (when attachments
+          (insert "\nAttachments:\n")
+          (dolist (attachment attachments)
+            (insert (format "- %s\n"
+                            (disco-room--attachment-label attachment "[file]")))))
+        (special-mode)
+        (setq-local disco-room--preview-buffer-owner-p t)))
+    (display-buffer buf)
+    (message "disco: opened composer preview")))
+
+(defun disco-room-attach (attach-type)
+  "Choose ATTACH-TYPE and invoke its configured attachment command."
+  (interactive
+   (list
+    (completing-read
+     "Attachment type: "
+     (mapcar #'car disco-room-attach-commands)
+     nil t)))
+  (let ((command (cadr (assoc attach-type disco-room-attach-commands))))
+    (unless (commandp command)
+      (user-error "disco: invalid attachment command for %s" attach-type))
+    (call-interactively command)))
+
+(defun disco-room-toggle-send-on-return ()
+  "Toggle whether `RET' sends the current room draft."
+  (interactive)
+  (let ((state (disco-room--update-input-options-state
+                (lambda (current)
+                  (plist-put (copy-tree current)
+                             :send-on-return
+                             (not (plist-get current :send-on-return)))))))
+    (message "disco: RET now %s"
+             (if (plist-get state :send-on-return)
+                 "sends messages"
+               "opens draft editor"))))
+
+(defun disco-room-cycle-long-message-action ()
+  "Cycle long-message send behavior for current room buffer."
+  (interactive)
+  (let ((state (disco-room--update-input-options-state
+                (lambda (current)
+                  (plist-put (copy-tree current)
+                             :long-message-action
+                             (pcase (plist-get current :long-message-action)
+                               ('split 'file)
+                               (_ 'split)))))))
+    (message "disco: long messages now %s"
+             (pcase (plist-get state :long-message-action)
+               ('file "send as file")
+               (_ "split across messages")))))
+
+(defun disco-room-cycle-allowed-mentions ()
+  "Cycle allowed-mentions policy for current room buffer."
+  (interactive)
+  (let ((state (disco-room--update-input-options-state
+                (lambda (current)
+                  (plist-put (copy-tree current)
+                             :allowed-mentions
+                             (pcase (plist-get current :allowed-mentions)
+                               ('none 'all)
+                               ('all nil)
+                               (_ 'none)))))))
+    (message "disco: allowed mentions now %s"
+             (pcase (plist-get state :allowed-mentions)
+               ('none "disabled")
+               ('all "explicitly enabled")
+               (_ "Discord defaults")))))
+
+(defun disco-room-toggle-reply-mention-replied-user ()
+  "Toggle whether replies mention the replied user in current room."
+  (interactive)
+  (let ((state (disco-room--update-input-options-state
+                (lambda (current)
+                  (plist-put (copy-tree current)
+                             :reply-mention-replied-user
+                             (not (plist-get current :reply-mention-replied-user)))))))
+    (message "disco: reply mention of replied user %s"
+             (if (plist-get state :reply-mention-replied-user)
+                 "enabled"
+               "disabled"))))
+
+(defun disco-room-reset-input-options ()
+  "Reset room-local input option overrides back to global defaults."
+  (interactive)
+  (dolist (var '(disco-room-send-on-return
+                 disco-room-long-message-action
+                 disco-room-allowed-mentions
+                 disco-room-reply-mention-replied-user))
+    (kill-local-variable var))
+  (disco-room--set-input-options-state (disco-room--current-input-options-state))
+  (message "disco: room input options reset to global defaults"))
+
+(transient-define-prefix disco-room-input-options-transient ()
+  "Transient for telega-like room input options."
+  [["Input Options"
+    ("RET" "Toggle RET send/editor" disco-room-toggle-send-on-return)
+    ("l" "Cycle long-message action" disco-room-cycle-long-message-action)
+    ("m" "Cycle allowed mentions" disco-room-cycle-allowed-mentions)
+    ("r" "Toggle reply mention" disco-room-toggle-reply-mention-replied-user)
+    ("0" "Reset room-local options" disco-room-reset-input-options)]])
+
+(defun disco-room-attach-file (path &optional description)
+  "Queue attachment PATH for next room send.
+
+DESCRIPTION is optional per-file description."
+  (interactive
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--attach-unavailable-reason)
+      "attach files")
+     (let* ((path (read-file-name "Attach file: " nil nil t))
+            (description-input (string-trim (read-string "Attachment description (optional): ")))
+            (description (unless (string-empty-p description-input)
+                           description-input)))
+       (list path description))))
+  (disco-room--ensure-action-available
+   (disco-room--attach-unavailable-reason)
+   "attach files")
+  (unless (file-readable-p path)
+    (user-error "disco: file is not readable: %s" path))
+  (let ((attachment (disco-room--make-attachment-input-object
+                     path
+                     :description description)))
+    (if (appkit-chatbuf-input-start-position)
+        (progn
+          (unless (appkit-chatbuf-point-in-input-p)
+            (goto-char (or (appkit-chatbuf-input-logical-end-position) (point-max))))
+          (disco-room--insert-attachment-input-object attachment)
+          (disco-room--sync-draft-from-buffer))
+      (let* ((draft (disco-room--current-draft))
+             (separator (if (or (string-empty-p (appkit-chatbuf-string-plain-text draft))
+                                (string-match-p "[ \t\n]\\'"
+                                                (appkit-chatbuf-string-plain-text draft)))
+                            ""
+                          " ")))
+        (disco-room--set-draft
+         (concat draft
+                 separator
+                 (disco-room--attachment-input-object-string attachment)))))
+    (message "disco: queued attachment %s"
+             (file-name-nondirectory path))))
+
+(defun disco-room-clear-attachments ()
+  "Clear queued attachments for next send in current room."
+  (interactive)
+  (disco-room--ensure-action-available
+   (when (disco-room--composer-edit-active-p)
+     "attachments are unavailable while editing a message")
+   "clear attachments")
+  (setq disco-room--pending-attachments nil)
+  (when disco-room--attachment-token-table
+    (clrhash disco-room--attachment-token-table))
+  (disco-room--set-draft
+   (string-trim-right (disco-room--draft-without-attachment-tokens)))
+  (message "disco: cleared queued attachments"))
+
+(defun disco-room--clear-pending-attachment-state ()
+  "Clear queued attachment state without touching the current draft text."
+  (setq disco-room--pending-attachments nil)
+  (when disco-room--attachment-token-table
+    (clrhash disco-room--attachment-token-table)))
+
+(defun disco-room--message-content-over-limit-p (content)
+  "Return non-nil when CONTENT exceeds Discord's single-message limit."
+  (and (stringp content)
+       (> (length content) disco-api--message-content-limit)))
+
+;;; Send pipeline
+
+(defun disco-room--long-message-split-point (content)
+  "Return preferred split point for CONTENT.
+
+The split point is at most `disco-api--message-content-limit' and prefers
+paragraph, line, and whitespace boundaries near the end of the chunk."
+  (let* ((limit disco-api--message-content-limit)
+         (len (length content))
+         (max-end (min len limit))
+         (min-acceptable (max 1 (/ limit 2))))
+    (or (let ((pos (cl-search "\n\n" content :from-end t :end2 max-end)))
+          (when (and pos (>= pos min-acceptable))
+            (+ pos 2)))
+        (let ((pos (cl-search "\n" content :from-end t :end2 max-end)))
+          (when (and pos (>= pos min-acceptable))
+            (1+ pos)))
+        (let ((pos (cl-position-if (lambda (char)
+                                     (memq char '(?\s ?\t)))
+                                   content :from-end t :end max-end)))
+          (when (and pos (>= pos min-acceptable))
+            (1+ pos)))
+        max-end)))
+
+(defun disco-room--split-message-content (content)
+  "Split CONTENT into Discord-sized message chunks."
+  (let ((remaining (or content ""))
+        (chunks nil))
+    (while (disco-room--message-content-over-limit-p remaining)
+      (let* ((split-point (disco-room--long-message-split-point remaining))
+             (chunk (string-trim-right (substring remaining 0 split-point)))
+             (rest (string-trim-left (substring remaining split-point))))
+        (when (string-empty-p chunk)
+          (setq split-point disco-api--message-content-limit
+                chunk (substring remaining 0 split-point)
+                rest (substring remaining split-point)))
+        (push chunk chunks)
+        (setq remaining rest)))
+    (unless (string-empty-p remaining)
+      (push remaining chunks))
+    (nreverse chunks)))
+
+(defun disco-room--write-long-message-temp-attachment (content)
+  "Write CONTENT to a temporary text file attachment plist."
+  (let ((path (make-temp-file "disco-message-" nil ".txt"))
+        (coding-system-for-write 'utf-8))
+    (with-temp-file path
+      (insert (or content "")))
+    (list :path path
+          :filename disco-room-long-message-file-name
+          :content-type "text/plain; charset=utf-8")))
+
+(defun disco-room--send-sticker-object (sticker)
+  "Send one normalized STICKER in the current room."
+  (let ((sticker-id (disco-sticker-id sticker)))
+    (unless sticker-id
+      (user-error "disco: selected Sticker has no valid ID"))
+    (disco-room--ensure-action-available
+     (disco-room--sticker-unavailable-reason)
+     "send stickers")
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
+     (disco-room--required-send-permissions)
+     :action "sending stickers")
+    (if disco-room--send-in-flight
+        (message "disco: send already in progress")
+      (let ((room-buffer (current-buffer))
+            (channel-id disco-room--channel-id)
+            (view (disco-room--ensure-view))
+            (request-revision
+             (disco-state-message-revision disco-room--channel-id)))
+        (setq disco-room--send-in-flight t)
+        (appkit-request-sync view :part 'frame)
+        (disco-api-send-message-async
+         channel-id nil
+         :sticker-ids (list sticker-id)
+         :on-success
+         (lambda (response)
+           (when (and (listp response) (alist-get 'id response))
+             (disco-state-merge-message-response
+              channel-id response request-revision))
+           (when (disco-room--channel-buffer-p room-buffer channel-id view)
+             (with-current-buffer room-buffer
+               (setq disco-room--send-in-flight nil)
+               (disco-room--request-render view)
+               (message
+                (if (and (listp response) (alist-get 'id response))
+                    "disco: sticker sent"
+                  "disco: sticker send failed: Discord returned no message")))))
+         :on-error
+         (lambda (err)
+           (when (disco-room--channel-buffer-p room-buffer channel-id view)
+             (with-current-buffer room-buffer
+               (setq disco-room--send-in-flight nil)
+               (disco-room--request-render view)
+               (message "disco: sticker send failed: %s"
+                        (disco-room--async-error-message err))))))))))
+
+(defun disco-room--read-and-send-sticker (&optional ranked-only)
+  "Read and send a sticker, optionally restricting to account rankings."
+  (when-let* ((sticker
+               (disco-sticker-read disco-room--guild-id ranked-only)))
+    (disco-room--send-sticker-object sticker)))
+
+(defun disco-room-send-sticker (&optional ranked-only)
+  "Select and send a sticker.
+
+With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
+  (interactive "P")
+  (disco-room--ensure-action-available
+   (disco-room--sticker-unavailable-reason)
+   "send stickers")
+  (cond
+   (disco-room--send-in-flight
+    (message "disco: send already in progress"))
+   ((disco-sticker-ready-p disco-room--guild-id)
+    (disco-sticker-ensure-ready disco-room--guild-id)
+    (disco-room--read-and-send-sticker ranked-only))
+   (disco-room--sticker-picker-pending
+    (message "disco: sticker catalog is still loading"))
+   (t
+    (let ((room-buffer (current-buffer))
+          (channel-id disco-room--channel-id)
+          (guild-id disco-room--guild-id)
+          (view (disco-room--ensure-view)))
+      (setq disco-room--sticker-picker-pending t)
+      (message "disco: loading sticker catalog…")
+      (disco-sticker-ensure-ready
+       guild-id
+       :on-success
+       (lambda ()
+         (when (disco-room--channel-buffer-p room-buffer channel-id view)
+           (with-current-buffer room-buffer
+             (setq disco-room--sticker-picker-pending nil)
+             (run-at-time
+              0 nil
+              (lambda ()
+                (when (disco-room--channel-buffer-p
+                       room-buffer channel-id view)
+                  (with-current-buffer room-buffer
+                    (disco-room--read-and-send-sticker ranked-only))))))))
+       :on-error
+       (lambda (err)
+         (when (disco-room--channel-buffer-p room-buffer channel-id view)
+           (with-current-buffer room-buffer
+             (setq disco-room--sticker-picker-pending nil)
+             (message "disco: sticker catalog load failed: %s"
+                      (disco-room--async-error-message err))))))))))
+
+(defun disco-room-send-message ()
+  "Send current draft message to this room asynchronously.
+
+When called with prefix argument, force draft edit in minibuffer first."
+  (interactive)
+  (when (appkit-chatbuf-input-start-position)
+    (appkit-chatbuf-input-prune-broken-objects)
+    (disco-room--sync-draft-from-buffer))
+  (disco-room--ensure-action-available
+   (disco-room--send-message-unavailable-reason)
+   (if (disco-room--composer-edit-active-p)
+       "save edits"
+     "send messages"))
+  (if disco-room--send-in-flight
+      (message "disco: send already in progress")
+    (let* ((current-draft (disco-room--current-draft))
+           (current-draft-text (appkit-chatbuf-string-plain-text current-draft))
+           (initial-has-attachments
+            (not (null (disco-room--attachments-from-draft current-draft))))
+           (prompt-edit-p
+            (or current-prefix-arg
+                (and (string-empty-p (string-trim-right current-draft-text))
+                     (not initial-has-attachments)))))
+      (when (and current-prefix-arg
+                 (appkit-chatbuf-string-has-objects-p current-draft))
+        (user-error
+         "disco: minibuffer send-edit is unavailable for structured input objects"))
+      (let* ((content (if prompt-edit-p
+                          (read-from-minibuffer "Message: " current-draft-text)
+                        current-draft))
+             (parsed-input (disco-room--parse-draft-input content))
+             (parsed-attachments (plist-get parsed-input :attachments))
+             (has-attachments (not (null parsed-attachments)))
+             (normalized
+              (string-trim-right (or (plist-get parsed-input :content) "")))
+             (edit-message-id (disco-room--composer-edit-message-id))
+             (over-limit-p
+              (disco-room--message-content-over-limit-p normalized)))
+        (if (and (string-empty-p normalized)
+                 (not has-attachments)
+                 (not edit-message-id))
+            (message "disco: draft is empty")
+          (let* ((room-buffer (current-buffer))
+                 (channel-id disco-room--channel-id)
+                 (view (disco-room--ensure-view))
+                 (reply-to (disco-room--composer-reply-message-id))
+                 (allowed-mentions
+                  (disco-room--send-allowed-mentions (not (null reply-to))))
+                 (attachments (copy-tree parsed-attachments))
+                 (edit-message
+                  (and edit-message-id
+                       (disco-room--composer-context-message edit-message-id)))
+                 (long-message-action
+                  (and over-limit-p
+                       (disco-room--input-option-long-message-action)))
+                 (needs-attach-files-p
+                  (or has-attachments (eq long-message-action 'file)))
+                 (required-permissions
+                  (append
+                   (disco-room--required-send-permissions)
+                   (when needs-attach-files-p '(attach-files))
+                   (when reply-to '(read-message-history))))
+                 (operation-slot (disco-room--composer-operation-slot))
+                 (operation-settled-p nil)
+                 cleared-revision)
+            (setq operation-slot
+                  (plist-put operation-slot :draft
+                             (appkit-chatbuf-copy-string content)))
+            (if edit-message-id
+                (progn
+                  (disco-api--validate-message-content-length
+                   normalized "content")
+                  (disco-room--ensure-action-available
+                   (disco-room--edit-permission-reason edit-message)
+                   "edit messages")
+                  (when has-attachments
+                    (user-error
+                     "disco: editing via composer does not support attachments yet"))
+                  (let ((request-revision
+                         (disco-state-message-revision channel-id))
+                        (saved-state
+                         (copy-tree
+                          (plist-get
+                           (plist-get operation-slot :pending-edit)
+                           :saved-state))))
+                    (condition-case err
+                        (progn
+                          (setq cleared-revision
+                                (disco-room--clear-composer-operation-slot)
+                                disco-room--send-in-flight t)
+                          (appkit-request-sync view :part 'frame)
+                          (cl-labels
+                              ((finish-error (error-data)
+                                 (unless operation-settled-p
+                                   (setq operation-settled-p t)
+                                   (when (disco-room--channel-buffer-p
+                                          room-buffer channel-id view)
+                                     (with-current-buffer room-buffer
+                                       (setq disco-room--send-in-flight nil)
+                                       (disco-room--restore-composer-operation-slot
+                                        cleared-revision operation-slot t)
+                                       (disco-room--request-render view)
+                                       (message
+                                        "disco: edit failed for %s: %s"
+                                        edit-message-id
+                                        (disco-room--async-error-message
+                                         error-data))))))
+                               (finish-success (response)
+                                 (if (not (and (listp response)
+                                               (alist-get 'id response)))
+                                     (finish-error
+                                      (list 'error
+                                            "Discord edit-message returned no message"))
+                                   (unless operation-settled-p
+                                     (setq operation-settled-p t)
+                                     (disco-state-merge-message-response
+                                      channel-id response request-revision)
+                                     (when (disco-room--channel-buffer-p
+                                            room-buffer channel-id view)
+                                       (with-current-buffer room-buffer
+                                         (setq disco-room--send-in-flight nil)
+                                         (when (= cleared-revision
+                                                  (appkit-chatbuf-composer-revision))
+                                           (disco-room--composer-edit-restore-state
+                                            saved-state t))
+                                         (disco-room--request-render view)
+                                         (message
+                                          "disco: edited message %s"
+                                          edit-message-id)))))))
+                            (disco-api-edit-message-async channel-id edit-message-id normalized
+                                                          :allowed-mentions
+                                                          (disco-room--send-allowed-mentions)
+                                                          :on-success #'finish-success
+                                                          :on-error #'finish-error)))
+                      (error
+                       (unless operation-settled-p
+                         (setq operation-settled-p t)
+                         (when (disco-room--channel-buffer-p
+                                room-buffer channel-id view)
+                           (with-current-buffer room-buffer
+                             (setq disco-room--send-in-flight nil)
+                             (when (integerp cleared-revision)
+                               (disco-room--restore-composer-operation-slot
+                                cleared-revision operation-slot t))
+                             (disco-room--request-render view))))
+                       (signal (car err) (cdr err))))))
+              (disco-room--ensure-action-available
+               (disco-room--room-send-restriction-reason
+                (append (when needs-attach-files-p '(attach-files))
+                        (when reply-to '(read-message-history))))
+               "send messages")
+              (disco-permission-ensure-channel
+               (disco-room--channel-object)
+               required-permissions
+               :action "sending messages")
+              (unless (string-empty-p normalized)
+                (appkit-chatbuf-input-history-push normalized))
+              (let ((recovery-slot operation-slot))
+                (condition-case err
+                    (progn
+                      (setq cleared-revision
+                            (disco-room--clear-composer-operation-slot)
+                            disco-room--send-in-flight t)
+                      (appkit-request-sync view :part 'frame)
+                      (cl-labels
+                          ((room-active-p ()
+                             (disco-room--channel-buffer-p
+                              room-buffer channel-id view))
+                           (settle-success
+                             (text)
+                             (unless operation-settled-p
+                               (setq operation-settled-p t)
+                               (when (room-active-p)
+                                 (with-current-buffer room-buffer
+                                   (setq disco-room--send-in-flight nil)
+                                   (disco-room--request-render view)
+                                   (message "%s" text)))))
+                           (settle-failure
+                             (slot error-data text)
+                             (unless operation-settled-p
+                               (setq operation-settled-p t)
+                               (when (room-active-p)
+                                 (with-current-buffer room-buffer
+                                   (setq disco-room--send-in-flight nil)
+                                   (let ((restored
+                                          (disco-room--restore-composer-operation-slot
+                                           cleared-revision slot t)))
+                                     (disco-room--request-render view)
+                                     (message
+                                      "%s%s: %s"
+                                      text
+                                      (if restored " (draft restored)" "")
+                                      (disco-room--async-error-message
+                                       error-data)))))))
+                           (send-one
+                             (text reply attachments-list on-success on-error)
+                             (let* ((request-revision
+                                     (disco-state-message-revision channel-id))
+                                    (nonce (disco-room--next-send-nonce))
+                                    (pending-content
+                                     (if (and attachments-list
+                                              (or (not (stringp text))
+                                                  (string-empty-p text)))
+                                         (format
+                                          "Uploading %d attachment%s…"
+                                          (length attachments-list)
+                                          (if (= (length attachments-list) 1)
+                                              ""
+                                            "s"))
+                                       text))
+                                    leg-settled-p)
+                               (disco-state-insert-pending-message
+                                channel-id nonce pending-content
+                                (disco-gateway-current-user-id) reply)
+                               (disco-room--request-render view)
+                               (cl-labels
+                                   ((failure
+                                      (error-data)
+                                      (unless leg-settled-p
+                                        (setq leg-settled-p t)
+                                        (disco-state-remove-pending-message
+                                         channel-id nonce)
+                                        (funcall on-error error-data)))
+                                    (success
+                                      (response)
+                                      (if (not (and (listp response)
+                                                    (alist-get 'id response)))
+                                          (failure
+                                           (list
+                                            'error
+                                            "Discord create-message returned no message"))
+                                        (unless leg-settled-p
+                                          (setq leg-settled-p t)
+                                          (disco-state-merge-message-response
+                                           channel-id response request-revision
+                                           nonce)
+                                          (when (room-active-p)
+                                            (with-current-buffer room-buffer
+                                              (when (disco-room--channel-message-by-id
+                                                     channel-id
+                                                     (alist-get 'id response))
+                                                (disco-room--observe-live-create
+                                                 (alist-get 'id response)))))
+                                          (funcall on-success response)))))
+                                 (condition-case dispatch-error
+                                     (if attachments-list
+                                         (disco-api-send-message-with-attachments-async
+                                          channel-id
+                                          :content
+                                          (and (stringp text)
+                                               (not (string-empty-p text))
+                                               text)
+                                          :reply-to-message-id reply
+                                          :allowed-mentions
+                                          (and (stringp text)
+                                               (not (string-empty-p text))
+                                               allowed-mentions)
+                                          :attachments attachments-list
+                                          :nonce nonce
+                                          :on-success #'success
+                                          :on-error #'failure)
+                                       (disco-api-send-message-async
+                                        channel-id text
+                                        :reply-to-message-id reply
+                                        :allowed-mentions
+                                        (and (stringp text)
+                                             (not (string-empty-p text))
+                                             allowed-mentions)
+                                        :nonce nonce
+                                        :on-success #'success
+                                        :on-error #'failure))
+                                   (error
+                                    (failure dispatch-error)
+                                    (signal (car dispatch-error)
+                                            (cdr dispatch-error))))))))
+                        (pcase long-message-action
+                          ('split
+                           (let* ((chunks
+                                   (disco-room--split-message-content normalized))
+                                  (total (length chunks)))
+                             (cl-labels
+                                 ((send-next
+                                    (remaining sent-count)
+                                    (let ((chunk (car remaining))
+                                          (rest (cdr remaining))
+                                          (first-p (= sent-count 0)))
+                                      (send-one
+                                       chunk
+                                       (and first-p reply-to)
+                                       (and first-p attachments)
+                                       (lambda (_response)
+                                         (if rest
+                                             (progn
+                                               (setq recovery-slot
+                                                     (list
+                                                      :draft
+                                                      (mapconcat
+                                                       #'identity rest "\n\n")
+                                                      :pending-edit nil
+                                                      :pending-reply-to nil
+                                                      :attachment-token-seq 0
+                                                      :attachment-token-entries
+                                                      nil))
+                                               (send-next
+                                                rest (1+ sent-count)))
+                                           (settle-success
+                                            (format
+                                             "disco: sent %d split messages"
+                                             total))))
+                                       (lambda (error-data)
+                                         (settle-failure
+                                          recovery-slot error-data
+                                          (format
+                                           "disco: sent %d/%d split messages"
+                                           sent-count total)))))))
+                               (send-next chunks 0))))
+                          ('file
+                           (let* ((text-attachment
+                                   (disco-room--write-long-message-temp-attachment
+                                    normalized))
+                                  (all-attachments
+                                   (append attachments
+                                           (list text-attachment))))
+                             (unwind-protect
+                                 (send-one
+                                  nil reply-to all-attachments
+                                  (lambda (_response)
+                                    (settle-success
+                                     (format
+                                      "disco: long message sent as %s"
+                                      disco-room-long-message-file-name)))
+                                  (lambda (error-data)
+                                    (settle-failure
+                                     recovery-slot error-data
+                                     "disco: send failed")))
+                               (ignore-errors
+                                 (delete-file
+                                  (plist-get text-attachment :path))))))
+                          (_
+                           (send-one
+                            normalized reply-to attachments
+                            (lambda (_response)
+                              (settle-success
+                               (if has-attachments
+                                   "disco: message with attachment(s) sent"
+                                 "disco: message sent")))
+                            (lambda (error-data)
+                              (settle-failure
+                               recovery-slot error-data
+                               "disco: send failed")))))))
+                  (error
+                   (unless operation-settled-p
+                     (setq operation-settled-p t)
+                     (when (disco-room--channel-buffer-p
+                            room-buffer channel-id view)
+                       (with-current-buffer room-buffer
+                         (setq disco-room--send-in-flight nil)
+                         (when (integerp cleared-revision)
+                           (disco-room--restore-composer-operation-slot
+                            cleared-revision recovery-slot t))
+                         (disco-room--request-render view))))
+                   (signal (car err) (cdr err))))))))))))
+
+;;; Reply, forward, and edit commands
+
+(defun disco-room--reply-to-msg (msg)
+  "Set pending reply target to MSG for the next send."
+  (let ((message-id (alist-get 'id msg)))
+    (unless (and (stringp message-id) (not (string-empty-p message-id)))
+      (user-error "disco: message has no id to reply to"))
+    (disco-room-reply-to-message message-id)))
+
+(defun disco-room-reply-to-message (&optional message-id)
+  "Set pending reply target MESSAGE-ID for next send.
+
+When called interactively, defaults to message under point."
+  (interactive
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--reply-unavailable-reason)
+      "start replies")
+     (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
+            (fallback (or at-point (disco-room--latest-message-id)))
+            (raw (read-string
+                  (if fallback
+                      (format "Reply to message ID (default %s): " fallback)
+                    "Reply to message ID: "))))
+       (list (if (string-empty-p raw)
+                 (or fallback
+                     (user-error "disco: no target message available"))
+               raw)))))
+  (disco-room--ensure-action-available
+   (disco-room--reply-unavailable-reason)
+   "start replies")
+  (when (disco-room--composer-edit-active-p)
+    (disco-room--composer-edit-clear t))
+  (disco-room--set-composer-aux-state nil message-id)
+  (disco-room--update-frame)
+  (appkit-chatbuf-focus-input)
+  (message "disco: next message will reply to %s" message-id))
+
+(defun disco-room--forward-msg (msg)
+  "Forward MSG into the current room, prompting only for optional extras."
+  (let* ((message-id (alist-get 'id msg))
+         (source-channel-id (or (alist-get 'channel_id msg) disco-room--channel-id))
+         (content-raw (string-trim (read-string "Optional forward comment: ")))
+         (forward-only (disco-room--read-forward-only source-channel-id message-id)))
+    (unless (and (stringp message-id) (not (string-empty-p message-id)))
+      (user-error "disco: message has no id to forward"))
+    (unless (and (stringp source-channel-id) (not (string-empty-p source-channel-id)))
+      (user-error "disco: message has no source channel id to forward"))
+    (disco-room-forward-message
+     message-id
+     source-channel-id
+     (unless (string-empty-p content-raw)
+       content-raw)
+     forward-only)))
+
+(defun disco-room-forward-message (&optional message-id source-channel-id content forward-only)
+  "Forward MESSAGE-ID from SOURCE-CHANNEL-ID into current room.
+
+CONTENT is optional text sent alongside the forwarded reference.
+FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
+  (interactive
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--forward-unavailable-reason)
+      "forward messages")
+     (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
+            (fallback-message (or at-point (disco-room--latest-message-id)))
+            (message-raw (read-string
+                          (if fallback-message
+                              (format "Forward message ID (default %s): " fallback-message)
+                            "Forward message ID: ")))
+            (message-id (if (string-empty-p message-raw)
+                            (or fallback-message
+                                (user-error "disco: no message id provided"))
+                          message-raw))
+            (fallback-channel (or disco-room--channel-id ""))
+            (channel-raw (read-string
+                          (if (string-empty-p fallback-channel)
+                              "Source channel ID: "
+                            (format "Source channel ID (default %s): " fallback-channel))))
+            (source-channel-id (if (string-empty-p channel-raw)
+                                   (or fallback-channel
+                                       (user-error "disco: no source channel id provided"))
+                                 channel-raw))
+            (content-raw (string-trim (read-string "Optional forward comment: ")))
+            (forward-only (disco-room--read-forward-only source-channel-id message-id)))
+       (list message-id
+             source-channel-id
+             (unless (string-empty-p content-raw)
+               content-raw)
+             forward-only))))
+  (disco-room--ensure-action-available
+   (disco-room--forward-unavailable-reason)
+   "forward messages")
+  (let* ((target-channel-id disco-room--channel-id)
+         (source-channel-id (or source-channel-id disco-room--channel-id))
+         (source-channel
+          (and source-channel-id
+               (disco-room--resolve-target-channel source-channel-id)))
+         (normalized-content
+          (and (stringp content)
+               (let ((trimmed (string-trim content)))
+                 (unless (string-empty-p trimmed)
+                   trimmed))))
+         (room-buffer (current-buffer))
+         (view (disco-room--ensure-view))
+         request-revision
+         (allowed-mentions
+          (and normalized-content (disco-room--send-allowed-mentions)))
+         settled-p)
+    (disco-api--validate-message-content-length normalized-content "content")
+    (unless (and message-id (not (string-empty-p (format "%s" message-id))))
+      (user-error "disco: message id cannot be empty"))
+    (unless (and source-channel-id
+                 (not (string-empty-p (format "%s" source-channel-id))))
+      (user-error "disco: source channel id cannot be empty"))
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
+     (disco-room--required-send-permissions)
+     :action "forwarding messages")
+    (disco-room--ensure-jump-permissions source-channel-id source-channel)
+    (setq request-revision
+          (disco-state-message-revision target-channel-id))
+    (setq disco-room--send-in-flight t)
+    (appkit-request-sync view :part 'frame)
+    (cl-labels
+        ((room-active-p
+           ()
+           (disco-room--channel-buffer-p room-buffer target-channel-id view))
+         (finish-error
+           (error-data)
+           (unless settled-p
+             (setq settled-p t)
+             (when (room-active-p)
+               (with-current-buffer room-buffer
+                 (setq disco-room--send-in-flight nil)
+                 (disco-room--request-render view)
+                 (message "disco: forward failed: %s"
+                          (disco-room--async-error-message error-data))))))
+         (finish-success
+           (response)
+           (if (not (and (listp response) (alist-get 'id response)))
+               (finish-error
+                (list 'error "disco: forward response has no message id"))
+             (unless settled-p
+               (setq settled-p t)
+               (disco-state-merge-message-response
+                target-channel-id response request-revision)
+               (when (room-active-p)
+                 (with-current-buffer room-buffer
+                   (setq disco-room--send-in-flight nil)
+                   (disco-room--request-render view)
+                   (message "disco: forwarded message %s from channel %s"
+                            message-id source-channel-id)))))))
+      (condition-case err
+          (disco-api-forward-message-async
+           target-channel-id
+           message-id
+           source-channel-id
+           :content normalized-content
+           :forward-only forward-only
+           :allowed-mentions (and normalized-content allowed-mentions)
+           :on-success #'finish-success
+           :on-error #'finish-error)
+        (error
+         (finish-error err)
+         (signal (car err) (cdr err)))))))
+
+(defun disco-room-cancel-reply ()
+  "Cancel pending composer reply/edit context."
+  (interactive)
+  (cond
+   ((disco-room--composer-edit-active-p)
+    (disco-room--composer-edit-clear t)
+    (disco-room--update-frame)
+    (message "disco: edit target cleared"))
+   ((disco-room--composer-reply-message-id)
+    (disco-room--set-composer-aux-state nil nil)
+    (disco-room--update-frame)
+    (message "disco: reply target cleared"))
+   (t
+    (message "disco: no composer context to cancel"))))
+
+(defun disco-room-return-dwim ()
+  "RET behavior for room buffer.
+
+An unresolved composer token owns RET so completion cannot fall through into
+an accidental send.  On a projected Lottie Sticker, RET streams its native
+frames; elsewhere outside the composer, RET returns point to the draft.
+Inside the composer, send-on-return sends the draft and the disabled setting
+opens the draft editor."
+  (interactive)
+  (cond
+   ((not (appkit-chatbuf-point-in-input-p))
+    (if-let* ((sticker (disco-room--lottie-sticker-at-point)))
+        (disco-sticker-play sticker)
+      (goto-char
+       (or (appkit-chatbuf-input-logical-end-position) (point-max)))))
+   ((disco-company-completion-token-at-point)
+    (disco-room-complete-mention))
+   ((disco-room--input-option-send-on-return)
+    (disco-room-send-message))
+   (t
+    (disco-room-edit-draft))))
+
+(defun disco-room--edit-msg (msg)
+  "Enter composer edit mode for MSG in current room."
+  (disco-room--ensure-action-available
+   (disco-room--edit-start-unavailable-reason msg)
+   "edit messages")
+  (disco-room--composer-enter-edit msg))
+
+(defun disco-room-edit-message ()
+  "Enter composer edit mode for message at point in current room."
+  (interactive)
+  (disco-room--edit-msg (disco-room--message-at-point)))
+
+(provide 'disco-room-compose)
+
+;;; disco-room-compose.el ends here

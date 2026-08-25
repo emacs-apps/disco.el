@@ -5,8 +5,8 @@
 ;;; Commentary:
 
 ;; Search, filter, and jump helpers extracted from `disco-room.el'.  This file
-;; owns room search behavior while leaving room state and render primitives in
-;; the room facade.
+;; owns room search state and behavior while leaving shared room/render
+;; primitives in the room facade.
 
 ;;; Code:
 
@@ -18,6 +18,7 @@
 (require 'appkit-chat-history)
 (require 'disco-api)
 (require 'disco-channel-type)
+(require 'disco-customize)
 (require 'disco-gateway)
 (require 'disco-msg)
 (require 'disco-state)
@@ -26,31 +27,71 @@
 (defvar disco-room--guild-id)
 (defvar disco-room--oldest-message-id)
 (defvar disco-room--newest-message-id)
-(defvar disco-room--last-search-query)
-(defvar disco-room--msg-filter)
-(defvar disco-room--filter-generation)
-(defvar disco-room--filter-in-flight)
-(defvar disco-room--inplace-search-filter)
-(defvar disco-room--inplace-search-generation)
+(defvar-local disco-room--last-search-query nil)
+(defvar-local disco-room--msg-filter nil)
+(defvar-local disco-room--filter-generation 0)
+(defvar-local disco-room--filter-in-flight nil)
+(defvar-local disco-room--inplace-search-filter nil)
+(defvar-local disco-room--inplace-search-generation 0)
+
+(defun disco-room-search-reset ()
+  "Reset search-local state in the current room buffer."
+  (setq-local disco-room--last-search-query nil
+              disco-room--msg-filter nil
+              disco-room--filter-generation 0
+              disco-room--filter-in-flight nil
+              disco-room--inplace-search-filter nil
+              disco-room--inplace-search-generation 0))
+
+(defun disco-room--msg-filter-active-p ()
+  "Return non-nil when a room message filter is currently active."
+  (and (listp disco-room--msg-filter)
+       (plist-get disco-room--msg-filter :active)))
+
 (defvar disco-room-search-inplace-history nil
   "Minibuffer history for room inplace searches.")
 
-(defcustom disco-room-search-filter-limit 25
-  "Number of search hits to request per room filter-search page."
-  :type 'integer
-  :group 'disco)
+(defun disco-room-search--clear-session-cache-memory ()
+  "Clear account-scoped room search history."
+  (setq disco-room-search-inplace-history nil))
 
-(declare-function disco-room--active-highlight-query "disco-room")
+(defun disco-room--active-highlight-query ()
+  "Return active room search query string to highlight, or nil."
+  (or (and (listp disco-room--inplace-search-filter)
+           (plist-get disco-room--inplace-search-filter :query))
+      (and (listp disco-room--msg-filter)
+           (plist-get disco-room--msg-filter :query))))
+
+(defun disco-room--highlight-search-query (text)
+  "Return TEXT with active room search query highlighted."
+  (let ((query (disco-room--active-highlight-query)))
+    (if (or (not (stringp text))
+            (string-empty-p text)
+            (not (stringp query))
+            (string-empty-p query))
+        text
+      (let ((copy (copy-sequence text))
+            (start 0)
+            (case-fold-search t))
+        (while (and (< start (length copy))
+                    (string-match (regexp-quote query) copy start))
+          (add-face-text-property (match-beginning 0)
+                                  (match-end 0)
+                                  'disco-room-search-highlight
+                                  'append
+                                  copy)
+          (setq start (match-end 0)))
+        copy))))
+
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-object "disco-room")
 (declare-function disco-room--display-messages "disco-room")
 (declare-function disco-room--ensure-view "disco-room")
 (declare-function disco-room--message-at-point "disco-room")
-(declare-function disco-room--message-author "disco-room" (msg))
-(declare-function disco-room--message-author-id "disco-room" (msg))
+(declare-function disco-room--message-author "disco-room-render" (msg))
+(declare-function disco-room--message-author-id "disco-room-render" (msg))
 (declare-function disco-room--message-by-id "disco-room" (message-id))
 (declare-function disco-room--message-id-at-point "disco-room")
-(declare-function disco-room--msg-filter-active-p "disco-room")
 (declare-function disco-room--queue-jump "disco-room" (message-id view))
 (declare-function disco-room--request-render "disco-room" (view))
 (declare-function disco-room-jump-to-message "disco-room"

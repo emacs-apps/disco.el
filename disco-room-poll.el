@@ -14,102 +14,35 @@
 (require 'transient)
 (require 'appkit-ui)
 (require 'disco-api)
+(require 'disco-customize)
 (require 'disco-gateway)
 (require 'disco-msg)
 (require 'disco-permission)
 (require 'disco-state)
+(require 'disco-room-compose)
 
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-buffer-p "disco-room" (buffer channel-id view))
 (declare-function disco-room--channel-object "disco-room" ())
-(declare-function disco-room--ensure-action-available "disco-room" (reason action))
 (declare-function disco-room--ensure-view "disco-room" ())
 (declare-function disco-room--event-self-p "disco-room" (event))
 (declare-function disco-room--message-at-point "disco-room" ())
-(declare-function disco-room--message-author-id "disco-room" (message))
+(declare-function disco-room--message-author-id "disco-room-render" (message))
 (declare-function disco-room--message-by-id "disco-room" (message-id))
-(declare-function disco-room--message-id-required-at-point "disco-room" ())
-(declare-function disco-room--required-send-permissions "disco-room" (&optional channel))
 (declare-function disco-room--request-render "disco-room" (view))
-(declare-function disco-room--room-send-restriction-reason "disco-room" (&optional extra-permissions channel))
 (declare-function disco-room--update-message-locally "disco-room" (message-id function))
 (declare-function disco-room-menu--message-at-point "disco-room" ())
 (declare-function disco-room-refresh "disco-room" ())
 (declare-function disco-room-render "disco-room" ())
+(declare-function disco-api--validate-message-content-length
+                  "disco-api-normalize" (content field-name))
+(declare-function disco-room--channel-message-by-id
+                  "disco-room" (channel-id message-id))
+(declare-function disco-room--observe-live-create "disco-room" (message-id))
 
 (defvar disco-room--channel-id)
-(defcustom disco-room-show-polls t
-  "When non-nil, render poll blocks under each message containing poll data."
-  :type 'boolean
-  :group 'disco)
+(defvar disco-room--send-in-flight)
 
-(defcustom disco-room-poll-show-voter-counts t
-  "When non-nil, render per-answer vote counts in poll rows."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-poll-show-total-votes t
-  "When non-nil, render total vote count in poll metadata line."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-poll-date-format "%Y-%m-%d %H:%M"
-  "Time format used for poll expiry labels."
-  :type 'string
-  :group 'disco)
-
-(defcustom disco-room-poll-auto-toggle-vote t
-  "When non-nil, clicking a poll option immediately submits vote change."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-poll-confirm-expire t
-  "When non-nil, ask before ending a poll via command/button."
-  :type 'boolean
-  :group 'disco)
-(defcustom disco-room-poll-button-face 'disco-room-reaction
-  "Face used for poll action buttons in message rows."
-  :type 'face
-  :group 'disco)
-
-(defcustom disco-room-poll-voted-face 'disco-room-poll-option-selected
-  "Face used for poll options selected by current user."
-  :type 'face
-  :group 'disco)
-
-(defcustom disco-room-poll-option-face 'disco-room-poll-option
-  "Face used for unselected poll options."
-  :type 'face
-  :group 'disco)
-
-(defcustom disco-room-poll-meta-face 'disco-room-poll-meta
-  "Face used for poll metadata lines."
-  :type 'face
-  :group 'disco)
-
-(defcustom disco-room-poll-title-face 'disco-room-poll-title
-  "Face used for poll question/title lines."
-  :type 'face
-  :group 'disco)
-(defface disco-room-poll-title
-  '((t :inherit bold))
-  "Face used for poll title lines."
-  :group 'disco)
-
-(defface disco-room-poll-meta
-  '((t :inherit shadow))
-  "Face used for poll metadata lines."
-  :group 'disco)
-
-(defface disco-room-poll-option
-  '((t :inherit default))
-  "Face used for poll option rows."
-  :group 'disco)
-
-(defface disco-room-poll-option-selected
-  '((t :inherit success :weight bold))
-  "Face used for selected poll option rows."
-  :group 'disco)
 (defvar-local disco-room--poll-selection-drafts nil)
 (defvar-local disco-room--poll-vote-op-seq 0
   "Monotonic owner token for poll vote requests in this room view.")
@@ -134,6 +67,12 @@
          (or (not (disco-room--poll-vote-unavailable-reason message))
              (not (disco-room--poll-expire-unavailable-reason message))))))
 
+(defun disco-room--poll-unavailable-reason ()
+  "Return reason send-poll action is unavailable, or nil."
+  (or (disco-room--room-send-restriction-reason '(send-polls))
+      (when-let* ((aux (disco-room--composer-aux-context-name)))
+        (format "cancel %s before sending a poll" aux))))
+
 (defun disco-room--poll-vote-required-permissions (&optional channel)
   "Return required permissions for poll vote actions in CHANNEL."
   (disco-room--required-send-permissions channel))
@@ -142,6 +81,7 @@
   "Return required permissions for poll expire action in CHANNEL."
   (append (disco-room--required-send-permissions channel)
           '(send-polls)))
+
 (defun disco-room--poll-vote-unavailable-reason (&optional msg)
   "Return reason poll voting actions are unavailable for MSG, or nil."
   (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
@@ -657,6 +597,100 @@ Each item is (LABEL . ANSWER-ID)."
     (or (cdr (assoc picked choices))
         default
         (user-error "disco: invalid poll answer"))))
+
+(defun disco-room-send-poll (question options &optional duration allow-multiselect content)
+  "Create and send a poll with QUESTION and OPTIONS in current room.
+
+DURATION is in hours. ALLOW-MULTISELECT toggles multi-select behavior.
+CONTENT is optional extra text sent alongside the poll."
+  (interactive
+   (progn
+     (disco-room--ensure-action-available
+      (disco-room--poll-unavailable-reason)
+      "send polls")
+     (let* ((question-input (string-trim (read-string "Poll question: ")))
+            (duration-input (read-number "Poll duration (hours): "
+                                         disco-room-poll-default-duration-hours))
+            (allow-multi (y-or-n-p "Allow multiple answers? "))
+            (content-input (string-trim (read-string "Optional message content: ")))
+            (max-options (max 2 disco-room-poll-max-options))
+            (idx 1)
+            (options nil)
+            opt)
+       (while (and (<= idx max-options)
+                   (not (string-empty-p
+                         (setq opt (string-trim
+                                    (read-string
+                                     (format "Option %d (empty to finish): " idx)))))))
+         (push opt options)
+         (setq idx (1+ idx)))
+       (unless (and (stringp question-input)
+                    (not (string-empty-p question-input)))
+         (user-error "disco: poll question cannot be empty"))
+       (unless (>= (length options) 2)
+         (user-error "disco: poll requires at least 2 options"))
+       (list question-input
+             (nreverse options)
+             duration-input
+             allow-multi
+             (unless (string-empty-p content-input)
+               content-input)))))
+  (disco-room--ensure-action-available
+   (disco-room--poll-unavailable-reason)
+   "send polls")
+  (let* ((poll `((question . ((text . ,question)))
+                 (answers . ,(mapcar (lambda (option)
+                                       `((poll_media . ((text . ,option)))))
+                                     options))
+                 (duration . ,duration)
+                 (allow_multiselect . ,(if allow-multiselect t :false))))
+         (room-buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         (view (disco-room--ensure-view))
+         request-revision
+         (required-permissions
+          (append (disco-room--required-send-permissions)
+                  '(send-polls))))
+    (disco-api--validate-message-content-length content "content")
+    (disco-permission-ensure-channel
+     (disco-room--channel-object)
+     required-permissions
+     :action "sending poll")
+    (setq request-revision
+          (disco-state-message-revision channel-id))
+    (setq disco-room--send-in-flight t)
+    (appkit-request-sync view :part 'frame)
+    (disco-api-create-message-async
+     channel-id
+     :content content
+     :poll poll
+     :allowed-mentions (disco-room--send-allowed-mentions)
+     :on-success
+     (lambda (response)
+       (when (and (listp response) (alist-get 'id response))
+         (disco-state-merge-message-response
+          channel-id response request-revision))
+       (when (disco-room--channel-buffer-p room-buffer channel-id view)
+         (with-current-buffer room-buffer
+           (setq disco-room--send-in-flight nil)
+           (cond
+            ((and (listp response)
+                  (alist-get 'id response)
+                  (disco-room--channel-message-by-id
+                   channel-id (alist-get 'id response)))
+             (disco-room--observe-live-create (alist-get 'id response)))
+            ((not (and (listp response) (alist-get 'id response)))
+             (disco-room-refresh)))
+           (disco-room--request-render view)
+           (message "disco: poll sent"))))
+     :on-error
+     (lambda (err)
+       (when (disco-room--channel-buffer-p room-buffer channel-id view)
+         (with-current-buffer room-buffer
+           (setq disco-room--send-in-flight nil)
+           (disco-room--request-render view)
+           (message "disco: send poll failed: %s"
+                    (disco-room--async-error-message err))))))))
 
 (defun disco-room--submit-poll-vote (message-id selected-answer-ids)
   "Submit SELECTED-ANSWER-IDS for poll MESSAGE-ID asynchronously."

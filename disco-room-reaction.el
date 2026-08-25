@@ -14,36 +14,22 @@
 (require 'appkit-chat-completion)
 (require 'disco-api)
 (require 'disco-company)
+(require 'disco-customize)
 (require 'disco-ins)
 (require 'disco-msg)
+(require 'disco-room-compose)
 
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-buffer-p "disco-room" (buffer channel-id view))
-(declare-function disco-room--ensure-action-available "disco-room" (reason action))
 (declare-function disco-room--ensure-view "disco-room" ())
 (declare-function disco-room--event-self-p "disco-room" (event))
 (declare-function disco-room--message-at-point "disco-room" ())
 (declare-function disco-room--message-by-id "disco-room" (message-id))
 (declare-function disco-room--message-id-at-point "disco-room" ())
-(declare-function disco-room--message-id-required-at-point "disco-room" ())
 (declare-function disco-room--request-render "disco-room" (view))
-(declare-function disco-room--room-send-restriction-reason "disco-room" (&optional extra-permissions channel))
 (declare-function disco-room--update-message-locally "disco-room" (message-id function))
 
 (defvar disco-room--channel-id)
-(defcustom disco-room-show-reactions t
-  "When non-nil, render reaction chips under each message."
-  :type 'boolean
-  :group 'disco)
-(defface disco-room-reaction
-  '((t :inherit mode-line-inactive))
-  "Face used for unselected reaction chips."
-  :group 'disco)
-
-(defface disco-room-reaction-selected
-  '((t :inherit success :weight bold))
-  "Face used for reactions selected by the current user."
-  :group 'disco)
 (defun disco-room-reaction-insert (message prefix)
   "Insert MESSAGE reaction chips using timeline PREFIX."
   (when disco-room-show-reactions
