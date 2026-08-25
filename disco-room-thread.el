@@ -17,6 +17,7 @@
 (require 'disco-permission)
 (require 'disco-state)
 (require 'disco-thread)
+(require 'disco-room-compose)
 
 (declare-function disco-room--channel-object "disco-room" ())
 (declare-function disco-room--ensure-view "disco-room" ())
@@ -26,7 +27,6 @@
 (declare-function disco-room--request-render "disco-room" (view))
 (declare-function disco-room--resolve-thread-update "disco-room" (updated))
 (declare-function disco-room-open "disco-room" (channel-id channel-name))
-(declare-function disco-room--required-send-permissions "disco-room" (&optional channel))
 (declare-function disco-root-list-archived-threads "disco-root" (&optional parent-channel-id))
 
 (defconst disco-room-thread--message-flag-has-thread (ash 1 5)

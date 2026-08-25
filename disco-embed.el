@@ -22,6 +22,26 @@
   "Embed card rendering for disco."
   :group 'disco)
 
+(defface disco-room-embed-card-border
+  '((t :inherit shadow))
+  "Face used for embed card border glyphs."
+  :group 'disco-embed)
+
+(defface disco-room-embed-card-title
+  '((t :inherit default :weight bold))
+  "Face used for embed card title row."
+  :group 'disco-embed)
+
+(defface disco-room-embed-card-meta
+  '((t :inherit shadow))
+  "Face used for embed card metadata rows."
+  :group 'disco-embed)
+
+(defface disco-room-embed-card-action
+  '((t :inherit link))
+  "Face used for embed card action buttons."
+  :group 'disco-embed)
+
 (defcustom disco-embed-show-embeds t
   "When non-nil, render embed details under each message."
   :type 'boolean
@@ -1277,7 +1297,7 @@ OWNER is the exact Appkit app or view captured by video actions."
                    (url (disco-embed--main-url msg embed)))
               (insert (disco-embed--summary embed) "\n")
               (appkit-ui-apply-line-prefix line-start (point) prefix-source)
-              (add-text-properties line-start (point) '(face disco-room-message-meta))
+              (add-text-properties line-start (point) '(face disco-room-embed-card-meta))
               (when (and disco-embed-show-urls
                          (appkit-media-url-present-p url))
                 (let ((url-start (point)))
