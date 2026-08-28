@@ -306,30 +306,6 @@ Grouping applies when sender stays the same and timestamps are within
   :type 'boolean
   :group 'disco)
 
-(defcustom disco-room-wrap-long-lines t
-  "When non-nil, visually wrap long timeline lines in room buffers.
-
-This mirrors telega chat buffers by enabling `visual-line-mode' and disabling
-`truncate-lines'."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-use-visual-fill-column nil
-  "When non-nil, enable `visual-fill-column-mode' in room buffers when available.
-
-This is optional and requires the external `visual-fill-column' package."
-  :type 'boolean
-  :group 'disco)
-
-(defcustom disco-room-fill-column nil
-  "Preferred fill column for room buffers.
-
-When non-nil and visual fill mode is active, set local `fill-column' to this
-value before enabling visual fill."
-  :type '(choice (const :tag "Use current fill-column" nil)
-          integer)
-  :group 'disco)
-
 (defcustom disco-room-auto-fill-margin-columns 1
   "Additional right margin columns used for timestamp alignment.
 

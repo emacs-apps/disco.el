@@ -48,6 +48,7 @@
 (require 'disco-thread)
 
 (autoload 'disco-user-open "disco-user" nil t)
+(defvar visual-fill-column-width)
 
 (declare-function disco-room--channel-message-by-id
                   "disco-room" (channel-id message-id))
@@ -118,9 +119,10 @@ process, so a late callback cannot retire or overwrite a replacement request.")
 (defun disco-room--line-fill-column ()
   "Return target fill column for the current message line."
   (or (and (bound-and-true-p visual-fill-column-mode)
-           (integerp disco-room-fill-column)
-           (> disco-room-fill-column 0)
-           disco-room-fill-column)
+           (boundp 'visual-fill-column-width)
+           (integerp visual-fill-column-width)
+           (> visual-fill-column-width 0)
+           visual-fill-column-width)
       (and (bound-and-true-p visual-fill-column-mode)
            (integerp fill-column)
            (> fill-column 0)
@@ -634,33 +636,6 @@ No Appkit invalidation is requested."
                             text)
     text))
 
-(defun disco-room--apply-breakline-settings ()
-  "Apply telega-style line wrapping behavior to current room buffer."
-  (let* ((visual-fill-feature-loaded
-          (or (featurep 'visual-fill-column)
-              (and disco-room-use-visual-fill-column
-                   (require 'visual-fill-column nil t))))
-         (visual-fill-mode-fn
-          (and visual-fill-feature-loaded
-               (fboundp 'visual-fill-column-mode)
-               (symbol-function 'visual-fill-column-mode))))
-    (if disco-room-wrap-long-lines
-        (progn
-          (setq-local truncate-lines nil)
-          (setq-local word-wrap t)
-          (visual-line-mode 1)
-          (if (and disco-room-use-visual-fill-column visual-fill-mode-fn)
-              (progn
-                (when disco-room-fill-column
-                  (setq-local fill-column disco-room-fill-column))
-                (funcall visual-fill-mode-fn 1))
-            (when visual-fill-mode-fn
-              (funcall visual-fill-mode-fn -1))))
-      (visual-line-mode -1)
-      (setq-local truncate-lines t)
-      (setq-local word-wrap nil)
-      (when visual-fill-mode-fn
-        (funcall visual-fill-mode-fn -1)))))
 
 (add-hook 'disco-media-rerender-hook #'disco-room--handle-media-rerender)
 
@@ -889,7 +864,8 @@ OWNER is the exact Appkit app captured by video playback actions."
         :action-face 'disco-room-attachment-card-action
         :show-url disco-room-show-attachment-urls
         :spoiler-hidden spoiler-hidden
-        :spoiler-toggle-action toggle-action))
+        :spoiler-toggle-action toggle-action
+        :owner owner))
       (_
        (disco-ins-insert-attachment-document
         attachment
