@@ -445,11 +445,9 @@ OWNER is the exact Appkit app or view captured by every play action."
        `((duration_secs . ,(max 0.0 progress)))))
      (t nil))))
 
-(cl-defun disco-ins-insert-attachment-audio (attachment &key prefix border-face
-                                                        title-face meta-face
-                                                        action-face show-url
-                                                        spoiler-hidden
-                                                        spoiler-toggle-action)
+(cl-defun disco-ins-insert-attachment-audio
+    (attachment &key prefix border-face title-face meta-face action-face
+                show-url spoiler-hidden spoiler-toggle-action owner)
   "Insert one audio-style attachment block for ATTACHMENT."
   (let* ((name (disco-media-attachment-display-name attachment))
          (details (delq nil (list (disco-media-attachment-size-label attachment)
@@ -457,7 +455,7 @@ OWNER is the exact Appkit app or view captured by every play action."
                                   (when (disco-media-attachment-ephemeral-p attachment)
                                     "ephemeral"))))
          (prefix-state (appkit-chat-ins-media-prefix-state prefix border-face))
-         (context (disco-media-attachment-card-context attachment))
+         (context (disco-media-attachment-card-context attachment owner))
          (inline-playback-p (disco-media-audio-inline-playback-available-p))
          (playing-p (and inline-playback-p
                          (disco-media-attachment-audio-playing-p attachment)))

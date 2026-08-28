@@ -55,22 +55,6 @@ Set to nil to disable per-render capping."
   :type 'integer
   :group 'disco-media)
 
-(defcustom disco-media-audio-player-command
-  (cond
-   ((executable-find "ffplay") "ffplay -nodisp -autoexit")
-   ((executable-find "mpv") "mpv --no-video")
-   ((executable-find "vlc") "vlc --intf dummy --play-and-exit")
-   (t nil))
-  "Command used to play audio URLs/files from cards.
-
-When this resolves to `ffplay', disco can track play/pause/progress inline in a
-telega-style attachment card.  Other players are launched as best-effort
-external commands without inline playback state.  An unavailable player is an
-explicit error."
-  :type '(choice
-          (const :tag "No audio player" nil)
-          (string :tag "Command line"))
-  :group 'disco-media)
 
 (defconst disco-media--attachment-flag-is-spoiler (ash 1 3)
   "Attachment flag bit marking spoiler attachments.")
@@ -104,16 +88,10 @@ Values are image objects or the symbol `:missing'.")
   "Exact owners of concurrent explicit save-as attachment transfers.")
 
 (defvar disco-media--attachment-audio-state-table (make-hash-table :test #'equal)
-  "Inline audio playback state keyed by stable attachment download key.")
+  "Appkit audio sessions keyed by stable attachment download key.")
 
-(defvar disco-media--attachment-audio-current-process nil
-  "Current inline audio playback process, if any.")
-
-(defvar disco-media--attachment-audio-current-owner nil
-  "Exact owner of `disco-media--attachment-audio-current-process'.")
-
-(defvar disco-media--attachment-external-audio-owners nil
-  "Exact owners of non-inline attachment audio processes.")
+(defvar disco-media--attachment-audio-current-key nil
+  "Download key of the one active or paused Appkit audio session.")
 
 (defvar disco-media--generation 0
   "Generation of the active account's asynchronous media work.")
@@ -166,29 +144,6 @@ Values are image objects or the symbol `:missing'.")
        (disco-media--session-current-p (plist-get owner :generation))
        (memq owner disco-media--attachment-export-owners)))
 
-(defun disco-media--external-audio-owner-current-p (owner process)
-  "Return non-nil when OWNER exactly owns external audio PROCESS."
-  (and (consp owner)
-       (processp process)
-       (disco-media--session-current-p (plist-get owner :generation))
-       (memq owner disco-media--attachment-external-audio-owners)
-       (eq process (plist-get owner :process))))
-
-(defun disco-media--audio-owner-current-p (process)
-  "Return non-nil when PROCESS exactly owns active inline audio state."
-  (when (processp process)
-    (let* ((properties (process-plist process))
-           (generation (plist-get properties :disco-media-generation))
-           (owner (plist-get properties :disco-media-owner))
-           (key (plist-get properties :attachment-key))
-           (entry (and key
-                       (gethash key disco-media--attachment-audio-state-table))))
-      (and owner
-           (disco-media--session-current-p generation)
-           (eq owner disco-media--attachment-audio-current-owner)
-           (eq process disco-media--attachment-audio-current-process)
-           (eq owner (plist-get entry :owner))
-           (eq process (plist-get entry :process))))))
 
 (defun disco-media--run-cleanup-items (items function)
   "Apply FUNCTION to all ITEMS despite failures or a nonlocal transfer."
@@ -249,6 +204,8 @@ Values are image objects or the symbol `:missing'.")
                  (delete-process process)))))
        (disco-media--force-dispose-process-buffer
         (plist-get item :buffer))))
+    ('player
+     (appkit-media-player-stop (plist-get item :session)))
     ('decoration
      (appkit-media-clear-video-decoration-cache 'disco))))
 
@@ -278,7 +235,8 @@ Values are image objects or the symbol `:missing'.")
   "Return cleanup items for tracked preview, transfer, and audio work."
   (let ((items (disco-media--preview-cleanup-items))
         transfers
-        process-records)
+        process-records
+        sessions)
     (maphash
      (lambda (_key entry)
        (when-let* ((transfer (plist-get entry :transfer)))
@@ -289,43 +247,29 @@ Values are image objects or the symbol `:missing'.")
      disco-media--attachment-download-state-table)
     (maphash
      (lambda (_key entry)
-       (when-let* ((process (plist-get entry :process)))
-         (when (processp process)
-           (push (cons process (plist-get entry :buffer)) process-records))))
+       (when-let* ((session (plist-get entry :session)))
+         (when (appkit-media-player-session-p session)
+           (push session sessions))))
      disco-media--attachment-audio-state-table)
     (dolist (owner disco-media--attachment-export-owners)
       (when-let* ((transfer (plist-get owner :transfer)))
         (push transfer transfers)))
-    (dolist (owner disco-media--attachment-external-audio-owners)
-      (when-let* ((process (plist-get owner :process)))
-        (when (processp process)
-          (push (cons process (plist-get owner :buffer)) process-records))))
-    (when (processp disco-media--attachment-audio-current-process)
-      (push
-       (cons
-        disco-media--attachment-audio-current-process
-        (plist-get (process-plist disco-media--attachment-audio-current-process)
-                   :disco-media-owned-buffer))
-       process-records))
-    (let ((seen (make-hash-table :test #'eq))
-          unique-records)
-      (dolist (record process-records)
-        (unless (gethash (car record) seen)
-          (puthash (car record) t seen)
-          (push record unique-records)))
-      (setq items
-            (append
-             items
-             (mapcar (lambda (transfer)
-                       (list :kind 'transfer :transfer transfer))
-                     (delete-dups transfers))
-             (mapcar (lambda (record)
-                       (list :kind 'process
-                             :process (car record)
-                             :buffer (cdr record)))
-                     unique-records)
-             (list (list :kind 'decoration))))
-      items)))
+    (setq items
+          (append
+           items
+           (mapcar (lambda (transfer)
+                     (list :kind 'transfer :transfer transfer))
+                   (delete-dups transfers))
+           (mapcar (lambda (record)
+                     (list :kind 'process
+                           :process (car record)
+                           :buffer (cdr record)))
+                   (delete-dups process-records))
+           (mapcar (lambda (session)
+                     (list :kind 'player :session session))
+                   (delete-dups sessions))
+           (list (list :kind 'decoration))))
+    items))
 
 (defun disco-media--clear-session-memory ()
   "Clear tracked attachment media state without running callbacks."
@@ -340,9 +284,7 @@ Values are image objects or the symbol `:missing'.")
   (clrhash disco-media--attachment-decorated-preview-cache)
   (setq disco-media--attachment-preview-fetch-budget nil
         disco-media--attachment-export-owners nil
-        disco-media--attachment-audio-current-process nil
-        disco-media--attachment-audio-current-owner nil
-        disco-media--attachment-external-audio-owners nil))
+        disco-media--attachment-audio-current-key nil))
 
 (defun disco-media-reset-session-state ()
   "Destroy tracked attachment media work for the retired account.
@@ -466,20 +408,9 @@ Downloaded files and the on-disk preview cache are intentionally preserved."
       (clrhash disco-media--attachment-placeholder-image-cache)
       (clrhash disco-media--attachment-decorated-preview-cache))))
 
-(defun disco-media--configured-audio-player-command ()
-  "Return the configured Discord attachment audio player command."
-  disco-media-audio-player-command)
-
-(defun disco-media--audio-player-program-name ()
-  "Return the configured Discord audio player's executable basename."
-  (appkit-media-command-program-name
-   (disco-media--configured-audio-player-command)))
-
 (defun disco-media-audio-inline-playback-available-p ()
-  "Return non-nil when the audio player supports tracked inline playback."
-  (let ((command (disco-media--configured-audio-player-command)))
-    (and (appkit-media-command-runnable-p command)
-         (equal (disco-media--audio-player-program-name) "ffplay"))))
+  "Return non-nil when Appkit can run tracked local audio playback."
+  (appkit-media-player-available-p nil 'audio))
 
 (defun disco-media-attachment-preview-rendering-available-p ()
   "Return non-nil when inline attachment image previews are available."
@@ -1881,358 +1812,186 @@ OWNER is the exact Appkit app or view that owns the external player."
       (user-error "disco: video attachment has no playable source")))))
 
 (defun disco-media--audio-state-entry (key)
-  "Return normalized inline audio playback state for KEY."
-  (let ((entry (copy-tree (or (gethash key disco-media--attachment-audio-state-table) '()))))
-    (unless (plist-get entry :status)
-      (setq entry (plist-put entry :status 'stopped)))
-    (when (and (eq (plist-get entry :status) 'playing)
-               (not (process-live-p (plist-get entry :process))))
-      (setq entry (plist-put entry :status 'stopped))
-      (setq entry (plist-put entry :process nil)))
+  "Return normalized Appkit audio playback state for KEY."
+  (let* ((entry
+          (copy-sequence
+           (or (gethash key disco-media--attachment-audio-state-table)
+               '())))
+         (session (plist-get entry :session))
+         (status
+          (and (appkit-media-player-session-p session)
+               (appkit-media-player-status session))))
+    (setq entry
+          (plist-put
+           entry :status
+           (pcase status
+             ('starting 'preparing)
+             ((or 'playing 'paused 'finished 'failed) status)
+             (_ 'stopped))))
+    (setq entry
+          (plist-put
+           entry :progress
+           (and (appkit-media-player-session-p session)
+                (appkit-media-player-played-seconds session))))
     entry))
 
 (defun disco-media--audio-store-state (key entry)
-  "Persist inline audio playback ENTRY for KEY and return ENTRY."
+  "Persist Appkit audio playback ENTRY for KEY and return ENTRY."
   (puthash key entry disco-media--attachment-audio-state-table)
   entry)
 
 (defun disco-media-attachment-audio-state (attachment)
-  "Return normalized inline audio playback state for ATTACHMENT."
+  "Return normalized Appkit audio playback state for ATTACHMENT."
   (let* ((key (disco-media-attachment-download-key attachment))
          (entry (disco-media--audio-state-entry key)))
-    (disco-media--audio-store-state key entry)))
+    (list :status (plist-get entry :status)
+          :progress (plist-get entry :progress)
+          :pending-play (plist-get entry :pending-play))))
 
 (defun disco-media-attachment-audio-playing-p (attachment)
-  "Return non-nil when ATTACHMENT audio is currently playing inline."
-  (eq (plist-get (disco-media-attachment-audio-state attachment) :status) 'playing))
+  "Return non-nil when ATTACHMENT audio is currently playing."
+  (eq (plist-get (disco-media-attachment-audio-state attachment) :status)
+      'playing))
 
 (defun disco-media-attachment-audio-paused-p (attachment)
   "Return pause position for ATTACHMENT audio, or nil when not paused."
-  (let ((entry (disco-media-attachment-audio-state attachment)))
-    (when (eq (plist-get entry :status) 'paused)
-      (plist-get entry :progress))))
+  (let ((state (disco-media-attachment-audio-state attachment)))
+    (when (eq (plist-get state :status) 'paused)
+      (plist-get state :progress))))
 
 (defun disco-media-attachment-audio-progress (attachment)
-  "Return current known playback progress for ATTACHMENT audio, or nil."
+  "Return current playback progress for ATTACHMENT audio, or nil."
   (plist-get (disco-media-attachment-audio-state attachment) :progress))
 
 (defun disco-media-attachment-audio-pending-play-p (attachment)
   "Return non-nil when ATTACHMENT should auto-play after download."
   (plist-get (disco-media-attachment-audio-state attachment) :pending-play))
 
-(defun disco-media--set-attachment-audio-pending-play (attachment pending-play)
+(defun disco-media--set-attachment-audio-pending-play
+    (attachment pending-play)
   "Set ATTACHMENT pending autoplay state to PENDING-PLAY."
   (let* ((key (disco-media-attachment-download-key attachment))
          (entry (disco-media--audio-state-entry key)))
     (setq entry (plist-put entry :pending-play pending-play))
-    (disco-media--audio-store-state key entry)
-    entry))
+    (disco-media--audio-store-state key entry)))
 
-(defun disco-media--external-audio-process-sentinel (process _event)
-  "Retire exact external audio PROCESS ownership after it exits."
-  (unless (process-live-p process)
-    (let ((owner (plist-get (process-plist process)
-                            :disco-media-external-owner)))
-      (when (disco-media--external-audio-owner-current-p owner process)
-        (setq disco-media--attachment-external-audio-owners
-              (delq owner disco-media--attachment-external-audio-owners)))
-      ;; A dead process may remain referenced by a caller; do not retain its
-      ;; account owner through the process plist.
-      (set-process-plist process nil))))
+(defun disco-media--audio-session-current-p (key generation session)
+  "Return non-nil when SESSION still owns KEY in GENERATION."
+  (and (disco-media--session-current-p generation)
+       (eq session
+           (plist-get
+            (gethash key disco-media--attachment-audio-state-table)
+            :session))))
 
-(defun disco-media--start-external-audio-player (source)
-  "Start configured non-inline audio player for SOURCE.
+(defun disco-media--audio-session-changed (key generation session)
+  "Publish exact Appkit SESSION state for KEY in GENERATION."
+  (when (disco-media--audio-session-current-p key generation session)
+    (when (and (equal key disco-media--attachment-audio-current-key)
+               (memq (appkit-media-player-status session)
+                     '(finished failed stopped)))
+      (setq disco-media--attachment-audio-current-key nil))
+    (disco-media--notify-state-updated 'audio key)))
 
-Return non-nil on success."
+(cl-defun disco-media--start-appkit-audio-player
+    (attachment source &key owner)
+  "Start Appkit-owned local ATTACHMENT playback from SOURCE."
   (disco-media--ensure-start-allowed)
-  (let* ((command (disco-media--configured-audio-player-command))
-         (argv (appkit-media-command-arguments command))
-         (program (car argv))
-         (args (append (cdr argv) (list source)))
+  (unless (and (stringp source) (file-regular-p source))
+    (user-error "disco: downloaded audio file is unavailable"))
+  (unless (appkit-media-player-available-p nil 'audio)
+    (user-error
+     "disco: audio player is unavailable; customize `appkit-media-audio-player-command'"))
+  (let* ((key (disco-media-attachment-download-key attachment))
          (generation disco-media--generation)
-         (owner (list :generation disco-media--generation
-                      :process nil
-                      :buffer nil))
-         process
-         completed-p)
-    (when (and program
-               (appkit-media-command-runnable-p command))
-      ;; Register the pending owner before process construction.  Reset may
-      ;; run synchronously inside a mocked or unusual process constructor.
-      (push owner disco-media--attachment-external-audio-owners)
-      (unwind-protect
-          (condition-case nil
-              (progn
-                (setq process
-                      (make-process
-                       :name "disco-audio-player"
-                       :buffer nil
-                       :command (cons program args)
-                       :noquery t))
-                (when (and (processp process)
-                           (disco-media--session-current-p generation)
-                           (memq owner
-                                 disco-media--attachment-external-audio-owners))
-                  (setf (plist-get owner :process) process
-                        (plist-get owner :buffer) nil)
-                  (set-process-plist
-                   process
-                   (list :disco-media-generation generation
-                         :disco-media-external-owner owner))
-                  (set-process-sentinel
-                   process #'disco-media--external-audio-process-sentinel)
-                  ;; Immediate normal exit may already retire OWNER.  It is
-                  ;; still a successful launch when the session did not reset.
-                  (setq completed-p
-                        (disco-media--session-current-p generation))))
-            ((error quit) nil))
-        (unless completed-p
-          ;; Revoke before compensating deletion so its synchronous sentinel
-          ;; cannot mutate the active account.  This covers reset occurring
-          ;; before MAKE-PROCESS returned and exposed PROCESS to the snapshot.
-          (setq disco-media--attachment-external-audio-owners
-                (delq owner disco-media--attachment-external-audio-owners))
-          (when (processp process)
-            (disco-media--run-cleanup-items
-             (list (list :kind 'process :process process :buffer nil))
-             #'disco-media--cancel-cleanup-item))))
-      completed-p)))
-
-(defun disco-media--stop-inline-audio-process (&optional process stop-reason)
-  "Stop inline audio PROCESS and record STOP-REASON for the sentinel."
-  (when-let* ((proc (or process disco-media--attachment-audio-current-process)))
-    (when (and (processp proc) (process-live-p proc))
-      (let ((proc-plist (process-plist proc)))
-        (setq proc-plist (plist-put proc-plist :stop-reason stop-reason))
-        (set-process-plist proc proc-plist)
-        (ignore-errors (delete-process proc))))))
-
-(defun disco-media--inline-audio-process-filter (proc output)
-  "Track ffplay progress for inline audio PROC from OUTPUT."
-  (when (disco-media--audio-owner-current-p proc)
-    (let ((buffer (process-buffer proc))
-          new-progress)
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (let ((inhibit-modification-hooks t))
-            (goto-char (point-max))
-            (insert output)
-            (when (> (buffer-size) 20000)
-              (delete-region (point-min)
-                             (max (point-min) (- (point-max) 10000)))))
-          (cond
-           ((save-excursion
-              (re-search-backward "\r\\s-*\\([0-9.]+\\)" nil t))
-            (setq new-progress (string-to-number (match-string 1))))
-           ((save-excursion
-              (re-search-backward
-               " time=\\([0-9][0-9]\\):\\([0-9][0-9]\\):\\([0-9.]+\\) "
-               nil t))
-            (setq new-progress
-                  (+ (* 3600 (string-to-number (match-string 1)))
-                     (* 60 (string-to-number (match-string 2)))
-                     (string-to-number (match-string 3))))))))
-      (when (and (numberp new-progress)
-                 (disco-media--audio-owner-current-p proc))
-        (let* ((proc-plist (process-plist proc))
-               (key (plist-get proc-plist :attachment-key))
-               (entry (disco-media--audio-state-entry key))
-               (last-second (plist-get proc-plist :last-second))
-               (next-second (floor new-progress)))
-          (setq proc-plist (plist-put proc-plist :progress new-progress))
-          (setq entry (plist-put entry :progress new-progress))
-          (disco-media--audio-store-state key entry)
-          (unless (equal last-second next-second)
-            (setq proc-plist (plist-put proc-plist :last-second next-second)))
-          (set-process-plist proc proc-plist)
-          (when (and (not (equal last-second next-second))
-                     (disco-media--audio-owner-current-p proc))
-            (disco-media--notify-state-updated 'audio key)))))))
-
-(defun disco-media--inline-audio-process-sentinel (proc _event)
-  "Finalize inline audio state after PROC exits."
-  (unless (process-live-p proc)
-    (let* ((proc-plist (process-plist proc))
-           (key (plist-get proc-plist :attachment-key))
-           (generation (plist-get proc-plist :disco-media-generation))
-           (owned-buffer (plist-get proc-plist :disco-media-owned-buffer))
-           (current-p (disco-media--audio-owner-current-p proc))
-           (stop-reason (plist-get proc-plist :stop-reason))
-           (final-progress (or (and (consp stop-reason)
-                                    (eq (car stop-reason) 'paused)
-                                    (cdr stop-reason))
-                               (plist-get proc-plist :progress))))
-      (when current-p
-        (let ((entry (disco-media--audio-state-entry key)))
-          (cond
-           ((and (consp stop-reason) (eq (car stop-reason) 'paused))
-            (setq entry (plist-put entry :status 'paused))
-            (setq entry
-                  (plist-put entry :progress
-                             (max 0.0 (or final-progress 0.0)))))
-           (t
-            (setq entry (plist-put entry :status 'stopped))
-            (setq entry (plist-put entry :progress nil))))
-          (setq entry (plist-put entry :pending-play nil))
-          (setq entry (plist-put entry :process nil))
-          (setq entry (plist-put entry :owner nil))
-          (setq entry (plist-put entry :generation nil))
-          (disco-media--audio-store-state key entry))
-        (setq disco-media--attachment-audio-current-process nil
-              disco-media--attachment-audio-current-owner nil))
-      ;; Buffer ownership is by exact process pointer, never its conventional
-      ;; name; stale sentinels may still dispose their own scratch buffer.
-      (disco-media--force-dispose-process-buffer owned-buffer)
-      (when (and current-p (disco-media--session-current-p generation))
-        (disco-media--notify-state-updated 'audio key)))))
-
-(defun disco-media--start-inline-audio-player (attachment source &optional start-at)
-  "Start ffplay-backed inline audio playback for ATTACHMENT using SOURCE."
-  (disco-media--ensure-start-allowed)
-  (let* ((command (disco-media--configured-audio-player-command))
-         (argv (appkit-media-command-arguments command))
-         (program (car argv))
-         (args (append (cdr argv)
-                       (when (and (numberp start-at)
-                                  (> start-at 0))
-                         (list "-ss" (format "%.2f" start-at)))
-                       (list source)))
-         (key (disco-media-attachment-download-key attachment))
-         (generation disco-media--generation)
-         (owner (list :generation disco-media--generation :key key))
-         buffer
-         process
-         published-p)
-    (unless (and program
-                 (disco-media-audio-inline-playback-available-p))
-      (user-error "disco: inline audio playback requires ffplay"))
-    (when (and (processp disco-media--attachment-audio-current-process)
-               (process-live-p disco-media--attachment-audio-current-process))
-      (disco-media--stop-inline-audio-process
-       disco-media--attachment-audio-current-process 'stopped))
-    (unless (disco-media--session-current-p generation)
-      (user-error "disco: media session changed before audio start"))
-    (setq buffer (generate-new-buffer " *disco-audio-player*"))
-    (with-current-buffer buffer
-      (buffer-disable-undo))
-    (unwind-protect
-        (progn
-          (setq process
-                (apply #'start-process "disco-audio-player" buffer program args))
-          (unless (disco-media--session-current-p generation)
-            (user-error "disco: media session changed during audio start"))
-          (set-process-query-on-exit-flag process nil)
-          (set-process-plist
-           process
-           (list :attachment-key key
-                 :disco-media-generation generation
-                 :disco-media-owner owner
-                 :disco-media-owned-buffer buffer
-                 :progress (and (numberp start-at)
-                                (max 0.0 start-at))
-                 :last-second (and (numberp start-at)
-                                   (floor start-at))))
-          (setq disco-media--attachment-audio-current-process process
-                disco-media--attachment-audio-current-owner owner)
-          (let ((entry (disco-media--audio-state-entry key)))
-            (setq entry (plist-put entry :status 'playing))
-            (setq entry
-                  (plist-put entry :progress
-                             (and (numberp start-at) (max 0.0 start-at))))
-            (setq entry (plist-put entry :pending-play nil))
-            (setq entry (plist-put entry :generation generation))
-            (setq entry (plist-put entry :owner owner))
-            (setq entry (plist-put entry :process process))
-            (setq entry (plist-put entry :buffer buffer))
-            (disco-media--audio-store-state key entry))
-          (set-process-filter process #'disco-media--inline-audio-process-filter)
-          (set-process-sentinel process #'disco-media--inline-audio-process-sentinel)
-          (when (disco-media--audio-owner-current-p process)
-            (disco-media--notify-state-updated 'audio key))
-          (setq published-p (disco-media--audio-owner-current-p process))
-          (and published-p process))
-      (unless published-p
-        ;; Revoke before deletion so a synchronous sentinel cannot repopulate
-        ;; state or rerender the retired account.
-        (when (eq process disco-media--attachment-audio-current-process)
-          (setq disco-media--attachment-audio-current-process nil
-                disco-media--attachment-audio-current-owner nil))
-        (when (eq owner
-                  (plist-get
-                   (gethash key disco-media--attachment-audio-state-table)
-                   :owner))
-          (remhash key disco-media--attachment-audio-state-table))
-        (if (processp process)
-            (disco-media--run-cleanup-items
-             (list (list :kind 'process :process process :buffer buffer))
-             #'disco-media--cancel-cleanup-item)
-          (disco-media--force-dispose-process-buffer buffer))))))
+         (duration (alist-get 'duration_secs attachment)))
+    (when (and disco-media--attachment-audio-current-key
+               (not (equal key disco-media--attachment-audio-current-key)))
+      (when-let* ((entry
+                   (gethash disco-media--attachment-audio-current-key
+                            disco-media--attachment-audio-state-table))
+                  (session (plist-get entry :session))
+                  ((appkit-media-player-session-p session)))
+        (appkit-media-player-stop session)))
+    (let* ((entry (disco-media--audio-state-entry key))
+           (old-session (plist-get entry :session)))
+      (when (and (appkit-media-player-session-p old-session)
+                 (not (appkit-media-player-session-finalized-p old-session)))
+        (appkit-media-player-stop old-session))
+      (let ((session
+             (appkit-media-player-start-file
+              source
+              :kind 'audio
+              :owner owner
+              :duration-seconds
+              (and (numberp duration) (max 0.0 (float duration)))
+              :on-change
+              (apply-partially
+               #'disco-media--audio-session-changed key generation))))
+        (setq entry (plist-put entry :session session))
+        (setq entry (plist-put entry :pending-play nil))
+        (disco-media--audio-store-state key entry)
+        (setq disco-media--attachment-audio-current-key key)
+        (disco-media--notify-state-updated 'audio key)
+        session))))
 
 (defun disco-media-stop-attachment-audio (attachment)
-  "Stop inline playback for ATTACHMENT and clear any paused position."
+  "Stop Appkit playback for ATTACHMENT and clear retained progress."
   (let* ((key (disco-media-attachment-download-key attachment))
          (entry (disco-media--audio-state-entry key))
-         (process (plist-get entry :process)))
-    (if (process-live-p process)
-        (disco-media--stop-inline-audio-process process 'stopped)
-      (setq entry (plist-put entry :status 'stopped))
-      (setq entry (plist-put entry :progress nil))
-      (setq entry (plist-put entry :pending-play nil))
-      (setq entry (plist-put entry :process nil))
-      (disco-media--audio-store-state key entry)
-      (disco-media--notify-state-updated 'audio key))))
+         (session (plist-get entry :session)))
+    (when (appkit-media-player-session-p session)
+      (appkit-media-player-stop session))
+    (setq entry (plist-put entry :session nil))
+    (setq entry (plist-put entry :pending-play nil))
+    (disco-media--audio-store-state key entry)
+    (when (equal key disco-media--attachment-audio-current-key)
+      (setq disco-media--attachment-audio-current-key nil))
+    (disco-media--notify-state-updated 'audio key)))
 
-(defun disco-media-play-attachment-audio (attachment)
-  "Play or pause ATTACHMENT audio.
+(defun disco-media-play-attachment-audio (attachment &optional owner)
+  "Play, pause, or resume ATTACHMENT audio through Appkit.
 
-Unlike the earlier URL-first implementation, this prefers a downloaded local
-file for playback and will queue a download before first play when needed.
-This matches telega's approach more closely and avoids ffplay timing quirks on
-streamed Discord voice-message URLs."
+OWNER lifecycle-owns the whole pause/resume session."
   (disco-media--ensure-start-allowed)
-  (let* ((download-state (disco-media-attachment-download-state attachment))
+  (let* ((download-state
+          (disco-media-attachment-download-state attachment))
          (path (plist-get download-state :path))
          (status (plist-get download-state :status))
          (url (disco-media-attachment-download-url attachment))
          (key (disco-media-attachment-download-key attachment))
          (entry (disco-media--audio-state-entry key))
-         (process (plist-get entry :process))
-         (paused-at (and (eq (plist-get entry :status) 'paused)
-                         (plist-get entry :progress))))
-    (cond
-     ((process-live-p process)
-      (disco-media--stop-inline-audio-process
-       process
-       (cons 'paused
-             (max 0.0
-                  (or (plist-get (process-plist process) :progress)
-                      (plist-get entry :progress)
-                      0.0)))))
-     ((and (stringp path) (file-exists-p path))
-      (if (disco-media-audio-inline-playback-available-p)
-          (disco-media--start-inline-audio-player attachment path paused-at)
-        (disco-media--set-attachment-audio-pending-play attachment nil)
-        (unless (disco-media--start-external-audio-player path)
-          (user-error
-           "disco: audio player is unavailable; customize `disco-media-audio-player-command'"))))
-     ((eq status 'downloading)
-      (if (disco-media-attachment-audio-pending-play-p attachment)
-          (progn
-            (disco-media--set-attachment-audio-pending-play attachment nil)
-            (message "disco: canceled pending audio autoplay"))
-        (disco-media--set-attachment-audio-pending-play attachment t)
-        (message "disco: audio will play after download")))
-     ((appkit-media-url-present-p url)
-      (disco-media--set-attachment-audio-pending-play attachment t)
-      (disco-media-start-attachment-download
-       attachment
-       nil
-       (lambda (_path)
-         (when (disco-media-attachment-audio-pending-play-p attachment)
-           (disco-media-play-attachment-audio attachment)))))
-     (t
-      (user-error "disco: audio attachment has no playable source")))))
-
+         (session (plist-get entry :session))
+         (playback-status
+          (and (appkit-media-player-session-p session)
+               (appkit-media-player-status session))))
+    (pcase playback-status
+      ((or 'playing 'paused)
+       (appkit-media-player-toggle session))
+      ('starting
+       (user-error "disco: audio playback is preparing"))
+      (_
+       (cond
+        ((and (stringp path) (file-regular-p path))
+         (disco-media--start-appkit-audio-player
+          attachment path :owner owner))
+        ((eq status 'downloading)
+         (if (disco-media-attachment-audio-pending-play-p attachment)
+             (progn
+               (disco-media--set-attachment-audio-pending-play
+                attachment nil)
+               (message "disco: canceled pending audio autoplay"))
+           (disco-media--set-attachment-audio-pending-play attachment t)
+           (message "disco: audio will play after download")))
+        ((appkit-media-url-present-p url)
+         (disco-media--set-attachment-audio-pending-play attachment t)
+         (disco-media-start-attachment-download
+          attachment
+          nil
+          (lambda (_path)
+            (when (disco-media-attachment-audio-pending-play-p attachment)
+              (disco-media-play-attachment-audio attachment owner)))))
+        (t
+         (user-error "disco: audio attachment has no playable source")))))))
 (defun disco-media-download-attachment (attachment &optional target-path)
   "Download ATTACHMENT to TARGET-PATH.
 
@@ -2308,14 +2067,14 @@ When TARGET-PATH is nil, prompt interactively for destination path."
 (defun disco-media-open-attachment (attachment &optional owner)
   "Open or play ATTACHMENT according to its media kind.
 
-OWNER is forwarded only to Appkit operations that can launch a video player."
+OWNER lifecycle-owns Appkit audio and video player sessions."
   (let* ((kind (disco-media-attachment-kind attachment))
          (state (disco-media-attachment-download-state attachment))
          (path (plist-get state :path))
          (url (disco-media-attachment-download-url attachment)))
     (pcase kind
       ('video (disco-media-play-attachment-video attachment owner))
-      ('audio (disco-media-play-attachment-audio attachment))
+      ('audio (disco-media-play-attachment-audio attachment owner))
       ('photo
        (disco-media-open-discord-resource
         `((file . ,(and (appkit-media-file-present-p path) path))

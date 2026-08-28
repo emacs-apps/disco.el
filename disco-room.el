@@ -1968,10 +1968,9 @@ When QUIET is non-nil, suppress progress messages."
 (defun disco-room-toggle-breakline ()
   "Toggle visual breakline wrapping in the current room buffer."
   (interactive)
-  (setq-local disco-room-wrap-long-lines (not disco-room-wrap-long-lines))
-  (disco-room--apply-breakline-settings)
+  (appkit-chatbuf-set-soft-wrap (not appkit-chatbuf-wrap-long-lines))
   (message "disco: breakline wrapping %s"
-           (if disco-room-wrap-long-lines "enabled" "disabled")))
+           (if appkit-chatbuf-wrap-long-lines "enabled" "disabled")))
 
 (defun disco-room--delete-msg (msg)
   "Delete MSG in current room."
@@ -2267,7 +2266,6 @@ its same-mode buffer survives."
 
 (define-derived-mode disco-room-mode appkit-chatbuf-mode "Disco-Room"
   "Major mode for disco.el room buffers."
-  (disco-room--apply-breakline-settings)
   ;; Avoid visible seams between vertically sliced inline images.
   (setq-local line-spacing 0)
   ;; Strip visual-only line prefixes from copied text.
