@@ -1256,23 +1256,23 @@ OWNER is the exact Appkit app or view captured by video actions."
                               author-url
                               provider-url
                               raw-icon-url))))
-        (when (appkit-media-url-present-p raw-url)
-          (let ((url-start (point)))
-            (insert raw-url "\n")
-            (disco-embed--add-url-properties
-             url-start
-             (1- (point))
-             raw-url
-             (cond
-              ((equal raw-url raw-video-url) 'video)
-              ((or (and (memq media-kind '(image thumbnail))
-                        (equal raw-url raw-media-url))
-                   (equal raw-url raw-icon-url))
-               'image)
-              (t 'page))
-             owner)
-            (appkit-ui-apply-line-prefix url-start (point) prefix-str)
-            (appkit-ui-append-face url-start (point) shadow-face))))))))
+          (when (appkit-media-url-present-p raw-url)
+            (let ((url-start (point)))
+              (insert raw-url "\n")
+              (disco-embed--add-url-properties
+               url-start
+               (1- (point))
+               raw-url
+               (cond
+                ((equal raw-url raw-video-url) 'video)
+                ((or (and (memq media-kind '(image thumbnail))
+                          (equal raw-url raw-media-url))
+                     (equal raw-url raw-icon-url))
+                 'image)
+                (t 'page))
+               owner)
+              (appkit-ui-apply-line-prefix url-start (point) prefix-str)
+              (appkit-ui-append-face url-start (point) shadow-face))))))))
 
 (defun disco-embed-insert-message-embeds (msg &optional owner)
   "Insert embed detail lines for MSG.
