@@ -27,14 +27,14 @@ it, or customize ~disco-evil-initial-state~.
 | Surface | Normal / motion keys |
 |---------+----------------------|
 | all read-only views | ~q~ / ~ZZ~ close; ~ZQ~ uses ~evil-quit~ |
-| root | ~RET~ open, ~g r~ refresh, ~g j~ / ~g k~ move, ~g u~ unread, ~s~ search, ~S~ advanced search |
-| guild directory | ~RET~ open, ~g r~ refresh, ~g j~ / ~g k~ move, ~g u~ unread, ~s~ / ~S~ set or clear filter |
+| root | ~RET~ open; ~g r~ refresh; ~g s~ / ~g S~ search; ~g v~ view; ~g t~ fold; ~g A~ archives |
+| guild directory | ~RET~ open; ~g r~ refresh; ~g s~ / ~g S~ filter; ~g t~ fold; ~g A~ archives |
 | room | ~g r~ refresh, ~g s~ search, ~g n~ / ~g p~ continue search |
-| room timeline | ~r~ reply, ~d d~ delete, ~R~ forward, ~E~ edit, ~o~ actions, ~Y~ copy, ~g y~ copy link |
+| room timeline | ~i~ composer, ~R~ reply, ~g f~ forward, ~E~ edit, ~D~ delete, ~Y~ copy, ~g y~ copy link |
 | room timeline | ~g j~ / ~g k~ move, ~!~ / ~+~ / ~-~ react, ~T~ thread, ~?~ menu |
 
-Timeline bindings are active only when point is outside the composer.  Move to
-the draft and enter insert state normally; message keys never steal draft
+Timeline bindings are active only when point is outside the composer.  ~i~
+moves to the draft and enters insert state; message keys never steal draft
 input.  Evil Snipe is disabled in Disco's read-only application buffers so its
 local overrides cannot shadow these bindings.
 

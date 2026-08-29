@@ -11,7 +11,6 @@
 (require 'appkit-evil)
 (require 'disco-customize)
 
-(declare-function appkit-evil-normalize-keymaps "appkit-evil" ())
 (declare-function disco-channel-directory-clear-filter
                   "disco-channel-directory" ())
 (declare-function disco-channel-directory-next-channel
@@ -79,7 +78,6 @@
 (declare-function disco-root-search "disco-root" (query domain))
 (declare-function disco-root-search-transient "disco-root" ())
 (declare-function disco-root-view--transient "disco-root-view" ())
-(declare-function evil-set-initial-state "evil-core" (mode state))
 
 (defgroup disco-evil nil
   "Optional native Evil integration for disco.el."
@@ -122,129 +120,114 @@ When nil, leave Evil's initial-state selection untouched."
     disco-root-mode-map)
   "Read-only Disco keymaps with standard modal quit semantics.")
 
-(defconst disco-evil--application-states '(normal motion)
-  "Evil states used by Disco application bindings.")
-
 (defun disco-evil--set-initial-states ()
   "Register `disco-evil-initial-state' for all Disco modes."
-  (when disco-evil-initial-state
-    (dolist (mode disco-evil--application-modes)
-      (evil-set-initial-state mode disco-evil-initial-state))))
+  (appkit-evil-set-initial-states
+   disco-evil--application-modes disco-evil-initial-state))
 
 (defun disco-evil--define-readonly-keys ()
   "Install shared and surface-specific read-only bindings."
   (dolist (map disco-evil--readonly-maps)
     (appkit-evil-define-readonly-keys map))
 
-  (appkit-evil-define-keys disco-evil--application-states 'disco-root-mode-map
-    (kbd "RET") #'disco-root-open-at-point
-    (kbd "<return>") #'disco-root-open-at-point
-    (kbd "g r") #'disco-root-refresh
-    (kbd "g G") #'disco-root-sync-gateway-context
-    (kbd "g s") #'disco-root-search
-    (kbd "g S") #'disco-root-search-transient
-    (kbd "s") #'disco-root-search
-    (kbd "S") #'disco-root-search-transient
-    (kbd "\\") #'disco-root-toggle-sort-mode
-    (kbd "v") #'disco-root-cycle-view-mode
-    (kbd "U") #'disco-root-toggle-unread-lens
-    (kbd "A") #'disco-root-list-archived-threads
-    (kbd "t") #'disco-root-toggle-section-at-point
-    (kbd "TAB") #'disco-root-tab-dwim
-    (kbd "<backtab>") #'disco-root-button-backward
-    (kbd "?") #'disco-root-transient)
-
-  (appkit-evil-define-keys
-      disco-evil--application-states 'disco-channel-directory-mode-map
-    (kbd "RET") #'disco-channel-directory-open-at-point
-    (kbd "<return>") #'disco-channel-directory-open-at-point
-    (kbd "g r") #'disco-channel-directory-refresh
-    (kbd "g s") #'disco-channel-directory-set-filter
-    (kbd "g S") #'disco-channel-directory-clear-filter
-    (kbd "g b") #'disco-channel-directory-open-root
-    (kbd "s") #'disco-channel-directory-set-filter
-    (kbd "S") #'disco-channel-directory-clear-filter
-    (kbd "U") #'disco-channel-directory-toggle-unread-only
-    (kbd "t") #'disco-channel-directory-toggle-at-point
-    (kbd "A") #'disco-channel-directory-open-archived-at-point
-    (kbd "TAB") #'disco-channel-directory-tab-dwim
-    (kbd "<backtab>") #'disco-channel-directory-previous-channel)
-
-  (appkit-evil-define-keys
-      disco-evil--application-states 'disco-root-archived-threads-mode-map
-    (kbd "RET") #'disco-root-open-at-point
-    (kbd "<return>") #'disco-root-open-at-point
-    (kbd "g r") #'disco-root-archived-threads-refresh
-    (kbd "m") #'disco-root-archived-threads-load-more
-    (kbd "?") #'disco-root-view--transient)
-
-  (appkit-evil-define-keys
-      disco-evil--application-states 'disco-room-pinned-messages-mode-map
-    (kbd "RET") #'appkit-ui-activate
-    (kbd "<return>") #'appkit-ui-activate
-    (kbd "g r") #'disco-room-pinned-messages-refresh
-    (kbd "m") #'disco-room-pinned-messages-load-more)
-
-  (appkit-evil-define-keys
-      disco-evil--application-states 'disco-root-channel-inspect-mode-map
-    (kbd "g r") #'disco-root-channel-inspect-refresh)
-
-  (appkit-evil-define-keys
-      disco-evil--application-states 'disco-msg-inspect-mode-map
-    (kbd "g r") #'disco-msg-inspect-refresh)
-
-  (appkit-evil-define-keys
-      disco-evil--application-states 'disco-user-mode-map
-    (kbd "g r") #'disco-user-refresh
-    (kbd "m") #'disco-user-open-chat
-    (kbd "Y") #'disco-user-copy-id
-    (kbd "TAB") #'forward-button
-    (kbd "<backtab>") #'disco-user-button-backward))
+  (appkit-evil-map
+    (:map disco-root-mode-map
+     :nm
+     "RET" #'disco-root-open-at-point
+     "<return>" #'disco-root-open-at-point
+     "g r" #'disco-root-refresh
+     "g G" #'disco-root-sync-gateway-context
+     "g s" #'disco-root-search
+     "g S" #'disco-root-search-transient
+     "g \\" #'disco-root-toggle-sort-mode
+     "g v" #'disco-root-cycle-view-mode
+     "U" #'disco-root-toggle-unread-lens
+     "g A" #'disco-root-list-archived-threads
+     "g t" #'disco-root-toggle-section-at-point
+     "TAB" #'disco-root-tab-dwim
+     "<backtab>" #'disco-root-button-backward
+     "?" #'disco-root-transient)
+    (:map disco-channel-directory-mode-map
+     :nm
+     "RET" #'disco-channel-directory-open-at-point
+     "<return>" #'disco-channel-directory-open-at-point
+     "g r" #'disco-channel-directory-refresh
+     "g s" #'disco-channel-directory-set-filter
+     "g S" #'disco-channel-directory-clear-filter
+     "g b" #'disco-channel-directory-open-root
+     "U" #'disco-channel-directory-toggle-unread-only
+     "g t" #'disco-channel-directory-toggle-at-point
+     "g A" #'disco-channel-directory-open-archived-at-point
+     "TAB" #'disco-channel-directory-tab-dwim
+     "<backtab>" #'disco-channel-directory-previous-channel)
+    (:map disco-root-archived-threads-mode-map
+     :nm
+     "RET" #'disco-root-open-at-point
+     "<return>" #'disco-root-open-at-point
+     "g r" #'disco-root-archived-threads-refresh
+     "g +" #'disco-root-archived-threads-load-more
+     "?" #'disco-root-view--transient)
+    (:map disco-room-pinned-messages-mode-map
+     :nm
+     "RET" #'appkit-ui-activate
+     "<return>" #'appkit-ui-activate
+     "g r" #'disco-room-pinned-messages-refresh
+     "g +" #'disco-room-pinned-messages-load-more)
+    (:map disco-root-channel-inspect-mode-map
+     :nm
+     "g r" #'disco-root-channel-inspect-refresh)
+    (:map disco-msg-inspect-mode-map
+     :nm
+     "g r" #'disco-msg-inspect-refresh)
+    (:map disco-user-mode-map
+     :nm
+     "g r" #'disco-user-refresh
+     "g m" #'disco-user-open-chat
+     "Y" #'disco-user-copy-id
+     "TAB" #'forward-button
+     "<backtab>" #'disco-user-button-backward)))
 
 (defun disco-evil--define-room-keys ()
   "Install room-wide and timeline-only modal bindings."
-  (appkit-evil-define-keys disco-evil--application-states 'disco-room-mode-map
-    (kbd "g r") #'disco-room-refresh
-    (kbd "g s") #'disco-room-inplace-search
-    (kbd "g n") #'disco-room-search-next
-    (kbd "g p") #'disco-room-search-prev)
-
-  ;; Timeline mode is inactive in the composer, so these keys cannot steal
-  ;; draft input.  Evil operators and motions retain their native meanings
-  ;; except for the deliberate normal-state message deletion aliases below.
-  (appkit-evil-define-keys
-      disco-evil--application-states 'disco-room-timeline-mode-map
-    (kbd "q") #'quit-window
-    (kbd "r") #'disco-msg-reply
-    (kbd "R") #'disco-msg-forward
-    (kbd "i") #'disco-msg-edit
-    (kbd "Y") #'disco-msg-copy-dwim
-    (kbd "g y") #'disco-msg-copy-link
-    (kbd "!") #'disco-msg-add-reaction
-    (kbd "+") #'disco-msg-toggle-reaction
-    (kbd "-") #'disco-msg-remove-reaction
-    (kbd "T") #'disco-msg-open-thread
-    (kbd "?") #'disco-room-transient)
-  ;; Like Telega's message buttons, timeline deletion is message-first:
-  ;; `D' and `d d' delete the current Discord message.  A `d' prefix is
-  ;; unavoidable here, so native `d{motion}' remains available only outside
-  ;; the timeline (including the composer).
-  (appkit-evil-define-keys 'normal 'disco-room-timeline-mode-map
-    (kbd "D") #'disco-msg-delete
-    (kbd "d d") #'disco-msg-delete)
-  ;; Motion state has no native `o'; block the ordinary Emacs timeline action.
-  (appkit-evil-define-keys 'motion 'disco-room-timeline-mode-map
-    (kbd "o") #'undefined))
-
-
+  ;; Timeline mode is inactive in the composer.  Lowercase Evil operators and
+  ;; motions remain native except for `i', which enters that composer.
+  (appkit-evil-map
+    (:map disco-room-mode-map
+     :nm
+     "g r" #'disco-room-refresh
+     "g s" #'disco-room-inplace-search
+     "g n" #'disco-room-search-next
+     "g p" #'disco-room-search-prev)
+    (:map disco-room-timeline-mode-map
+     :nm
+     "q" #'quit-window
+     "R" #'disco-msg-reply
+     "g f" #'disco-msg-forward
+     "i" #'appkit-evil-chatbuf-enter-input
+     "E" #'disco-msg-edit
+     "Y" #'disco-msg-copy-dwim
+     "g y" #'disco-msg-copy-link
+     "!" #'disco-msg-add-reaction
+     "+" #'disco-msg-toggle-reaction
+     "-" #'disco-msg-remove-reaction
+     "T" #'disco-msg-open-thread
+     "?" #'disco-room-transient
+     :n
+     "D" #'disco-msg-delete
+     :m
+     "c" #'undefined
+     "d" #'undefined
+     "e" #'undefined
+     "f" #'undefined
+     "o" #'undefined
+     "r" #'undefined
+     "t" #'undefined
+     "P" #'undefined
+     "L" #'undefined)))
 
 (defun disco-evil--refresh-live-buffers ()
   "Refresh Evil projections in existing Disco application buffers."
-  (dolist (buffer (buffer-list))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when (memq major-mode disco-evil--application-modes)
-          (appkit-evil-normalize-keymaps))))))
+  (appkit-evil-normalize-buffers disco-evil--application-modes))
 
 ;;;###autoload
 (defun disco-evil-setup ()
