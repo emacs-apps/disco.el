@@ -1302,4 +1302,113 @@
             (alist-get 'content
                        (disco-room--channel-message-by-id "chat" "300"))))))
 
+(ert-deftest disco-room-compose-prefix-selection-is-semantic-and-nonpersistent ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat"
+                disco-room--guild-id "guild")
+    (disco-room--set-draft "*bold*")
+    (should (eq 'discord-markdown appkit-markup-compose-active-codec))
+    (let* ((capture (appkit-markup-compose-capture '(4)))
+           (output
+            (appkit-markup-compose-output capture 'discord-markdown)))
+      (should (eq 'org (appkit-markup-compose-capture-codec capture)))
+      (should (equal "bold"
+                     (appkit-markup-plain-text
+                      (appkit-markup-compose-document capture))))
+      (should (equal "**bold**"
+                     (appkit-markup-compose-output-source output)))
+      (should-not (appkit-markup-compose-output-losses output))
+      (should (eq 'discord-markdown appkit-markup-compose-active-codec)))))
+
+(ert-deftest disco-room-send-org-capture-drives-wire-and-local-echo ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat"
+                disco-room--channel-name "chat"
+                disco-room--guild-id "guild")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat") (type . 0) (guild_id . "guild")
+       (permissions . "2048")))
+    (disco-room-render)
+    (appkit-markup-compose-set-active-codec 'org)
+    (disco-room--set-draft "*bold* /italic/ _under_")
+    (let (wire pending-document)
+      (cl-letf
+          (((symbol-function 'disco-api-send-message-async)
+            (lambda (channel-id content &rest args)
+              (setq wire content
+                    pending-document
+                    (alist-get
+                     'appkit_document
+                     (car (disco-state-messages channel-id))))
+              (funcall
+               (plist-get args :on-success)
+               `((id . "server-1")
+                 (nonce . ,(plist-get args :nonce))
+                 (channel_id . ,channel-id)
+                 (content . ,content)))))
+           ((symbol-function 'disco-room--channel-buffer-p)
+            (lambda (&rest _arguments) t))
+           ((symbol-function 'message) #'ignore))
+        (disco-room-send-message))
+      (should (equal "**bold** *italic* __under__" wire))
+      (should (appkit-markup-document-p pending-document))
+      (should (equal "bold italic under"
+                     (appkit-markup-plain-text pending-document)))
+      (should (eq 'org appkit-markup-compose-active-codec)))))
+
+(ert-deftest disco-room-send-preserves-discord-spoiler-syntax ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat"
+                disco-room--channel-name "chat"
+                disco-room--guild-id "guild")
+    (disco-state-reset)
+    (disco-state-upsert-channel
+     '((id . "chat") (type . 0) (guild_id . "guild")
+       (permissions . "2048")))
+    (disco-room-render)
+    (disco-room--set-draft "before ||**secret**|| after")
+    (let (wire)
+      (cl-letf
+          (((symbol-function 'disco-api-send-message-async)
+            (lambda (channel-id content &rest args)
+              (setq wire content)
+              (funcall
+               (plist-get args :on-success)
+               `((id . "server-spoiler")
+                 (nonce . ,(plist-get args :nonce))
+                 (channel_id . ,channel-id)
+                 (content . ,content)))))
+           ((symbol-function 'disco-room--channel-buffer-p)
+            (lambda (&rest _arguments) t))
+           ((symbol-function 'message) #'ignore))
+        (disco-room-send-message))
+      (should (equal "before ||**secret**|| after" wire)))))
+
+(ert-deftest disco-room-edit-restores-source-codec-with-rich-draft ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (appkit-markup-compose-set-active-codec 'org)
+    (cl-letf (((symbol-function 'disco-room--update-frame) #'ignore)
+              ((symbol-function 'appkit-chatbuf-focus-input) #'ignore))
+      (disco-room--set-draft
+       (concat "draft "
+               (disco-room--attachment-input-object-string
+                (disco-room--make-attachment-input-object "/tmp/a.txt"))))
+      (disco-room--composer-enter-edit
+       '((id . "m1") (content . "||server||")))
+      (should (eq 'discord-markdown appkit-markup-compose-active-codec))
+      (let* ((capture (appkit-markup-compose-capture))
+             (output
+              (appkit-markup-compose-output capture 'discord-markdown)))
+        (should (equal "||server||"
+                       (appkit-markup-compose-output-source output))))
+      (should (disco-room--composer-edit-clear t))
+      (should (eq 'org appkit-markup-compose-active-codec))
+      (should (appkit-chatbuf-string-has-objects-p
+               (disco-room--current-draft))))))
+
 ;;; disco-room-compose-test.el ends here

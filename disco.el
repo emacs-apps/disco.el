@@ -7,7 +7,7 @@
 ;; Keywords: comm
 ;; URL: https://github.com/0WD0/disco.el
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (plz "0.8") (websocket "1.16") (transient "0.5.0") (appkit "0.2.19"))
+;; Package-Requires: ((emacs "31.1") (plz "0.8") (websocket "1.16") (transient "0.5.0") (appkit "0.3.0"))
 
 ;;; Commentary:
 
@@ -71,8 +71,7 @@
   (or disco-notifications--history-owner-p
       disco-root--debug-log-owner-p
       disco-api--rate-limit-buffer-owner-p
-      disco-room--preview-buffer-owner-p
-      disco-markdown--fontification-buffer-owner-p))
+      disco-room--preview-buffer-owner-p))
 
 (defun disco--collect-client-buffers ()
   "Return live buffers owned by the current Disco client session.
@@ -361,7 +360,6 @@ nonlocal transfer, the remaining privacy cleanup still runs while unwinding."
   (disco-avatar--clear-session-memory)
   (disco-room--clear-session-cache-memory)
   (disco-root--clear-session-cache-memory)
-  (disco-markdown-reset-session-state)
   (disco-preview--clear-session-data)
   (disco-directory-reset)
   (disco-state-clear-session-data)
@@ -425,7 +423,6 @@ cannot leave another old-account projection visible."
         #'disco-avatar-reset-session-state
         #'disco-room-reset-session-cache-state
         #'disco-root-reset-session-cache-state
-        #'disco-markdown-reset-session-state
         #'disco-preview-reset
         #'disco-directory-reset
         #'disco-state-reset

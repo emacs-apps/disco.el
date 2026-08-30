@@ -3,10 +3,10 @@
 
 * Dependencies
 
-- Emacs 29.1
+- Emacs 31.1
 - ~plz~ for HTTP
 - ~websocket~ for Gateway
-- Appkit 0.2.15 for views, chat, presentation, and media
+- Appkit 0.3.0 for views, semantic markup, source-backed composition, and media
 
 * File layout
 
@@ -14,6 +14,7 @@
 |------+------|
 | ~disco.el~ | package entry |
 | ~disco-customize.el~ | user options and token command |
+| ~disco-markdown.el~ | bounded Discord Markdown Adapter, provider objects, native rendering, and provider printer |
 | ~disco-ins.el~ | attachment and message insertion |
 | ~disco-media.el~ | attachment, spoiler, waveform, audio |
 | ~disco-sticker.el~ | Sticker catalogs, ranking, visual selection, and image projection |
@@ -55,11 +56,19 @@ hydrate through Gateway opcode 34 (~LAST_MESSAGES~).  Identify can
 include ~PASSIVE_GUILD_UPDATE_V2~ so activity can refresh from
 passive unread deltas.
 
-Shared presentation contracts are documented in Appkit's integrator
-guide, not duplicated here.
+Shared presentation contracts are documented in Appkit's integrator guide,
+not duplicated here.  Incoming Discord Markdown is protected for provider
+tokens and extensions, then adapted by Appkit's low-level dual-grammar
+Tree-sitter backend into an immutable Document.  Parsing never activates a
+major mode, Font Lock, language hooks, or grammar installation.
+
+Room composition defaults to the provider-aware ~discord-markdown~ source
+codec.  This converts Discord delimiters such as ~||spoiler||~ into semantic
+objects before the provider printer runs; using generic ~markdown~ here would
+turn those delimiters into literal text and escape them on output.
 
 * Next
 
-1. Mention and composer parity, including ~C-c C-e~ and ~C-c C-v~.
+1. Structured mention insertion in addition to exact textual Discord completion.
 2. Faster navigation (~M-g~ unread, mentions, reactions).
 3. Queue prioritization so user actions beat background work.

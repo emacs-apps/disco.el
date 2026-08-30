@@ -6,6 +6,16 @@
 The default token comes from ~DISCO_TOKEN~.  ~M-x disco-set-token~
 overrides it for the session.  ~M-x disco~ opens the root navigator.
 
+Disco requires Emacs 31.1, Appkit 0.3.0, and both pinned native Markdown
+Tree-sitter grammars.  Install the grammars explicitly once:
+
+#+begin_src emacs-lisp
+(appkit-markup-markdown-ts-install-grammars)
+#+end_src
+
+Startup and message parsing never install grammars or activate
+~markdown-ts-mode~.
+
 Enable optional presentation modes:
 
 #+begin_src emacs-lisp
@@ -164,13 +174,13 @@ editable.
 
 | Key | Action |
 |-----+--------|
-| ~RET~ | send in the composer; return to it from the timeline |
-| ~C-c RET~ | send the current draft explicitly |
+| ~RET~ | send with the persistent source format; return to the composer from the timeline |
+| ~C-c RET~ | send explicitly; ~C-u~ selects Org and ~C-u C-u~ selects plain for this send |
 | ~C-c C-c~ | cancel an active message filter |
 | ~C-c C-k~ / ~ESC ESC~ / ~C-M-c~ | cancel reply or edit context |
 | ~C-c '~ | edit the draft in another buffer |
 | ~M-p~ / ~M-n~ / ~M-r~ | draft history |
-| ~M-RET~ | parsed preview |
+| ~M-RET~ | semantic preview; universal prefixes select the same per-command source formats |
 | ~M-g s~ / ~M-g n~ / ~M-g p~ | keyboard search |
 | ~C-c C-o~ | room input options |
 | ~C-c M-v~ | clear avatar cache and refetch |
@@ -188,8 +198,32 @@ closes if its channel or guild is deleted.
 ~@everyone~ / ~@here~, channels, Unicode emoji, and guild custom
 emoji.  Inserted text uses native Discord mention and emoji syntax.
 
+The persistent source format defaults to Discord Markdown, including provider
+extensions such as ~||spoiler||~ and ~__underline__~.  Customize
+~disco-room-compose-codecs~ or use ~C-c f f~ to change it.  One universal
+prefix selects the second configured codec for one preview/send; two select
+the third.  The default order is Discord Markdown, Org, plain.
+
+~C-c f~ is the semantic formatting prefix:
+
+| Key | Source edit |
+|-----+-------------|
+| ~b~ / ~i~ / ~u~ / ~s~ | bold, italic, underline, strike |
+| ~c~ / ~p~ | inline code, preformatted block |
+| ~l~ | described link |
+| ~q~ / ~h~ | quote, heading |
+| ~-~ / ~1~ | unordered, ordered list |
+| ~f~ | set persistent source format |
+
+Region edits preserve the selected source codec.  Attachments remain atomic
+composer objects and are captured as side channels; they are never encoded as
+Markdown.  Reply/edit state remains separate from source syntax.  Entering a
+server edit temporarily selects the provider-aware Discord Markdown codec, then
+cancel or success restores the previous rich draft and source format.
+
 | Variable | Meaning |
 |----------+---------|
+| ~disco-room-compose-codecs~ | ordered source formats and prefix selection |
 | ~disco-room-enable-company-backend~ | optional company backend |
 | ~disco-company-show-user-avatars~ | avatars in completion rows |
 | ~disco-company-capf-avatar-size~ | stable completion row height |
@@ -199,9 +233,6 @@ emoji.  Inserted text uses native Discord mention and emoji syntax.
 Reply and edit cards use the same one-line media projection as root rows.
 The image is cache-backed and optional; the author and message text remain
 visible when images are unavailable.
-
-~C-c C-e~ formatting and ~C-c C-v~ clipboard attach are reserved
-until fuller parity lands.
 
 ** Attachments
 

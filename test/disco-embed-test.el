@@ -16,7 +16,7 @@
     (should (equal "link\nquote" plain))
     (should (equal "https://example.com"
                    (get-text-property link-pos 'disco-markdown-url rendered)))
-    (should (equal "| "
+    (should (equal "│ "
                    (substring-no-properties
                     (get-text-property quote-pos 'line-prefix rendered))))))
 
