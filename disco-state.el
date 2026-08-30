@@ -1088,15 +1088,52 @@ the canonical channel cache."
                   (disco-state--normalize-id message-id)))
          (disco-state-messages channel-id)))))
 
+(defun disco-state--pending-message-by-nonce (channel-id nonce)
+  "Return CHANNEL-ID's optimistic message identified by NONCE."
+  (let ((nonce (disco-state--normalize-id nonce)))
+    (and nonce
+         (seq-find
+          (lambda (message)
+            (and (alist-get 'pending message)
+                 (equal nonce
+                        (disco-state--normalize-id
+                         (alist-get 'nonce message)))))
+          (disco-state-messages channel-id)))))
+
+(defun disco-state--reconcile-pending-create-response
+    (message pending request-nonce)
+  "Return server MESSAGE reconciled with its optimistic PENDING occurrence."
+  (let ((accepted (copy-tree message)))
+    (setf (alist-get 'nonce accepted)
+          (format "%s" request-nonce))
+    (when pending
+      (dolist (field '(author timestamp message_reference))
+        (unless (assq field accepted)
+          (when-let* ((entry (assq field pending)))
+            (push (copy-tree entry) accepted))))
+      ;; The capture remains exact only when Discord retained the printed wire
+      ;; content.  A server-normalized response must be parsed afresh.
+      (when (and (not (assq 'appkit_document accepted))
+                 (equal (alist-get 'content accepted)
+                        (alist-get 'content pending)))
+        (when-let* ((entry (assq 'appkit_document pending)))
+          (push (cons 'appkit_document (cdr entry)) accepted))))
+    accepted))
+
 (defun disco-state-merge-message-response
     (channel-id message request-revision &optional request-nonce)
   "Merge one REST mutation MESSAGE unless newer authority already won.
 
 REQUEST-REVISION is captured before dispatch.  Gateway/local updates and
 deletions after it retain authority.  REQUEST-NONCE, when non-nil, correlates a
-create response with its optimistic row.  Return non-nil only when MESSAGE was
-accepted."
-  (let ((message-id (and (listp message) (alist-get 'id message))))
+create response with its optimistic row.  Missing presentation metadata is
+retained from that exact optimistic occurrence.  Return non-nil only when
+MESSAGE was accepted."
+  (let ((message-id (and (listp message) (alist-get 'id message)))
+        (pending
+         (and request-nonce
+              (disco-state--pending-message-by-nonce
+               channel-id request-nonce))))
     (unless message-id
       (error "disco: message mutation response has no message id"))
     (unless (integerp request-revision)
@@ -1108,12 +1145,13 @@ accepted."
           (when request-nonce
             (disco-state-remove-pending-message channel-id request-nonce))
           nil)
-      (let ((accepted-message (copy-tree message)))
-        (when request-nonce
-          (setf (alist-get 'nonce accepted-message)
-                (format "%s" request-nonce)))
-        (disco-state-upsert-message channel-id accepted-message)
-        t))))
+      (disco-state-upsert-message
+       channel-id
+       (if request-nonce
+           (disco-state--reconcile-pending-create-response
+            message pending request-nonce)
+         (copy-tree message)))
+      t)))
 
 (defun disco-state-merge-message-page (channel-id messages request-revision)
   "Merge REST page MESSAGES into CHANNEL-ID at REQUEST-REVISION.
