@@ -1197,7 +1197,7 @@
   (unwind-protect
       (let ((request-revision (disco-state-message-revision "chan")))
         (disco-state-insert-pending-message
-         "chan" "local-nonce" "pending" "self")
+         "chan" "local-nonce" "pending" "self" nil 'stale-document)
         (should
          (disco-state-merge-message-response
           "chan" '((id . "20") (content . "REST"))
@@ -1205,9 +1205,34 @@
         (should (equal '("20")
                        (mapcar (lambda (message) (alist-get 'id message))
                                (disco-state-messages "chan"))))
-        (should (equal "local-nonce"
-                       (alist-get 'nonce
-                                  (car (disco-state-messages "chan"))))))
+        (should
+         (equal "local-nonce"
+                (alist-get 'nonce
+                           (car (disco-state-messages "chan")))))
+        (should-not
+         (alist-get 'appkit_document
+                    (car (disco-state-messages "chan")))))
+    (disco-state-reset)))
+
+(ert-deftest disco-state-message-response-preserves-exact-optimistic-occurrence ()
+  (disco-state-reset)
+  (unwind-protect
+      (let ((request-revision (disco-state-message-revision "chan")))
+        (disco-state-insert-pending-message
+         "chan" "local-nonce" "wire body" "self" nil 'semantic-document)
+        (should
+         (disco-state-merge-message-response
+          "chan"
+          '((id . "20") (channel_id . "chan") (content . "wire body"))
+          request-revision "local-nonce"))
+        (let ((message (car (disco-state-messages "chan"))))
+          (should-not (alist-get 'pending message))
+          (should (equal "local-nonce" (alist-get 'nonce message)))
+          (should (equal "self"
+                         (alist-get 'id (alist-get 'author message))))
+          (should (stringp (alist-get 'timestamp message)))
+          (should (eq 'semantic-document
+                      (alist-get 'appkit_document message)))))
     (disco-state-reset)))
 
 (ert-deftest disco-state-deletion-tombstone-covers-uncached-message ()

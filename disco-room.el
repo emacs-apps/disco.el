@@ -1216,6 +1216,24 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
     (error "disco: room buffer has no channel id"))
   (list 'room disco-room--channel-id))
 
+(defun disco-room--enqueue-local-create-response (view channel-id message)
+  "Queue canonical create MESSAGE for VIEW's keyed room projection.
+
+The REST create response is authoritative state, but presentation still uses
+the same message-create lifecycle as Gateway delivery.  This preserves the
+optimistic row node while its nonce key becomes the server message id."
+  (when (and (appkit-view-live-p view)
+             (listp message)
+             (alist-get 'id message))
+    (appkit-view-enqueue-event
+     view
+     (list :type 'message-create
+           :channel-id (disco-msg-normalize-id channel-id)
+           :message (copy-tree message)
+           :self-p t))
+    (appkit-request-sync view :part 'timeline)
+    t))
+
 (defun disco-room--request-render (view)
   "Request one coalesced full room projection for live VIEW.
 

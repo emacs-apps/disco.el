@@ -2058,17 +2058,36 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
                                             "Discord create-message returned no message"))
                                         (unless leg-settled-p
                                           (setq leg-settled-p t)
-                                          (disco-state-merge-message-response
-                                           channel-id response request-revision
-                                           nonce)
-                                          (when (room-active-p)
-                                            (with-current-buffer room-buffer
-                                              (when (disco-room--channel-message-by-id
-                                                     channel-id
-                                                     (alist-get 'id response))
-                                                (disco-room--observe-live-create
-                                                 (alist-get 'id response)))))
-                                          (funcall on-success response)))))
+                                          (let ((accepted-response
+                                                 (copy-tree response)))
+                                            ;; Discord normally returns the
+                                            ;; complete Message object.  Keep
+                                            ;; the exact sent wire content if
+                                            ;; a transport omits it.
+                                            (unless
+                                                (stringp
+                                                 (alist-get
+                                                  'content accepted-response))
+                                              (setf
+                                               (alist-get
+                                                'content accepted-response)
+                                               (or text "")))
+                                            (disco-state-merge-message-response
+                                             channel-id accepted-response
+                                             request-revision nonce)
+                                            (when (room-active-p)
+                                              (with-current-buffer room-buffer
+                                                (when-let* ((message
+                                                            (disco-room--channel-message-by-id
+                                                             channel-id
+                                                             (alist-get
+                                                              'id
+                                                              accepted-response))))
+                                                  (disco-room--enqueue-local-create-response
+                                                   view channel-id message))))
+                                            (funcall
+                                             on-success
+                                             accepted-response))))))
                                  (condition-case dispatch-error
                                      (if attachments-list
                                          (disco-api-send-message-with-attachments-async

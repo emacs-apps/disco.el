@@ -1378,6 +1378,60 @@
                      (appkit-markup-plain-text pending-document)))
       (should (eq 'org appkit-markup-compose-active-codec)))))
 
+(ert-deftest disco-room-send-success-rekeys-optimistic-row-in-place ()
+  (let ((disco-runtime--app nil)
+        callback
+        nonce)
+    (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
+      (unwind-protect
+          (with-temp-buffer
+            (disco-room-mode)
+            (disco-room-test-setup-channel "chat")
+            (disco-state-put-messages
+             "chat"
+             '(((id . "100")
+                (channel_id . "chat")
+                (content . "before")
+                (timestamp . "2026-08-30T00:00:00+0000")
+                (author . ((id . "other") (username . "Other"))))))
+            (disco-room-test-establish-latest-window "chat")
+            (disco-room-render)
+            (disco-room--set-draft "local echo")
+            (let ((view (disco-room--ensure-view)))
+              (cl-letf
+                  (((symbol-function 'disco-api-send-message-async)
+                    (lambda (_channel-id _content &rest args)
+                      (setq callback (plist-get args :on-success)
+                            nonce (plist-get args :nonce))))
+                   ((symbol-function 'disco-gateway-current-user-id)
+                    (lambda () "self"))
+                   ((symbol-function 'message) #'ignore))
+                (disco-room-send-message)
+                (appkit-sync-invalidations view)
+                (let ((pending-node
+                       (appkit-chat-timeline-node nonce)))
+                  (should pending-node)
+                  ;; Some transports expose only the created identity here;
+                  ;; the exact optimistic occurrence remains renderable.
+                  (funcall callback
+                           '((id . "200") (channel_id . "chat")))
+                  (appkit-sync-invalidations view)
+                  (should
+                   (eq pending-node
+                       (appkit-chat-timeline-node "200")))
+                  (should-not (appkit-chat-timeline-node nonce))
+                  (let ((message
+                         (disco-room--channel-message-by-id "chat" "200")))
+                    (should (equal "local echo"
+                                   (alist-get 'content message)))
+                    (should
+                     (appkit-markup-document-p
+                      (alist-get 'appkit_document message))))
+                  (should
+                   (string-match-p
+                    "local echo" (substring-no-properties (buffer-string))))))))
+        (disco-runtime-stop)))))
+
 (ert-deftest disco-room-send-preserves-discord-spoiler-syntax ()
   (with-temp-buffer
     (disco-room-mode)
