@@ -142,86 +142,6 @@
   (raw nil :read-only t)
   (fallback nil :read-only t))
 
-(cl-defstruct (disco-markdown--mapped-source
-               (:constructor disco-markdown--mapped-source-create)
-               (:copier nil))
-  (text nil :read-only t)
-  (mapping nil :read-only t))
-
-(defun disco-markdown--mapped-source-initial (source)
-  "Return SOURCE with an identity transformed-to-original boundary map."
-  (let* ((source-length (length source))
-         (mapping (make-vector (1+ source-length) 0)))
-    (dotimes (index (1+ source-length))
-      (aset mapping index index))
-    (disco-markdown--mapped-source-create
-     :text source :mapping mapping)))
-
-(defun disco-markdown--mapped-source-replace (source replacements)
-  "Apply non-overlapping REPLACEMENTS to mapped SOURCE.
-
-Each replacement is (START END TEXT) in current transformed coordinates.
-Replacement boundaries map monotonically across the replaced original span."
-  (let* ((text (disco-markdown--mapped-source-text source))
-         (mapping (disco-markdown--mapped-source-mapping source))
-         (source-length (length text))
-         (ordered
-          (sort (copy-sequence replacements)
-                (lambda (left right) (< (car left) (car right)))))
-         (cursor 0)
-         (boundaries (list (aref mapping 0)))
-         pieces)
-    (cl-labels
-        ((emit-source
-          (start end)
-          (when (< start end)
-            (push (substring text start end) pieces)
-            (cl-loop for boundary from (1+ start) to end
-                     do (push (aref mapping boundary) boundaries))))
-         (emit-replacement
-          (start end replacement)
-          (let ((output-width (length replacement))
-                (source-width (- end start)))
-            (unless (zerop output-width)
-              (push replacement pieces)
-              (dotimes (offset output-width)
-                (let ((source-offset
-                       (if (zerop source-width)
-                           0
-                         (ceiling (* (1+ offset) source-width)
-                                  output-width))))
-                  (push (aref mapping (+ start source-offset))
-                        boundaries)))))))
-      (dolist (replacement ordered)
-        (pcase-let ((`(,start ,end ,text) replacement))
-          (unless (and (integerp start) (integerp end) (stringp text)
-                       (<= 0 cursor start end source-length))
-            (signal 'appkit-markup-codec-error
-                    '(discord-invalid-source-replacement)))
-          (emit-source cursor start)
-          (emit-replacement start end text)
-          (setq cursor end)))
-      (emit-source cursor source-length))
-    (let ((result (apply #'concat (nreverse pieces)))
-          (result-mapping (vconcat (nreverse boundaries))))
-      (unless (= (length result-mapping) (1+ (length result)))
-        (signal 'appkit-markup-codec-error
-                '(discord-invalid-source-mapping)))
-      (disco-markdown--mapped-source-create
-       :text result :mapping result-mapping))))
-
-(defun disco-markdown--map-diagnostic (diagnostic mapping)
-  "Map DIAGNOSTIC to original source coordinates through MAPPING."
-  (cl-labels
-      ((position
-        (value)
-        (aref mapping (min (max 0 value) (1- (length mapping))))))
-    (appkit-markup-diagnostic
-     (appkit-markup-diagnostic-kind diagnostic)
-     (appkit-markup-diagnostic-severity diagnostic)
-     (position (appkit-markup-diagnostic-start diagnostic))
-     (position (appkit-markup-diagnostic-end diagnostic)))))
-
 (defvar disco-markdown--sentinels nil)
 (defvar disco-markdown--user-map nil)
 (defvar disco-markdown--channel-map nil)
@@ -501,48 +421,52 @@ backtick syntax documented by Discord; it does not parse Markdown structure."
       (nreverse zones))))
 
 (defun disco-markdown--protect-code-zones (source sentinels)
-  "Hide provider-significant characters in mapped SOURCE code zones."
-  (let* ((text (disco-markdown--mapped-source-text source))
-         (zones (disco-markdown--code-zones text))
-         (table (plist-get sentinels :code-table))
-         (reverse (plist-get sentinels :code-reverse))
-         (characters '(?< ?> ?@ ?| ?_ ?- ?# ?~ ?+))
-         replacements)
-    (dolist (zone zones)
-      (cl-loop
-       for position from (car zone) below (cdr zone)
-       for character = (aref text position)
-       when (memq character characters)
-       do
-       (let ((sentinel
-              (or (gethash character reverse)
-                  (let* ((fresh
-                          (disco-markdown--provider-sentinel text sentinels))
-                         (code (aref fresh 0)))
-                    (puthash code character table)
-                    (puthash character code reverse)
-                    code))))
-         (push (list position (1+ position) (string sentinel))
-               replacements))))
-    (disco-markdown--mapped-source-replace source replacements)))
+  "Hide provider-significant characters in SOURCE code zones."
+  (let ((zones (disco-markdown--code-zones source)))
+    (if (null zones)
+        (copy-sequence source)
+      (let ((result (vconcat source))
+            (table (plist-get sentinels :code-table))
+            (reverse (plist-get sentinels :code-reverse))
+            (characters '(?< ?> ?@ ?| ?_ ?- ?# ?~ ?+)))
+        (dolist (zone zones)
+          (cl-loop
+           for position from (car zone) below (cdr zone)
+           for character = (aref result position)
+           when (memq character characters)
+           do
+           (let ((sentinel
+                  (or (gethash character reverse)
+                      (let* ((fresh
+                              (disco-markdown--provider-sentinel
+                               source sentinels))
+                             (code (aref fresh 0)))
+                        (puthash code character table)
+                        (puthash character code reverse)
+                        code))))
+             (aset result position sentinel))))
+        (concat result)))))
 
 (defun disco-markdown--protect-escapes (source sentinels)
-  "Replace provider-significant escapes in mapped SOURCE using SENTINELS."
-  (let* ((text (disco-markdown--mapped-source-text source))
-         (mapping `((?< . ,(plist-get sentinels :escape-less))
-                    (?@ . ,(plist-get sentinels :escape-at))
-                    (?| . ,(plist-get sentinels :escape-pipe))
-                    (?_ . ,(plist-get sentinels :escape-underscore))
-                    (?- . ,(plist-get sentinels :escape-dash))
-                    (?# . ,(plist-get sentinels :escape-hash))))
-         replacements)
-    (cl-loop for position from 0 below (length text)
-             for character = (aref text position)
+  "Replace provider-significant escapes in SOURCE using SENTINELS."
+  (let ((result source)
+        (mapping `((?< . ,(plist-get sentinels :escape-less))
+                   (?@ . ,(plist-get sentinels :escape-at))
+                   (?| . ,(plist-get sentinels :escape-pipe))
+                   (?_ . ,(plist-get sentinels :escape-underscore))
+                   (?- . ,(plist-get sentinels :escape-dash))
+                   (?# . ,(plist-get sentinels :escape-hash))))
+        replacements)
+    (cl-loop for position from 0 below (length source)
+             for character = (aref source position)
              for sentinel = (cdr (assq character mapping))
-             when (and sentinel (disco-markdown--escaped-p text position))
-             do (push (list (1- position) (1+ position) sentinel)
-                      replacements))
-    (disco-markdown--mapped-source-replace source replacements)))
+             when (and sentinel (disco-markdown--escaped-p source position))
+             do (push (list (1- position) (1+ position) sentinel) replacements))
+    (dolist (replacement replacements result)
+      (setq result
+            (concat (substring result 0 (nth 0 replacement))
+                    (nth 2 replacement)
+                    (substring result (nth 1 replacement)))))))
 
 (defun disco-markdown--word-character-p (character)
   "Return non-nil when CHARACTER is a word constituent."
@@ -550,53 +474,44 @@ backtick syntax documented by Discord; it does not parse Markdown structure."
 
 (defun disco-markdown--replace-delimiter-pairs
     (source delimiter open-sentinel close-sentinel &optional underline-p)
-  "Replace paired DELIMITER in mapped SOURCE with private sentinels.
+  "Replace paired DELIMITER in SOURCE with OPEN-SENTINEL and CLOSE-SENTINEL.
 
 Pairs never cross a line.  UNDERLINE-P applies Discord's word-boundary and
 non-whitespace rules for `__underline__'."
-  (let* ((text (disco-markdown--mapped-source-text source))
-         (width (length delimiter))
-         (position 0)
-         replacements)
-    (while (string-match (regexp-quote delimiter) text position)
-      (let* ((open-start (match-beginning 0))
-             (open-end (match-end 0))
-             (line-end (or (cl-position ?\n text :start open-end)
-                           (length text)))
-             (search open-end)
-             close-start
-             close-end)
-        (while (and (not close-start)
-                    (string-match (regexp-quote delimiter) text search)
-                    (< (match-beginning 0) line-end))
-          (let* ((candidate-start (match-beginning 0))
-                 (candidate-end (match-end 0))
-                 (first (and (< open-end (length text))
-                             (aref text open-end)))
-                 (last (and (> candidate-start 0)
-                            (aref text (1- candidate-start))))
-                 (outside-left (and (> open-start 0)
-                                    (aref text (1- open-start))))
-                 (outside-right (and (< candidate-end (length text))
-                                     (aref text candidate-end))))
-            (if (and (< open-end candidate-start)
-                     (or (not underline-p)
-                         (and (not (memq first '(?\s ?\t ?\n)))
-                              (not (memq last '(?\s ?\t ?\n)))
-                              (not (disco-markdown--word-character-p
-                                    outside-left))
-                              (not (disco-markdown--word-character-p
-                                    outside-right)))))
-                (setq close-start candidate-start
-                      close-end candidate-end)
-              (setq search candidate-end))))
-        (if close-start
-            (progn
-              (push (list open-start open-end open-sentinel) replacements)
-              (push (list close-start close-end close-sentinel) replacements)
-              (setq position close-end))
-          (setq position open-end))))
-    (disco-markdown--mapped-source-replace source replacements)))
+  (with-temp-buffer
+    (insert source)
+    (goto-char (point-min))
+    (let ((width (length delimiter)))
+      (while (search-forward delimiter nil t)
+        (let* ((open-start (- (point) width))
+               (open-end (point))
+               (limit (line-end-position))
+               close-start)
+          (save-excursion
+            (while (and (not close-start) (search-forward delimiter limit t))
+              (let* ((candidate-start (- (point) width))
+                     (first (char-after open-end))
+                     (last (char-before candidate-start))
+                     (outside-left (char-before open-start))
+                     (outside-right (char-after (point))))
+                (when (and (< open-end candidate-start)
+                           (or (not underline-p)
+                               (and (not (memq first '(?\s ?\t ?\n)))
+                                    (not (memq last '(?\s ?\t ?\n)))
+                                    (not (disco-markdown--word-character-p
+                                          outside-left))
+                                    (not (disco-markdown--word-character-p
+                                          outside-right)))))
+                  (setq close-start candidate-start)))))
+          (if (not close-start)
+              (goto-char open-end)
+            (goto-char close-start)
+            (delete-region close-start (+ close-start width))
+            (insert close-sentinel)
+            (delete-region open-start open-end)
+            (goto-char open-start)
+            (insert open-sentinel)))))
+    (buffer-string)))
 
 (defun disco-markdown--provider-sentinel (source sentinels)
   "Return one unused provider sentinel character for SOURCE and SENTINELS."
@@ -632,118 +547,119 @@ non-whitespace rules for `__underline__'."
            (not (disco-markdown--word-character-p
                  (and (< end (length source)) (aref source end)))))))
 (defun disco-markdown--protect-escaped-provider-tokens (source sentinels)
-  "Protect escaped provider tokens in mapped SOURCE as literal wire forms."
-  (let ((text (disco-markdown--mapped-source-text source))
-        (position 0)
-        replacements)
+  "Protect escaped provider tokens in SOURCE with their literal wire form."
+  (let ((position 0) replacements)
     (while (string-match
             (concat "\\\\" disco-markdown--regexp-provider-token)
-            text position)
+            source position)
       (let* ((begin (match-beginning 0))
              (end (match-end 0))
              (token-begin (1+ begin))
-             (raw (substring text token-begin end)))
+             (raw (substring source token-begin end)))
         (if (not (disco-markdown--provider-token-boundary-p
-                  text token-begin end raw))
+                  source token-begin end raw))
             (setq position (1+ token-begin))
           (when (>= (hash-table-count
                      (plist-get sentinels :provider-table))
                     appkit-markup-codec-object-limit)
             (signal 'appkit-markup-codec-error '(too-many-objects)))
           (let ((sentinel
-                 (disco-markdown--provider-sentinel text sentinels)))
+                 (disco-markdown--provider-sentinel source sentinels)))
             (puthash
              (aref sentinel 0)
              (disco-markdown--protected-token-create
-              :raw (substring text begin end)
+              :raw (substring source begin end)
               :fallback raw)
              (plist-get sentinels :provider-table))
             (push (list begin end sentinel) replacements))
           (setq position end))))
-    (disco-markdown--mapped-source-replace source replacements)))
+    (dolist (replacement replacements source)
+      (setq source
+            (concat (substring source 0 (nth 0 replacement))
+                    (nth 2 replacement)
+                    (substring source (nth 1 replacement)))))))
 
 (defun disco-markdown--protect-provider-tokens (source sentinels)
-  "Protect complete provider tokens in mapped SOURCE as sentinels."
-  (let ((text (disco-markdown--mapped-source-text source))
-        (position 0)
-        replacements)
-    (while (string-match disco-markdown--regexp-provider-token text position)
+  "Protect complete provider tokens in SOURCE as occurrence sentinels."
+  (let ((position 0) replacements)
+    (while (string-match disco-markdown--regexp-provider-token source position)
       (let* ((begin (match-beginning 0))
              (end (match-end 0))
-             (raw (match-string-no-properties 0 text)))
+             (raw (match-string-no-properties 0 source)))
         (if (not (disco-markdown--provider-token-boundary-p
-                  text begin end raw))
+                  source begin end raw))
             (setq position (1+ begin))
           (when (>= (hash-table-count
                      (plist-get sentinels :provider-table))
                     appkit-markup-codec-object-limit)
             (signal 'appkit-markup-codec-error '(too-many-objects)))
           (let ((sentinel
-                 (disco-markdown--provider-sentinel text sentinels)))
+                 (disco-markdown--provider-sentinel source sentinels)))
             (puthash (aref sentinel 0) raw
                      (plist-get sentinels :provider-table))
             (push (list begin end sentinel) replacements))
           (setq position end))))
-    (disco-markdown--mapped-source-replace source replacements)))
+    (dolist (replacement replacements source)
+      (setq source
+            (concat (substring source 0 (nth 0 replacement))
+                    (nth 2 replacement)
+                    (substring source (nth 1 replacement)))))))
 
+(defun disco-markdown--replace-character (position replacement)
+  "Replace the character at buffer POSITION with REPLACEMENT."
+  (goto-char position)
+  (delete-char 1)
+  (insert replacement))
 
 (defun disco-markdown--protect-commonmark-only-blocks (source sentinels)
-  "Shield undocumented CommonMark block forms in mapped SOURCE."
-  (let ((text (disco-markdown--mapped-source-text source))
-        replacements)
-    (with-temp-buffer
-      (insert text)
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let ((line-end (line-end-position)))
-          (cond
-           ((looking-at "####+[ \t]+")
-            (push (list (1- (point)) (point)
-                        (plist-get sentinels :escape-hash))
-                  replacements))
-           ((looking-at "[ \t]*\\([+]\\)[ \t]+")
-            (push (list (1- (match-beginning 1)) (1- (match-end 1))
-                        (plist-get sentinels :escape-plus))
-                  replacements))
-           ((looking-at "[ \t]*[0-9]+\\([)]\\)[ \t]+")
-            (push (list (1- (match-beginning 1)) (1- (match-end 1))
-                        (plist-get sentinels :escape-paren))
-                  replacements))
-           ((looking-at "[ \t]*\\(~\\{3,\\}\\)")
-            (let ((start (1- (match-beginning 1)))
-                  (end (1- (match-end 1)))
-                  (sentinel (plist-get sentinels :escape-tilde)))
-              (push (list start end
-                          (make-string (- end start) (aref sentinel 0)))
-                    replacements)))
-           ((looking-at "\\(    \\)\\S-")
-            (push (list (1- (match-beginning 1)) (match-beginning 1)
-                        (plist-get sentinels :escape-space))
-                  replacements))
-           ((looking-at "\\(>\\)\\(?:[^ \t]\\|$\\)")
-            (push (list (1- (match-beginning 1)) (1- (match-end 1))
-                        (plist-get sentinels :escape-greater))
-                  replacements)))
-          (goto-char line-end)
-          (forward-line 1))))
-    (disco-markdown--mapped-source-replace source replacements)))
+  "Shield CommonMark block forms that Discord does not document."
+  (with-temp-buffer
+    (insert source)
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let ((line-end (line-end-position)))
+        (cond
+         ((looking-at "####+[ \t]+")
+          (disco-markdown--replace-character
+           (point) (plist-get sentinels :escape-hash)))
+         ((looking-at "[ \t]*\\([+]\\)[ \t]+")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-plus)))
+         ((looking-at "[ \t]*[0-9]+\\([)]\\)[ \t]+")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-paren)))
+         ((looking-at "[ \t]*\\(~\\{3,\\}\\)")
+          (let ((start (match-beginning 1))
+                (end (match-end 1))
+                (sentinel (plist-get sentinels :escape-tilde)))
+            (goto-char start)
+            (delete-region start end)
+            (insert (make-string (- end start) (aref sentinel 0)))))
+         ((looking-at "\\(    \\)\\S-")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-space)))
+         ((looking-at "\\(>\\)\\(?:[^ \t]\\|$\\)")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-greater))))
+        (goto-char line-end)
+        (forward-line 1)))
+    (buffer-string)))
 
 (defun disco-markdown--adapt-multiline-quote-source (source)
-  "Convert Discord `>>> ' in mapped SOURCE into a generic quote."
-  (let* ((text (disco-markdown--mapped-source-text source))
-         replacements)
-    (when (string-match "^>>>[ \t]+" text)
-      (push (list (match-beginning 0) (match-end 0) "> ") replacements)
-      (let ((position (match-end 0)))
-        (while (string-match "\n" text position)
-          (let ((line-start (match-end 0)))
-            (when (< line-start (length text))
-              (push (list line-start line-start "> ") replacements))
-            (setq position line-start)))))
-    (disco-markdown--mapped-source-replace source replacements)))
+  "Convert Discord `>>> ' source into one generic quote through message end."
+  (with-temp-buffer
+    (insert source)
+    (goto-char (point-min))
+    (when (re-search-forward "^>>>[ \t]+" nil t)
+      (replace-match "> " t t)
+      (forward-line 1)
+      (while (< (point) (point-max))
+        (insert "> ")
+        (forward-line 1)))
+    (buffer-string)))
 
 (defun disco-markdown--protect-extensions (source sentinels)
-  "Protect Discord extensions in mapped SOURCE using SENTINELS."
+  "Protect Discord extension delimiters in SOURCE using SENTINELS."
   (let* ((protected
           (disco-markdown--protect-code-zones source sentinels))
          (protected
@@ -765,17 +681,13 @@ non-whitespace rules for `__underline__'."
              protected "||"
              (plist-get sentinels :spoiler-open)
              (plist-get sentinels :spoiler-close))))
-    (let ((text (disco-markdown--mapped-source-text protected))
-          (position 0)
-          replacements)
-      (while (string-match "^-#\\(?:[ \t]+\\|$\\)" text position)
-        (push (list (match-beginning 0) (match-end 0)
-                    (plist-get sentinels :subtitle))
-              replacements)
-        (setq position (match-end 0)))
+    (with-temp-buffer
+      (insert protected)
+      (goto-char (point-min))
+      (while (re-search-forward "^-#\\(?:[ \t]+\\|$\\)" nil t)
+        (replace-match (plist-get sentinels :subtitle) t t))
       (disco-markdown--protect-provider-tokens
-       (disco-markdown--mapped-source-replace protected replacements)
-       sentinels))))
+       (buffer-string) sentinels))))
 
 (defun disco-markdown--sentinel-kind (character)
   "Return delimiter marker kind for CHARACTER, or nil."
@@ -1157,7 +1069,10 @@ Return (NODES REST CLOSED-P)."
    (t block)))
 
 (cl-defun disco-markdown-parse (text &key context message spoiler-message-id)
-  "Adapt Discord Markdown TEXT into one immutable Appkit parse result."
+  "Adapt Discord Markdown TEXT into one immutable Appkit parse result.
+
+Diagnostics from the protected intermediate source are omitted because their
+coordinates do not address TEXT."
   (ignore context spoiler-message-id)
   (let* ((source
           (let ((source
@@ -1170,28 +1085,15 @@ Return (NODES REST CLOSED-P)."
          (disco-markdown--channel-map
           (disco-markdown--build-channel-name-map message))
          (disco-markdown--role-map (disco-markdown--build-role-name-map message))
-         (protected
-          (disco-markdown--protect-extensions
-           (disco-markdown--mapped-source-initial source)
-           disco-markdown--sentinels))
-         (mapping (disco-markdown--mapped-source-mapping protected))
-         (result
-          (appkit-markup-parse
-           'markdown (disco-markdown--mapped-source-text protected)))
+         (protected (disco-markdown--protect-extensions
+                     source disco-markdown--sentinels))
+         (result (appkit-markup-parse 'markdown protected))
          (document
           (appkit-markup-document
            (mapcar #'disco-markdown--adapt-block
                    (appkit-markup-document-blocks
                     (appkit-markup-parse-result-document result))))))
-    (appkit-markup-parse-result
-     document
-     :diagnostics
-     (mapcar
-      (lambda (diagnostic)
-        (disco-markdown--map-diagnostic diagnostic mapping))
-      (appkit-markup-parse-result-diagnostics result))
-     :side-channels
-     (appkit-markup-parse-result-side-channels result))))
+    (appkit-markup-parse-result document)))
 
 (cl-defun disco-markdown-document (text &key context message spoiler-message-id)
   "Return the semantic Appkit Document adapted from Discord Markdown TEXT."
@@ -1879,9 +1781,7 @@ echo.  Atomic objects and structural blocks are never cut."
  'discord-markdown
  :label "Discord Markdown"
  :parse #'disco-markdown--codec-parse
- :print #'disco-markdown--codec-print
- :capabilities
- '(heading bold italic underline strike code link quote list preformatted))
+ :print #'disco-markdown--codec-print)
 
 (provide 'disco-markdown)
 

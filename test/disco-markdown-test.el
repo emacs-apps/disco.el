@@ -158,6 +158,11 @@ Return a plist carrying :document, :objects, :printed, and :wire."
     (should-not (appkit-markup-parse-result-diagnostics result))
     (should (appkit-markup-validate document))))
 
+(ert-deftest disco-markdown-drops-transformed-source-diagnostics ()
+  (let ((result
+         (disco-markdown-parse "<@123456789>\n- [x] task")))
+    (should-not (appkit-markup-parse-result-diagnostics result))))
+
 (ert-deftest disco-markdown-adapts-underline-and-nested-spoiler-semantics ()
   (let* ((message '((mentions . (((id . "1") (username . "Ada"))))))
          (document
@@ -407,20 +412,6 @@ Return a plist carrying :document, :objects, :printed, and :wire."
         (should (= 1 (length blocks)))
         (should (appkit-markup-paragraph-p (car blocks)))
         (should (equal source (appkit-markup-plain-text document)))))))
-
-(ert-deftest disco-markdown-diagnostics-use-original-source-coordinates ()
-  (let* ((source "<@123456789>\n- [x] task")
-         (result (disco-markdown-parse source))
-         (diagnostic
-          (seq-find
-           (lambda (item)
-             (eq (appkit-markup-diagnostic-kind item)
-                 'unsupported-markdown-block))
-           (appkit-markup-parse-result-diagnostics result))))
-    (should diagnostic)
-    (should (= 13 (appkit-markup-diagnostic-start diagnostic)))
-    (should (= (length source)
-               (appkit-markup-diagnostic-end diagnostic)))))
 
 (ert-deftest disco-markdown-native-provider-objects-expose-actions ()
   (let* ((message
