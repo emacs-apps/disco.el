@@ -217,6 +217,16 @@ Return a plist carrying :document, :objects, :printed, and :wire."
     (should (equal "<@1> ||secret|| __under__\n<@1> ||secret|| __under__"
                    (appkit-markup-plain-text document)))))
 
+(ert-deftest disco-markdown-restores-fenced-code-language-metadata ()
+  (dolist (language '("c++" "c#"))
+    (let* ((document
+            (disco-markdown-document
+             (format "```%s\ncode\n```" language)))
+           (block (car (appkit-markup-document-blocks document))))
+      (should (appkit-markup-preformatted-p block))
+      (should (equal language
+                     (appkit-markup-preformatted-language block))))))
+
 (ert-deftest disco-markdown-escaped-provider-delimiters-stay-literal ()
   (let* ((document
           (disco-markdown-document
@@ -324,6 +334,11 @@ Return a plist carrying :document, :objects, :printed, and :wire."
       "## Heading\n\n__under** bold**__  \n[link](https://example.com/a\\)b)\n\n```elisp\ncode\n```"
       (appkit-markup-print-result-source printed)))))
 
+(ert-deftest disco-markdown-provider-printer-preserves-object-styles ()
+  (disco-markdown-test--assert-lossless-round-trip
+   "**<@1>**"
+   :message '((mentions . (((id . "1") (username . "Ada")))))))
+
 (ert-deftest disco-markdown-codec-round-trips-spoilers-and-escaped-pipes ()
   (disco-markdown-test--assert-lossless-round-trip
    "before ||**secret**|| and \\|\\|literal\\|\\|"))
@@ -392,6 +407,20 @@ Return a plist carrying :document, :objects, :printed, and :wire."
         (should (= 1 (length blocks)))
         (should (appkit-markup-paragraph-p (car blocks)))
         (should (equal source (appkit-markup-plain-text document)))))))
+
+(ert-deftest disco-markdown-diagnostics-use-original-source-coordinates ()
+  (let* ((source "<@123456789>\n- [x] task")
+         (result (disco-markdown-parse source))
+         (diagnostic
+          (seq-find
+           (lambda (item)
+             (eq (appkit-markup-diagnostic-kind item)
+                 'unsupported-markdown-block))
+           (appkit-markup-parse-result-diagnostics result))))
+    (should diagnostic)
+    (should (= 13 (appkit-markup-diagnostic-start diagnostic)))
+    (should (= (length source)
+               (appkit-markup-diagnostic-end diagnostic)))))
 
 (ert-deftest disco-markdown-native-provider-objects-expose-actions ()
   (let* ((message

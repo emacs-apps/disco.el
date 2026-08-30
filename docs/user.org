@@ -200,24 +200,15 @@ emoji.  Inserted text uses native Discord mention and emoji syntax.
 
 The persistent source format defaults to Discord Markdown, including provider
 extensions such as ~||spoiler||~ and ~__underline__~.  Customize
-~disco-room-compose-codecs~ or use ~C-c f f~ to change it.  One universal
-prefix selects the second configured codec for one preview/send; two select
-the third.  The default order is Discord Markdown, Org, plain.
+~disco-room-compose-codecs~ or use ~C-c f~ to change it.  Users enter the
+selected source syntax directly; the composer does not rewrite point or region
+with preset formatting delimiters.
 
-~C-c f~ is the semantic formatting prefix:
-
-| Key | Source edit |
-|-----+-------------|
-| ~b~ / ~i~ / ~u~ / ~s~ | bold, italic, underline, strike |
-| ~c~ / ~p~ | inline code, preformatted block |
-| ~l~ | described link |
-| ~q~ / ~h~ | quote, heading |
-| ~-~ / ~1~ | unordered, ordered list |
-| ~f~ | set persistent source format |
-
-Region edits preserve the selected source codec.  Discord parsing keeps
-provider tokens and escapes literal inside code, preserves escaped mentions,
-supports ~>>>~ multiline quotes, and retains ~<https://…>~ embed suppression.
+One universal prefix selects the second configured codec for one preview/send;
+two select the third.  The default order is Discord Markdown, Org, plain.
+Discord parsing keeps provider tokens and escapes literal inside code,
+preserves escaped mentions, supports ~>>>~ multiline quotes, and retains
+~<https://…>~ embed suppression.
 Attachments remain atomic composer objects and are captured as side channels;
 they are never encoded as Markdown.  Reply/edit state remains separate from
 source syntax.  Entering a server edit temporarily selects the provider-aware
