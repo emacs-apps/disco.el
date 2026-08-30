@@ -424,6 +424,25 @@
           (kill-buffer preview-buf))
         (delete-file path)))))
 
+(ert-deftest disco-room-capture-preserves-attachment-spoiler-side-channel ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local disco-room--channel-id "chat"
+                disco-room--guild-id "guild")
+    (let* ((object
+            (disco-room--make-attachment-input-object
+             "/tmp/secret.png" :description "hidden" :spoiler t))
+           (draft (disco-room--attachment-input-object-string object)))
+      (disco-room--set-draft draft)
+      (let* ((capture (appkit-markup-compose-capture))
+             (attachments (disco-room--capture-attachments capture)))
+        (should (= 1 (length attachments)))
+        (should (eq t (plist-get (car attachments) :is-spoiler)))
+        (should
+         (string-match-p
+          "\\[spoiler\\]"
+          (disco-room--attachment-input-object-display-text object)))))))
+
 (ert-deftest disco-room-composer-visible-p-hides-read-only-guild-channel ()
   (with-temp-buffer
     (disco-room-mode)
@@ -1387,6 +1406,89 @@
            ((symbol-function 'message) #'ignore))
         (disco-room-send-message))
       (should (equal "before ||**secret**|| after" wire)))))
+
+(ert-deftest disco-room-split-send-keeps-semantic-delimiters-balanced ()
+  (let ((disco-api--message-content-limit 20)
+        (disco-room-long-message-action 'split))
+    (with-temp-buffer
+      (disco-room-mode)
+      (setq-local disco-room--channel-id "chat"
+                  disco-room--channel-name "chat"
+                  disco-room--guild-id "guild")
+      (disco-state-reset)
+      (disco-state-upsert-channel
+       '((id . "chat") (type . 0) (guild_id . "guild")
+         (permissions . "2048")))
+      (disco-room-render)
+      (disco-room--set-draft
+       (concat (make-string 18 ?x) "||secret||"))
+      (let (wires documents)
+        (cl-letf
+            (((symbol-function 'disco-api-send-message-async)
+              (lambda (channel-id content &rest args)
+                (push content wires)
+                (push
+                 (alist-get
+                  'appkit_document
+                  (car (disco-state-messages channel-id)))
+                 documents)
+                (funcall
+                 (plist-get args :on-success)
+                 `((id . ,(format "server-%d" (length wires)))
+                   (nonce . ,(plist-get args :nonce))
+                   (channel_id . ,channel-id)
+                   (content . ,content)))))
+             ((symbol-function 'disco-room--channel-buffer-p)
+              (lambda (&rest _arguments) t))
+             ((symbol-function 'message) #'ignore))
+          (disco-room-send-message))
+        (setq wires (nreverse wires)
+              documents (nreverse documents))
+        (should (equal (list (make-string 18 ?x) "||secret||") wires))
+        (should (= 2 (length documents)))
+        (should (cl-every #'appkit-markup-document-p documents))))))
+
+(ert-deftest disco-room-partial-split-failure-restores-balanced-provider-draft ()
+  (let ((disco-api--message-content-limit 20)
+        (disco-room-long-message-action 'split))
+    (with-temp-buffer
+      (disco-room-mode)
+      (setq-local disco-room--channel-id "chat"
+                  disco-room--channel-name "chat"
+                  disco-room--guild-id "guild")
+      (disco-state-reset)
+      (disco-state-upsert-channel
+       '((id . "chat") (type . 0) (guild_id . "guild")
+         (permissions . "2048")))
+      (disco-room-render)
+      (appkit-markup-compose-set-active-codec 'org)
+      (disco-room--set-draft
+       (concat (make-string 17 ?x) " *secret*"))
+      (let ((leg 0) wires)
+        (cl-letf
+            (((symbol-function 'disco-api-send-message-async)
+              (lambda (channel-id content &rest args)
+                (push content wires)
+                (setq leg (1+ leg))
+                (if (= leg 1)
+                    (funcall
+                     (plist-get args :on-success)
+                     `((id . "server-first")
+                       (nonce . ,(plist-get args :nonce))
+                       (channel_id . ,channel-id)
+                       (content . ,content)))
+                  (funcall
+                   (plist-get args :on-error)
+                   '(:message "second leg failed")))))
+             ((symbol-function 'disco-room--channel-buffer-p)
+              (lambda (&rest _arguments) t))
+             ((symbol-function 'message) #'ignore))
+          (disco-room-send-message))
+        (setq wires (nreverse wires))
+        (should (equal (cadr wires) (disco-room--current-draft)))
+        (should (eq 'discord-markdown
+                    appkit-markup-compose-active-codec))
+        (should-not disco-room--send-in-flight)))))
 
 (ert-deftest disco-room-edit-restores-source-codec-with-rich-draft ()
   (with-temp-buffer

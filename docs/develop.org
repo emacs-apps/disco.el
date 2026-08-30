@@ -57,15 +57,25 @@ include ~PASSIVE_GUILD_UPDATE_V2~ so activity can refresh from
 passive unread deltas.
 
 Shared presentation contracts are documented in Appkit's integrator guide,
-not duplicated here.  Incoming Discord Markdown is protected for provider
-tokens and extensions, then adapted by Appkit's low-level dual-grammar
-Tree-sitter backend into an immutable Document.  Parsing never activates a
-major mode, Font Lock, language hooks, or grammar installation.
+not duplicated here.  The ~discord-markdown~ codec is itself the provider
+extension boundary:
 
-Room composition defaults to the provider-aware ~discord-markdown~ source
-codec.  This converts Discord delimiters such as ~||spoiler||~ into semantic
-objects before the provider printer runs; using generic ~markdown~ here would
-turn those delimiters into literal text and escape them on output.
+1. A bounded lexical pass marks inline/fenced code zones.
+2. Discord escapes, provider tokens, spoilers, underline, subtitles, ~>>>~
+   quotes, suppressed links, and the documented block subset are shielded
+   outside those zones.
+3. Appkit's low-level dual-grammar Tree-sitter backend adapts the remaining
+   Markdown structure.
+4. Discord objects are restored as independent immutable occurrences.
+
+Parsing never activates a major mode, Font Lock, language hooks, or grammar
+installation.  Generic Appkit codec registration already permits this complete
+provider parser/printer pair; no provider hooks were added to Appkit.
+
+Room composition defaults to ~discord-markdown~.  The provider printer retains
+escaped mentions and provider wire forms.  Long-message split mode partitions
+the captured Document and reprints each chunk rather than slicing Markdown
+source.  Attachment spoiler state remains in its attachment side channel.
 
 * Next
 

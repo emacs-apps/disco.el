@@ -472,6 +472,7 @@ forwarded to the controller-only restore path used by asynchronous callbacks."
   (list :draft (appkit-chatbuf-copy-string (disco-room--current-draft))
         :pending-edit (copy-tree disco-room--pending-edit)
         :pending-reply-to disco-room--pending-reply-to
+        :active-codec appkit-markup-compose-active-codec
         :message-revision
         (disco-state-message-revision disco-room--channel-id)
         :attachment-token-seq disco-room--attachment-token-seq
@@ -515,6 +516,8 @@ recoverable."
       (disco-room--restore-attachment-token-table
        (plist-get slot :attachment-token-entries))
       (disco-room--set-composer-aux-state pending-edit pending-reply-to)
+      (when-let* ((codec (plist-get slot :active-codec)))
+        (appkit-markup-compose-set-active-codec codec))
       (disco-room--apply-draft-state
        (appkit-chatbuf-copy-string (plist-get slot :draft))
        :reset-history-p t
@@ -596,7 +599,8 @@ recoverable."
   (and (listp object)
        (eq (plist-get object :kind) disco-room--input-object-kind-attachment)))
 
-(cl-defun disco-room--make-attachment-input-object (path &key description filename content-type)
+(cl-defun disco-room--make-attachment-input-object
+    (path &key description filename content-type spoiler)
   "Build one structured attachment input object for PATH."
   (unless (and (stringp path) (not (string-empty-p path)))
     (user-error "disco: attachment object requires a file path"))
@@ -608,7 +612,8 @@ recoverable."
           :path path
           :filename resolved-filename
           :description trimmed-description
-          :content-type content-type)))
+          :content-type content-type
+          :spoiler (and spoiler t))))
 
 (defun disco-room--attachment-input-object-display-text (attachment)
   "Return visible composer text for ATTACHMENT input object."
@@ -632,7 +637,8 @@ recoverable."
           (and (appkit-media-file-present-p path)
                (file-size-human-readable
                 (file-attribute-size (file-attributes path))))))
-    (concat (if image-p "[image] " "[file] ")
+    (concat (if (plist-get attachment :spoiler) "[spoiler] " "")
+            (if image-p "[image] " "[file] ")
             (if preview (concat preview " ") "")
             (propertize filename 'help-echo path)
             (if size (format " (%s)" size) ""))))
@@ -676,6 +682,8 @@ recoverable."
         (setq attachment (plist-put attachment :description description)))
       (when-let* ((content-type (plist-get object :content-type)))
         (setq attachment (plist-put attachment :content-type content-type)))
+      (when (plist-get object :spoiler)
+        (setq attachment (plist-put attachment :is-spoiler t)))
       attachment)))
 
 (defun disco-room--attachment-label (attachment prefix)
@@ -765,6 +773,7 @@ recoverable."
            (plist-get (plist-get ref :attachment) :path)
            :filename (plist-get (plist-get ref :attachment) :filename)
            :description (plist-get (plist-get ref :attachment) :description)
+           :spoiler (plist-get (plist-get ref :attachment) :is-spoiler)
            :content-type (plist-get (plist-get ref :attachment) :content-type)))))
     (_
      (disco-room--attachment-token-text (plist-get ref :token-id)))))
@@ -1235,6 +1244,30 @@ current effective input-options state.  Return the normalized state plist."
       (message "disco: %s"
                (mapconcat (lambda (ref) (plist-get ref :label)) refs " | ")))))
 
+(defun disco-room--replace-attachment-ref (ref attachment)
+  "Replace queued attachment REF with normalized ATTACHMENT."
+  (pcase (plist-get ref :type)
+    ('token
+     (puthash (plist-get ref :token-id)
+              (plist-put attachment :token-id (plist-get ref :token-id))
+              disco-room--attachment-token-table)
+     (disco-room--sync-pending-attachments-from-draft))
+    ('object
+     (let ((replacement
+            (disco-room--attachment-input-object-string
+             (disco-room--make-attachment-input-object
+              (plist-get attachment :path)
+              :filename (plist-get attachment :filename)
+              :description (plist-get attachment :description)
+              :content-type (plist-get attachment :content-type)
+              :spoiler (plist-get attachment :is-spoiler)))))
+       (disco-room--set-draft
+        (disco-room--draft-substring-replace
+         (disco-room--current-draft)
+         (plist-get ref :start)
+         (plist-get ref :end)
+         replacement))))))
+
 (defun disco-room-edit-attachment-description ()
   "Edit description of one queued attachment."
   (interactive)
@@ -1242,40 +1275,45 @@ current effective input-options state.  Return the normalized state plist."
    (disco-room--attachment-token-action-unavailable-reason 1)
    "edit attachment descriptions")
   (let* ((ref (disco-room--choose-attachment-ref "Edit attachment: "))
-         (attachment (copy-tree (or (plist-get ref :attachment)
-                                    (user-error "disco: attachment not found"))))
+         (attachment
+          (copy-tree
+           (or (plist-get ref :attachment)
+               (user-error "disco: attachment not found"))))
          (current (or (plist-get attachment :description) ""))
-         (next-input (read-string
-                      (format "Description for %s (empty clears): "
-                              (plist-get ref :label))
-                      current))
+         (next-input
+          (read-string
+           (format "Description for %s (empty clears): "
+                   (plist-get ref :label))
+           current))
          (next (string-trim next-input)))
     (setq attachment
-          (plist-put attachment :description (unless (string-empty-p next) next)))
-    (pcase (plist-get ref :type)
-      ('token
-       (puthash (plist-get ref :token-id)
-                (plist-put attachment :token-id (plist-get ref :token-id))
-                disco-room--attachment-token-table)
-       (disco-room--sync-pending-attachments-from-draft))
-      ('object
-       (let ((replacement
-              (disco-room--attachment-input-object-string
-               (disco-room--make-attachment-input-object
-                (plist-get attachment :path)
-                :filename (plist-get attachment :filename)
-                :description (plist-get attachment :description)
-                :content-type (plist-get attachment :content-type)))))
-         (disco-room--set-draft
-          (disco-room--draft-substring-replace
-           (disco-room--current-draft)
-           (plist-get ref :start)
-           (plist-get ref :end)
-           replacement)))))
+          (plist-put attachment :description
+                     (unless (string-empty-p next) next)))
+    (disco-room--replace-attachment-ref ref attachment)
     (disco-room--update-frame)
     (if (string-empty-p next)
         (message "disco: cleared description for %s" (plist-get ref :label))
       (message "disco: updated description for %s" (plist-get ref :label)))))
+
+
+(defun disco-room-toggle-attachment-spoiler ()
+  "Toggle spoiler status for one queued attachment."
+  (interactive)
+  (disco-room--ensure-action-available
+   (disco-room--attachment-token-action-unavailable-reason 1)
+   "toggle attachment spoilers")
+  (let* ((ref (disco-room--choose-attachment-ref "Toggle spoiler: "))
+         (attachment
+          (copy-tree
+           (or (plist-get ref :attachment)
+               (user-error "disco: attachment not found"))))
+         (spoiler (not (plist-get attachment :is-spoiler))))
+    (setq attachment (plist-put attachment :is-spoiler spoiler))
+    (disco-room--replace-attachment-ref ref attachment)
+    (disco-room--update-frame)
+    (message "disco: attachment spoiler %s for %s"
+             (if spoiler "enabled" "disabled")
+             (plist-get ref :label))))
 
 (defun disco-room-reorder-attachments ()
   "Reorder one queued attachment in the current draft."
@@ -1609,28 +1647,31 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
     ("r" "Toggle reply mention" disco-room-toggle-reply-mention-replied-user)
     ("0" "Reset room-local options" disco-room-reset-input-options)]])
 
-(defun disco-room-attach-file (path &optional description)
+(defun disco-room-attach-file (path &optional description spoiler)
   "Queue attachment PATH for next room send.
 
-DESCRIPTION is optional per-file description."
+DESCRIPTION is optional per-file description.  With interactive prefix, mark
+the attachment as a spoiler."
   (interactive
    (progn
      (disco-room--ensure-action-available
       (disco-room--attach-unavailable-reason)
       "attach files")
      (let* ((path (read-file-name "Attach file: " nil nil t))
-            (description-input (string-trim (read-string "Attachment description (optional): ")))
-            (description (unless (string-empty-p description-input)
-                           description-input)))
-       (list path description))))
+            (description-input
+             (string-trim
+              (read-string "Attachment description (optional): ")))
+            (description
+             (unless (string-empty-p description-input) description-input)))
+       (list path description (and current-prefix-arg t)))))
   (disco-room--ensure-action-available
    (disco-room--attach-unavailable-reason)
    "attach files")
   (unless (file-readable-p path)
     (user-error "disco: file is not readable: %s" path))
-  (let ((attachment (disco-room--make-attachment-input-object
-                     path
-                     :description description)))
+  (let ((attachment
+         (disco-room--make-attachment-input-object
+          path :description description :spoiler spoiler)))
     (if (appkit-chatbuf-input-start-position)
         (progn
           (unless (appkit-chatbuf-point-in-input-p)
@@ -1677,45 +1718,6 @@ DESCRIPTION is optional per-file description."
 
 ;;; Send pipeline
 
-(defun disco-room--long-message-split-point (content)
-  "Return preferred split point for CONTENT.
-
-The split point is at most `disco-api--message-content-limit' and prefers
-paragraph, line, and whitespace boundaries near the end of the chunk."
-  (let* ((limit disco-api--message-content-limit)
-         (len (length content))
-         (max-end (min len limit))
-         (min-acceptable (max 1 (/ limit 2))))
-    (or (let ((pos (cl-search "\n\n" content :from-end t :end2 max-end)))
-          (when (and pos (>= pos min-acceptable))
-            (+ pos 2)))
-        (let ((pos (cl-search "\n" content :from-end t :end2 max-end)))
-          (when (and pos (>= pos min-acceptable))
-            (1+ pos)))
-        (let ((pos (cl-position-if (lambda (char)
-                                     (memq char '(?\s ?\t)))
-                                   content :from-end t :end max-end)))
-          (when (and pos (>= pos min-acceptable))
-            (1+ pos)))
-        max-end)))
-
-(defun disco-room--split-message-content (content)
-  "Split CONTENT into Discord-sized message chunks."
-  (let ((remaining (or content ""))
-        (chunks nil))
-    (while (disco-room--message-content-over-limit-p remaining)
-      (let* ((split-point (disco-room--long-message-split-point remaining))
-             (chunk (string-trim-right (substring remaining 0 split-point)))
-             (rest (string-trim-left (substring remaining split-point))))
-        (when (string-empty-p chunk)
-          (setq split-point disco-api--message-content-limit
-                chunk (substring remaining 0 split-point)
-                rest (substring remaining split-point)))
-        (push chunk chunks)
-        (setq remaining rest)))
-    (unless (string-empty-p remaining)
-      (push remaining chunks))
-    (nreverse chunks)))
 
 (defun disco-room--write-long-message-temp-attachment (content)
   "Write CONTENT to a temporary text file attachment plist."
@@ -2012,7 +2014,8 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
                                       (disco-room--async-error-message
                                        error-data)))))))
                            (send-one
-                             (text reply attachments-list on-success on-error)
+                             (text semantic-document reply attachments-list
+                                   on-success on-error)
                              (let* ((request-revision
                                      (disco-state-message-revision channel-id))
                                     (nonce (disco-room--next-send-nonce))
@@ -2028,8 +2031,9 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
                                             "s"))
                                        text))
                                     (pending-document
-                                     (and (equal text normalized)
-                                          capture-document))
+                                     (or semantic-document
+                                         (and (equal text normalized)
+                                              capture-document)))
                                     leg-settled-p)
                                (disco-state-insert-pending-message
                                 channel-id nonce pending-content
@@ -2099,29 +2103,56 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
                         (pcase long-message-action
                           ('split
                            (let* ((chunks
-                                   (disco-room--split-message-content normalized))
+                                   (condition-case nil
+                                       (disco-markdown-print-chunks
+                                        capture-document
+                                        disco-api--message-content-limit)
+                                     (appkit-markup-codec-error
+                                      (user-error
+                                       "disco: message cannot be split without breaking semantic structure; choose file mode"))))
                                   (total (length chunks)))
                              (cl-labels
                                  ((send-next
                                     (remaining sent-count)
-                                    (let ((chunk (car remaining))
-                                          (rest (cdr remaining))
-                                          (first-p (= sent-count 0)))
+                                    (let* ((chunk (car remaining))
+                                           (rest (cdr remaining))
+                                           (text (plist-get chunk :source))
+                                           (document (plist-get chunk :document))
+                                           (first-p (= sent-count 0)))
                                       (send-one
-                                       chunk
+                                       text document
                                        (and first-p reply-to)
                                        (and first-p attachments)
                                        (lambda (_response)
                                          (if rest
-                                             (progn
+                                             (let ((draft
+                                                    (mapconcat
+                                                     (lambda (part)
+                                                       (plist-get part :source))
+                                                     rest "\n\n")))
                                                (setq recovery-slot
-                                                     (list
-                                                      :draft
-                                                      (mapconcat
-                                                       #'identity rest "\n\n")
-                                                      :pending-edit nil
-                                                      :pending-reply-to nil
-                                                      :attachment-token-seq 0
+                                                     (copy-tree recovery-slot)
+                                                     recovery-slot
+                                                     (plist-put
+                                                      recovery-slot :draft draft)
+                                                     recovery-slot
+                                                     (plist-put
+                                                      recovery-slot :active-codec
+                                                      'discord-markdown)
+                                                     recovery-slot
+                                                     (plist-put
+                                                      recovery-slot :pending-edit nil)
+                                                     recovery-slot
+                                                     (plist-put
+                                                      recovery-slot
+                                                      :pending-reply-to nil)
+                                                     recovery-slot
+                                                     (plist-put
+                                                      recovery-slot
+                                                      :attachment-token-seq 0)
+                                                     recovery-slot
+                                                     (plist-put
+                                                      recovery-slot
                                                       :attachment-token-entries
                                                       nil))
                                                (send-next
@@ -2145,8 +2176,8 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
                                    (append attachments
                                            (list text-attachment))))
                              (unwind-protect
-                                 (send-one
-                                  nil reply-to all-attachments
+                                (send-one
+                                  nil nil reply-to all-attachments
                                   (lambda (_response)
                                     (settle-success
                                      (format
@@ -2161,7 +2192,7 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
                                   (plist-get text-attachment :path))))))
                           (_
                            (send-one
-                            normalized reply-to attachments
+                            normalized capture-document reply-to attachments
                             (lambda (_response)
                               (settle-success
                                (if has-attachments

@@ -68,6 +68,17 @@
     (should (equal "12345" (alist-get 'nonce payload)))
     (should (eq t (alist-get 'enforce_nonce payload)))))
 
+(ert-deftest disco-api-normalize-message-send-payload-preserves-attachment-spoiler ()
+  (let* ((attachment
+          '(:filename "secret.png" :description "hidden" :is-spoiler t))
+         (payload
+          (disco-api--message-send-payload
+           nil nil nil (list attachment) nil nil))
+         (wire (car (alist-get 'attachments payload))))
+    (should (equal "secret.png" (alist-get 'filename wire)))
+    (should (equal "hidden" (alist-get 'description wire)))
+    (should (eq t (alist-get 'is_spoiler wire)))))
+
 (ert-deftest disco-api-normalize-message-send-payload-supports-sticker-only ()
   (should
    (equal '((sticker_ids . ["11" "22"]))
