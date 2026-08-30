@@ -305,21 +305,30 @@
         (setq position (match-end 0))))
     (nreverse result)))
 
-(defun disco-markdown--unused-characters (source count)
-  "Return COUNT private-use characters absent from SOURCE."
+(defun disco-markdown--source-character-table (source)
+  "Return an eql table containing every character in SOURCE."
+  (let ((characters (make-hash-table :test #'eql)))
+    (cl-loop for character across source
+             do (puthash character t characters))
+    characters))
+
+(defun disco-markdown--unused-characters (source-characters count)
+  "Return COUNT private-use characters absent from SOURCE-CHARACTERS."
   (let ((code #xe000) result)
     (while (< (length result) count)
       (when (> code #xf8ff)
         (signal 'appkit-markup-codec-error '(discord-sentinel-exhausted)))
-      (let ((character (string code)))
-        (unless (string-match-p (regexp-quote character) source)
-          (push character result)))
+      (unless (gethash code source-characters)
+        (push (char-to-string code) result))
       (setq code (1+ code)))
     (nreverse result)))
 
 (defun disco-markdown--make-sentinels (source)
   "Return a private sentinel plist for SOURCE."
-  (let ((characters (disco-markdown--unused-characters source 16)))
+  (let* ((source-characters
+          (disco-markdown--source-character-table source))
+         (characters
+          (disco-markdown--unused-characters source-characters 16)))
     (list :escape-less (pop characters)
           :escape-at (pop characters)
           :escape-pipe (pop characters)
@@ -336,6 +345,7 @@
           :spoiler-open (pop characters)
           :spoiler-close (pop characters)
           :subtitle (pop characters)
+          :source-characters source-characters
           :provider-table (make-hash-table :test #'eql)
           :code-table (make-hash-table :test #'eql)
           :code-reverse (make-hash-table :test #'eql)
@@ -439,7 +449,7 @@ backtick syntax documented by Discord; it does not parse Markdown structure."
                   (or (gethash character reverse)
                       (let* ((fresh
                               (disco-markdown--provider-sentinel
-                               source sentinels))
+                               sentinels))
                              (code (aref fresh 0)))
                         (puthash code character table)
                         (puthash character code reverse)
@@ -447,10 +457,27 @@ backtick syntax documented by Discord; it does not parse Markdown structure."
              (aset result position sentinel))))
         (concat result)))))
 
+(defun disco-markdown--apply-replacements (source replacements)
+  "Apply descending non-overlapping REPLACEMENTS to SOURCE in one pass.
+
+Each replacement is a list of zero-based START, END, and replacement text.
+Callers collect replacements with `push' while scanning SOURCE forward."
+  (if (null replacements)
+      source
+    (with-temp-buffer
+      (insert source)
+      (dolist (replacement replacements)
+        (let ((start (nth 0 replacement))
+              (end (nth 1 replacement))
+              (text (nth 2 replacement)))
+          (goto-char (1+ start))
+          (delete-region (1+ start) (1+ end))
+          (insert text)))
+      (buffer-string))))
+
 (defun disco-markdown--protect-escapes (source sentinels)
   "Replace provider-significant escapes in SOURCE using SENTINELS."
-  (let ((result source)
-        (mapping `((?< . ,(plist-get sentinels :escape-less))
+  (let ((mapping `((?< . ,(plist-get sentinels :escape-less))
                    (?@ . ,(plist-get sentinels :escape-at))
                    (?| . ,(plist-get sentinels :escape-pipe))
                    (?_ . ,(plist-get sentinels :escape-underscore))
@@ -462,11 +489,7 @@ backtick syntax documented by Discord; it does not parse Markdown structure."
              for sentinel = (cdr (assq character mapping))
              when (and sentinel (disco-markdown--escaped-p source position))
              do (push (list (1- position) (1+ position) sentinel) replacements))
-    (dolist (replacement replacements result)
-      (setq result
-            (concat (substring result 0 (nth 0 replacement))
-                    (nth 2 replacement)
-                    (substring result (nth 1 replacement)))))))
+    (disco-markdown--apply-replacements source replacements)))
 
 (defun disco-markdown--word-character-p (character)
   "Return non-nil when CHARACTER is a word constituent."
@@ -513,9 +536,10 @@ non-whitespace rules for `__underline__'."
             (insert open-sentinel)))))
     (buffer-string)))
 
-(defun disco-markdown--provider-sentinel (source sentinels)
-  "Return one unused provider sentinel character for SOURCE and SENTINELS."
+(defun disco-markdown--provider-sentinel (sentinels)
+  "Return one unused provider sentinel character from SENTINELS."
   (let ((code (plist-get sentinels :provider-next))
+        (source-characters (plist-get sentinels :source-characters))
         (table (plist-get sentinels :provider-table))
         (code-table (plist-get sentinels :code-table))
         character)
@@ -523,14 +547,15 @@ non-whitespace rules for `__underline__'."
              (when (> code #xf8ff)
                (signal 'appkit-markup-codec-error
                        '(discord-sentinel-exhausted)))
-             (setq character (string code))
-             (or (gethash code table)
+             (setq character (char-to-string code))
+             (or (gethash code source-characters)
+                 (gethash code table)
                  (gethash code code-table)
-                 (string-match-p (regexp-quote character) source)
                  (cl-loop for (key value) on sentinels by #'cddr
                           thereis
                           (and (not (memq key
-                                          '(:provider-table :code-table
+                                          '(:source-characters
+                                            :provider-table :code-table
                                             :code-reverse :provider-next)))
                                (stringp value)
                                (equal value character)))))
@@ -564,7 +589,7 @@ non-whitespace rules for `__underline__'."
                     appkit-markup-codec-object-limit)
             (signal 'appkit-markup-codec-error '(too-many-objects)))
           (let ((sentinel
-                 (disco-markdown--provider-sentinel source sentinels)))
+                 (disco-markdown--provider-sentinel sentinels)))
             (puthash
              (aref sentinel 0)
              (disco-markdown--protected-token-create
@@ -573,11 +598,7 @@ non-whitespace rules for `__underline__'."
              (plist-get sentinels :provider-table))
             (push (list begin end sentinel) replacements))
           (setq position end))))
-    (dolist (replacement replacements source)
-      (setq source
-            (concat (substring source 0 (nth 0 replacement))
-                    (nth 2 replacement)
-                    (substring source (nth 1 replacement)))))))
+    (disco-markdown--apply-replacements source replacements)))
 
 (defun disco-markdown--protect-provider-tokens (source sentinels)
   "Protect complete provider tokens in SOURCE as occurrence sentinels."
@@ -594,16 +615,12 @@ non-whitespace rules for `__underline__'."
                     appkit-markup-codec-object-limit)
             (signal 'appkit-markup-codec-error '(too-many-objects)))
           (let ((sentinel
-                 (disco-markdown--provider-sentinel source sentinels)))
+                 (disco-markdown--provider-sentinel sentinels)))
             (puthash (aref sentinel 0) raw
                      (plist-get sentinels :provider-table))
             (push (list begin end sentinel) replacements))
           (setq position end))))
-    (dolist (replacement replacements source)
-      (setq source
-            (concat (substring source 0 (nth 0 replacement))
-                    (nth 2 replacement)
-                    (substring source (nth 1 replacement)))))))
+    (disco-markdown--apply-replacements source replacements)))
 
 (defun disco-markdown--replace-character (position replacement)
   "Replace the character at buffer POSITION with REPLACEMENT."
