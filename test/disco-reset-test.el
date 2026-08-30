@@ -42,8 +42,6 @@
          (disco-notifications--reset-in-progress nil)
          (disco-notifications--delay-owners nil)
          (disco-notifications--timeout-owners nil)
-         (disco-markdown--fontification-buffers
-          (make-hash-table :test #'eq))
          (disco-root-debug-log-buffer-name "*disco-root-debug-reset-test*")
          (disco-root--debug-log-buffer nil)
          (disco-root--debug-log-configured-name nil)
@@ -85,8 +83,6 @@
          (markdown-collision-buffer
           (get-buffer-create
            " *disco-markdown-code-fontification:fundamental-mode*"))
-         (markdown-buffer
-          (disco-markdown--fontification-buffer 'fundamental-mode))
          (unrelated-buffer
           (disco-reset-test--make-mode-buffer
            " *disco-looking-but-unrelated*" 'special-mode
@@ -99,8 +95,7 @@
           (list root-buffer room-buffer directory-buffer archived-buffer
                 message-inspect-buffer channel-inspect-buffer user-buffer
                 tracked-history-buffer fixed-history-buffer
-                preview-buffer rate-limit-buffer debug-buffer
-                markdown-buffer))
+                preview-buffer rate-limit-buffer debug-buffer))
          cleanup-after-failure
          spawned-app
          spawned-buffer
@@ -204,9 +199,6 @@
             (setq-local disco-root--debug-log-owner-p t)
             (let ((inhibit-read-only t))
               (insert "OLD_ACCOUNT_SECRET debug")))
-          (with-current-buffer markdown-buffer
-            (fundamental-mode)
-            (insert "OLD_ACCOUNT_SECRET code block"))
           (with-current-buffer markdown-collision-buffer
             (special-mode)
             (let ((inhibit-read-only t))
@@ -515,8 +507,6 @@
          (disco-notifications--delay-owners nil)
          (disco-notifications--timeout-owners nil)
          (disco-state--guilds nil)
-         (disco-markdown--cache (make-hash-table :test #'equal))
-         (disco-markdown--fontification-buffers (make-hash-table :test #'eq))
          (disco-preview--pending-by-guild (make-hash-table :test #'equal))
          (disco-preview--requested-message-id-by-channel
           (make-hash-table :test #'equal))
@@ -616,7 +606,6 @@
          cleared-queue
          (tables
           (list disco-notifications--seen
-                disco-markdown--cache
                 disco-preview--pending-by-guild
                 disco-preview--requested-message-id-by-channel
                 disco-preview--in-flight-by-guild
@@ -650,7 +639,6 @@
                 disco-root--extra-info-provider-error-cache)))
     (unwind-protect
         (progn
-          (puthash old-url secret disco-markdown--cache)
           (puthash old-url secret
                    disco-media--attachment-preview-image-cache)
           (puthash old-url t disco-media--attachment-preview-fetching)
@@ -700,7 +688,6 @@
                ;; callback boundary before hooks-disabled projection cleanup.
                (setq disco-http--plz-queue 'late-http-queue
                      disco-http--plz-queue-limit 4)
-               (puthash old-url secret disco-markdown--cache)
                (puthash old-url (list :error secret)
                         disco-media--attachment-download-state-table)
                (puthash old-url (list :url old-url :reason secret)

@@ -2135,6 +2135,21 @@ _MSG is ignored because the transient resolves availability from point."
    ["Window"
     ("q" "Quit window" quit-window)]])
 
+(defvar-keymap disco-room-format-prefix-map
+  :doc "Semantic source formatting commands for the room composer."
+  "f" #'appkit-markup-compose-set-active-codec
+  "b" #'appkit-markup-compose-bold
+  "i" #'appkit-markup-compose-italic
+  "u" #'appkit-markup-compose-underline
+  "s" #'appkit-markup-compose-strike
+  "c" #'appkit-markup-compose-code
+  "l" #'appkit-markup-compose-link
+  "q" #'appkit-markup-compose-quote
+  "h" #'appkit-markup-compose-heading
+  "-" #'appkit-markup-compose-unordered-list
+  "1" #'appkit-markup-compose-ordered-list
+  "p" #'appkit-markup-compose-preformatted)
+
 (defvar-keymap disco-room-mode-map
   :doc "Keymap for `disco-room-mode'."
   "C-l" #'recenter-top-bottom
@@ -2143,6 +2158,7 @@ _MSG is ignored because the transient resolves availability from point."
   "C-M-i" #'disco-room-complete-mention
   "C-c g" #'disco-room-refresh
   "C-c m" disco-room-message-prefix-map
+  "C-c f" disco-room-format-prefix-map
   "RET" #'disco-room-return-dwim
   "M-RET" #'disco-room-input-preview
   "C-c '" #'disco-room-edit-draft

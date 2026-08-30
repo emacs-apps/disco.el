@@ -1572,6 +1572,59 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                      (disco-room-jump-to-message ref-id ref-channel))
            :help-echo "Open forwarded source"))))))
 
+(defconst disco-room--semantic-system-message-types
+  '(6 7 8 9 10 11 12 14 15 16 17 18 21 22 24 25 26 27 28 29 30 31
+    32 36 37 38 39 44 46)
+  "Message types whose body is synthesized rather than rendered as Markdown.")
+
+(defun disco-room--semantic-message-document (msg)
+  "Return MSG's native semantic content Document, or nil for synthetic rows."
+  (let ((captured (and (listp msg) (alist-get 'appkit_document msg)))
+        (source (and (listp msg) (alist-get 'content msg))))
+    (cond
+     ((appkit-markup-document-p captured)
+      (appkit-markup-normalize captured))
+     ((and (stringp source)
+           (not (string-empty-p source))
+           (not (memq (disco-msg-type msg)
+                      disco-room--semantic-system-message-types)))
+      (let ((message-id (alist-get 'id msg)))
+        (disco-markdown-document
+         source
+         :context 'room-message
+         :message msg
+         :spoiler-message-id message-id)))
+     (t nil))))
+
+(defun disco-room--highlight-search-region (start end)
+  "Apply the active room search highlight between START and END."
+  (when-let* ((query (and (fboundp 'disco-room--active-highlight-query)
+                          (funcall 'disco-room--active-highlight-query))))
+    (when (and (stringp query) (not (string-empty-p query)))
+      (save-excursion
+        (goto-char start)
+        (let ((case-fold-search t))
+          (while (re-search-forward (regexp-quote query) end t)
+            (add-face-text-property
+             (match-beginning 0) (match-end 0)
+             'disco-room-search-highlight 'append)))))))
+
+(cl-defun disco-room--insert-semantic-message-content
+    (document msg &key prefix (final-newline-p t))
+  "Insert MSG's semantic DOCUMENT natively and return its exact bounds."
+  (let* ((message-id (alist-get 'id msg))
+         (span
+          (disco-markdown-insert-document
+           document
+           :context 'room-message
+           :spoiler-message-id message-id
+           :reveal-spoilers
+           (disco-room--message-spoilers-revealed-p message-id)
+           :prefix prefix
+           :final-newline-p final-newline-p)))
+    (disco-room--highlight-search-region (car span) (cdr span))
+    span))
+
 (defun disco-room--insert-message (msg context &optional owner)
   "Insert one message MSG using projected render CONTEXT and Appkit OWNER."
   (if (disco-room--message-system-divider-p msg)
@@ -1588,9 +1641,13 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                (or (alist-get 'timestamp msg) ""))))
            (author (disco-room--message-author msg))
            (author-face (disco-room--author-face msg))
-           (content (disco-room--message-display-content msg))
-           (reply (disco-room--reply-preview msg))
            (message-id (alist-get 'id msg))
+           (semantic-document (disco-room--semantic-message-document msg))
+           (content
+            (if semantic-document
+                (appkit-markup-plain-text semantic-document)
+              (disco-room--message-display-content msg)))
+           (reply (disco-room--reply-preview msg))
            line-start
            section-prefix-state)
       (when (and (stringp insert-date)
@@ -1620,7 +1677,10 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
             (let ((content-start (point))
                   (time-span nil))
               (unless (string-empty-p content)
-                (insert content))
+                (if semantic-document
+                    (disco-room--insert-semantic-message-content
+                     semantic-document msg :final-newline-p nil)
+                  (insert content)))
               (setq time-span
                     (disco-room--insert-right-aligned-text
                      short-time
@@ -1669,7 +1729,11 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
                               (disco-room-jump-to-message ref-id ref-channel)))
                :help-echo "Open replied-to message")))
           (unless (string-empty-p content)
-            (appkit-ui-insert-prefixed-lines section-prefix-state content))))
+            (if semantic-document
+                (disco-room--insert-semantic-message-content
+                 semantic-document msg :prefix section-prefix-state)
+              (appkit-ui-insert-prefixed-lines
+               section-prefix-state content)))))
       (let ((appkit-ui-card-indent-prefix-state section-prefix-state)
             (appkit-ui-card-indent-prefix
              (appkit-ui-prefix-string section-prefix-state nil "    ")))

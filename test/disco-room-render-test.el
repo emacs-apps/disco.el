@@ -532,9 +532,9 @@
          (link-pos (string-match "link" plain))
          (quote-pos (string-match "quote" plain)))
     (should (equal "link\nquote" plain))
-    (should (equal "https://example.com"
-                   (get-text-property link-pos 'disco-markdown-url rendered)))
-    (should (equal "| "
+    (should (functionp
+             (get-text-property link-pos appkit-ui-action-property rendered)))
+    (should (equal "│ "
                    (substring-no-properties
                     (get-text-property quote-pos 'line-prefix rendered))))))
 

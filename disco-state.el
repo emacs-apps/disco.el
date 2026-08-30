@@ -1222,8 +1222,9 @@ an older in-flight REST page from resurrecting a Gateway-deleted message."
         (puthash message-id revision revisions)))
     (disco-state-messages channel-id)))
 
-(defun disco-state-insert-pending-message (channel-id nonce content current-user-id
-                                                      &optional reply-to-message-id)
+(defun disco-state-insert-pending-message
+    (channel-id nonce content current-user-id
+                &optional reply-to-message-id semantic-document)
   "Insert exact local pending message identified by NONCE into CHANNEL-ID."
   (let ((message
          `((id . ,(format "%s" nonce))
@@ -1234,6 +1235,8 @@ an older in-flight REST page from resurrecting a Gateway-deleted message."
            (pending . t)
            (author (id . ,(format "%s" current-user-id))
                    (username . "You"))
+           ,@(when semantic-document
+               `((appkit_document . ,semantic-document)))
            ,@(when reply-to-message-id
                `((message_reference
                   (message_id . ,(format "%s" reply-to-message-id))

@@ -175,6 +175,16 @@ page."
   :type 'integer
   :group 'disco)
 
+(defcustom disco-room-compose-codecs '(discord-markdown org plain)
+  "Ordered source codecs selectable for room composition.
+
+The first entry defaults to provider-aware `discord-markdown', preserving
+Discord extensions such as `||spoiler||'.  A universal prefix selects
+subsequent codecs for one preview or send command without changing the
+persistent active codec."
+  :type '(repeat symbol)
+  :group 'disco)
+
 (defcustom disco-room-send-on-return t
   "When non-nil, `RET' in room buffer sends current draft."
   :type 'boolean
