@@ -36,6 +36,12 @@ to the GNU Emacs-tested grammar revision:
 Parsing and account startup never download, compile, or activate
 ~markdown-ts-mode~.
 
+The provider-aware ~discord-markdown~ codec preserves Discord spoilers,
+underline, multiline quotes, suppressed links, mentions, timestamps, navigation
+tokens, and code-zone literals in both incoming rendering and outgoing
+composition.  Attachments, including spoiler state, remain structured side
+channels.
+
 Keys, threads, attachments, and options are in the
 [[file:docs/user.org][user guide]].  Layouts, file map, and design
 notes are in [[file:docs/develop.org][docs/develop.org]].

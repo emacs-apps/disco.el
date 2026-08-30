@@ -81,13 +81,23 @@
 (defconst disco-markdown--regexp-timestamp
   "<t:\\([0-9]+\\)\\(?::\\([tTdDfFRsS]\\)\\)?>"
   "Regexp matching Discord timestamp tokens.")
-(defconst disco-markdown--regexp-guild-navigation "<id:\\([^>]+\\)>"
-  "Regexp matching Discord guild navigation tokens.")
-(defconst disco-markdown--regexp-guild-navigation-bare
-  "\\_<id:[[:alnum:]:_-]+\\_>"
-  "Regexp matching bare Discord guild navigation tokens.")
+(defconst disco-markdown--regexp-guild-navigation
+  "<id:\\(customize\\|browse\\|guide\\|home\\|linked-roles\\(?:\\:[0-9]+\\)?\\)>"
+  "Regexp matching a documented Discord guild navigation token.")
+(defconst disco-markdown--regexp-suppressed-link
+  "<https?://[^<>[:space:]]+>"
+  "Regexp matching a Discord link with embed suppression.")
+(defconst disco-markdown--regexp-email-link
+  "<\\(?:mailto:\\)?[^<>@[:space:]]+@[^<>[:space:]]+>"
+  "Regexp matching a Discord email link token.")
+(defconst disco-markdown--regexp-phone-link
+  "<\\(?:\\(?:tel\\|sms\\):\\)?[+]?[0-9][0-9() .+-]*>"
+  "Regexp matching a Discord phone link token.")
+(defconst disco-markdown--regexp-standard-emoji
+  ":[[:alnum:]_+-]+:"
+  "Regexp matching a standard emoji shortcode candidate.")
 (defconst disco-markdown--regexp-everyone-mention "@\\(?:everyone\\|here\\)"
-  "Regexp matching @everyone and @here tokens.")
+  "Regexp matching an @everyone or @here candidate.")
 
 (defconst disco-markdown--regexp-provider-token
   (concat "\\(?:" disco-markdown--regexp-user-mention
@@ -97,9 +107,12 @@
           "\\|" disco-markdown--regexp-custom-emoji
           "\\|" disco-markdown--regexp-timestamp
           "\\|" disco-markdown--regexp-guild-navigation
-          "\\|" disco-markdown--regexp-guild-navigation-bare
+          "\\|" disco-markdown--regexp-suppressed-link
+          "\\|" disco-markdown--regexp-email-link
+          "\\|" disco-markdown--regexp-phone-link
+          "\\|" disco-markdown--regexp-standard-emoji
           "\\|" disco-markdown--regexp-everyone-mention "\\)")
-  "Regexp matching one Discord provider token.")
+  "Regexp matching one Discord provider token candidate.")
 
 (defconst disco-markdown--spoiler-translation-table
   (let ((table (make-char-table 'translation-table ?█)))
@@ -115,12 +128,19 @@
   (id nil :read-only t)
   (name nil :read-only t)
   (style nil :read-only t)
-  (animated nil :read-only t))
+  (animated nil :read-only t)
+  (url nil :read-only t))
 
 (cl-defstruct (disco-markdown--marker
                (:constructor disco-markdown--marker-create)
                (:copier nil))
   (kind nil :read-only t))
+
+(cl-defstruct (disco-markdown--protected-token
+               (:constructor disco-markdown--protected-token-create)
+               (:copier nil))
+  (raw nil :read-only t)
+  (fallback nil :read-only t))
 
 (defvar disco-markdown--sentinels nil)
 (defvar disco-markdown--user-map nil)
@@ -300,19 +320,26 @@
 
 (defun disco-markdown--make-sentinels (source)
   "Return a private sentinel plist for SOURCE."
-  (let ((characters (disco-markdown--unused-characters source 11)))
+  (let ((characters (disco-markdown--unused-characters source 16)))
     (list :escape-less (pop characters)
           :escape-at (pop characters)
           :escape-pipe (pop characters)
           :escape-underscore (pop characters)
           :escape-dash (pop characters)
           :escape-hash (pop characters)
+          :escape-tilde (pop characters)
+          :escape-paren (pop characters)
+          :escape-space (pop characters)
+          :escape-plus (pop characters)
+          :escape-greater (pop characters)
           :underline-open (pop characters)
           :underline-close (pop characters)
           :spoiler-open (pop characters)
           :spoiler-close (pop characters)
           :subtitle (pop characters)
           :provider-table (make-hash-table :test #'eql)
+          :code-table (make-hash-table :test #'eql)
+          :code-reverse (make-hash-table :test #'eql)
           :provider-next #xe100)))
 
 (defun disco-markdown--escaped-p (text position)
@@ -322,6 +349,104 @@
       (setq count (1+ count)
             cursor (1- cursor)))
     (= (% count 2) 1)))
+
+(defun disco-markdown--inline-code-zones (line base)
+  "Return inline code zones in LINE offset by BASE."
+  (let ((position 0) zones)
+    (while (string-match "`+" line position)
+      (let* ((open-start (match-beginning 0))
+             (open-end (match-end 0))
+             (width (- open-end open-start))
+             (search open-end)
+             close-end)
+        (if (disco-markdown--escaped-p line open-start)
+            (setq position open-end)
+          (while (and (not close-end) (string-match "`+" line search))
+            (let ((candidate-start (match-beginning 0))
+                  (candidate-end (match-end 0)))
+              (if (and (= width (- candidate-end candidate-start))
+                       (not (disco-markdown--escaped-p line candidate-start)))
+                  (setq close-end candidate-end)
+                (setq search candidate-end))))
+          (if close-end
+              (progn
+                (push (cons (+ base open-start) (+ base close-end)) zones)
+                (setq position close-end))
+            (setq position open-end)))))
+    (nreverse zones)))
+
+(defun disco-markdown--code-zones (source)
+  "Return bounded Discord inline and fenced code zones in SOURCE.
+
+Each zone is a zero-based half-open source range.  This scanner recognizes only
+backtick syntax documented by Discord; it does not parse Markdown structure."
+  (with-temp-buffer
+    (insert source)
+    (goto-char (point-min))
+    (let (zones)
+      (while (< (point) (point-max))
+        (let* ((line-start (point))
+               (line-end (line-end-position))
+               (line (buffer-substring-no-properties line-start line-end)))
+          (if (and (string-match "\\`\\(`\\{3,\\}\\)" line)
+                   (= (match-beginning 0) 0))
+              (let* ((width (length (match-string 1 line)))
+                     (zone-start (1- line-start))
+                     (zone-end (1- (point-max)))
+                     closed)
+                (forward-line 1)
+                (while (and (< (point) (point-max)) (not closed))
+                  (let* ((candidate-start (point))
+                         (candidate-end (line-end-position))
+                         (candidate
+                          (buffer-substring-no-properties
+                           candidate-start candidate-end)))
+                    (when (and
+                           (string-match "\\`\\(`+\\)[ \t]*\\'" candidate)
+                           (>= (length (match-string 1 candidate)) width))
+                      (setq zone-end
+                            (min (1- (point-max))
+                                 (if (< candidate-end (point-max))
+                                     candidate-end
+                                   (1- candidate-end)))
+                            closed t))
+                    (forward-line 1)))
+                (push (cons zone-start zone-end) zones))
+            (setq zones
+                  (nconc
+                   (nreverse
+                    (disco-markdown--inline-code-zones
+                     line (1- line-start)))
+                   zones))
+            (forward-line 1))))
+      (nreverse zones))))
+
+(defun disco-markdown--protect-code-zones (source sentinels)
+  "Hide provider-significant characters in SOURCE code zones."
+  (let ((zones (disco-markdown--code-zones source)))
+    (if (null zones)
+        (copy-sequence source)
+      (let ((result (vconcat source))
+            (table (plist-get sentinels :code-table))
+            (reverse (plist-get sentinels :code-reverse))
+            (characters '(?< ?> ?@ ?| ?_ ?- ?# ?~ ?+)))
+        (dolist (zone zones)
+          (cl-loop
+           for position from (car zone) below (cdr zone)
+           for character = (aref result position)
+           when (memq character characters)
+           do
+           (let ((sentinel
+                  (or (gethash character reverse)
+                      (let* ((fresh
+                              (disco-markdown--provider-sentinel
+                               source sentinels))
+                             (code (aref fresh 0)))
+                        (puthash code character table)
+                        (puthash character code reverse)
+                        code))))
+             (aset result position sentinel))))
+        (concat result)))))
 
 (defun disco-markdown--protect-escapes (source sentinels)
   "Replace provider-significant escapes in SOURCE using SENTINELS."
@@ -391,6 +516,7 @@ non-whitespace rules for `__underline__'."
   "Return one unused provider sentinel character for SOURCE and SENTINELS."
   (let ((code (plist-get sentinels :provider-next))
         (table (plist-get sentinels :provider-table))
+        (code-table (plist-get sentinels :code-table))
         character)
     (while (progn
              (when (> code #xf8ff)
@@ -398,43 +524,151 @@ non-whitespace rules for `__underline__'."
                        '(discord-sentinel-exhausted)))
              (setq character (string code))
              (or (gethash code table)
+                 (gethash code code-table)
                  (string-match-p (regexp-quote character) source)
                  (cl-loop for (key value) on sentinels by #'cddr
                           thereis
                           (and (not (memq key
-                                          '(:provider-table :provider-next)))
+                                          '(:provider-table :code-table
+                                            :code-reverse :provider-next)))
                                (stringp value)
                                (equal value character)))))
       (setq code (1+ code)))
     (setf (plist-get sentinels :provider-next) (1+ code))
     character))
 
-(defun disco-markdown--protect-provider-tokens (source sentinels)
-  "Protect provider tokens in SOURCE as occurrence-specific SENTINELS."
-  (let ((position 0)
-        (count 0)
-        replacements)
-    (while (string-match disco-markdown--regexp-provider-token source position)
-      (when (>= count appkit-markup-codec-object-limit)
-        (signal 'appkit-markup-codec-error '(too-many-objects)))
+(defun disco-markdown--provider-token-boundary-p (source begin end raw)
+  "Return non-nil when RAW at BEGIN..END is a complete provider token."
+  (or (not (or (string-prefix-p "@" raw)
+               (string-prefix-p ":" raw)))
+      (and (not (disco-markdown--word-character-p
+                 (and (> begin 0) (aref source (1- begin)))))
+           (not (disco-markdown--word-character-p
+                 (and (< end (length source)) (aref source end)))))))
+(defun disco-markdown--protect-escaped-provider-tokens (source sentinels)
+  "Protect escaped provider tokens in SOURCE with their literal wire form."
+  (let ((position 0) replacements)
+    (while (string-match
+            (concat "\\\\" disco-markdown--regexp-provider-token)
+            source position)
       (let* ((begin (match-beginning 0))
              (end (match-end 0))
-             (raw (match-string-no-properties 0 source))
-             (sentinel (disco-markdown--provider-sentinel source sentinels)))
-        (puthash (aref sentinel 0) raw
-                 (plist-get sentinels :provider-table))
-        (push (list begin end sentinel) replacements)
-        (setq position end
-              count (1+ count))))
+             (token-begin (1+ begin))
+             (raw (substring source token-begin end)))
+        (if (not (disco-markdown--provider-token-boundary-p
+                  source token-begin end raw))
+            (setq position (1+ token-begin))
+          (when (>= (hash-table-count
+                     (plist-get sentinels :provider-table))
+                    appkit-markup-codec-object-limit)
+            (signal 'appkit-markup-codec-error '(too-many-objects)))
+          (let ((sentinel
+                 (disco-markdown--provider-sentinel source sentinels)))
+            (puthash
+             (aref sentinel 0)
+             (disco-markdown--protected-token-create
+              :raw (substring source begin end)
+              :fallback raw)
+             (plist-get sentinels :provider-table))
+            (push (list begin end sentinel) replacements))
+          (setq position end))))
     (dolist (replacement replacements source)
       (setq source
             (concat (substring source 0 (nth 0 replacement))
                     (nth 2 replacement)
                     (substring source (nth 1 replacement)))))))
 
+(defun disco-markdown--protect-provider-tokens (source sentinels)
+  "Protect complete provider tokens in SOURCE as occurrence sentinels."
+  (let ((position 0) replacements)
+    (while (string-match disco-markdown--regexp-provider-token source position)
+      (let* ((begin (match-beginning 0))
+             (end (match-end 0))
+             (raw (match-string-no-properties 0 source)))
+        (if (not (disco-markdown--provider-token-boundary-p
+                  source begin end raw))
+            (setq position (1+ begin))
+          (when (>= (hash-table-count
+                     (plist-get sentinels :provider-table))
+                    appkit-markup-codec-object-limit)
+            (signal 'appkit-markup-codec-error '(too-many-objects)))
+          (let ((sentinel
+                 (disco-markdown--provider-sentinel source sentinels)))
+            (puthash (aref sentinel 0) raw
+                     (plist-get sentinels :provider-table))
+            (push (list begin end sentinel) replacements))
+          (setq position end))))
+    (dolist (replacement replacements source)
+      (setq source
+            (concat (substring source 0 (nth 0 replacement))
+                    (nth 2 replacement)
+                    (substring source (nth 1 replacement)))))))
+
+(defun disco-markdown--replace-character (position replacement)
+  "Replace the character at buffer POSITION with REPLACEMENT."
+  (goto-char position)
+  (delete-char 1)
+  (insert replacement))
+
+(defun disco-markdown--protect-commonmark-only-blocks (source sentinels)
+  "Shield CommonMark block forms that Discord does not document."
+  (with-temp-buffer
+    (insert source)
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let ((line-end (line-end-position)))
+        (cond
+         ((looking-at "####+[ \t]+")
+          (disco-markdown--replace-character
+           (point) (plist-get sentinels :escape-hash)))
+         ((looking-at "[ \t]*\\([+]\\)[ \t]+")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-plus)))
+         ((looking-at "[ \t]*[0-9]+\\([)]\\)[ \t]+")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-paren)))
+         ((looking-at "[ \t]*\\(~\\{3,\\}\\)")
+          (let ((start (match-beginning 1))
+                (end (match-end 1))
+                (sentinel (plist-get sentinels :escape-tilde)))
+            (goto-char start)
+            (delete-region start end)
+            (insert (make-string (- end start) (aref sentinel 0)))))
+         ((looking-at "\\(    \\)\\S-")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-space)))
+         ((looking-at "\\(>\\)\\(?:[^ \t]\\|$\\)")
+          (disco-markdown--replace-character
+           (match-beginning 1) (plist-get sentinels :escape-greater))))
+        (goto-char line-end)
+        (forward-line 1)))
+    (buffer-string)))
+
+(defun disco-markdown--adapt-multiline-quote-source (source)
+  "Convert Discord `>>> ' source into one generic quote through message end."
+  (with-temp-buffer
+    (insert source)
+    (goto-char (point-min))
+    (when (re-search-forward "^>>>[ \t]+" nil t)
+      (replace-match "> " t t)
+      (forward-line 1)
+      (while (< (point) (point-max))
+        (insert "> ")
+        (forward-line 1)))
+    (buffer-string)))
+
 (defun disco-markdown--protect-extensions (source sentinels)
   "Protect Discord extension delimiters in SOURCE using SENTINELS."
-  (let ((protected (disco-markdown--protect-escapes source sentinels)))
+  (let* ((protected
+          (disco-markdown--protect-code-zones source sentinels))
+         (protected
+          (disco-markdown--protect-escaped-provider-tokens
+           protected sentinels))
+         (protected (disco-markdown--protect-escapes protected sentinels))
+         (protected (disco-markdown--adapt-multiline-quote-source protected))
+         (protected
+          (disco-markdown--protect-commonmark-only-blocks
+           protected sentinels)))
     (setq protected
           (disco-markdown--replace-delimiter-pairs
            protected "__"
@@ -449,11 +683,8 @@ non-whitespace rules for `__underline__'."
     (with-temp-buffer
       (insert protected)
       (goto-char (point-min))
-      (while (re-search-forward "^\\([ \t]*\\)-#\\(?:[ \t]+\\|$\\)" nil t)
-        (replace-match
-         (concat (match-string-no-properties 1)
-                 (plist-get sentinels :subtitle))
-         t t))
+      (while (re-search-forward "^-#\\(?:[ \t]+\\|$\\)" nil t)
+        (replace-match (plist-get sentinels :subtitle) t t))
       (disco-markdown--protect-provider-tokens
        (buffer-string) sentinels))))
 
@@ -556,9 +787,13 @@ Return (NODES REST CLOSED-P)."
     (list (nreverse result) events closed)))
 
 (defun disco-markdown--token-object (token styles)
-  "Return semantic provider object for TOKEN carrying STYLES."
-  (let (kind id name style animated display)
+  "Return semantic provider object for protected TOKEN carrying STYLES."
+  (let ((raw token) kind id name style animated url display fallback)
     (cond
+     ((disco-markdown--protected-token-p token)
+      (setq kind 'literal
+            raw (disco-markdown--protected-token-raw token)
+            display (disco-markdown--protected-token-fallback token)))
      ((string-match (concat "\\`" disco-markdown--regexp-role-mention "\\'") token)
       (setq kind 'role id (match-string 1 token)
             name (or (gethash id disco-markdown--role-map) (format "role:%s" id))
@@ -585,17 +820,53 @@ Return (NODES REST CLOSED-P)."
       (setq kind 'timestamp id (match-string 1 token) style (match-string 2 token)
             display (disco-markdown--format-timestamp id style)))
      ((string-match (concat "\\`" disco-markdown--regexp-guild-navigation "\\'") token)
-      (setq kind 'navigation id (string-trim (match-string 1 token))
-            display (format "id:%s" (if (string-empty-p id) "unknown" id))))
-     ((string-match-p (concat "\\`" disco-markdown--regexp-everyone-mention "\\'") token)
+      (setq kind 'navigation id (match-string 1 token)
+            display (format "id:%s" id)))
+     ((string-match-p
+       (concat "\\`" disco-markdown--regexp-suppressed-link "\\'") token)
+      (setq kind 'suppressed-link
+            url (substring token 1 -1)
+            display url
+            fallback
+            (list
+             (appkit-markup-link url (list (appkit-markup-text display))))))
+     ((string-match-p
+       (concat "\\`" disco-markdown--regexp-email-link "\\'") token)
+      (let ((inner (substring token 1 -1)))
+        (setq kind 'email
+              url (if (string-prefix-p "mailto:" inner)
+                      inner
+                    (concat "mailto:" inner))
+              display (string-remove-prefix "mailto:" inner)
+              fallback
+              (list
+               (appkit-markup-link url (list (appkit-markup-text display)))))))
+     ((string-match-p
+       (concat "\\`" disco-markdown--regexp-phone-link "\\'") token)
+      (let ((inner (substring token 1 -1)))
+        (setq kind 'phone
+              url (if (string-match-p "\\`\\(?:tel\\|sms\\):" inner)
+                      inner
+                    (concat "tel:" inner))
+              display inner
+              fallback
+              (list
+               (appkit-markup-link url (list (appkit-markup-text display)))))))
+     ((string-match-p
+       (concat "\\`" disco-markdown--regexp-standard-emoji "\\'") token)
+      (setq kind 'standard-emoji
+            name (substring token 1 -1)
+            display token))
+     ((string-match-p
+       (concat "\\`" disco-markdown--regexp-everyone-mention "\\'") token)
       (setq kind 'everyone name token display token))
      (t
-      (setq kind 'navigation id (string-remove-prefix "id:" token)
-            display token)))
+      (setq kind 'literal display (format "%s" token))))
     (appkit-markup-object
      (disco-markdown-object--create
-      :kind kind :raw token :id id :name name :style style :animated animated)
-     (list (appkit-markup-text display))
+      :kind kind :raw raw :id id :name name :style style
+      :animated animated :url url)
+     (or fallback (list (appkit-markup-text display)))
      styles)))
 
 (defun disco-markdown--split-provider-tokens (node)
@@ -628,7 +899,11 @@ Return (NODES REST CLOSED-P)."
                (push
                 (if disco-markdown-enable-discord-tokens
                     (disco-markdown--token-object raw styles)
-                  (appkit-markup-text raw styles))
+                  (appkit-markup-text
+                   (if (disco-markdown--protected-token-p raw)
+                       (disco-markdown--protected-token-fallback raw)
+                     raw)
+                   styles))
                 result)
                (setq start (1+ position)))
       (when (< start (length text))
@@ -678,7 +953,10 @@ Return (NODES REST CLOSED-P)."
   (let ((result text)
         (escapes `((:escape-less . ?<) (:escape-at . ?@)
                    (:escape-pipe . ?|) (:escape-underscore . ?_)
-                   (:escape-dash . ?-) (:escape-hash . ?#))))
+                   (:escape-dash . ?-) (:escape-hash . ?#)
+                   (:escape-tilde . ?~) (:escape-paren . ?\))
+                   (:escape-space . ?\s) (:escape-plus . ?+)
+                   (:escape-greater . ?>))))
     (dolist (entry escapes)
       (setq result
             (replace-regexp-in-string
@@ -695,10 +973,18 @@ Return (NODES REST CLOSED-P)."
              (regexp-quote (plist-get disco-markdown--sentinels (car entry)))
              (cdr entry) result t t)))
     (maphash
-     (lambda (character raw)
+     (lambda (character original)
        (setq result
              (replace-regexp-in-string
-              (regexp-quote (char-to-string character)) raw result t t)))
+              (regexp-quote (char-to-string character))
+              (char-to-string original) result t t)))
+     (plist-get disco-markdown--sentinels :code-table))
+    (maphash
+     (lambda (character raw)
+       (when (stringp raw)
+         (setq result
+               (replace-regexp-in-string
+                (regexp-quote (char-to-string character)) raw result t t))))
      (plist-get disco-markdown--sentinels :provider-table))
     result))
 
@@ -829,7 +1115,47 @@ Return (NODES REST CLOSED-P)."
                   (char-table-range
                    disco-markdown--spoiler-translation-table character))
                  'rear-nonsticky '(display))))
-      (setq position (1+ position))))))
+        (setq position (1+ position))))))
+
+(defun disco-markdown--provider-action (value)
+  "Return `(ACTION . HELP)' for provider VALUE, or nil."
+  (let ((kind (disco-markdown-object-kind value))
+        (id (disco-markdown-object-id value))
+        (name (disco-markdown-object-name value)))
+    (pcase kind
+      ('user
+       (cons
+        (lambda ()
+          (when (fboundp 'disco-user-open)
+            (funcall
+             'disco-user-open id
+             (and (boundp 'disco-room--guild-id)
+                  (symbol-value 'disco-room--guild-id)))))
+        "Open user profile"))
+      ('channel
+       (cons
+        (lambda ()
+          (when (fboundp 'disco-room-open)
+            (funcall 'disco-room-open id name)))
+        "Open channel"))
+      ('command
+       (cons
+        (lambda ()
+          (when (and (appkit-chatbuf-input-start-position)
+                     (fboundp 'appkit-chatbuf-input-insert))
+            (appkit-chatbuf-focus-input)
+            (appkit-chatbuf-input-insert (concat "/" name " "))))
+        "Insert command into composer"))
+      ('timestamp
+       (cons
+        (lambda ()
+          (message
+           "Discord timestamp: %s"
+           (format-time-string
+            "%Y-%m-%d %H:%M:%S %Z"
+            (seconds-to-time (string-to-number id)))))
+        "Show exact timestamp"))
+      (_ nil))))
 
 (defun disco-markdown--insert-object-fallback (node object-inserter)
   "Insert semantic fallback of object NODE using OBJECT-INSERTER recursively."
@@ -904,7 +1230,12 @@ Return (NODES REST CLOSED-P)."
                   ('timestamp 'disco-markdown-timestamp-face)
                   ('navigation 'disco-markdown-navigation-face)
                   (_ 'appkit-markup-object-fallback-face))
-                'append)))))))
+                'append)
+               (when-let* ((action
+                            (and (disco-markdown-object-p value)
+                                 (disco-markdown--provider-action value))))
+                 (appkit-ui-add-action
+                  start (point) (car action) :help-echo (cdr action)))))))))
     inserter))
 
 (defun disco-markdown--native-face-p (face expected)
@@ -1118,8 +1449,9 @@ Return (NODES REST CLOSED-P)."
               (pcase kind
                 ('spoiler (concat "||" fallback "||"))
                 ('subtitle (concat "-# " fallback))
-                ((or 'user 'role 'channel 'command 'emoji
-                     'timestamp 'navigation 'everyone)
+                ((or 'user 'role 'channel 'command 'emoji 'standard-emoji
+                     'timestamp 'navigation 'everyone 'literal
+                     'suppressed-link 'email 'phone)
                  (or (disco-markdown-object-raw value) fallback))
                 (_
                  (push (appkit-markup-loss 'object path) (car losses))
@@ -1222,6 +1554,202 @@ Return (NODES REST CLOSED-P)."
      (disco-markdown--printer-blocks
       (appkit-markup-document-blocks document) '(blocks) losses)
      (nreverse (car losses)))))
+
+(defun disco-markdown--chunk-print-blocks (blocks)
+  "Print BLOCKS or reject a lossy Discord chunk."
+  (let* ((document (appkit-markup-document blocks))
+         (printed (disco-markdown--codec-print document nil))
+         (losses (appkit-markup-print-result-losses printed)))
+    (when losses
+      (signal 'appkit-markup-codec-error '(discord-chunk-semantic-loss)))
+    (cons
+     (string-trim-right (appkit-markup-print-result-source printed))
+     document)))
+
+(defun disco-markdown--chunk-blocks-fit-p (blocks limit)
+  "Return non-nil when printed BLOCKS fit LIMIT."
+  (<= (length (car (disco-markdown--chunk-print-blocks blocks))) limit))
+
+(defun disco-markdown--chunk-inline-blocks
+    (children constructor limit)
+  "Split inline CHILDREN through block CONSTRUCTOR under LIMIT."
+  (let (current chunks)
+    (cl-labels
+        ((block (nodes) (funcall constructor nodes))
+         (fits (nodes)
+           (disco-markdown--chunk-blocks-fit-p (list (block nodes)) limit))
+         (flush ()
+           (when current
+             (push (block current) chunks)
+             (setq current nil)))
+         (prefix-width
+          (text styles)
+          (let ((low 1) (high (length text)) (best 0))
+            (while (<= low high)
+              (let* ((middle (/ (+ low high) 2))
+                     (node (appkit-markup-text
+                            (substring text 0 middle) styles)))
+                (if (fits (append current (list node)))
+                    (setq best middle low (1+ middle))
+                  (setq high (1- middle)))))
+            best)))
+      (dolist (node children)
+        (if (fits (append current (list node)))
+            (setq current (append current (list node)))
+          (if (not (appkit-markup-text-p node))
+              (progn
+                (flush)
+                (unless (fits (list node))
+                  (signal 'appkit-markup-codec-error
+                          '(discord-atomic-inline-too-long)))
+                (setq current (list node)))
+            (let ((text (appkit-markup-text-text node))
+                  (styles (appkit-markup-text-styles node)))
+              (while (not (string-empty-p text))
+                (let ((width (prefix-width text styles)))
+                  (cond
+                   ((> width 0)
+                    (setq current
+                          (append
+                           current
+                           (list
+                            (appkit-markup-text
+                             (substring text 0 width) styles)))
+                          text (substring text width))
+                    (unless (string-empty-p text) (flush)))
+                   (current (flush))
+                   (t
+                    (signal 'appkit-markup-codec-error
+                            '(discord-inline-too-long))))))))))
+      (flush)
+      (nreverse chunks))))
+
+(defun disco-markdown--chunk-preformatted (block limit)
+  "Split preformatted BLOCK under LIMIT."
+  (if (disco-markdown--chunk-blocks-fit-p (list block) limit)
+      (list block)
+    (let ((text (appkit-markup-preformatted-text block))
+          (language (appkit-markup-preformatted-language block))
+          chunks)
+      (while (not (string-empty-p text))
+        (let ((low 1) (high (length text)) (best 0))
+          (while (<= low high)
+            (let* ((middle (/ (+ low high) 2))
+                   (candidate
+                    (appkit-markup-preformatted
+                     (substring text 0 middle) language)))
+              (if (disco-markdown--chunk-blocks-fit-p
+                   (list candidate) limit)
+                  (setq best middle low (1+ middle))
+                (setq high (1- middle)))))
+          (when (= best 0)
+            (signal 'appkit-markup-codec-error
+                    '(discord-preformatted-too-long)))
+          (push
+           (appkit-markup-preformatted (substring text 0 best) language)
+           chunks)
+          (setq text (substring text best))))
+      (nreverse chunks))))
+
+(defun disco-markdown--chunk-list (block limit)
+  "Split list BLOCK between items under LIMIT."
+  (if (disco-markdown--chunk-blocks-fit-p (list block) limit)
+      (list block)
+    (let ((style (appkit-markup-list-style block))
+          (start (appkit-markup-list-start block))
+          (offset 0)
+          current current-start chunks)
+      (dolist (item (appkit-markup-list-items block))
+        (let* ((candidate-start
+                (and (eq style 'ordered)
+                     (or current-start (+ (or start 1) offset))))
+               (candidate
+                (appkit-markup-list
+                 style (append current (list item))
+                 :start candidate-start)))
+          (if (disco-markdown--chunk-blocks-fit-p
+               (list candidate) limit)
+              (progn
+                (unless current
+                  (setq current-start candidate-start))
+                (setq current (append current (list item))))
+            (unless current
+              (signal 'appkit-markup-codec-error
+                      '(discord-list-item-too-long)))
+            (push
+             (appkit-markup-list style current :start current-start)
+             chunks)
+            (setq current (list item)
+                  current-start
+                  (and (eq style 'ordered) (+ (or start 1) offset)))
+            (unless (disco-markdown--chunk-blocks-fit-p
+                     (list
+                      (appkit-markup-list
+                       style current :start current-start))
+                     limit)
+              (signal 'appkit-markup-codec-error
+                      '(discord-list-item-too-long)))))
+        (setq offset (1+ offset)))
+      (when current
+        (push (appkit-markup-list style current :start current-start)
+              chunks))
+      (nreverse chunks))))
+
+(defun disco-markdown--chunk-block (block limit)
+  "Return lossless chunks for semantic BLOCK under LIMIT."
+  (cond
+   ((disco-markdown--chunk-blocks-fit-p (list block) limit)
+    (list block))
+   ((appkit-markup-paragraph-p block)
+    (disco-markdown--chunk-inline-blocks
+     (appkit-markup-paragraph-children block)
+     #'appkit-markup-paragraph limit))
+   ((appkit-markup-heading-p block)
+    (let ((level (appkit-markup-heading-level block)))
+      (disco-markdown--chunk-inline-blocks
+       (appkit-markup-heading-children block)
+       (lambda (children) (appkit-markup-heading level children))
+       limit)))
+   ((appkit-markup-preformatted-p block)
+    (disco-markdown--chunk-preformatted block limit))
+   ((appkit-markup-list-p block)
+    (disco-markdown--chunk-list block limit))
+   (t
+    (signal 'appkit-markup-codec-error
+            '(discord-structural-block-too-long)))))
+
+(defun disco-markdown-print-chunks (document limit)
+  "Print immutable DOCUMENT as lossless Discord chunks within LIMIT.
+
+Return ordered plists containing :source and the exact :document for local
+echo.  Atomic objects and structural blocks are never cut."
+  (unless (and (appkit-markup-document-p document)
+               (integerp limit) (> limit 0))
+    (signal 'appkit-markup-codec-error '(invalid-discord-chunk-input)))
+  (let* ((expanded
+          (apply
+           #'append
+           (mapcar
+            (lambda (block) (disco-markdown--chunk-block block limit))
+            (appkit-markup-document-blocks document))))
+         current chunks)
+    (cl-labels
+        ((flush ()
+           (when current
+             (let* ((printed
+                     (disco-markdown--chunk-print-blocks current))
+                    (source (car printed))
+                    (chunk-document (cdr printed)))
+               (push (list :source source :document chunk-document) chunks))
+             (setq current nil))))
+      (dolist (block expanded)
+        (let ((candidate (append current (list block))))
+          (if (disco-markdown--chunk-blocks-fit-p candidate limit)
+              (setq current candidate)
+            (flush)
+            (setq current (list block)))))
+      (flush)
+      (nreverse chunks))))
 
 (defun disco-markdown--codec-parse (source context)
   "Parse Discord Markdown SOURCE into provider-aware semantics."

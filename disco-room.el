@@ -2086,6 +2086,9 @@ _MSG is ignored because the transient resolves availability from point."
     ("V" "Edit attachment desc" disco-room-edit-attachment-description
      :if-not (lambda ()
                (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("S" "Toggle attachment spoiler" disco-room-toggle-attachment-spoiler
+     :if-not (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
     ("O" "Reorder attachments" disco-room-reorder-attachments
      :if-not (lambda ()
                (disco-room--attachment-token-action-unavailable-reason 2)))
@@ -2191,6 +2194,7 @@ _MSG is ignored because the transient resolves availability from point."
   "C-c C-x" #'disco-room-clear-attachments
   "C-c M-l" #'disco-room-list-attachments
   "C-c M-e" #'disco-room-edit-attachment-description
+  "C-c M-s" #'disco-room-toggle-attachment-spoiler
   "C-c M-r" #'disco-room-reorder-attachments
   "C-c C-k" #'disco-room-cancel-reply
   "ESC ESC" #'disco-room-cancel-reply

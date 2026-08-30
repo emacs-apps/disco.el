@@ -215,11 +215,14 @@ the third.  The default order is Discord Markdown, Org, plain.
 | ~-~ / ~1~ | unordered, ordered list |
 | ~f~ | set persistent source format |
 
-Region edits preserve the selected source codec.  Attachments remain atomic
-composer objects and are captured as side channels; they are never encoded as
-Markdown.  Reply/edit state remains separate from source syntax.  Entering a
-server edit temporarily selects the provider-aware Discord Markdown codec, then
-cancel or success restores the previous rich draft and source format.
+Region edits preserve the selected source codec.  Discord parsing keeps
+provider tokens and escapes literal inside code, preserves escaped mentions,
+supports ~>>>~ multiline quotes, and retains ~<https://…>~ embed suppression.
+Attachments remain atomic composer objects and are captured as side channels;
+they are never encoded as Markdown.  Reply/edit state remains separate from
+source syntax.  Entering a server edit temporarily selects the provider-aware
+Discord Markdown codec, then cancel or success restores the previous rich draft
+and source format.
 
 | Variable | Meaning |
 |----------+---------|
@@ -239,11 +242,16 @@ visible when images are unavailable.
 | Key | Action |
 |-----+--------|
 | ~C-c C-a~ | choose an attachment command |
-| ~C-c C-f~ | attach a file |
+| ~C-c C-f~ | attach a file; use ~C-u C-c C-f~ for a spoiler attachment |
 | ~C-c C-i~ | choose and send a Sticker |
 | ~C-c C-d~ | remove the attachment at point |
 | ~C-c C-x~ | clear all attachments |
-| ~C-c M-l~ / ~C-c M-e~ / ~C-c M-r~ | list, edit, or reorder |
+| ~C-c M-l~ / ~C-c M-e~ / ~C-c M-s~ / ~C-c M-r~ | list, edit, toggle spoiler, or reorder |
+
+Long-message split mode partitions the immutable semantic Document and prints
+each leg independently, so spoiler/style delimiters and code fences remain
+balanced.  An indivisible structural block that cannot fit is rejected; choose
+file mode rather than cutting provider syntax.
 
 Title and preview open or play the item.  An in-flight transfer
 control stays inline with Cancel.  Download, Save As, and Copy URL

@@ -420,9 +420,10 @@ FIELD-NAME is used to describe the failing payload field."
     (disco-api--multipart-write-string "\r\n")))
 
 (defun disco-api--normalize-send-attachment (attachment)
-  "Normalize ATTACHMENT into plist with :path/:filename/:description/:content-type.
+  "Normalize ATTACHMENT into one upload descriptor.
 
-ATTACHMENT may be a file path string or a plist containing :path."
+ATTACHMENT may be a file path string or a plist containing :path.  Plists may
+also carry :filename, :description, :content-type, and :is-spoiler."
   (let* ((path (cond
                 ((stringp attachment) attachment)
                 ((and (listp attachment) (plist-get attachment :path))
@@ -430,7 +431,8 @@ ATTACHMENT may be a file path string or a plist containing :path."
                 (t nil)))
          (description (and (listp attachment) (plist-get attachment :description)))
          (filename (and (listp attachment) (plist-get attachment :filename)))
-         (content-type (and (listp attachment) (plist-get attachment :content-type))))
+         (content-type (and (listp attachment) (plist-get attachment :content-type)))
+         (spoiler (and (listp attachment) (plist-get attachment :is-spoiler))))
     (unless (and (stringp path) (not (string-empty-p path)))
       (user-error "disco: attachment must include a file path"))
     (unless (file-readable-p path)
@@ -442,7 +444,8 @@ ATTACHMENT may be a file path string or a plist containing :path."
                               (not (string-empty-p (string-trim description)))
                               (string-trim description))
             :content-type (or content-type
-                              (disco-api--guess-content-type resolved-filename))))))
+                              (disco-api--guess-content-type resolved-filename))
+            :is-spoiler (and spoiler t)))))
 
 (defun disco-api--build-message-multipart-body (payload attachments)
   "Build multipart body for message PAYLOAD and ATTACHMENTS.
@@ -812,6 +815,8 @@ STICKER-IDS contains at most three Discord sticker snowflakes."
                       (let ((description (plist-get attachment :description)))
                         (when description
                           (setq entry (append entry `((description . ,description))))))
+                      (when (plist-get attachment :is-spoiler)
+                        (setq entry (append entry '((is_spoiler . t)))))
                       (push entry attachment-objects)))
         (push `(attachments . ,(nreverse attachment-objects)) payload)))
     (when poll
