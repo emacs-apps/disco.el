@@ -1,0 +1,84 @@
+#+title: disco.el development
+#+options: toc:2 num:nil
+
+* Dependencies
+
+- Emacs 31.1
+- ~plz~ for HTTP
+- ~websocket~ for Gateway
+- Appkit 0.3.0 for views, semantic markup, source-backed composition, and media
+
+* File layout
+
+| File | Owns |
+|------+------|
+| ~disco.el~ | package entry |
+| ~disco-customize.el~ | user options and token command |
+| ~disco-markdown.el~ | bounded Discord Markdown Adapter, provider objects, native rendering, and provider printer |
+| ~disco-ins.el~ | attachment and message insertion |
+| ~disco-media.el~ | attachment, spoiler, waveform, audio |
+| ~disco-sticker.el~ | Sticker catalogs, ranking, visual selection, and image projection |
+| ~disco-api.el~ | REST, sync and async |
+| ~disco-http.el~ | ~plz~ wrapper |
+| ~disco-permission.el~ | permission bitfields |
+| ~disco-state.el~ | in-memory guild, channel, and message cache |
+| ~disco-directory.el~ | guild and DM indexes |
+| ~disco-preview.el~ | latest-message preview hydration |
+| ~disco-gateway.el~ | Gateway transport and dispatch |
+| ~disco-root-render.el~ | composite/search render specifications |
+| ~disco-root-view.el~ | root row models and renderers |
+| ~disco-root.el~ | root controllers and live updates |
+| ~disco-user.el~ | Appkit profile views keyed by user and server context |
+| ~disco-channel-directory.el~ | per-guild browser and async Guild Profile overview |
+| ~disco-room.el~ | room render and send |
+| ~disco-company.el~ | composer completion |
+
+
+* Design notes
+
+Root and room refresh use async requests.  HTTP is ~plz~ with
+optional in-process serialization.  REST applies global and
+bucket/route cooldown plus bounded 429 retries.
+
+Gateway follows HELLO, heartbeat, identify, and resume.  Dispatch
+mutates channel, guild, and thread structure.  Optional
+~compress=zlib-stream~ uses a per-connection shared stream context.
+Reconnect uses exponential backoff with jitter; ~INVALID_SESSION~
+uses a randomized delay window.
+
+Guild directories defer passive EWOC mutations while hidden, then
+coalesce dirty channel IDs when redisplayed.  Room EWOC keeps
+message-node indexes; reaction and poll-vote events patch rows
+locally, while create, update, and delete rerender fully.
+
+READY channel snapshots are reused.  Missing latest-message previews
+hydrate through Gateway opcode 34 (~LAST_MESSAGES~).  Identify can
+include ~PASSIVE_GUILD_UPDATE_V2~ so activity can refresh from
+passive unread deltas.
+
+Shared presentation contracts are documented in Appkit's integrator guide,
+not duplicated here.  The ~discord-markdown~ codec is itself the provider
+extension boundary:
+
+1. A bounded lexical pass marks inline/fenced code zones.
+2. Discord escapes, provider tokens, spoilers, underline, subtitles, ~>>>~
+   quotes, suppressed links, and the documented block subset are shielded
+   outside those zones.
+3. Appkit's low-level dual-grammar Tree-sitter backend adapts the remaining
+   Markdown structure.
+4. Discord objects are restored as independent immutable occurrences.
+
+Parsing never activates a major mode, Font Lock, language hooks, or grammar
+installation.  Generic Appkit codec registration already permits this complete
+provider parser/printer pair; no provider hooks were added to Appkit.
+
+Room composition defaults to ~discord-markdown~.  The provider printer retains
+escaped mentions and provider wire forms.  Long-message split mode partitions
+the captured Document and reprints each chunk rather than slicing Markdown
+source.  Attachment spoiler state remains in its attachment side channel.
+
+* Next
+
+1. Structured mention insertion in addition to exact textual Discord completion.
+2. Faster navigation (~M-g~ unread, mentions, reactions).
+3. Queue prioritization so user actions beat background work.

@@ -1,0 +1,370 @@
+#+title: disco.el user guide
+#+options: toc:2 num:nil
+
+* Start
+
+The default token comes from ~DISCO_TOKEN~.  ~M-x disco-set-token~
+overrides it for the session.  ~M-x disco~ opens the root navigator.
+
+Disco requires Emacs 31.1, Appkit 0.3.0, and both pinned native Markdown
+Tree-sitter grammars.  Install the grammars explicitly once:
+
+#+begin_src emacs-lisp
+(appkit-markup-markdown-ts-install-grammars)
+#+end_src
+
+Startup and message parsing never install grammars or activate
+~markdown-ts-mode~.
+
+Enable optional presentation modes:
+
+#+begin_src emacs-lisp
+(disco-client-mode-line-mode 1)
+(disco-notifications-mode 1)
+#+end_src
+
+The mode line shows clickable unread and mention status.
+Notifications are delayed and visibility-aware.
+
+** Evil
+
+When Evil is installed, Disco loads native integration automatically.  The
+ordinary mode maps remain the Emacs-state interface; normal and motion states
+use a separate modal vocabulary, so native sequences such as ~gg~, ~n~, and
+operators remain intact.  Set ~disco-evil-enable-integration~ to nil to disable
+it, or customize ~disco-evil-initial-state~.
+
+| Surface | Normal / motion keys |
+|---------+----------------------|
+| all read-only views | ~q~ / ~ZZ~ close; ~ZQ~ uses ~evil-quit~ |
+| root | ~RET~ open; ~g r~ refresh; ~g s~ / ~g S~ search; ~g v~ view; ~g t~ fold; ~g A~ archives |
+| guild directory | ~RET~ open; ~g r~ refresh; ~g s~ / ~g S~ filter; ~g t~ fold; ~g A~ archives |
+| room | ~g r~ refresh, ~g s~ search, ~g n~ / ~g p~ continue search |
+| room timeline | ~i~ composer, ~R~ reply, ~g f~ forward, ~E~ edit, ~D~ delete, ~Y~ copy, ~g y~ copy link |
+| room timeline | ~g j~ / ~g k~ move, ~!~ / ~+~ / ~-~ react, ~T~ thread, ~?~ menu |
+
+Timeline bindings are active only when point is outside the composer.  ~i~
+moves to the draft and enters insert state; message keys never steal draft
+input.  Evil Snipe is disabled in Disco's read-only application buffers so its
+local overrides cannot shadow these bindings.
+
+* Root
+
+Root is summary-first: guild and DM indexes load without a per-guild
+REST fan-out.  Opening a guild hydrates only that guild.  ~g~
+refreshes the index; ~C-u g~ refreshes every guild directory.
+The guild directory begins with a compact server overview when Discord exposes
+one: description, member/online and boost counts, community traits, and the
+account's join date.  Profile details load independently of the channel tree;
+~g~ refreshes both.
+
+| Key | Action |
+|-----+--------|
+| ~n~ / ~p~ / ~TAB~ | move |
+| ~RET~ | open |
+| ~u~ | unread navigation |
+| ~\~ | toggle sort |
+| ~v~ | cycle all / unread / DMs |
+| ~U~ | unread lens |
+| ~A~ | archived threads for the selected parent |
+| ~s~ / ~S~ | search / advanced structured search |
+
+Root has one composite presentation: unread shortcuts, direct messages, and
+lazily expanded guild trees.  Search temporarily replaces that projection.
+Its first action is ~Back to root~; optional empty result sections disappear
+after loading, while each live section keeps its own loading and ~Show more~
+state.  In Evil normal/motion state, ~l~ and ~L~ retain their native motions.
+
+Private channels (DM, group DM, ephemeral DM) appear in root.  Each row uses
+one whole-row delimiter around its complete context.  Stable Discord types
+select the delimiter: ={user}= for DM, =⦃user⦄= for ephemeral DM, =(group)=
+for group DM, =[[guild]]= for a Guild container, and
+=[guild > category > channel]= for an ordinary Guild channel.  Specialized
+channels use =⟪announcement⟫=, =⟨thread⟩=, =⦇private thread⦈=, =「voice」=,
+=『stage』=, =⟦forum⟧=, =【media】=, =〔directory〕=, and =⌜lobby⌝=.  Category is
+only an unbracketed path fragment, not a conversation row.  Redundant leading
+type glyphs such as =#=, =◎=, and =↳= are omitted; cached user avatars,
+custom Group DM icons, and Guild identity icons remain.  Customize
+~disco-root-show-group-dm-icons~ to disable Group DM icon loading.  Guild
+channels without ~VIEW_CHANNEL~ are
+hidden.  Mention badges ~@N~ are right-aligned inside the row's delimiter;
+Disco does not infer a per-channel unread message count.  ~[read]~ means the
+local cursor reached ~last_message_id~.
+
+Customize ~disco-title-bracket-rules~ to replace or prepend ordered rules.
+Each rule is ~(SELECTOR OPEN CLOSE)~ and the first match wins.  A selector can
+be a presentation kind such as ~channel~, an exact Discord type such as
+~(channel-type 5)~, ~t~ as the fallback, or a predicate function.  OPEN may
+include a former type prefix: ~(channel "#[" "]")~ renders ~#[channel]~.
+Appkit measures the complete customized strings, so prefixes and multi-column
+Unicode delimiters retain row alignment.
+
+Root, thread, archived-thread, and search rows show a one-line image, video
+poster, or Sticker preview when its shared media cache is ready.
+Spoiler attachments stay textual.  Cache completion refreshes only the
+dependent channel rows; failed or unsupported images retain the ordinary
+message summary.
+
+** Guild directories
+
+Directories use collapsible categories, text and unread lenses, and
+active-thread nesting under forum and media parents.
+
+| Key | Action |
+|-----+--------|
+| ~/~ | text lens |
+| ~U~ | unread lens |
+| ~RET~ / ~TAB~ | open a channel or toggle a category |
+| ~g~ | refresh the selected guild only |
+| ~A~ | archived-thread browser for a parent or child post |
+
+The first expansion of a forum or media parent fetches one active
+thread page.  ~Load more active posts~ advances one page.  A failed
+page keeps committed posts and the exact cursor.  Threads under
+ordinary text channels open from messages, references, or search;
+they are not inserted into the directory.
+
+** Archived threads
+
+| Key | Action |
+|-----+--------|
+| ~n~ / ~p~ | move |
+| ~m~ | load the next page |
+| ~RET~ | open the selected thread |
+
+Private archived sources are queried only with ~MANAGE_THREADS~.
+
+* User profiles
+
+Sender names in room message headers are buttons.  Activate one with the mouse
+or ~RET~ to open a Telega-style user page.  Its first two lines combine the
+avatar, display name, username, and current presence without a separate
+identity card.  The page appears immediately from the message author object,
+then fills Discord's extended profile asynchronously.  When opened from a
+server message it keeps that server context and shows the member nickname,
+server bio, pronouns, join date, and boost date separately from the
+account-wide profile.
+
+Each user and server-context pair owns an independent profile page.  Opening
+the same pair again reuses that page; opening another user or the same user
+from another server preserves both pages and their asynchronous state.
+
+| Key | Action |
+|-----+--------|
+| ~g~ | refresh the extended profile |
+| ~m~ | create or open a direct message |
+| ~Y~ | copy the Discord user ID |
+| ~TAB~ / ~S-TAB~ | move between actions |
+| ~q~ | close the page |
+
+The extended profile also includes available badges, mutual servers, mutual
+friends, connected accounts, presence, and the account creation date.  Mutual
+servers use compact =[server ... members]= rows with a right-aligned cached
+member count when available; each server name opens its channel directory.
+Each available mutual friend uses a ={name · @username}= row that opens that
+user's independent profile page.  Discord may return only the friend count
+when detailed profile data is private or unavailable.
+
+* Rooms
+
+Rooms use compact same-sender grouping, date separators, and an
+unread divider.  Grouped messages show an author header with a
+right-aligned time, then indented body and reply lines.
+
+The prompt and history are immutable.  Only the draft after ~>>>~ is
+editable.
+
+| Key | Action |
+|-----+--------|
+| ~RET~ | send with the persistent source format; return to the composer from the timeline |
+| ~C-c RET~ | send explicitly; ~C-u~ selects Org and ~C-u C-u~ selects plain for this send |
+| ~C-c C-c~ | cancel an active message filter |
+| ~C-c C-k~ / ~ESC ESC~ / ~C-M-c~ | cancel reply or edit context |
+| ~C-c '~ | edit the draft in another buffer |
+| ~M-p~ / ~M-n~ / ~M-r~ | draft history |
+| ~M-RET~ | semantic preview; universal prefixes select the same per-command source formats |
+| ~M-g s~ / ~M-g n~ / ~M-g p~ | keyboard search |
+| ~C-c C-o~ | room input options |
+| ~C-c M-v~ | clear avatar cache and refetch |
+| ~?~ / ~C-c ?~ | room transient |
+
+History extends automatically near either visible edge.  ~M-<~ and
+~M->~ keep native beginning and end-of-buffer bindings.
+
+Live Gateway events update create, update, and delete.  The room
+closes if its channel or guild is deleted.
+
+** Composer
+
+~TAB~ completes ~@~, ~#~, and ~:~ tokens: guild members, roles,
+~@everyone~ / ~@here~, channels, Unicode emoji, and guild custom
+emoji.  Inserted text uses native Discord mention and emoji syntax.
+
+The persistent source format defaults to Discord Markdown, including provider
+extensions such as ~||spoiler||~ and ~__underline__~.  Customize
+~disco-room-compose-codecs~ or use ~C-c f~ to change it.  Users enter the
+selected source syntax directly; the composer does not rewrite point or region
+with preset formatting delimiters.
+
+One universal prefix selects the second configured codec for one preview/send;
+two select the third.  The default order is Discord Markdown, Org, plain.
+Discord parsing keeps provider tokens and escapes literal inside code,
+preserves escaped mentions, supports ~>>>~ multiline quotes, and retains
+~<https://…>~ embed suppression.
+Attachments remain atomic composer objects and are captured as side channels;
+they are never encoded as Markdown.  Reply/edit state remains separate from
+source syntax.  Entering a server edit temporarily selects the provider-aware
+Discord Markdown codec, then cancel or success restores the previous rich draft
+and source format.
+
+| Variable | Meaning |
+|----------+---------|
+| ~disco-room-compose-codecs~ | ordered source formats and prefix selection |
+| ~disco-room-enable-company-backend~ | optional company backend |
+| ~disco-company-show-user-avatars~ | avatars in completion rows |
+| ~disco-company-capf-avatar-size~ | stable completion row height |
+| ~disco-room-allowed-mentions~ | mention send policy |
+| ~disco-room-reply-mention-replied-user~ | whether a reply pings the author |
+
+Reply and edit cards use the same one-line media projection as root rows.
+The image is cache-backed and optional; the author and message text remain
+visible when images are unavailable.
+
+** Attachments
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-a~ | choose an attachment command |
+| ~C-c C-f~ | attach a file; use ~C-u C-c C-f~ for a spoiler attachment |
+| ~C-c C-i~ | choose and send a Sticker |
+| ~C-c C-d~ | remove the attachment at point |
+| ~C-c C-x~ | clear all attachments |
+| ~C-c M-l~ / ~C-c M-e~ / ~C-c M-s~ / ~C-c M-r~ | list, edit, toggle spoiler, or reorder |
+
+Long-message split mode partitions the immutable semantic Document and prints
+each leg independently, so spoiler/style delimiters and code fences remain
+balanced.  An indivisible structural block that cannot fit is rejected; choose
+file mode rather than cutting provider syntax.
+
+Title and preview open or play the item.  An in-flight transfer
+control stays inline with Cancel.  Download, Save As, and Copy URL
+live in the message transient.  Audio keeps play, pause, and stop
+waveform controls inline.
+
+The Sticker picker searches names, tags, IDs, current-server Stickers,
+and Discord standard packs.  ~C-u C-c C-i~ restricts it to Favorite
+and Frequently Used Stickers from Discord account settings.  Static,
+APNG, GIF, and Lottie Stickers render through the shared image path.
+APNG and GIF previews play as bounded native images; ~RET~ on a Lottie
+Sticker streams its native frames.  Lottie rendering requires ~tgs2png~.
+Unsupported or temporarily unavailable images retain a textual Sticker label.
+
+** Messages
+
+Timeline keys apply outside the composer:
+
+| Key | Action |
+|-----+--------|
+| ~n~ / ~p~ | next or previous message |
+| ~c~ | copy DWIM |
+| ~l~ | copy permalink |
+| ~o~ | message action transient |
+| ~r~ | reply |
+| ~C-c C-k~ / ~ESC ESC~ / ~C-M-c~ | clear pending reply or edit |
+| ~f~ | forward |
+| ~e~ | edit |
+| ~d~ | delete, with confirmation |
+| ~i~ | describe |
+| ~L~ | redisplay |
+| ~!~ | add reaction |
+| ~+~ | toggle reaction |
+| ~-~ | remove reaction |
+| ~T~ | open thread |
+
+The add/toggle reaction commands open a searchable, sectioned visual catalog.
+Sections are ordered as top/newly-added guild emoji, account favorites,
+frequently used reactions, reactions already on the message, current and
+eligible external guild catalogs, then Unicode emoji.  Account ranking data is
+prefetched when a room opens from Discord's private settings/top-emoji routes;
+until that asynchronous load completes, the picker still contains the local
+guild/message/Unicode sources.  Disabled and role-locked custom emoji are
+omitted.  External guild emoji require Nitro and channel permission.
+
+Custom emoji rows lazily load cached CDN WebP previews only when displayed.
+Animated emoji request animated WebP when both Disco and Appkit animation
+settings permit it; otherwise the same row uses a static preview.  Reactions
+already present on the message remain selectable even when their custom emoji
+was renamed or deleted.  Remove offers only reactions selected by the current
+account.  The message's suggested reaction remains the ~RET~ default.  When no
+catalog is available, add/toggle accepts an unrestricted reaction string.
+
+~C-c m~ exposes the same message family from anywhere in the room.
+
+** Polls
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-p s~ | send a poll |
+| ~C-c C-p +~ / ~-~ / ~t~ | select, unselect, or toggle a staged answer |
+| ~C-c C-p v~ | submit the staged vote |
+| ~C-c C-p c~ | remove own vote |
+| ~C-c C-p e~ | end the poll |
+
+* Threads
+
+In a parent room:
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-t m~ | create from the message at point |
+| ~C-c C-t c~ | create a detached thread |
+| ~C-c C-t o~ | jump to the thread room |
+
+Message rows with starter threads show ~[Open thread]~.
+
+In a thread room:
+
+| Key | Action |
+|-----+--------|
+| ~C-c C-j~ | join |
+| ~C-c C-l~ | leave |
+| ~C-c C-t a~ | toggle archived |
+| ~C-c C-t r~ | rename |
+| ~C-c C-t k~ | toggle locked |
+| ~C-c C-t s~ | slowmode |
+| ~C-c C-t A~ | auto-archive duration |
+| ~C-c C-t e~ | multi-field settings |
+| ~C-c C-t u~ | mute |
+
+* Observability
+
+| Command | Shows |
+|---------+-------|
+| ~M-x disco-describe-http-queue~ | queue limit, active, and pending |
+| ~M-x disco-describe-rate-limits~ | global, route, and bucket cooldowns |
+| ~M-x disco-describe-gateway~ | websocket, watches, resume, backoff |
+
+* Options
+
+| Variable | Meaning |
+|----------+---------|
+| ~disco-root-activity-context-width~ | root row context width |
+| ~disco-root-activity-time-format-alist~ | root row timestamp buckets |
+| ~disco-root-week-start-day~ | week start for those buckets |
+| ~disco-root-activity-time-column-width~ | reserved time column |
+| ~disco-root-auto-fill-on-window-size-change~ | reflow on resize |
+| ~disco-root-auto-fill-margin-columns~ | extra right margin |
+| ~disco-root-extra-info-functions~ | extra row fragments |
+| ~disco-preview-fetch-enabled~ | opcode-34 preview hydration |
+| ~disco-preview-fetch-debounce~ | preview debounce |
+| ~disco-preview-response-timeout~ | preview timeout |
+| ~disco-gateway-version~ | Gateway API version, default v10 |
+| ~disco-gateway-transport-compression~ | ~zlib-stream~ or disabled |
+| ~disco-gateway-identify-intents~ | identify intents bitmask |
+| ~disco-gateway-enable-lazy-channel-subscriptions~ | op 14 for watched guild channels |
+| ~disco-thread-archive-fetch-limit~ | archived-thread page size, 2–100 |
+
+Typing events need ~GUILD_MESSAGE_TYPING~ and/or
+~DIRECT_MESSAGE_TYPING~.  Poll vote events need
+~GUILD_MESSAGE_POLLS~ and/or ~DIRECT_MESSAGE_POLLS~.
+~M-x disco-root-buffer-auto-fill~ forces one manual reflow.

@@ -1,0 +1,1976 @@
+;;; disco-api.el --- Discord REST API wrapper for disco.el -*- lexical-binding: t; -*-
+
+;; Author: disco.el contributors
+
+;;; Commentary:
+
+;; Synchronous HTTP wrapper for MVP workflows:
+;; current user, guild list, guild channels, channel messages, send message.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'json)
+(require 'seq)
+(require 'subr-x)
+(require 'url-util)
+(require 'appkit-core)
+(require 'disco-customize)
+(require 'disco-http)
+(require 'disco-api-normalize)
+
+(define-error 'disco-api-error "Disco API error")
+
+(defvar disco-api--global-rate-limit-until 0.0
+  "Unix timestamp until which global requests must wait.")
+
+(defvar disco-api--route-rate-limit-until (make-hash-table :test #'equal)
+  "Hash route-key -> unix timestamp deadline.")
+
+(defvar disco-api--route-bucket-map (make-hash-table :test #'equal)
+  "Hash route-key -> bucket-id.")
+
+(defvar disco-api--bucket-rate-limit-until (make-hash-table :test #'equal)
+  "Hash bucket-id -> unix timestamp deadline.")
+
+(defvar disco-api--generation 0
+  "Generation of asynchronous work owned by the active API session.")
+
+(defvar disco-api--reset-in-progress nil
+  "Non-nil while account-scoped API work is being destructively reset.")
+
+(defvar disco-api--retry-owners nil
+  "Exact owners of scheduled asynchronous API dispatch/retry timers.")
+
+(cl-defstruct (disco-api--owned-request
+               (:constructor disco-api--owned-request-create))
+  "One cancellable logical API request attached to an Appkit owner."
+  generation
+  timer
+  handle
+  active-p)
+
+(defvar disco-api--owned-requests nil
+  "Active logical API requests attached to Appkit lifecycle owners.")
+
+(defun disco-api--owned-request-current-p (request)
+  "Return non-nil when owned API REQUEST may dispatch or publish."
+  (and (disco-api--owned-request-p request)
+       (disco-api--owned-request-active-p request)
+       (disco-api--session-current-p
+        (disco-api--owned-request-generation request))
+       (memq request disco-api--owned-requests)
+       (when-let* ((handle (disco-api--owned-request-handle request)))
+         (appkit-handle-alive-p handle))))
+
+(defun disco-api--cancel-owned-request (request)
+  "Cancel logical API REQUEST without publishing an outcome."
+  (when (and (disco-api--owned-request-p request)
+             (disco-api--owned-request-active-p request))
+    (let ((timer (disco-api--owned-request-timer request)))
+      (setf (disco-api--owned-request-active-p request) nil
+            (disco-api--owned-request-timer request) nil)
+      (setq disco-api--owned-requests
+            (delq request disco-api--owned-requests))
+      (when (timerp timer)
+        (cancel-timer timer)))
+    t))
+
+(defun disco-api--retire-owned-request (request)
+  "Retire logical API REQUEST after normal settlement."
+  (when (disco-api--cancel-owned-request request)
+    (when-let* ((handle (disco-api--owned-request-handle request)))
+      (when (appkit-handle-alive-p handle)
+        (appkit-retire-handle handle)))
+    t))
+
+(defun disco-api--cancel-owned-request-handle (request)
+  "Cancel logical API REQUEST through its Appkit handle when live."
+  (if-let* ((handle (and (disco-api--owned-request-p request)
+                         (disco-api--owned-request-handle request)))
+            ((appkit-handle-alive-p handle)))
+      (appkit-cancel-handle handle)
+    (disco-api--cancel-owned-request request)))
+
+(defun disco-api--start-owned-request (owner generation)
+  "Create a logical request for Appkit OWNER in API GENERATION."
+  (let ((request
+         (disco-api--owned-request-create
+          :generation generation :active-p t)))
+    (push request disco-api--owned-requests)
+    (condition-case error-data
+        (progn
+          (setf (disco-api--owned-request-handle request)
+                (appkit-register-handle
+                 owner 'disco-api-request request
+                 #'disco-api--cancel-owned-request))
+          request)
+      ((error quit)
+       (disco-api--cancel-owned-request request)
+       (signal (car error-data) (cdr error-data))))))
+
+(defun disco-api--schedule-owned-request (request delay function)
+  "Run FUNCTION after DELAY while logical API REQUEST remains current."
+  (when (disco-api--owned-request-current-p request)
+    (let (timer returned-p fired-p)
+      (unwind-protect
+          (progn
+            (setq timer
+                  (run-at-time
+                   (max 0 (or delay 0.0)) nil
+                   (lambda ()
+                     (setq fired-p t)
+                     (when (disco-api--owned-request-current-p request)
+                       (setf (disco-api--owned-request-timer request) nil)
+                       (funcall function)))))
+            (setq returned-p t)
+            (if (and (not fired-p)
+                     (disco-api--owned-request-current-p request))
+                (setf (disco-api--owned-request-timer request) timer)
+              (when (and (not fired-p) (timerp timer))
+                (cancel-timer timer)))
+            timer)
+        (unless returned-p
+          (when (timerp timer)
+            (cancel-timer timer))
+          (disco-api--retire-owned-request request))))))
+
+(defvar-local disco-api--rate-limit-buffer-owner-p nil
+  "Non-nil when this buffer is a Disco rate-limit projection.")
+
+(put 'disco-api--rate-limit-buffer-owner-p 'permanent-local t)
+
+(defconst disco-api--rate-limit-buffer-name "*disco-rate-limit*"
+  "Preferred name for the owned rate-limit diagnostic buffer.")
+
+(defvar disco-api--rate-limit-buffer nil
+  "Live Disco-owned rate-limit buffer, including after a user rename.")
+
+(defun disco-api--owned-rate-limit-buffer ()
+  "Return the explicitly owned rate-limit diagnostic buffer."
+  (or (and (buffer-live-p disco-api--rate-limit-buffer)
+           (buffer-local-value 'disco-api--rate-limit-buffer-owner-p
+                               disco-api--rate-limit-buffer)
+           disco-api--rate-limit-buffer)
+      (let* ((named (get-buffer disco-api--rate-limit-buffer-name))
+             (buffer
+              (if (and (buffer-live-p named)
+                       (buffer-local-value
+                        'disco-api--rate-limit-buffer-owner-p named))
+                  named
+                (generate-new-buffer disco-api--rate-limit-buffer-name))))
+        (with-current-buffer buffer
+          (setq-local disco-api--rate-limit-buffer-owner-p t))
+        (setq disco-api--rate-limit-buffer buffer))))
+
+(defun disco-api--blocked-entries (table)
+  "Return sorted list of active blocked entries in TABLE.
+
+Each element is (KEY . remaining-seconds)."
+  (let ((now (disco-api--now))
+        entries)
+    (maphash
+     (lambda (key deadline)
+       (let ((remaining (- deadline now)))
+         (when (> remaining 0)
+           (push (cons key remaining) entries))))
+     table)
+    (sort entries (lambda (a b) (> (cdr a) (cdr b))))))
+
+(defun disco-api-rate-limit-snapshot ()
+  "Return current rate-limit snapshot as plist."
+  (let* ((now (disco-api--now))
+         (global-block (max 0 (- disco-api--global-rate-limit-until now)))
+         (route-blocks (disco-api--blocked-entries disco-api--route-rate-limit-until))
+         (bucket-blocks (disco-api--blocked-entries disco-api--bucket-rate-limit-until)))
+    (list :global-block global-block
+          :route-block-count (length route-blocks)
+          :bucket-block-count (length bucket-blocks)
+          :route-bucket-map-count (hash-table-count disco-api--route-bucket-map)
+          :route-blocks route-blocks
+          :bucket-blocks bucket-blocks)))
+
+(defun disco-api-describe-rate-limits ()
+  "Show current rate-limit state in a dedicated buffer."
+  (interactive)
+  (let* ((snapshot (disco-api-rate-limit-snapshot))
+         (global-block (plist-get snapshot :global-block))
+         (route-blocks (plist-get snapshot :route-blocks))
+         (bucket-blocks (plist-get snapshot :bucket-blocks))
+         (buf (disco-api--owned-rate-limit-buffer)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Global block: %.3fs\n" global-block))
+        (insert (format "Blocked routes: %d\n" (length route-blocks)))
+        (insert (format "Blocked buckets: %d\n" (length bucket-blocks)))
+        (insert (format "Route->bucket mappings: %d\n\n"
+                        (plist-get snapshot :route-bucket-map-count)))
+        (insert "Top route blocks:\n")
+        (if route-blocks
+            (dolist (entry (seq-take route-blocks 20))
+              (insert (format "  %s => %.3fs\n" (car entry) (cdr entry))))
+          (insert "  (none)\n"))
+        (insert "\nTop bucket blocks:\n")
+        (if bucket-blocks
+            (dolist (entry (seq-take bucket-blocks 20))
+              (insert (format "  %s => %.3fs\n" (car entry) (cdr entry))))
+          (insert "  (none)\n"))
+        (special-mode)
+        (setq-local disco-api--rate-limit-buffer-owner-p t)))
+    (pop-to-buffer buf)))
+
+(defun disco-api--session-current-p (generation)
+  "Return non-nil when GENERATION may still act for the active API session."
+  (and (not disco-api--reset-in-progress)
+       (integerp generation)
+       (= generation disco-api--generation)))
+
+(defun disco-api--ensure-start-allowed ()
+  "Reject API work while the current account session is being destroyed."
+  (when disco-api--reset-in-progress
+    (user-error "disco: API session reset is in progress")))
+
+(defun disco-api--ensure-session-current (generation)
+  "Signal when GENERATION no longer owns the active API session."
+  (unless (disco-api--session-current-p generation)
+    (signal
+     'disco-api-error
+     (list "disco: API session was reset while request was in progress"
+           0 nil))))
+
+(defun disco-api--retry-owner-current-p (owner)
+  "Return non-nil when timer OWNER remains exact and current."
+  (and (consp owner)
+       (disco-api--session-current-p (plist-get owner :generation))
+       (memq owner disco-api--retry-owners)))
+
+(defun disco-api--cancel-retry-owner (owner)
+  "Cancel exact API timer OWNER after revoking its callback metadata."
+  (let ((timer (plist-get owner :timer)))
+    (setf (plist-get owner :timer) nil)
+    (when (timerp timer)
+      (cancel-timer timer))))
+
+(defun disco-api--run-cleanup-items (items function)
+  "Apply FUNCTION to all ITEMS despite failures or a nonlocal transfer."
+  (let ((remaining items)
+        complete-p)
+    (unwind-protect
+        (progn
+          (while remaining
+            (let ((item (pop remaining)))
+              (condition-case err
+                  (funcall function item)
+                (error
+                 (message "disco: API cleanup failed: %s"
+                          (error-message-string err)))
+                (quit
+                 (message "disco: API cleanup was interrupted")))))
+          (setq complete-p t))
+      ;; Preserve an arbitrary caller-owned `throw' while still attempting
+      ;; every remaining privacy action during the unwind.
+      (unless complete-p
+        (disco-api--run-cleanup-items remaining function)))))
+
+(defun disco-api--schedule-session-timer (generation delay function)
+  "Run FUNCTION after DELAY only while GENERATION owns the API session."
+  (when (disco-api--session-current-p generation)
+    ;; Pre-seed the mutable timer slot so `setf' preserves OWNER's `eq'
+    ;; identity in both this list and the timer callback closure.
+    (let ((owner (list :generation generation :timer nil))
+          timer
+          returned-p)
+      (push owner disco-api--retry-owners)
+      (unwind-protect
+          (progn
+            (setq timer
+                  (run-at-time
+                   (max 0 (or delay 0.0)) nil
+                   (lambda ()
+                     (when (disco-api--retry-owner-current-p owner)
+                       ;; Retire before invoking client/transport code.  A
+                       ;; nested reset therefore cannot rediscover this fired
+                       ;; timer as live account work.
+                       (setq disco-api--retry-owners
+                             (delq owner disco-api--retry-owners))
+                       (setf (plist-get owner :timer) nil)
+                       (when (disco-api--session-current-p generation)
+                         (funcall function))))))
+            (setq returned-p t)
+            (if (disco-api--retry-owner-current-p owner)
+                (setf (plist-get owner :timer) timer)
+              ;; A synchronous timer constructor/reset retired OWNER before
+              ;; exposing its returned handle.  Compensate immediately.
+              (when (timerp timer)
+                (cancel-timer timer)))
+            timer)
+        (unless returned-p
+          (setq disco-api--retry-owners
+                (delq owner disco-api--retry-owners))
+          (when (timerp timer)
+            (cancel-timer timer)))))))
+
+(defun disco-api--clear-rate-limit-memory ()
+  "Clear cached rate-limit data without invoking lifecycle cancellation."
+  (setq disco-api--global-rate-limit-until 0.0)
+  (clrhash disco-api--route-rate-limit-until)
+  (clrhash disco-api--route-bucket-map)
+  (clrhash disco-api--bucket-rate-limit-until))
+
+(defun disco-api-reset-rate-limit-state ()
+  "Revoke asynchronous API work and clear cached rate-limit state."
+  (let ((disco-api--reset-in-progress t)
+        (retry-owners disco-api--retry-owners)
+        (owned-requests disco-api--owned-requests))
+    ;; Generation/list revocation must precede cancellation because an
+    ;; instrumented cancellation may synchronously invoke old code.
+    (cl-incf disco-api--generation)
+    (setq disco-api--retry-owners nil
+          disco-api--owned-requests nil)
+    (unwind-protect
+        (disco-api--run-cleanup-items
+         owned-requests #'disco-api--cancel-owned-request-handle)
+      (unwind-protect
+          (disco-api--run-cleanup-items
+           retry-owners #'disco-api--cancel-retry-owner)
+        (setq disco-api--retry-owners nil
+              disco-api--owned-requests nil)
+        (disco-api--clear-rate-limit-memory)))))
+
+(defun disco-api--now ()
+  "Return current unix timestamp as float."
+  (float-time))
+
+(defun disco-api--route-key (method endpoint)
+  "Build stable route key from METHOD and ENDPOINT."
+  (format "%s %s" method endpoint))
+
+(defun disco-api--header (headers key)
+  "Return header KEY value from HEADERS, supporting symbol/string forms."
+  (let ((sym (if (symbolp key)
+                 key
+               (intern (downcase key))))
+        (str (if (symbolp key)
+                 (symbol-name key)
+               key)))
+    (or (cdr (assq sym headers))
+        (cdr (assoc str headers)))))
+
+(defun disco-api--to-number (value)
+  "Convert VALUE to number when possible, else nil."
+  (cond
+   ((numberp value)
+    (float value))
+   ((and (stringp value)
+         (string-match-p "\\`[0-9]+\\(?:\\.[0-9]+\\)?\\'" value))
+    (string-to-number value))
+   (t nil)))
+
+(defun disco-api--remaining-zero-p (value)
+  "Return non-nil if VALUE represents 0 remaining requests."
+  (or (equal value "0")
+      (equal value 0)
+      (equal value 0.0)))
+
+(defun disco-api--extract-retry-after (headers body)
+  "Extract retry-after seconds from HEADERS or BODY.
+
+Return a number (seconds) or nil."
+  (or (disco-api--to-number (disco-api--header headers 'retry-after))
+      (and (listp body)
+           (disco-api--to-number (alist-get 'retry_after body)))))
+
+(defun disco-api--route-deadline (route-key)
+  "Return current effective deadline for ROUTE-KEY."
+  (let* ((route-deadline (or (gethash route-key disco-api--route-rate-limit-until) 0.0))
+         (bucket-id (gethash route-key disco-api--route-bucket-map))
+         (bucket-deadline (if bucket-id
+                              (or (gethash bucket-id disco-api--bucket-rate-limit-until) 0.0)
+                            0.0)))
+    (max route-deadline bucket-deadline)))
+
+(defun disco-api--wait-for-rate-limit (route-key)
+  "Sleep until ROUTE-KEY is no longer blocked by rate-limit state."
+  (let* ((deadline (max disco-api--global-rate-limit-until
+                        (disco-api--route-deadline route-key)))
+         (sleep-time (- deadline (disco-api--now))))
+    (when (> sleep-time 0)
+      (sleep-for sleep-time))))
+
+(defun disco-api--set-route-deadline (route-key deadline &optional bucket-id)
+  "Set DEADLINE for ROUTE-KEY, optionally under BUCKET-ID."
+  (if bucket-id
+      (puthash bucket-id deadline disco-api--bucket-rate-limit-until)
+    (puthash route-key deadline disco-api--route-rate-limit-until)))
+
+(defun disco-api--update-rate-limit-state
+    (route-key status headers body &optional generation)
+  "Update in-memory rate-limit state from one response.
+
+ROUTE-KEY identifies the API route.
+STATUS, HEADERS, BODY come from transport layer.  When GENERATION is non-nil,
+discard the update if that asynchronous or synchronous request was retired."
+  (cl-labels ((current-p ()
+                (or (null generation)
+                    (disco-api--session-current-p generation))))
+    (when (current-p)
+      (let* ((now (disco-api--now))
+             (bucket-id (disco-api--header headers 'x-ratelimit-bucket))
+             (remaining (disco-api--header headers 'x-ratelimit-remaining))
+             (reset-after
+              (disco-api--to-number
+               (disco-api--header headers 'x-ratelimit-reset-after)))
+             (retry-after (disco-api--extract-retry-after headers body))
+             (global-header
+              (disco-api--header headers 'x-ratelimit-global))
+             (global-body (and (listp body) (alist-get 'global body))))
+        (when (and (current-p) bucket-id)
+          (puthash route-key bucket-id disco-api--route-bucket-map))
+
+        ;; Proactive cooldown when bucket is exhausted.
+        (when (and (current-p)
+                   (disco-api--remaining-zero-p remaining)
+                   reset-after
+                   (> reset-after 0))
+          (disco-api--set-route-deadline
+           route-key
+           (+ now reset-after disco-rate-limit-safety-margin)
+           bucket-id))
+
+        ;; Authoritative cooldown on 429 responses.
+        (when (and (current-p) (= status 429) retry-after)
+          (let ((deadline (+ now retry-after disco-rate-limit-safety-margin)))
+            (if (or (eq global-body t)
+                    (equal global-header "true"))
+                (when (current-p)
+                  (setq disco-api--global-rate-limit-until deadline))
+              (when (current-p)
+                (disco-api--set-route-deadline
+                 route-key deadline bucket-id)))))))))
+
+(defun disco-api--auth-header ()
+  "Return Authorization header value from active token source."
+  (let ((token (disco-current-token)))
+    (unless token
+      (user-error "disco: token is not set; use M-x disco-set-token or DISCO_TOKEN"))
+    token))
+
+(defun disco-api--normalize-query-entry (entry)
+  "Normalize one query ENTRY for `url-build-query-string'.
+
+Supported entry shapes are (KEY . VALUE) and (KEY VALUE)."
+  (cond
+   ((and (consp entry)
+         (consp (cdr entry))
+         (null (cddr entry)))
+    (let ((key (car entry))
+          (value (cadr entry)))
+      (when (and key value)
+        (list (format "%s" key)
+              (format "%s" value)))))
+   ((and (consp entry) (not (listp (cdr entry))))
+    (let* ((raw-key (car entry))
+           (raw-value (cdr entry))
+           (key (if (symbolp raw-key)
+                    (symbol-name raw-key)
+                  raw-key)))
+      (when (and key raw-value)
+        (list (format "%s" key)
+              (format "%s" raw-value)))))
+   (t nil)))
+
+(defun disco-api--normalize-query (query)
+  "Normalize QUERY entries for `url-build-query-string'."
+  (delq nil (mapcar #'disco-api--normalize-query-entry query)))
+
+(defun disco-api--build-url (endpoint &optional query)
+  "Build full URL using ENDPOINT and optional QUERY alist."
+  (let ((normalized-query
+         (and (consp query)
+              (disco-api--normalize-query query))))
+    (concat
+     (replace-regexp-in-string "/$" "" disco-api-base-url)
+     endpoint
+     (if normalized-query
+         (concat "?" (url-build-query-string normalized-query))
+       ""))))
+
+(defun disco-api--json-encode (payload)
+  "JSON encode PAYLOAD, preserving UTF-8."
+  (let ((json-encoding-pretty-print nil)
+        (json-object-type 'alist)
+        (json-array-type 'list)
+        (json-key-type 'symbol))
+    (json-encode payload)))
+
+(defun disco-api--decode-json (body-text)
+  "Decode BODY-TEXT into alist/list JSON value.
+
+Return nil for empty or non-JSON body."
+  (if (or (null body-text) (string-empty-p body-text))
+      nil
+    (let ((json-object-type 'alist)
+          (json-array-type 'list)
+          (json-key-type 'symbol)
+          (json-false :false))
+      (condition-case _
+          (json-read-from-string body-text)
+        (error nil)))))
+
+(defun disco-api--http-error-message (status raw-body body)
+  "Return user-facing message for STATUS/RAW-BODY/BODY response tuple."
+  (format "HTTP %d %s"
+          status
+          (or (and (listp body) (alist-get 'message body))
+              (and (not (string-empty-p (or raw-body ""))) raw-body)
+              "request failed")))
+
+(defun disco-api--error-plist (status body message)
+  "Build normalized async error plist."
+  (list :status status
+        :body body
+        :message message))
+
+(defun disco-api--request (method endpoint &optional payload query unauthenticated
+                                  raw-body extra-headers body-type)
+  "Execute METHOD request to ENDPOINT.
+
+PAYLOAD is an alist encoded as JSON for request body.
+QUERY is an alist for query parameters.
+If UNAUTHENTICATED is non-nil, omit Authorization header.
+RAW-BODY and EXTRA-HEADERS enable non-JSON requests (for example multipart).
+BODY-TYPE is forwarded to transport layer."
+  (when (and payload raw-body)
+    (error "disco: payload and raw-body cannot be combined"))
+  (disco-api--ensure-start-allowed)
+  (let* ((generation disco-api--generation)
+         (headers
+          (append
+           (unless raw-body
+             '(("Content-Type" . "application/json")))
+           `(("Accept" . "application/json")
+             ("User-Agent" . ,disco-user-agent)
+             ("X-Discord-Locale" . ,disco-locale)
+             ("Accept-Language" . ,disco-locale))
+           (or extra-headers '())
+           (unless unauthenticated
+             `(("Authorization" . ,(disco-api--auth-header))))))
+         (data (cond
+                ((not (null raw-body))
+                 raw-body)
+                ((eq payload :empty-object)
+                 "{}")
+                (payload
+                 (disco-api--json-encode payload))
+                (t nil)))
+         (effective-body-type (or body-type
+                                  (when raw-body 'binary)))
+         (url (disco-api--build-url endpoint query))
+         (route-key (disco-api--route-key method endpoint))
+         (attempt 0))
+    (catch 'disco-api-return
+      (while t
+        (disco-api--ensure-session-current generation)
+        (disco-api--wait-for-rate-limit route-key)
+        ;; `sleep-for' may run timers and therefore complete a reset before
+        ;; returning to this old synchronous stack.
+        (disco-api--ensure-session-current generation)
+        (let* ((response (disco-http-request
+                          :method method
+                          :url url
+                          :headers headers
+                          :body data
+                          :body-type effective-body-type
+                          :timeout disco-http-timeout))
+               (status (or (plist-get response :status) 0))
+               (raw-body (or (plist-get response :body) ""))
+               (response-headers (or (plist-get response :headers) nil))
+               (body (disco-api--decode-json raw-body))
+               (retry-after (disco-api--extract-retry-after response-headers body)))
+          ;; A synchronous transport wait can process the reset timer.  Do not
+          ;; let its retired response refill maps, publish a body, or retry.
+          (disco-api--ensure-session-current generation)
+          (disco-api--update-rate-limit-state
+           route-key status response-headers body generation)
+          (disco-api--ensure-session-current generation)
+          (cond
+           ((and (>= status 200) (< status 300))
+            (throw 'disco-api-return body))
+           ((= status 429)
+            (if (>= attempt disco-rate-limit-max-retries)
+                (signal
+                 'disco-api-error
+                 (list (format "rate limited (429), retries exhausted, retry-after=%s"
+                               (or retry-after "unknown"))
+                       status
+                       body))
+              (setq attempt (1+ attempt))
+              (sleep-for (or retry-after 1.0))
+              (disco-api--ensure-session-current generation)))
+           (t
+            (signal
+             'disco-api-error
+             (list (disco-api--http-error-message status raw-body body)
+                   status
+                   body)))))))))
+
+(cl-defun disco-api--request-async
+    (method endpoint
+            &key payload query unauthenticated owner on-success on-error
+            raw-body extra-headers body-type)
+  "Execute METHOD request to ENDPOINT asynchronously.
+
+PAYLOAD is JSON data and QUERY is a URL parameter alist.  UNAUTHENTICATED omits
+account credentials.  OWNER, when non-nil, owns one cancellable logical request
+across retries.  ON-SUCCESS receives decoded JSON; ON-ERROR receives
+`(:status :body :message)'.  RAW-BODY and EXTRA-HEADERS enable non-JSON
+requests.  BODY-TYPE is forwarded to the transport layer."
+  (when (and payload raw-body)
+    (error "disco: payload and raw-body cannot be combined"))
+  (disco-api--ensure-start-allowed)
+  (let* ((generation disco-api--generation)
+         (headers
+          (append
+           (unless raw-body
+             '(("Content-Type" . "application/json")))
+           `(("Accept" . "application/json")
+             ("User-Agent" . ,disco-user-agent)
+             ("X-Discord-Locale" . ,disco-locale)
+             ("Accept-Language" . ,disco-locale))
+           (or extra-headers '())
+           (unless unauthenticated
+             `(("Authorization" . ,(disco-api--auth-header))))))
+         (data (cond
+                ((not (null raw-body))
+                 raw-body)
+                ((eq payload :empty-object)
+                 "{}")
+                (payload
+                 (disco-api--json-encode payload))
+                (t nil)))
+         (effective-body-type (or body-type
+                                  (when raw-body 'binary)))
+         (url (disco-api--build-url endpoint query))
+         (route-key (disco-api--route-key method endpoint))
+         (attempt 0)
+         (owned-request
+          (and owner (disco-api--start-owned-request owner generation))))
+    (cl-labels
+        ((request-current-p ()
+           (and (disco-api--session-current-p generation)
+                (or (null owned-request)
+                    (disco-api--owned-request-current-p owned-request))))
+         (retire-request ()
+           (when owned-request
+             (disco-api--retire-owned-request owned-request)))
+         (emit-error (status body message)
+           (when (request-current-p)
+             (let ((error-data
+                    (disco-api--error-plist status body message)))
+               (retire-request)
+               (when on-error
+                 (funcall on-error error-data)))))
+         (schedule-next (delay)
+           (when (request-current-p)
+             (if owned-request
+                 (disco-api--schedule-owned-request
+                  owned-request delay #'dispatch-request)
+               (disco-api--schedule-session-timer
+                generation delay #'dispatch-request))))
+         (handle-response (response)
+           (if (not (request-current-p))
+               (retire-request)
+             (let* ((status (or (plist-get response :status) 0))
+                    (raw-body (or (plist-get response :body) ""))
+                    (response-headers
+                     (or (plist-get response :headers) nil))
+                    (body (disco-api--decode-json raw-body))
+                    (retry-after
+                     (disco-api--extract-retry-after response-headers body)))
+               (when (request-current-p)
+                 (disco-api--update-rate-limit-state
+                  route-key status response-headers body generation)
+                 ;; An instrumented state update or nested callback may reset
+                 ;; the account.  Never publish or retry after that boundary.
+                 (when (request-current-p)
+                   (cond
+                    ((and (>= status 200) (< status 300))
+                     (retire-request)
+                     (when on-success
+                       (funcall on-success body)))
+                    ((= status 429)
+                     (if (>= attempt disco-rate-limit-max-retries)
+                         (emit-error
+                          status
+                          body
+                          (format
+                           (concat "rate limited (429), retries exhausted, "
+                                   "retry-after=%s")
+                           (or retry-after "unknown")))
+                       (setq attempt (1+ attempt))
+                       (schedule-next (or retry-after 1.0))))
+                    ((= status 0)
+                     (emit-error
+                      status body
+                      (or (plist-get response :error-message)
+                          (disco-api--http-error-message
+                           status raw-body body))))
+                    (t
+                     (emit-error
+                      status body
+                      (disco-api--http-error-message
+                       status raw-body body)))))))))
+         (dispatch-request ()
+           (if (not (request-current-p))
+               (retire-request)
+             (let* ((deadline
+                     (max disco-api--global-rate-limit-until
+                          (disco-api--route-deadline route-key)))
+                    (wait-time (- deadline (disco-api--now))))
+               (when (request-current-p)
+                 (if (> wait-time 0)
+                     (schedule-next wait-time)
+                   (disco-http-request-async
+                    :method method
+                    :url url
+                    :headers headers
+                    :body data
+                    :body-type effective-body-type
+                    :timeout disco-http-timeout
+                    :on-success #'handle-response
+                    :on-error #'handle-response)))))))
+      (condition-case error-data
+          (let ((transport (dispatch-request)))
+            (or (and owned-request
+                     (disco-api--owned-request-handle owned-request))
+                transport))
+        ((error quit)
+         (retire-request)
+         (signal (car error-data) (cdr error-data)))))))
+
+(defun disco-api-current-user ()
+  "Fetch current user object."
+  (disco-api--request "GET" "/users/@me" nil nil nil))
+
+(cl-defun disco-api-user-profile-async
+    (user-id &key guild-id on-success on-error)
+  "Fetch USER-ID's profile, optionally in GUILD-ID, asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/users/%s/profile" user-id)
+   :query
+   (append
+    '(("with_mutual_guilds" . "true")
+      ("with_mutual_friends" . "true")
+      ("with_mutual_friends_count" . "true")
+      ("type" . "modal"))
+    (when guild-id
+      `(("guild_id" . ,(format "%s" guild-id)))))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-gateway ()
+  "Fetch gateway connection object containing websocket URL."
+  (disco-api--request "GET" "/gateway" nil nil t))
+
+(defun disco-api-user-guilds ()
+  "Fetch current user's guilds list."
+  (disco-api--request "GET" "/users/@me/guilds" nil '(("limit" . "200")) nil))
+
+(cl-defun disco-api-user-guilds-async (&key on-success on-error)
+  "Fetch current user's guild list asynchronously."
+  (disco-api--request-async
+   "GET"
+   "/users/@me/guilds"
+   :query '(("limit" . "200"))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-guild-profile (guild-id)
+  "Fetch GUILD-ID's public server profile."
+  (disco-api--request
+   "GET" (format "/guilds/%s/profile" guild-id) nil nil nil))
+
+(cl-defun disco-api-guild-profile-async
+    (guild-id &key on-success on-error)
+  "Fetch GUILD-ID's public server profile asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/profile" guild-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-user-private-channels ()
+  "Fetch current user's private channel list."
+  (disco-api--request "GET" "/users/@me/channels" nil nil nil))
+
+(cl-defun disco-api-user-private-channels-async (&key on-success on-error)
+  "Fetch current user's private channels asynchronously."
+  (disco-api--request-async
+   "GET"
+   "/users/@me/channels"
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-create-private-channel-async
+    (user-id &key on-success on-error)
+  "Create or return the one-to-one private channel with USER-ID."
+  (disco-api--request-async
+   "POST"
+   "/users/@me/channels"
+   :payload `((recipients . [,(format "%s" user-id)]))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-user-settings-proto (type)
+  "Fetch current user's settings protobuf of TYPE."
+  (disco-api--request
+   "GET"
+   (format "/users/@me/settings-proto/%s" type)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-user-settings-proto-async
+    (type &key on-success on-error)
+  "Fetch current user's settings protobuf of TYPE asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/users/@me/settings-proto/%s" type)
+   :on-success on-success
+   :on-error on-error))
+
+
+(defun disco-api-guild-channels (guild-id)
+  "Fetch channels in GUILD-ID."
+  (disco-api--request
+   "GET"
+   (format "/guilds/%s/channels" guild-id)
+   nil
+   '(("permissions" . "true"))
+   nil))
+
+(cl-defun disco-api-guild-channels-async (guild-id &key on-success on-error)
+  "Fetch channels in GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/channels" guild-id)
+   :query '(("permissions" . "true"))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-guild-top-emojis (guild-id)
+  "Fetch ranked top emoji metadata for GUILD-ID."
+  (disco-api--request
+   "GET"
+   (format "/guilds/%s/top-emojis" guild-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-guild-top-emojis-async
+    (guild-id &key on-success on-error)
+  "Fetch ranked top emoji metadata for GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/top-emojis" guild-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-guild-stickers (guild-id)
+  "Fetch custom stickers in GUILD-ID."
+  (disco-api--request
+   "GET" (format "/guilds/%s/stickers" guild-id) nil nil nil))
+
+(cl-defun disco-api-guild-stickers-async
+    (guild-id &key on-success on-error)
+  "Fetch custom stickers in GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/stickers" guild-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-standard-sticker-packs ()
+  "Fetch Discord's standard sticker packs."
+  (disco-api--request "GET" "/sticker-packs" nil nil t))
+
+(cl-defun disco-api-standard-sticker-packs-async (&key on-success on-error)
+  "Fetch Discord's standard sticker packs asynchronously."
+  (disco-api--request-async
+   "GET"
+   "/sticker-packs"
+   :unauthenticated t
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-channel (channel-id)
+  "Fetch channel object for CHANNEL-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s" channel-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-channel-async (channel-id &key on-success on-error)
+  "Fetch channel object for CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s" channel-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-guild-active-threads (guild-id)
+  "Fetch active threads object for GUILD-ID.
+
+Response is an alist with keys including `threads' and `members'."
+  (disco-api--request "GET" (format "/guilds/%s/threads/active" guild-id) nil nil nil))
+
+(cl-defun disco-api-guild-active-threads-async (guild-id &key on-success on-error)
+  "Fetch active threads object for GUILD-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/threads/active" guild-id)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-channel-search-threads
+    (channel-id &key name slop tags tag-setting archived sort-by sort-order
+                limit offset max-id min-id)
+  "Search threads under CHANNEL-ID using `/threads/search'."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/threads/search" channel-id)
+   nil
+   (disco-api--thread-search-query
+    :name name
+    :slop slop
+    :tags tags
+    :tag-setting tag-setting
+    :archived archived
+    :sort-by sort-by
+    :sort-order sort-order
+    :limit limit
+    :offset offset
+    :max-id max-id
+    :min-id min-id)
+   nil))
+
+(cl-defun disco-api-channel-search-threads-async
+    (channel-id &key name slop tags tag-setting archived sort-by sort-order
+                limit offset max-id min-id on-success on-error)
+  "Search threads under CHANNEL-ID asynchronously using `/threads/search'."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s/threads/search" channel-id)
+   :query (disco-api--thread-search-query
+           :name name
+           :slop slop
+           :tags tags
+           :tag-setting tag-setting
+           :archived archived
+           :sort-by sort-by
+           :sort-order sort-order
+           :limit limit
+           :offset offset
+           :max-id max-id
+           :min-id min-id)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-guild-search-messages
+    (guild-id &key limit offset max-id min-id slop content author-types author-ids mentions
+              mention-everyone has pinned sort-by sort-order channel-ids include-nsfw)
+  "Search messages in GUILD-ID using Discord guild message search endpoint."
+  (disco-api--request
+   "GET"
+   (format "/guilds/%s/messages/search" guild-id)
+   nil
+   (disco-api--message-search-query
+    :limit limit
+    :offset offset
+    :max-id max-id
+    :min-id min-id
+    :slop slop
+    :content content
+    :author-types author-types
+    :author-ids author-ids
+    :mentions mentions
+    :mention-everyone mention-everyone
+    :has has
+    :pinned pinned
+    :sort-by sort-by
+    :sort-order sort-order
+    :channel-ids channel-ids
+    :include-nsfw include-nsfw)
+   nil))
+
+(cl-defun disco-api-guild-search-messages-async
+    (guild-id &key limit offset max-id min-id slop content author-types author-ids mentions
+              mention-everyone has pinned sort-by sort-order channel-ids include-nsfw
+              on-success on-error)
+  "Search messages in GUILD-ID asynchronously using Discord guild message search endpoint."
+  (disco-api--request-async
+   "GET"
+   (format "/guilds/%s/messages/search" guild-id)
+   :query (disco-api--message-search-query
+           :limit limit
+           :offset offset
+           :max-id max-id
+           :min-id min-id
+           :slop slop
+           :content content
+           :author-types author-types
+           :author-ids author-ids
+           :mentions mentions
+           :mention-everyone mention-everyone
+           :has has
+           :pinned pinned
+           :sort-by sort-by
+           :sort-order sort-order
+           :channel-ids channel-ids
+           :include-nsfw include-nsfw)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-channel-search-messages
+    (channel-id &key limit offset max-id min-id slop content author-types author-ids mentions
+                mention-everyone has pinned sort-by sort-order)
+  "Search messages in private CHANNEL-ID using Discord channel message search endpoint."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/messages/search" channel-id)
+   nil
+   (disco-api--message-search-query
+    :limit limit
+    :offset offset
+    :max-id max-id
+    :min-id min-id
+    :slop slop
+    :content content
+    :author-types author-types
+    :author-ids author-ids
+    :mentions mentions
+    :mention-everyone mention-everyone
+    :has has
+    :pinned pinned
+    :sort-by sort-by
+    :sort-order sort-order)
+   nil))
+
+(cl-defun disco-api-channel-search-messages-async
+    (channel-id &key limit offset max-id min-id slop content author-types author-ids mentions
+                mention-everyone has pinned sort-by sort-order on-success on-error)
+  "Search messages in private CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s/messages/search" channel-id)
+   :query (disco-api--message-search-query
+           :limit limit
+           :offset offset
+           :max-id max-id
+           :min-id min-id
+           :slop slop
+           :content content
+           :author-types author-types
+           :author-ids author-ids
+           :mentions mentions
+           :mention-everyone mention-everyone
+           :has has
+           :pinned pinned
+           :sort-by sort-by
+           :sort-order sort-order)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-guild-search-messages-tabs
+    (guild-id &key tabs channel-ids include-nsfw track-exact-total-hits)
+  "Search messages in GUILD-ID using Discord tabs search endpoint."
+  (disco-api--request
+   "POST"
+   (format "/guilds/%s/messages/search/tabs" guild-id)
+   (disco-api--message-search-tabs-payload
+    :tabs tabs
+    :channel-ids channel-ids
+    :include-nsfw include-nsfw
+    :track-exact-total-hits track-exact-total-hits)
+   nil
+   nil))
+
+(cl-defun disco-api-guild-search-messages-tabs-async
+    (guild-id &key tabs channel-ids include-nsfw track-exact-total-hits
+              on-success on-error)
+  "Search messages in GUILD-ID asynchronously using Discord tabs search endpoint."
+  (disco-api--request-async
+   "POST"
+   (format "/guilds/%s/messages/search/tabs" guild-id)
+   :payload (disco-api--message-search-tabs-payload
+             :tabs tabs
+             :channel-ids channel-ids
+             :include-nsfw include-nsfw
+             :track-exact-total-hits track-exact-total-hits)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-channel-search-messages-tabs
+    (channel-id &key tabs include-nsfw track-exact-total-hits)
+  "Search messages in CHANNEL-ID using Discord channel tabs search endpoint."
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/messages/search/tabs" channel-id)
+   (disco-api--message-search-tabs-payload
+    :tabs tabs
+    :include-nsfw include-nsfw
+    :track-exact-total-hits track-exact-total-hits)
+   nil
+   nil))
+
+(cl-defun disco-api-channel-search-messages-tabs-async
+    (channel-id &key tabs include-nsfw track-exact-total-hits on-success on-error)
+  "Search messages in CHANNEL-ID asynchronously using Discord channel tabs search endpoint."
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/messages/search/tabs" channel-id)
+   :payload (disco-api--message-search-tabs-payload
+             :tabs tabs
+             :include-nsfw include-nsfw
+             :track-exact-total-hits track-exact-total-hits)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-user-search-messages-tabs
+    (&key tabs include-nsfw track-exact-total-hits)
+  "Search messages across private channels using Discord user tabs search endpoint."
+  (disco-api--request
+   "POST"
+   "/users/@me/messages/search/tabs"
+   (disco-api--message-search-tabs-payload
+    :tabs tabs
+    :include-nsfw include-nsfw
+    :track-exact-total-hits track-exact-total-hits)
+   nil
+   nil))
+
+(cl-defun disco-api-user-search-messages-tabs-async
+    (&key tabs include-nsfw track-exact-total-hits on-success on-error)
+  "Search messages across private channels asynchronously."
+  (disco-api--request-async
+   "POST"
+   "/users/@me/messages/search/tabs"
+   :payload (disco-api--message-search-tabs-payload
+             :tabs tabs
+             :include-nsfw include-nsfw
+             :track-exact-total-hits track-exact-total-hits)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-channel-archived-public-threads (channel-id &optional before limit)
+  "Fetch archived public threads under CHANNEL-ID.
+
+BEFORE is an ISO8601 timestamp. LIMIT defaults to 50."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/threads/archived/public" channel-id)
+   nil
+   (disco-api--thread-archive-query before limit)
+   nil))
+
+(defun disco-api-channel-archived-private-threads (channel-id &optional before limit)
+  "Fetch archived private threads under CHANNEL-ID.
+
+BEFORE is an ISO8601 timestamp. LIMIT defaults to 50."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/threads/archived/private" channel-id)
+   nil
+   (disco-api--thread-archive-query before limit)
+   nil))
+
+(defun disco-api-channel-joined-private-archived-threads (channel-id &optional before limit)
+  "Fetch archived private threads joined by current user under CHANNEL-ID.
+
+BEFORE is a thread snowflake ID. LIMIT defaults to 50."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/users/@me/threads/archived/private" channel-id)
+   nil
+   (disco-api--thread-archive-query before limit)
+   nil))
+
+(cl-defun disco-api-thread-members (thread-id &key with-member after limit)
+  "Fetch thread member objects for THREAD-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/thread-members" thread-id)
+   nil
+   (disco-api--thread-members-query
+    :with-member with-member
+    :after after
+    :limit limit)
+   nil))
+
+(cl-defun disco-api-thread-member (thread-id user-id &key with-member)
+  "Fetch thread member object for USER-ID in THREAD-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/thread-members/%s" thread-id user-id)
+   nil
+   (disco-api--thread-members-query
+    :with-member with-member)
+   nil))
+
+(defun disco-api-add-thread-member (thread-id user-id)
+  "Add USER-ID to THREAD-ID."
+  (disco-api--request
+   "PUT"
+   (format "/channels/%s/thread-members/%s" thread-id user-id)
+   nil
+   nil
+   nil))
+
+(defun disco-api-remove-thread-member (thread-id user-id)
+  "Remove USER-ID from THREAD-ID."
+  (disco-api--request
+   "DELETE"
+   (format "/channels/%s/thread-members/%s" thread-id user-id)
+   nil
+   nil
+   nil))
+
+(defun disco-api-join-thread (thread-id)
+  "Join thread THREAD-ID as current user."
+  (disco-api--request "PUT" (format "/channels/%s/thread-members/@me" thread-id) nil nil nil))
+
+(defun disco-api-leave-thread (thread-id)
+  "Leave thread THREAD-ID as current user."
+  (disco-api--request "DELETE" (format "/channels/%s/thread-members/@me" thread-id) nil nil nil))
+
+(cl-defun disco-api-update-thread-member-settings (thread-id &key flags muted mute-config)
+  "Update current user's thread settings for THREAD-ID.
+
+FLAGS updates thread member flags. MUTED toggles thread mute state.
+MUTE-CONFIG is forwarded as the `mute_config' object."
+  (let (payload)
+    (when (not (null flags))
+      (push `(flags . ,flags) payload))
+    (when (not (null muted))
+      (push `(muted . ,(if muted t :false)) payload))
+    (when mute-config
+      (push `(mute_config . ,mute-config) payload))
+    (setq payload (nreverse payload))
+    (unless payload
+      (user-error "disco: no thread settings fields provided"))
+    (disco-api--request
+     "PATCH"
+     (format "/channels/%s/thread-members/@me/settings" thread-id)
+     payload
+     nil
+     nil)))
+
+(cl-defun disco-api-update-thread (thread-id &key name archived locked auto-archive-duration
+                                             rate-limit-per-user invitable applied-tags)
+  "Patch mutable thread fields for THREAD-ID."
+  (let ((payload (disco-api--thread-update-payload
+                  :name name
+                  :archived archived
+                  :locked locked
+                  :auto-archive-duration auto-archive-duration
+                  :rate-limit-per-user rate-limit-per-user
+                  :invitable invitable
+                  :applied-tags applied-tags)))
+    (unless payload
+      (user-error "disco: no thread fields provided"))
+    (disco-api--request
+     "PATCH"
+     (format "/channels/%s" thread-id)
+     payload
+     nil
+     nil)))
+
+(defun disco-api-set-thread-archived (thread-id archived &optional locked)
+  "Set THREAD-ID archived state to ARCHIVED.
+
+If LOCKED is non-nil, set lock state in the same request."
+  (disco-api-update-thread
+   thread-id
+   :archived archived
+   :locked locked))
+
+(defun disco-api-create-thread-from-message (channel-id message-id name
+                                                        &optional auto-archive-duration
+                                                        rate-limit-per-user)
+  "Create a thread named NAME from MESSAGE-ID under CHANNEL-ID.
+
+AUTO-ARCHIVE-DURATION is minutes (60/1440/4320/10080).
+RATE-LIMIT-PER-USER is per-user slowmode seconds."
+  (let ((payload `((name . ,name))))
+    (when auto-archive-duration
+      (setq payload (append payload `((auto_archive_duration . ,auto-archive-duration)))))
+    (when rate-limit-per-user
+      (setq payload (append payload `((rate_limit_per_user . ,rate-limit-per-user)))))
+    (disco-api--request
+     "POST"
+     (format "/channels/%s/messages/%s/threads" channel-id message-id)
+     payload
+     nil
+     nil)))
+
+(defun disco-api-create-thread (channel-id name
+                                           &optional type auto-archive-duration invitable
+                                           rate-limit-per-user)
+  "Create a detached thread named NAME under CHANNEL-ID.
+
+TYPE is thread channel type (e.g., 11 public, 12 private).
+AUTO-ARCHIVE-DURATION is minutes (60/1440/4320/10080).
+INVITABLE controls non-moderator invites in private threads.
+RATE-LIMIT-PER-USER is per-user slowmode seconds."
+  (let ((payload `((name . ,name))))
+    (when type
+      (setq payload (append payload `((type . ,type)))))
+    (when auto-archive-duration
+      (setq payload (append payload `((auto_archive_duration . ,auto-archive-duration)))))
+    (when (not (null invitable))
+      (setq payload (append payload `((invitable . ,(if invitable t :false))))))
+    (when rate-limit-per-user
+      (setq payload (append payload `((rate_limit_per_user . ,rate-limit-per-user)))))
+    (disco-api--request
+     "POST"
+     (format "/channels/%s/threads" channel-id)
+     payload
+     nil
+     nil)))
+
+(defun disco-api-channel-messages (channel-id &optional before limit)
+  "Fetch messages in CHANNEL-ID.
+
+If BEFORE is non-nil, paginate before that message id.
+LIMIT defaults to `disco-message-fetch-limit'."
+  (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit))))))
+    (when before
+      (setq query (append query `(("before" . ,before)))))
+    (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
+
+(cl-defun disco-api-channel-messages-async
+    (channel-id &key before after limit owner on-success on-error)
+  "Fetch messages in CHANNEL-ID asynchronously.
+
+BEFORE and AFTER are mutually exclusive Discord message cursors.  LIMIT is
+the maximum page size.  OWNER controls logical request cancellation.
+ON-SUCCESS receives the newest-first message array; ON-ERROR receives the
+transport error."
+  (when (and before after)
+    (error "disco: channel messages accepts only one of before/after"))
+  (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit))))))
+    (when before
+      (setq query (append query `(("before" . ,(format "%s" before))))))
+    (when after
+      (setq query (append query `(("after" . ,(format "%s" after))))))
+    (disco-api--request-async
+     "GET"
+     (format "/channels/%s/messages" channel-id)
+     :query query
+     :owner owner
+     :on-success on-success
+     :on-error on-error)))
+
+(cl-defun disco-api-channel-pins-async
+    (channel-id &key before limit owner on-success on-error)
+  "Fetch pinned messages in CHANNEL-ID asynchronously.
+
+BEFORE is the final Message Pin's ISO8601 `pinned_at' timestamp from the
+preceding response.  LIMIT defaults to Discord's maximum page size of 50.  OWNER controls logical
+request cancellation.  ON-SUCCESS receives the paginated response object; ON-ERROR receives the
+transport error."
+  (let ((query `(("limit" . ,(number-to-string (or limit 50))))))
+    (when before
+      (setq query
+            (append query `(("before" . ,(format "%s" before))))))
+    (disco-api--request-async
+     "GET"
+     (format "/channels/%s/messages/pins" channel-id)
+     :query query
+     :owner owner
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-pin-message (channel-id message-id)
+  "Pin MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request
+   "PUT"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   nil nil nil))
+
+(cl-defun disco-api-pin-message-async (channel-id message-id &key on-success on-error)
+  "Pin MESSAGE-ID in CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "PUT"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-unpin-message (channel-id message-id)
+  "Unpin MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request
+   "DELETE"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   nil nil nil))
+
+(cl-defun disco-api-unpin-message-async (channel-id message-id &key on-success on-error)
+  "Unpin MESSAGE-ID in CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "DELETE"
+   (format "/channels/%s/messages/pins/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api--normalize-id-list (ids)
+  "Normalize IDS for an API list payload, preserving first-seen order."
+  (let (result)
+    (dolist (id (or ids '()) (nreverse result))
+      (when id
+        (cl-pushnew (format "%s" id) result :test #'equal)))))
+
+(defconst disco-api-preload-channel-messages-limit 100
+  "Maximum private channels accepted by Preload Messages.")
+
+(cl-defun disco-api-preload-channel-messages-async
+    (channel-ids &key on-success on-error)
+  "Preload the last message from each private channel in CHANNEL-IDS."
+  (let ((normalized-channel-ids
+         (disco-api--normalize-id-list channel-ids)))
+    (unless normalized-channel-ids
+      (error "disco: Preload Messages requires at least one channel ID"))
+    (when (> (length normalized-channel-ids)
+             disco-api-preload-channel-messages-limit)
+      (error "disco: Preload Messages accepts at most %d channel IDs"
+             disco-api-preload-channel-messages-limit))
+    (disco-api--request-async
+     "POST"
+     "/channels/preload-messages"
+     :payload `((channel_ids . ,normalized-channel-ids))
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-channel-messages-around (channel-id message-id &optional limit)
+  "Fetch one message page around MESSAGE-ID in CHANNEL-ID."
+  (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit)))
+                 ("around" . ,(format "%s" message-id)))))
+    (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
+
+(cl-defun disco-api-channel-messages-around-async
+    (channel-id message-id &key limit owner on-success on-error)
+  "Fetch a message page around MESSAGE-ID in CHANNEL-ID for optional OWNER."
+  (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit)))
+                 ("around" . ,(format "%s" message-id)))))
+    (disco-api--request-async
+     "GET"
+     (format "/channels/%s/messages" channel-id)
+     :query query
+     :owner owner
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-channel-message (channel-id message-id)
+  "Fetch one MESSAGE-ID from CHANNEL-ID."
+  (disco-api--request
+   "GET"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-channel-message-async (channel-id message-id &key on-success on-error)
+  "Fetch one MESSAGE-ID from CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "GET"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-ack-message (channel-id message-id
+                                         &optional token manual mention-count
+                                         flags last-viewed)
+  "Acknowledge MESSAGE-ID in CHANNEL-ID.
+
+TOKEN is optional read-state ack token from prior responses.
+When MANUAL is non-nil, send manual mode to set read cursor explicitly.
+MENTION-COUNT implies MANUAL mode and is forwarded as mention_count.
+FLAGS and LAST-VIEWED are forwarded when non-nil.
+
+Response may include a refreshed ack token."
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/messages/%s/ack" channel-id message-id)
+   (disco-api--ack-message-payload token manual mention-count flags last-viewed)
+   nil
+   nil))
+
+(cl-defun disco-api-ack-message-async (channel-id message-id
+                                                  &key token manual mention-count
+                                                  flags last-viewed on-success on-error)
+  "Acknowledge MESSAGE-ID in CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/messages/%s/ack" channel-id message-id)
+   :payload (disco-api--ack-message-payload token manual mention-count flags last-viewed)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-ack-channel-pins (channel-id)
+  "Acknowledge currently pinned messages in CHANNEL-ID."
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/pins/ack" channel-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-ack-channel-pins-async (channel-id &key on-success on-error)
+  "Asynchronously acknowledge pinned messages in CHANNEL-ID."
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/pins/ack" channel-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-ack-guild-feature (guild-id read-state-type entity-id &optional token)
+  "Acknowledge guild feature read state for ENTITY-ID in GUILD-ID.
+
+READ-STATE-TYPE follows Discord read-state type values. TOKEN is optional."
+  (let ((normalized-guild-id (disco-api--normalize-id-string guild-id "guild_id"))
+        (normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request
+     "POST"
+     (format "/guilds/%s/ack/%s/%s"
+             normalized-guild-id
+             normalized-read-state-type
+             normalized-entity-id)
+     (disco-api--token-payload token)
+     nil
+     nil)))
+
+(cl-defun disco-api-ack-guild-feature-async (guild-id read-state-type entity-id
+                                                      &key token on-success on-error)
+  "Asynchronously acknowledge guild feature read state."
+  (let ((normalized-guild-id (disco-api--normalize-id-string guild-id "guild_id"))
+        (normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request-async
+     "POST"
+     (format "/guilds/%s/ack/%s/%s"
+             normalized-guild-id
+             normalized-read-state-type
+             normalized-entity-id)
+     :payload (disco-api--token-payload token)
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-ack-user-feature (read-state-type entity-id &optional token)
+  "Acknowledge non-channel user feature read state for ENTITY-ID.
+
+READ-STATE-TYPE follows Discord read-state type values. TOKEN is optional."
+  (let ((normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request
+     "POST"
+     (format "/users/@me/%s/%s/ack"
+             normalized-read-state-type
+             normalized-entity-id)
+     (disco-api--token-payload token)
+     nil
+     nil)))
+
+(cl-defun disco-api-ack-user-feature-async (read-state-type entity-id
+                                                            &key token on-success on-error)
+  "Asynchronously acknowledge non-channel user feature read state."
+  (let ((normalized-read-state-type
+         (disco-api--normalize-read-state-type read-state-type "read_state_type" 0))
+        (normalized-entity-id (disco-api--normalize-id-string entity-id "entity_id")))
+    (disco-api--request-async
+     "POST"
+     (format "/users/@me/%s/%s/ack"
+             normalized-read-state-type
+             normalized-entity-id)
+     :payload (disco-api--token-payload token)
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-bulk-update-read-states (read-states)
+  "Bulk update READ-STATES for current user."
+  (disco-api--request
+   "POST"
+   "/read-states/ack-bulk"
+   (disco-api--read-states-bulk-payload read-states)
+   nil
+   nil))
+
+(cl-defun disco-api-bulk-update-read-states-async (read-states &key on-success on-error)
+  "Asynchronously bulk update READ-STATES for current user."
+  (disco-api--request-async
+   "POST"
+   "/read-states/ack-bulk"
+   :payload (disco-api--read-states-bulk-payload read-states)
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-delete-read-state (read-state-id &key read-state-type version)
+  "Delete read state for READ-STATE-ID.
+
+READ-STATE-TYPE and VERSION are optional request fields."
+  (let ((normalized-read-state-id
+         (disco-api--normalize-id-string read-state-id "read_state.id"))
+        (payload (disco-api--delete-read-state-payload
+                  :read-state-type read-state-type
+                  :version version)))
+    (disco-api--request
+     "DELETE"
+     (format "/channels/%s/messages/ack" normalized-read-state-id)
+     payload
+     nil
+     nil)))
+
+(cl-defun disco-api-delete-read-state-async (read-state-id &key read-state-type version on-success on-error)
+  "Asynchronously delete read state for READ-STATE-ID."
+  (let ((normalized-read-state-id
+         (disco-api--normalize-id-string read-state-id "read_state.id"))
+        (payload (disco-api--delete-read-state-payload
+                  :read-state-type read-state-type
+                  :version version)))
+    (disco-api--request-async
+     "DELETE"
+     (format "/channels/%s/messages/ack" normalized-read-state-id)
+     :payload payload
+     :on-success on-success
+     :on-error on-error)))
+
+(cl-defun disco-api-create-message
+    (channel-id &key content reply-to-message-id message-reference
+                allowed-mentions attachments poll nonce sticker-ids)
+  "Create one message in CHANNEL-ID.
+
+CONTENT is optional text content. REPLY-TO-MESSAGE-ID is a reply shorthand.
+MESSAGE-REFERENCE can be used for explicit reply/forward references.
+ALLOWED-MENTIONS controls mention parsing for the message.
+ATTACHMENTS is an optional list of upload descriptors.
+POLL is an optional poll create payload.  STICKER-IDS contains up to three
+Discord sticker snowflakes."
+  (let* ((normalized-attachments
+          (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
+         (normalized-poll (disco-api--normalize-poll-request poll))
+         (payload (disco-api--message-send-payload
+                   content
+                   reply-to-message-id
+                   message-reference
+                   normalized-attachments
+                   normalized-poll
+                   allowed-mentions
+                   nonce
+                   sticker-ids)))
+    (unless (or (alist-get 'content payload)
+                (alist-get 'message_reference payload)
+                normalized-attachments
+                normalized-poll
+                (alist-get 'sticker_ids payload))
+      (user-error "disco: message content, poll, stickers, attachments, and message_reference are all empty"))
+    (if normalized-attachments
+        (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
+               (boundary (car multipart))
+               (body (cdr multipart)))
+          (disco-api--request
+           "POST"
+           (format "/channels/%s/messages" channel-id)
+           nil
+           nil
+           nil
+           body
+           `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
+           'binary))
+      (disco-api--request
+       "POST"
+       (format "/channels/%s/messages" channel-id)
+       payload
+       nil
+       nil))))
+
+(cl-defun disco-api-create-message-async
+    (channel-id &key content reply-to-message-id message-reference
+                allowed-mentions attachments poll nonce sticker-ids
+                on-success on-error)
+  "Asynchronously create one message in CHANNEL-ID.
+
+Keyword arguments are the same as `disco-api-create-message'."
+  (let* ((normalized-attachments
+          (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
+         (normalized-poll (disco-api--normalize-poll-request poll))
+         (payload (disco-api--message-send-payload
+                   content
+                   reply-to-message-id
+                   message-reference
+                   normalized-attachments
+                   normalized-poll
+                   allowed-mentions
+                   nonce
+                   sticker-ids)))
+    (unless (or (alist-get 'content payload)
+                (alist-get 'message_reference payload)
+                normalized-attachments
+                normalized-poll
+                (alist-get 'sticker_ids payload))
+      (user-error "disco: message content, poll, stickers, attachments, and message_reference are all empty"))
+    (if normalized-attachments
+        (let* ((multipart (disco-api--build-message-multipart-body payload normalized-attachments))
+               (boundary (car multipart))
+               (body (cdr multipart)))
+          (disco-api--request-async
+           "POST"
+           (format "/channels/%s/messages" channel-id)
+           :raw-body body
+           :extra-headers `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
+           :body-type 'binary
+           :on-success on-success
+           :on-error on-error))
+      (disco-api--request-async
+       "POST"
+       (format "/channels/%s/messages" channel-id)
+       :payload payload
+       :on-success on-success
+       :on-error on-error))))
+
+(cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments)
+  "Send message to CHANNEL-ID with ATTACHMENTS.
+
+ATTACHMENTS is a list of file path strings or plists containing :path and
+optional :description/:filename/:content-type."
+  (disco-api-create-message
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :message-reference message-reference
+   :allowed-mentions allowed-mentions
+   :attachments attachments))
+
+(cl-defun disco-api-send-message-with-attachments-async (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments nonce on-success on-error)
+  "Asynchronously send message to CHANNEL-ID with ATTACHMENTS.
+
+ATTACHMENTS is a list of file path strings or plists containing :path and
+optional :description/:filename/:content-type."
+  (disco-api-create-message-async
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :message-reference message-reference
+   :allowed-mentions allowed-mentions
+   :attachments attachments
+   :nonce nonce
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-add-reaction
+    (channel-id message-id emoji &optional reaction-type)
+  "Add EMOJI REACTION-TYPE to MESSAGE-ID in CHANNEL-ID for current user."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request
+     "PUT"
+     (format "/channels/%s/messages/%s/reactions/%s/@me"
+             channel-id message-id (disco-api--encode-reaction-emoji emoji))
+     nil `((type . ,reaction-type)) nil)))
+
+(cl-defun disco-api-add-reaction-async
+    (channel-id message-id emoji
+                &key reaction-type on-success on-error)
+  "Asynchronously add EMOJI REACTION-TYPE to MESSAGE-ID in CHANNEL-ID."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request-async
+     "PUT"
+     (format "/channels/%s/messages/%s/reactions/%s/@me"
+             channel-id message-id (disco-api--encode-reaction-emoji emoji))
+     :query `((type . ,reaction-type))
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-remove-own-reaction
+    (channel-id message-id emoji &optional reaction-type)
+  "Remove current user's EMOJI REACTION-TYPE from MESSAGE-ID in CHANNEL-ID."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request
+     "DELETE"
+     (format "/channels/%s/messages/%s/reactions/%s/%d/@me"
+             channel-id message-id
+             (disco-api--encode-reaction-emoji emoji)
+             reaction-type)
+     nil nil nil)))
+
+(cl-defun disco-api-remove-own-reaction-async
+    (channel-id message-id emoji
+                &key reaction-type on-success on-error)
+  "Asynchronously remove current user's EMOJI REACTION-TYPE."
+  (let ((reaction-type
+         (disco-api--normalize-reaction-type reaction-type)))
+    (disco-api--request-async
+     "DELETE"
+     (format "/channels/%s/messages/%s/reactions/%s/%d/@me"
+             channel-id message-id
+             (disco-api--encode-reaction-emoji emoji)
+             reaction-type)
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-create-poll-vote (channel-id message-id answer-ids)
+  "Submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request
+   "PUT"
+   (format "/channels/%s/polls/%s/answers/@me" channel-id message-id)
+   `((answer_ids . ,(disco-api--normalize-poll-answer-ids answer-ids)))
+   nil
+   nil))
+
+(cl-defun disco-api-create-poll-vote-async (channel-id message-id answer-ids &key on-success on-error)
+  "Asynchronously submit poll vote ANSWER-IDS for MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request-async
+   "PUT"
+   (format "/channels/%s/polls/%s/answers/@me" channel-id message-id)
+   :payload `((answer_ids . ,(disco-api--normalize-poll-answer-ids answer-ids)))
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-expire-poll (channel-id message-id)
+  "End poll for MESSAGE-ID in CHANNEL-ID immediately."
+  (disco-api--request
+   "POST"
+   (format "/channels/%s/polls/%s/expire" channel-id message-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-expire-poll-async (channel-id message-id &key on-success on-error)
+  "Asynchronously end poll for MESSAGE-ID in CHANNEL-ID."
+  (disco-api--request-async
+   "POST"
+   (format "/channels/%s/polls/%s/expire" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-send-message (channel-id content
+                                          &optional reply-to-message-id poll
+                                          allowed-mentions)
+  "Send CONTENT into CHANNEL-ID.
+
+When REPLY-TO-MESSAGE-ID is non-nil, send as a reply to that message.
+When POLL is non-nil, include poll create payload.
+When ALLOWED-MENTIONS is non-nil, send explicit allowed_mentions payload."
+  (disco-api-create-message
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :allowed-mentions allowed-mentions
+   :poll poll))
+
+(cl-defun disco-api-send-message-async
+    (channel-id content
+                &key reply-to-message-id message-reference allowed-mentions
+                poll nonce sticker-ids on-success on-error)
+  "Send CONTENT into CHANNEL-ID asynchronously.
+
+MESSAGE-REFERENCE may be used for explicit reply/forward references.
+When POLL is non-nil, include poll create payload.  STICKER-IDS is an exact
+sequence of up to three Discord sticker snowflakes."
+  (disco-api-create-message-async
+   channel-id
+   :content content
+   :reply-to-message-id reply-to-message-id
+   :message-reference message-reference
+   :allowed-mentions allowed-mentions
+   :poll poll
+   :nonce nonce
+   :sticker-ids sticker-ids
+   :on-success on-success
+   :on-error on-error))
+
+(cl-defun disco-api-forward-message (channel-id source-message-id source-channel-id
+                                                &key content forward-only allowed-mentions)
+  "Forward SOURCE-MESSAGE-ID from SOURCE-CHANNEL-ID into CHANNEL-ID.
+
+CONTENT is optional text sent alongside the forward.
+FORWARD-ONLY optionally selects attachments/embeds to include.
+ALLOWED-MENTIONS controls mention parsing for optional CONTENT."
+  (let ((message-reference
+         (append
+          (list `(type . 1)
+                `(message_id . ,source-message-id)
+                `(channel_id . ,source-channel-id))
+          (when forward-only
+            (list `(forward_only . ,forward-only))))))
+    (disco-api-create-message
+     channel-id
+     :content content
+     :message-reference message-reference
+     :allowed-mentions allowed-mentions)))
+
+(cl-defun disco-api-forward-message-async (channel-id source-message-id source-channel-id
+                                                      &key content forward-only allowed-mentions
+                                                      on-success on-error)
+  "Asynchronously forward SOURCE-MESSAGE-ID from SOURCE-CHANNEL-ID to CHANNEL-ID."
+  (let ((message-reference
+         (append
+          (list `(type . 1)
+                `(message_id . ,source-message-id)
+                `(channel_id . ,source-channel-id))
+          (when forward-only
+            (list `(forward_only . ,forward-only))))))
+    (disco-api-create-message-async
+     channel-id
+     :content content
+     :message-reference message-reference
+     :allowed-mentions allowed-mentions
+     :on-success on-success
+     :on-error on-error)))
+
+(defun disco-api-edit-message (channel-id message-id content &optional allowed-mentions)
+  "Edit MESSAGE-ID in CHANNEL-ID with new CONTENT.
+
+When ALLOWED-MENTIONS is non-nil, include it in the edit payload."
+  (disco-api--request
+   "PATCH"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   (disco-api--message-edit-payload content allowed-mentions)
+   nil
+   nil))
+
+(cl-defun disco-api-edit-message-async (channel-id message-id content &key allowed-mentions on-success on-error)
+  "Edit MESSAGE-ID in CHANNEL-ID asynchronously with new CONTENT."
+  (disco-api--request-async
+   "PATCH"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   :payload (disco-api--message-edit-payload content allowed-mentions)
+   :on-success on-success
+   :on-error on-error))
+
+(defun disco-api-delete-message (channel-id message-id)
+  "Delete MESSAGE-ID from CHANNEL-ID."
+  (disco-api--request
+   "DELETE"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   nil
+   nil
+   nil))
+
+(cl-defun disco-api-delete-message-async (channel-id message-id &key on-success on-error)
+  "Delete MESSAGE-ID from CHANNEL-ID asynchronously."
+  (disco-api--request-async
+   "DELETE"
+   (format "/channels/%s/messages/%s" channel-id message-id)
+   :on-success on-success
+   :on-error on-error))
+
+(provide 'disco-api)
+
+;;; disco-api.el ends here

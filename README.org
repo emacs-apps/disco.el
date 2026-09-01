@@ -1,0 +1,47 @@
+#+title: disco.el
+#+options: toc:nil num:nil
+
+* What it is
+
+~disco.el~ is an Emacs Discord client.  It uses a telega-style root
+and room flow, an ement-style split between API, state, and buffers,
+and Appkit for views, composers, and media.
+
+* Start
+
+Set a token, then open the root:
+
+#+begin_src sh
+export DISCO_TOKEN=...
+#+end_src
+
+#+begin_src emacs-lisp
+(require 'disco)
+;; or override in-session:
+;; M-x disco-set-token
+#+end_src
+
+~M-x disco~ opens ~*disco*~.  ~RET~ opens a guild directory or room.
+
+Requires Emacs 31.1, ~plz~, ~websocket~, and Appkit 0.3.0.
+
+Discord Markdown parsing requires both native Tree-sitter grammars used by
+Appkit: ~markdown~ and ~markdown-inline~.  Installation is explicit and pinned
+to the GNU Emacs-tested grammar revision:
+
+#+begin_src emacs-lisp
+(appkit-markup-markdown-ts-install-grammars)
+#+end_src
+
+Parsing and account startup never download, compile, or activate
+~markdown-ts-mode~.
+
+The provider-aware ~discord-markdown~ codec preserves Discord spoilers,
+underline, multiline quotes, suppressed links, mentions, timestamps, navigation
+tokens, and code-zone literals in both incoming rendering and outgoing
+composition.  Attachments, including spoiler state, remain structured side
+channels.
+
+Keys, threads, attachments, and options are in the
+[[file:docs/user.org][user guide]].  Layouts, file map, and design
+notes are in [[file:docs/develop.org][docs/develop.org]].

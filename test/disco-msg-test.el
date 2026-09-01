@@ -1,0 +1,244 @@
+;;; disco-msg-test.el --- Tests for disco-msg helpers -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'cl-lib)
+
+(require 'disco-msg)
+(require 'disco-state)
+
+(ert-deftest disco-msg-preview-content-prefers-text ()
+  (should (equal "hello world"
+                 (disco-msg-preview-content
+                  '((content . "hello\nworld")
+                    (attachments . (((id . "a1")))))))))
+
+(ert-deftest disco-msg-preview-content-falls-back-to-attachment-summary ()
+  (should (equal "(2 attachments)"
+                 (disco-msg-preview-content
+                  '((content . "")
+                    (attachments . (((id . "a1"))
+                                    ((id . "a2")))))))))
+
+(ert-deftest disco-msg-channel-last-cached-message-prefers-last-message-id ()
+  (disco-state-reset)
+  (let* ((channel '((id . "c1")
+                    (last_message_id . "m2")))
+         (m1 '((id . "m1") (content . "older")))
+         (m2 '((id . "m2") (content . "newer"))))
+    (disco-state-put-messages "c1" (list m1 m2))
+    (should (equal "m2"
+                   (alist-get 'id (disco-msg-channel-last-cached-message channel))))))
+
+(ert-deftest disco-msg-channel-last-cached-message-rejects-stale-preview ()
+  (disco-state-reset)
+  (let ((channel '((id . "c1") (last_message_id . "m2")))
+        (older '((id . "m1") (content . "older"))))
+    (disco-state-put-messages "c1" (list older))
+    (should-not (disco-msg-channel-last-cached-message channel))))
+
+(ert-deftest disco-msg-time-and-type-helpers-normalize-message-fields ()
+  (let ((message '((timestamp . "2026-03-08T12:34:56.000000+00:00")
+                   (type . "19"))))
+    (should (disco-msg-time message))
+    (should (numberp (disco-msg-time-epoch message)))
+    (should (equal "2026-03-08" (disco-msg-day-key message)))
+    (should (= 19 (disco-msg-type message)))
+    (should (disco-msg-reply-type-p message))))
+
+(ert-deftest disco-msg-poll-helpers-cover-question-counts-and-state ()
+  (let* ((poll '((question . ((text . "Lunch?")))
+                 (allow_multiselect . t)
+                 (expiry . "2099-03-08T12:34:56.000000+00:00")
+                 (answers . (((answer_id . "1")
+                              (poll_media . ((text . "Pizza")
+                                             (emoji . ((name . "pizza"))))))
+                             ((answer_id . 2)
+                              (poll_media . ((text . "Sushi"))))))
+                 (results . ((answer_counts . (((id . 1)
+                                               (count . 2)
+                                               (me_voted . t))
+                                              ((id . "2")
+                                               (count . 1))))))))
+         (first-answer (car (alist-get 'answers poll))))
+    (should (equal "Lunch?" (disco-msg-poll-question-text poll)))
+    (should (= 1 (disco-msg-poll-answer-id first-answer)))
+    (should (equal "Pizza" (disco-msg-poll-answer-text first-answer)))
+    (should (equal "pizza" (disco-msg-poll-answer-emoji first-answer)))
+    (should (= 2 (disco-msg-poll-answer-count poll 1)))
+    (should (disco-msg-poll-answer-me-voted-p poll 1))
+    (should (= 3 (disco-msg-poll-total-votes poll)))
+    (should (disco-msg-poll-multiselect-p poll))
+    (should (equal "open" (disco-msg-poll-state-label poll)))
+    (should (equal '(1) (disco-msg-poll-voted-answer-ids poll)))
+    (should (equal '(2 1)
+                   (disco-msg-poll-normalize-answer-id-list '("2" 2 "1" "x" 1))))
+    (should (equal "2099-03-08"
+                   (disco-msg-poll-expiry-label poll "%Y-%m-%d")))))
+
+(ert-deftest disco-msg-reaction-helpers-normalize-message-shapes ()
+  (let* ((reaction '((emoji . ((name . ":thumbsup:")))
+                     (total_count . 3)
+                     (is_chosen . t)))
+         (message `((reaction_counts . (,reaction)))))
+    (should (equal ":thumbsup:" (disco-msg-reaction-emoji reaction)))
+    (should (= 3 (disco-msg-reaction-count reaction)))
+    (should (disco-msg-reaction-selected-p reaction))
+    (should-not (disco-msg-reaction-selected-p '((me . true))))
+    (should (equal (list reaction)
+                   (disco-msg-reactions message)))))
+
+(ert-deftest disco-msg-at-uses-buffer-properties-and-resolver ()
+  (with-temp-buffer
+    (let ((expected '((id . "m1")
+                      (channel_id . "c1")
+                      (content . "hello"))))
+      (insert "hello")
+      (add-text-properties (point-min) (point-max)
+                           '(disco-message-id "m1"
+                             disco-message-channel-id "c1"
+                             disco-message-guild-id "g1"))
+      (setq-local disco-msg-resolve-function
+                  (lambda (message-id channel-id _pos)
+                    (when (and (equal message-id "m1")
+                               (equal channel-id "c1"))
+                      expected)))
+      (goto-char (point-min))
+      (should (eq expected (disco-msg-at)))
+      (should (equal '(:message-id "m1" :channel-id "c1" :guild-id "g1")
+                     (disco-msg-ref-at))))))
+
+(ert-deftest disco-msg-link-infers-guild-from-channel-and-supports-dms ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "c1")
+                                (guild_id . "g1")
+                                (type . 0)))
+  (disco-state-upsert-channel '((id . "dm1")
+                                (type . 1)))
+  (should (equal "https://discord.com/channels/g1/c1/m1"
+                 (disco-msg-link '((id . "m1")
+                                   (channel_id . "c1")))))
+  (should (equal "https://discord.com/channels/@me/dm1/m2"
+                 (disco-msg-link '((id . "m2")
+                                   (channel_id . "dm1"))))))
+
+(ert-deftest disco-msg-copy-text-respects-no-properties ()
+  (let (copied)
+    (with-temp-buffer
+      (setq-local disco-msg-content-text-function
+                  (lambda (_msg)
+                    (propertize "hello" 'face 'bold)))
+      (cl-letf (((symbol-function 'kill-new)
+                 (lambda (text &rest _args)
+                   (setq copied text)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (disco-msg-copy-text '((id . "m1")))
+        (should (equal "hello" (substring-no-properties copied)))
+        (should (get-text-property 0 'face copied))
+        (disco-msg-copy-text '((id . "m1")) t)
+        (should (equal "hello" copied))))))
+
+(ert-deftest disco-msg-copy-dwim-prefers-url-code-then-message-text ()
+  (let (copied)
+    (with-temp-buffer
+      (let ((rendered (disco-markdown-render
+                       "visit [site](https://example.com) and `(+ 1 2)`"
+                       :context 'test-msg-copy-dwim)))
+        (insert rendered))
+      (cl-letf (((symbol-function 'kill-new)
+                 (lambda (text &rest _args)
+                   (setq copied text)))
+                ((symbol-function 'message)
+                 (lambda (&rest _args) nil)))
+        (goto-char (point-min))
+        (search-forward "site")
+        (backward-char 2)
+        (disco-msg-copy-dwim '((id . "m1")
+                               (content . "fallback text")))
+        (should (equal "https://example.com" copied))
+        (search-forward "+ 1 2")
+        (backward-char 3)
+        (disco-msg-copy-dwim '((id . "m1")
+                               (content . "fallback text")))
+        (should (equal "(+ 1 2)" copied))
+        (goto-char (point-min))
+        (setq-local disco-msg-content-text-function
+                    (lambda (_msg)
+                      "fallback text"))
+        (disco-msg-copy-dwim '((id . "m1")
+                               (content . "fallback text")) t)
+        (should (equal "fallback text" copied))))))
+
+(ert-deftest disco-msg-commands-dispatch-through-buffer-local-adapters ()
+  (with-temp-buffer
+    (let ((msg '((id . "m1")))
+          seen)
+      (setq-local disco-msg-reply-function (lambda (it) (setq seen (list 'reply it))))
+      (disco-msg-reply msg)
+      (should (equal (list 'reply msg) seen))
+      (setq-local disco-msg-forward-function (lambda (it) (setq seen (list 'forward it))))
+      (disco-msg-forward msg)
+      (should (equal (list 'forward msg) seen))
+      (setq-local disco-msg-operate-function (lambda (it) (setq seen (list 'operate it))))
+      (disco-msg-operate msg)
+      (should (equal (list 'operate msg) seen))
+      (setq-local disco-msg-edit-function (lambda (it) (setq seen (list 'edit it))))
+      (disco-msg-edit msg)
+      (should (equal (list 'edit msg) seen))
+      (setq-local disco-msg-delete-function (lambda (it) (setq seen (list 'delete it))))
+      (disco-msg-delete msg)
+      (should (equal (list 'delete msg) seen))
+      (setq-local disco-msg-open-thread-function (lambda (it) (setq seen (list 'thread it))))
+      (disco-msg-open-thread msg)
+      (should (equal (list 'thread msg) seen))
+      (setq-local disco-msg-toggle-reaction-function (lambda (it) (setq seen (list 'toggle it))))
+      (disco-msg-toggle-reaction msg)
+      (should (equal (list 'toggle msg) seen))
+      (setq-local disco-msg-add-reaction-function (lambda (it) (setq seen (list 'add it))))
+      (disco-msg-add-reaction msg)
+      (should (equal (list 'add msg) seen))
+      (setq-local disco-msg-remove-reaction-function (lambda (it) (setq seen (list 'remove it))))
+      (disco-msg-remove-reaction msg)
+      (should (equal (list 'remove msg) seen))
+      (setq-local disco-msg-redisplay-function (lambda (it) (setq seen (list 'redisplay it))))
+      (disco-msg-redisplay msg)
+      (should (equal (list 'redisplay msg) seen)))))
+
+(ert-deftest disco-msg-next-and-previous-follow-message-spans ()
+  (with-temp-buffer
+    (insert "one\n\ntwo\n")
+    (add-text-properties 1 4 '(disco-message-id "m1"))
+    (add-text-properties 6 9 '(disco-message-id "m2"))
+    (goto-char 2)
+    (disco-msg-next)
+    (should (= 6 (point)))
+    (disco-msg-previous)
+    (should (= 1 (point)))))
+
+(ert-deftest disco-msg-describe-message-renders-inspect-buffer ()
+  (disco-state-reset)
+  (disco-state-upsert-channel '((id . "c1") (guild_id . "g1") (type . 0)))
+  (disco-state-put-messages
+   "c1"
+   '(((id . "m1")
+      (channel_id . "c1")
+      (content . "hello world"))))
+  (let ((buf nil))
+    (unwind-protect
+        (progn
+          (setq buf (disco-msg-describe-message
+                     '((id . "m1")
+                       (channel_id . "c1")
+                       (content . "hello world"))))
+          (with-current-buffer buf
+            (should (eq major-mode 'disco-msg-inspect-mode))
+            (should (string-match-p "Message ID: m1" (buffer-string)))
+            (should (string-match-p "hello world" (buffer-string)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+
+
+(provide 'disco-msg-test)
+
+;;; disco-msg-test.el ends here

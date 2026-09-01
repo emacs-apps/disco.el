@@ -1,0 +1,2790 @@
+;;; disco-root-view.el --- Root view builders for disco.el -*- lexical-binding: t; -*-
+
+;; Author: disco.el contributors
+
+;;; Commentary:
+
+;; Root-specific projection state, row models, inserters, and builders.  This
+;; keeps `disco-root.el' focused on controller, live-update, and buffer
+;; lifecycle logic while `appkit-presentation.el' provides reusable UI primitives.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'seq)
+(require 'subr-x)
+(require 'time-date)
+
+(require 'disco-avatar)
+(require 'disco-api)
+(require 'disco-channel-type)
+(require 'disco-gateway)
+(require 'disco-media)
+(require 'disco-msg)
+(require 'disco-permission)
+(require 'disco-preview)
+(require 'disco-room)
+(require 'disco-thread)
+(require 'appkit-ui)
+(require 'appkit-directory)
+(require 'appkit-presentation)
+(require 'appkit-invalidation)
+(require 'appkit-surface)
+(require 'disco-runtime)
+(require 'disco-state)
+(require 'disco-root-render)
+(require 'disco-guild-directory)
+
+(defvar disco-root--archived-parent-channel)
+(defvar disco-root--archived-before-cursors)
+(defvar disco-root--archived-source-has-more)
+(defvar disco-root--archived-threads-cache)
+(defvar disco-root--archived-last-errors)
+(defvar disco-root--archived-thread-sources)
+(defvar disco-root--inspect-channel)
+(defvar disco-root--view-mode)
+(defvar disco-root--search-domain)
+(defvar disco-root--search-query-spec)
+(defvar disco-root--search-tab-order)
+(defvar disco-root--search-tabs)
+(defvar disco-root--search-tab-label-alist)
+(defvar disco-root--search-channel-table)
+(defvar disco-root--search-thread-table)
+(defvar disco-root--tree-fold-state)
+(defvar disco-root--tree-force-channel-ids)
+(defvar disco-root--tree-force-all-rows-p)
+(defvar disco-root--search-active-p)
+(defvar disco-root--sort-mode)
+(defvar disco-root--fill-column)
+(defvar disco-root--activity-icon-slot-width)
+(defvar disco-root--icon-fetching)
+(defvar disco-root--icon-image-cache)
+(defvar disco-root--icon-fetch-generation)
+(defvar disco-root--session-cache-reset-in-progress)
+(defvar disco-root--extra-info-provider-error-cache)
+(defvar disco-root-extra-info-functions)
+(defvar disco-root-guild-icon-size)
+(defvar disco-root-show-guild-icons)
+(defvar disco-root-show-group-dm-icons)
+(defvar disco-root-activity-context-width)
+(defvar disco-root-activity-context-separator)
+(defvar disco-root-activity-time-format-alist)
+(defvar disco-root-activity-time-column-width)
+(defvar disco-root-auto-fill-margin-columns)
+(defvar disco-root-tree-unread-section-limit)
+(defvar disco-root-tree-default-expanded-sections)
+(defvar disco-root-week-start-day)
+(defvar disco-thread-archive-fetch-limit)
+
+(declare-function disco-root--section-expanded-p "disco-root" (section))
+(declare-function disco-root--set-section-expanded
+                  "disco-root" (section expanded))
+(declare-function disco-root--surface-init "disco-root" (context input))
+(declare-function disco-root--surface-update
+                  "disco-root" (context model message))
+(declare-function disco-root--surface-renderer "disco-root" (surface))
+(declare-function disco-root--flush-live-updates "disco-root" ())
+(declare-function disco-root--toggle-node-at-point "disco-root" ())
+(declare-function disco-root-render "disco-root" ())
+(declare-function disco-channel-directory-open "disco-channel-directory" (guild-id))
+(declare-function disco-channel-directory-open-thread-parent
+                  "disco-channel-directory" (parent-channel-id))
+
+(defconst disco-root-directory-row-kind-property
+  'disco-root-directory-row-kind
+  "Text property identifying root-owned composite directory rows.")
+
+(defvar disco-root-view-attach-live-updates-function nil
+  "Function used by root view buffers to attach live updates.")
+
+(defvar disco-root-view-load-more-function nil
+  "Function used by root search rows to load more results.")
+
+(defvar disco-root-view-exit-search-function nil
+  "Function used by root search rows to restore the composite root.")
+
+(defvar disco-root-view-queue-live-update-function nil
+  "Function used by root view helpers to queue projection updates.")
+
+(defvar disco-root-view-transient-function nil
+  "Interactive command used for root view transient menus.")
+
+(defface disco-root-section-heading
+  '((t :inherit bold))
+  "Face for semantic section headings in the root buffer."
+  :group 'disco)
+
+(defface disco-root-active-lens
+  '((t :inherit mode-line-emphasis :weight bold))
+  "Face for the active root header lens."
+  :group 'disco)
+
+(defface disco-root-unread-badge
+  '((t :inherit font-lock-warning-face :weight semi-bold))
+  "Face for unread and mention indicators in root rows."
+  :group 'disco)
+
+(defface disco-root-context-separator
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for hierarchy separators in root activity rows."
+  :group 'disco)
+
+(defun disco-root-view--call-controller (function label &rest args)
+  "Call controller FUNCTION named by LABEL with ARGS.
+
+Signal a user-facing error when the root controller callback is missing."
+  (unless (and function
+               (or (functionp function)
+                   (and (symbolp function)
+                        (fboundp function))))
+    (error "disco: root view callback is not configured: %s" label))
+  (apply function args))
+
+(defun disco-root-view--attach-live-updates ()
+  "Attach live updates for the current root-related buffer."
+  (disco-root-view--call-controller
+   disco-root-view-attach-live-updates-function
+   'attach-live-updates))
+
+(defun disco-root-view--load-more (tab)
+  "Load more search results for exact search TAB."
+  (disco-root-view--call-controller
+   disco-root-view-load-more-function
+   'load-more
+   tab))
+
+(defun disco-root-view--exit-search ()
+  "Restore the composite root through the controller."
+  (disco-root-view--call-controller
+   disco-root-view-exit-search-function
+   'exit-search))
+
+(defun disco-root-view--queue-live-update (channel-ids &optional structural-p header-p)
+  "Queue a controller update for CHANNEL-IDS.
+When STRUCTURAL-P is non-nil, request a full projection.  When HEADER-P is
+non-nil, also invalidate the root header."
+  (disco-root-view--call-controller
+   disco-root-view-queue-live-update-function
+   'queue-live-update
+   channel-ids structural-p header-p))
+
+(defun disco-root-view--transient ()
+  "Open the root transient menu through the controller."
+  (interactive)
+  (disco-root-view--call-controller
+   disco-root-view-transient-function
+   'transient))
+
+
+(defun disco-root--search-domain-kind (domain)
+  "Return kind symbol from root search DOMAIN plist."
+  (plist-get domain :kind))
+
+(defun disco-root--search-domain-id (domain)
+  "Return identifier from root search DOMAIN plist."
+  (plist-get domain :id))
+
+(defun disco-root--search-domain-channel-id (domain)
+  "Return fixed channel id from root search DOMAIN when it is channel-scoped."
+  (when (eq (disco-root--search-domain-kind domain) 'channel)
+    (disco-root--search-domain-id domain)))
+
+(defun disco-root--search-domain-guild-id (domain)
+  "Return guild id associated with root search DOMAIN, or nil."
+  (pcase (disco-root--search-domain-kind domain)
+    ('guild
+     (disco-root--search-domain-id domain))
+    ('channel
+     (plist-get domain :guild-id))
+    (_ nil)))
+
+(defun disco-root--search-domain-channel-object (domain)
+  "Return fixed channel object for root search DOMAIN, or nil."
+  (when-let* ((channel-id (disco-root--search-domain-channel-id domain)))
+    (or (disco-state-channel channel-id)
+        (and (hash-table-p disco-root--search-channel-table)
+             (gethash channel-id disco-root--search-channel-table))
+        (and (hash-table-p disco-root--search-thread-table)
+             (gethash channel-id disco-root--search-thread-table)))))
+
+(defun disco-root--search-channel-domain (channel)
+  "Return channel-scoped search domain plist for CHANNEL."
+  (when (disco-channel-searchable-p channel)
+    (when-let* ((channel-id (and (listp channel) (alist-get 'id channel))))
+      (let ((label (or (disco-root--channel-display-name channel)
+                       channel-id)))
+        (list :kind 'channel
+              :id channel-id
+              :guild-id (alist-get 'guild_id channel)
+              :label label)))))
+
+(defun disco-root--search-current-channel-domain ()
+  "Return current channel-scoped search domain inferred from point, or nil."
+  (or (when (and disco-root--search-active-p
+                 (eq (disco-root--search-domain-kind disco-root--search-domain) 'channel))
+        disco-root--search-domain)
+      (when-let* ((channel-id (disco-root--line-channel-id))
+                  (channel (or (disco-state-channel channel-id)
+                               (and (hash-table-p disco-root--search-channel-table)
+                                    (gethash channel-id disco-root--search-channel-table))
+                               (and (hash-table-p disco-root--search-thread-table)
+                                    (gethash channel-id disco-root--search-thread-table)))))
+        (disco-root--search-channel-domain channel))))
+
+(defun disco-root--search-domain-label (domain)
+  "Return display label from root search DOMAIN plist."
+  (or (plist-get domain :label)
+      (pcase (disco-root--search-domain-kind domain)
+        ('dms "DMs")
+        ('guild (or (disco-root--guild-name-by-id (disco-root--search-domain-id domain))
+                    (disco-root--search-domain-id domain)
+                    "Guild"))
+        ('channel (let ((channel (disco-root--search-domain-channel-object domain)))
+                    (or (and channel (disco-root--channel-display-name channel))
+                        (disco-root--search-domain-channel-id domain)
+                        "Channel")))
+        (_ "Search"))))
+
+
+(defun disco-root--search-empty-tab-state ()
+  "Return freshly initialized root search tab state plist."
+  (list :items nil
+        :loading nil
+        :error nil
+        :cursor nil
+        :total-results nil
+        :time-spent-ms nil))
+
+(defun disco-root--search-reset-tab-states ()
+  "Reset root search tab state alist for the current buffer."
+  (setq-local disco-root--search-tabs
+              (mapcar (lambda (tab)
+                        (cons tab (disco-root--search-empty-tab-state)))
+                      disco-root--search-tab-order)))
+
+(defun disco-root--search-tab-state (tab)
+  "Return root search TAB state plist, initializing when needed."
+  (or (alist-get tab disco-root--search-tabs nil nil #'eq)
+      (let ((state (disco-root--search-empty-tab-state)))
+        (push (cons tab state) disco-root--search-tabs)
+        state)))
+
+(defun disco-root--search-set-tab-state (tab state)
+  "Set root search TAB STATE plist and return STATE."
+  (if-let* ((cell (assq tab disco-root--search-tabs)))
+      (setcdr cell state)
+    (push (cons tab state) disco-root--search-tabs))
+  state)
+
+(defun disco-root--search-tab-label (tab)
+  "Return display label for root search TAB symbol."
+  (or (alist-get tab disco-root--search-tab-label-alist nil nil #'eq)
+      (capitalize (symbol-name tab))))
+
+
+(defun disco-root--search-effective-spec-p (&optional spec)
+  "Return non-nil when root search SPEC contains an actual query/filter."
+  (let ((it (or spec disco-root--search-query-spec)))
+    (or (let ((content (plist-get it :content)))
+          (and (stringp content)
+               (not (string-empty-p content))))
+        (plist-get it :author-ids)
+        (plist-get it :author-types)
+        (plist-get it :mentions)
+        (plist-get it :mention-everyone)
+        (plist-get it :has)
+        (plist-get it :slop)
+        (plist-member it :pinned)
+        (plist-get it :channel-ids)
+        (plist-get it :max-id)
+        (plist-get it :min-id))))
+
+
+(defun disco-root--search-channel (channel-id)
+  "Return best-effort channel object for CHANNEL-ID in search results."
+  (or (and channel-id (disco-state-channel channel-id))
+      (and channel-id
+           (hash-table-p disco-root--search-thread-table)
+           (gethash channel-id disco-root--search-thread-table))
+      (and channel-id
+           (hash-table-p disco-root--search-channel-table)
+           (gethash channel-id disco-root--search-channel-table))))
+
+
+(defun disco-root--line-property (property &optional pos)
+  "Return text PROPERTY on current rendered row at POS (or point)."
+  (let ((p (or pos (point))))
+    (or (get-text-property p property)
+        (save-excursion
+          (goto-char p)
+          (get-text-property (line-beginning-position) property)))))
+
+(defun disco-root--line-section (&optional pos)
+  "Return section symbol for row at POS when row is a section header."
+  (disco-root--line-property 'disco-root-section pos))
+
+(defun disco-root--line-row-type (&optional pos)
+  "Return row type symbol at POS (or point)."
+  (disco-root--line-property 'disco-root-row-type pos))
+
+(defun disco-root--line-guild-id (&optional pos)
+  "Return guild id for row at POS when row is a guild header."
+  (disco-root--line-property 'disco-root-guild-id pos))
+
+(defun disco-root--line-channel-id (&optional pos)
+  "Return channel id for row at POS when row is channel/thread row."
+  (disco-root--line-property 'disco-channel-id pos))
+
+
+(defun disco-root--line-unread-count (&optional pos)
+  "Return mention badge count for row at POS, defaulting to 0."
+  (or (disco-root--line-property 'disco-unread-count pos) 0))
+
+(defun disco-root--line-has-unread-p (&optional pos)
+  "Return non-nil when row at POS has unread state."
+  (or (disco-root--line-property 'disco-has-unread pos)
+      (> (disco-root--line-unread-count pos) 0)))
+
+(defun disco-root--channel-line-positions (&optional predicate)
+  "Return ordered list of channel row positions.
+
+When PREDICATE is non-nil, include row only when (PREDICATE POS) is non-nil."
+  (let (positions)
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (when (and (disco-root--line-channel-id (point))
+                   (or (null predicate)
+                       (funcall predicate (point))))
+          (push (line-beginning-position) positions))
+        (forward-line 1)))
+    (nreverse positions)))
+
+(defun disco-root--next-position-after (positions cursor)
+  "Return first position in POSITIONS strictly after CURSOR."
+  (seq-find (lambda (pos) (> pos cursor)) positions))
+
+(defun disco-root--previous-position-before (positions cursor)
+  "Return last position in POSITIONS strictly before CURSOR."
+  (let (found)
+    (dolist (pos positions found)
+      (when (< pos cursor)
+        (setq found pos)))))
+
+(defun disco-root--display-window (&optional buffer)
+  "Return preferred live window displaying BUFFER."
+  (let* ((buf (or buffer (current-buffer)))
+         (selected (selected-window)))
+    (cond
+     ((and (window-live-p selected)
+           (eq (window-buffer selected) buf))
+      selected)
+     (t
+      (get-buffer-window buf t)))))
+
+(defun disco-root--window-width-remap (window)
+  "Return WINDOW width in columns, respecting face remapping when possible."
+  (if (not (window-live-p window))
+      (window-width)
+    (condition-case _err
+        (window-width window 'remap)
+      (wrong-number-of-arguments
+       (window-width window))
+      (error
+       (window-width window)))))
+
+(defun disco-root--chars-xwidth (columns &optional buffer window)
+  "Return pixel width for COLUMNS in BUFFER/WINDOW metrics."
+  (let* ((win (or window (disco-root--display-window buffer)))
+         (frame (and (window-live-p win)
+                     (window-frame win)))
+         (char-width
+          (or (and (frame-live-p frame)
+                   (let* ((font (ignore-errors (face-font 'default frame)))
+                          (info (and font (ignore-errors (font-info font frame)))))
+                     (when info
+                       (let ((width (aref info 11)))
+                         (if (> width 0)
+                             width
+                           (aref info 10))))))
+              (and (frame-live-p frame)
+                   (frame-char-width frame))
+              (frame-char-width)
+              1)))
+    (* (max 0 columns) (max 1 char-width))))
+
+(defun disco-root--chars-in-width (pixels &optional buffer window)
+  "Return character columns required to cover PIXELS in BUFFER/WINDOW."
+  (max 0
+       (ceiling (/ (max 0 pixels)
+                   (float (max 1 (disco-root--chars-xwidth 1 buffer window)))))))
+
+(defun disco-root--text-scale-factor (&optional buffer)
+  "Return text scale factor for BUFFER (or current buffer)."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((step (if (boundp 'text-scale-mode-step)
+                    text-scale-mode-step
+                  1.2))
+          (amount (if (boundp 'text-scale-mode-amount)
+                      text-scale-mode-amount
+                    0)))
+      (if (= amount 0)
+          1.0
+        (expt step amount)))))
+
+(defun disco-root--scaled-image (image &optional buffer)
+  "Return IMAGE spec scaled for BUFFER text scale when possible."
+  (let ((factor (disco-root--text-scale-factor buffer)))
+    (if (and (consp image)
+             (eq (car image) 'image)
+             (numberp factor)
+             (> factor 0)
+             (/= factor 1.0))
+        (let ((scaled (copy-tree image)))
+          (setcdr scaled (plist-put (cdr scaled) :scale factor))
+          scaled)
+      image)))
+
+(defun disco-root--compute-fill-column (&optional buffer window)
+  "Return effective render width for BUFFER.
+
+When WINDOW is non-nil, compute using WINDOW directly."
+  (let* ((buf (or buffer (current-buffer)))
+         (win (or window (disco-root--display-window buf))))
+    (max 20
+         (if (not (window-live-p win))
+             (window-width)
+           (let* ((margins (window-margins win))
+                  (raw-width (+ (disco-root--window-width-remap win)
+                                (or (car margins) 0)
+                                (or (cdr margins) 0)))
+                  (line-number-columns
+                   (with-selected-window win
+                     (disco-root--chars-in-width
+                      (line-number-display-width 'pixels)
+                      buf
+                      win)))
+                  (adjusted-width (- raw-width
+                                     (or disco-root-auto-fill-margin-columns 0)
+                                     line-number-columns)))
+             adjusted-width)))))
+
+(defun disco-root--selected-window-for-buffer (&optional buffer)
+  "Return selected window when it displays BUFFER, otherwise nil."
+  (let* ((buf (or buffer (current-buffer)))
+         (win (selected-window)))
+    (when (and (window-live-p win)
+               (eq (window-buffer win) buf))
+      win)))
+
+(defun disco-root--render-fill-column (&optional buffer)
+  "Return stable fill width for BUFFER before one render pass.
+
+Mirror telega's root autofill behavior: prefer the selected BUFFER
+window, otherwise reuse the last width so passive background rerenders do
+not jump between windows or reflow unpredictably."
+  (with-current-buffer (or buffer (current-buffer))
+    (let* ((buf (current-buffer))
+           (selected-win (disco-root--selected-window-for-buffer buf))
+           (fallback-win (or selected-win
+                             (disco-root--display-window buf)))
+           (computed-width
+            (and (window-live-p selected-win)
+                 (disco-root--compute-fill-column buf selected-win))))
+      (or (and (integerp computed-width)
+               (> computed-width 0)
+               computed-width)
+          (and (integerp disco-root--fill-column)
+               (> disco-root--fill-column 0)
+               disco-root--fill-column)
+          (and (window-live-p fallback-win)
+               (disco-root--compute-fill-column buf fallback-win))
+          (disco-root--compute-fill-column buf fallback-win)))))
+
+(defun disco-root--async-error-message (err)
+  "Return user-facing error message extracted from async ERR payload."
+  (or (and (listp err) (plist-get err :message))
+      (and (listp err)
+           (plist-get err :status)
+           (format "HTTP %s" (plist-get err :status)))
+      (format "%S" err)))
+
+(defun disco-root--archived-source-fetch-allowed-p (source-name parent-channel)
+  "Return non-nil when archived SOURCE-NAME is expected to be fetchable.
+
+This prevents noisy permission errors for sources that require elevated access."
+  (cond
+   ;; Discord private archived thread listing requires MANAGE_THREADS.
+   ((equal source-name "private")
+    (disco-permission-channel-has-p parent-channel 'manage-threads nil))
+   (t t)))
+
+(defun disco-root--displayable-channel-p (channel)
+  "Return non-nil when CHANNEL should appear in root buffer."
+  (and (disco-channel-root-visible-p channel)
+       (disco-state-channel-viewable-p channel nil)))
+
+(defun disco-root--openable-channel-p (channel)
+  "Return non-nil when CHANNEL has a supported open action."
+  (not (null (disco-channel-open-mode channel))))
+
+(defun disco-root--channel-open-help-echo (channel)
+  "Return hover help text describing how CHANNEL will open."
+  (let ((channel-id (alist-get 'id channel)))
+    (pcase (disco-channel-open-mode channel)
+      ('thread-directory
+       (format "Expand active posts under channel %s in its guild directory"
+               channel-id))
+      ('inspect
+       (format "Inspect channel %s" channel-id))
+      (_
+       (format "Open channel %s" channel-id)))))
+
+(defun disco-root--thread-parent-channel-p (channel)
+  "Return non-nil when CHANNEL can contain visible threads in UI."
+  (disco-thread-parent-channel-p channel))
+
+(defun disco-root--forum-or-media-channel-p (channel)
+  "Return non-nil when CHANNEL is a forum/media parent channel."
+  (disco-thread-forum-or-media-channel-p channel))
+
+(defun disco-root--thread-metadata (channel)
+  "Return thread metadata for CHANNEL."
+  (disco-thread-metadata channel))
+
+(defun disco-root--thread-status-tags (thread)
+  "Return comma-joined status tags for THREAD."
+  (disco-thread-status-string thread))
+
+(defun disco-root--recipient-display-name (recipient)
+  "Return best display name for one DM RECIPIENT user object."
+  (or (alist-get 'global_name recipient)
+      (alist-get 'username recipient)
+      (alist-get 'id recipient)
+      "unknown-user"))
+
+(defun disco-root--private-channel-recipient-display-names (channel)
+  "Return display names for CHANNEL recipients.
+
+Exclude the current user when its ID is known."
+  (let* ((current-user-id (and (fboundp 'disco-gateway-current-user-id)
+                               (disco-gateway-current-user-id)))
+         (recipients (or (alist-get 'recipients channel) '()))
+         (filtered (if current-user-id
+                       (seq-remove
+                        (lambda (recipient)
+                          (equal (format "%s" (alist-get 'id recipient))
+                                 (format "%s" current-user-id)))
+                        recipients)
+                     recipients))
+         (effective-recipients (if filtered filtered recipients)))
+    (delq nil
+          (mapcar (lambda (recipient)
+                    (when (listp recipient)
+                      (disco-root--recipient-display-name recipient)))
+                  effective-recipients))))
+
+(defun disco-root--private-channel-avatar-user (channel)
+  "Return the other Discord user whose avatar represents private CHANNEL."
+  (when (disco-channel-direct-message-p (alist-get 'type channel))
+    (let* ((current-user-id
+            (and (fboundp 'disco-gateway-current-user-id)
+                 (disco-gateway-current-user-id)))
+           (recipients (seq-filter #'listp
+                                   (or (alist-get 'recipients channel) '())))
+           (other
+            (and current-user-id
+                 (seq-find
+                  (lambda (recipient)
+                    (not (equal (format "%s" (alist-get 'id recipient))
+                                (format "%s" current-user-id))))
+                  recipients))))
+      (or other (car recipients)))))
+
+(defun disco-root--private-channel-display-name (channel)
+  "Return best display name for private CHANNEL."
+  (let* ((channel-type (alist-get 'type channel))
+         (explicit-name (and (stringp (alist-get 'name channel))
+                             (not (string-empty-p (alist-get 'name channel)))
+                             (alist-get 'name channel)))
+         (recipient-names (disco-root--private-channel-recipient-display-names channel)))
+    (cond
+     ((disco-channel-direct-message-p channel-type)
+      (or (car recipient-names) explicit-name "direct-message"))
+     ((disco-channel-group-dm-p channel-type)
+      (or explicit-name
+          (and recipient-names (mapconcat #'identity recipient-names ", "))
+          "group-dm"))
+     (t
+      (or explicit-name "(no-name)")))))
+
+(defun disco-root--channel-display-name (channel)
+  "Return display name for CHANNEL independent of badge suffixes."
+  (if (disco-channel-private-p channel)
+      (disco-root--private-channel-display-name channel)
+    (or (alist-get 'name channel) "(no-name)")))
+
+(defun disco-root--icon-hash (object)
+  "Return non-empty icon hash from OBJECT, or nil when unavailable."
+  (let ((icon (alist-get 'icon object)))
+    (and (stringp icon)
+         (not (string-empty-p icon))
+         icon)))
+
+(defun disco-root--guild-icon-url (guild)
+  "Return Discord CDN Guild icon URL for GUILD, or nil."
+  (let ((guild-id (alist-get 'id guild))
+        (icon-hash (disco-root--icon-hash guild)))
+    (when (and guild-id icon-hash)
+      (format "https://cdn.discordapp.com/icons/%s/%s.png?size=64"
+              guild-id icon-hash))))
+
+(defun disco-root--guild-icon-cache-key (guild)
+  "Build stable cache key for GUILD icon image."
+  (let ((guild-id (alist-get 'id guild))
+        (icon-hash (disco-root--icon-hash guild)))
+    (when (and guild-id icon-hash)
+      (format "guild:%s:%s:%s"
+              guild-id icon-hash disco-root-guild-icon-size))))
+
+(defun disco-root--channel-icon-url (channel)
+  "Return Discord CDN Group DM icon URL for CHANNEL, or nil."
+  (let ((channel-id (alist-get 'id channel))
+        (icon-hash (disco-root--icon-hash channel)))
+    (when (and channel-id icon-hash)
+      (format "https://cdn.discordapp.com/channel-icons/%s/%s.png?size=64"
+              channel-id icon-hash))))
+
+(defun disco-root--channel-icon-cache-key (channel)
+  "Build stable cache key for CHANNEL icon image."
+  (let ((channel-id (alist-get 'id channel))
+        (icon-hash (disco-root--icon-hash channel)))
+    (when (and channel-id icon-hash)
+      (format "channel:%s:%s:%s"
+              channel-id icon-hash disco-root-guild-icon-size))))
+
+(defun disco-root--guild-icon-fallback (guild)
+  "Return fallback textual icon for GUILD when image is unavailable."
+  (let* ((name (or (alist-get 'name guild) "?"))
+         (initial (if (and (stringp name) (> (length name) 0))
+                      (upcase (substring name 0 1))
+                    "?")))
+    (format "[%s]" initial)))
+
+(defun disco-root--icon-image-valid-p (image)
+  "Return non-nil when IMAGE object appears renderable."
+  (and image
+       (ignore-errors (image-size image t) t)))
+
+(defun disco-root--icon-rendering-available-p (enabled)
+  "Return non-nil when ENABLED root identity icons can be rendered."
+  (and enabled
+       (not disco-root--session-cache-reset-in-progress)
+       (display-images-p)
+       (image-type-available-p 'png)
+       (fboundp 'plz)))
+
+(defun disco-root--rerender-open-root-buffers ()
+  "Invalidate live root projections after identity icon updates."
+  (unless disco-root--session-cache-reset-in-progress
+    (dolist (buffer (buffer-list))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (eq major-mode 'disco-root-mode)
+            (disco-root-view--queue-live-update nil t nil)))))))
+
+(defun disco-root-view--icon-owner-current-p (cache-key owner)
+  "Return non-nil when OWNER still owns CACHE-KEY in this account session."
+  (and (not disco-root--session-cache-reset-in-progress)
+       (= (or (plist-get owner :generation) -1)
+          disco-root--icon-fetch-generation)
+       (eq owner (gethash cache-key disco-root--icon-fetching))))
+
+(defun disco-root-view--cancel-icon-process (process)
+  "Cancel PROCESS when live, isolating ordinary cancellation failures."
+  (when process
+    (condition-case nil
+        (when (process-live-p process)
+          (delete-process process))
+      ((error quit) nil))))
+
+(defun disco-root-view--cancel-icon-processes (processes)
+  "Cancel PROCESSES while guaranteeing every remaining cancellation attempt."
+  (let ((remaining processes))
+    (unwind-protect
+        (while remaining
+          (disco-root-view--cancel-icon-process (pop remaining)))
+      (when remaining
+        (disco-root-view--cancel-icon-processes remaining)))))
+
+(defun disco-root-view--icon-finish (cache-key owner image)
+  "Publish IMAGE for CACHE-KEY when OWNER remains exact and current."
+  (when (disco-root-view--icon-owner-current-p cache-key owner)
+    (puthash cache-key
+             (if (disco-root--icon-image-valid-p image) image :missing)
+             disco-root--icon-image-cache)
+    (when (disco-root-view--icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-root--icon-fetching)
+      (when (and (not disco-root--session-cache-reset-in-progress)
+                 (= (plist-get owner :generation)
+                    disco-root--icon-fetch-generation))
+        (disco-root--rerender-open-root-buffers)))))
+
+(defun disco-root-view--icon-fail (cache-key owner)
+  "Publish a missing icon for CACHE-KEY only when OWNER remains current."
+  (when (disco-root-view--icon-owner-current-p cache-key owner)
+    (puthash cache-key :missing disco-root--icon-image-cache)
+    (when (disco-root-view--icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-root--icon-fetching))))
+
+(defun disco-root--start-icon-fetch (cache-key url)
+  "Start asynchronous root icon fetch for CACHE-KEY from URL."
+  (unless (or disco-root--session-cache-reset-in-progress
+              (gethash cache-key disco-root--icon-fetching)
+              (gethash cache-key disco-root--icon-image-cache))
+    (let* ((generation disco-root--icon-fetch-generation)
+           (owner (list :generation generation :process nil))
+           process
+           returned-p)
+      (puthash cache-key owner disco-root--icon-fetching)
+      (unwind-protect
+          (progn
+            (setq process
+                  (plz 'get url
+                       :as 'binary
+                       :headers
+                       '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
+                       :then
+                       (lambda (bytes)
+                         (when (disco-root-view--icon-owner-current-p
+                                cache-key owner)
+                           (let ((image
+                                  (ignore-errors
+                                    (create-image
+                                     bytes 'png t
+                                     :width disco-root-guild-icon-size
+                                     :height disco-root-guild-icon-size
+                                     :ascent 'center))))
+                             (disco-root-view--icon-finish
+                              cache-key owner image))))
+                       :else
+                       (lambda (_err)
+                         (disco-root-view--icon-fail
+                          cache-key owner))))
+            (setq returned-p t))
+        (cond
+         ((and returned-p
+               (disco-root-view--icon-owner-current-p cache-key owner))
+          (setf (plist-get owner :process) process))
+         ((disco-root-view--icon-owner-current-p cache-key owner)
+          (remhash cache-key disco-root--icon-fetching))
+         (returned-p
+          (disco-root-view--cancel-icon-process process))))))
+  nil)
+
+(defun disco-root-view--reset-icon-cache-state ()
+  "Revoke root icon work and clear its account-scoped caches."
+  (let ((disco-root--session-cache-reset-in-progress t)
+        processes)
+    (cl-incf disco-root--icon-fetch-generation)
+    (maphash
+     (lambda (_cache-key owner)
+       (when-let* ((process (and (listp owner)
+                                 (plist-get owner :process))))
+         (push process processes)))
+     disco-root--icon-fetching)
+    (unwind-protect
+        (disco-root-view--cancel-icon-processes processes)
+      (clrhash disco-root--icon-fetching)
+      (clrhash disco-root--icon-image-cache))))
+
+(defun disco-root--icon-image (cache-key url enabled)
+  "Return cached icon for CACHE-KEY, fetching URL when ENABLED and absent."
+  (when (disco-root--icon-rendering-available-p enabled)
+    (let ((cached (and cache-key
+                       (gethash cache-key disco-root--icon-image-cache))))
+      (cond
+       ((null cache-key) nil)
+       ((eq cached :missing) nil)
+       ((disco-root--icon-image-valid-p cached) cached)
+       (t
+        (when url
+          (disco-root--start-icon-fetch cache-key url))
+        nil)))))
+
+(defun disco-root--guild-icon-image (guild)
+  "Return GUILD icon image, asynchronously fetching it when needed."
+  (disco-root--icon-image
+   (disco-root--guild-icon-cache-key guild)
+   (disco-root--guild-icon-url guild)
+   disco-root-show-guild-icons))
+
+(defun disco-root--channel-icon-image (channel)
+  "Return Group DM CHANNEL icon image, asynchronously fetching it when needed."
+  (when (disco-channel-group-dm-p channel)
+    (disco-root--icon-image
+     (disco-root--channel-icon-cache-key channel)
+     (disco-root--channel-icon-url channel)
+     disco-root-show-group-dm-icons)))
+
+(defun disco-root--insert-guild-icon (guild)
+  "Insert one guild icon for GUILD, falling back to text when needed."
+  (let* ((fallback (disco-root--guild-icon-fallback guild))
+         (image (disco-root--guild-icon-image guild))
+         (display-image (and (disco-root--icon-image-valid-p image)
+                             (disco-root--scaled-image image))))
+    (if (disco-root--icon-image-valid-p display-image)
+        (insert-image display-image fallback)
+      (insert fallback))))
+
+(defun disco-root--channel-category-p (channel)
+  "Return non-nil when CHANNEL is a guild category container."
+  (= (alist-get 'type channel) 4))
+
+(defun disco-root--thread-count-under-parent (channel)
+  "Return the indexed viewable active-thread count under CHANNEL.
+
+This count is for ordinary text and announcement channels.  Forum/media
+pagination reports its own exact loaded/total progress below the parent row."
+  (length
+   (seq-filter
+    (lambda (thread)
+      (and (not (disco-thread-archived-p thread))
+           (disco-state-channel-viewable-p thread nil)))
+    (disco-state-parent-threads (alist-get 'id channel)))))
+
+(defun disco-root--normalize-extra-info-value (value)
+  "Normalize one provider VALUE into a flat list of non-empty strings."
+  (cond
+   ((null value) nil)
+   ((stringp value)
+    (unless (string-empty-p value)
+      (list value)))
+   ((listp value)
+    (cl-mapcan #'disco-root--normalize-extra-info-value value))
+   (t
+    (list (format "%s" value)))))
+
+(defun disco-root--collect-extra-info (kind object context)
+  "Collect extra display fragments for KIND OBJECT with CONTEXT."
+  (let (parts)
+    (dolist (provider disco-root-extra-info-functions)
+      (condition-case err
+          (setq parts
+                (nconc parts
+                       (disco-root--normalize-extra-info-value
+                        (funcall provider kind object context))))
+        (error
+         (unless (gethash provider disco-root--extra-info-provider-error-cache)
+           (puthash provider t disco-root--extra-info-provider-error-cache)
+           (message "disco: root extra info provider error (%S): %s"
+                    provider
+                    (error-message-string err))))))
+    parts))
+
+(defun disco-root--append-extra-info (label kind object context)
+  "Append provider-driven fragments to LABEL for KIND OBJECT CONTEXT."
+  (let ((parts (disco-root--collect-extra-info kind object context)))
+    (if parts
+        (concat label " " (string-join parts " "))
+      label)))
+
+(defun disco-root--channel-read-p (channel)
+  "Return non-nil when CHANNEL is considered fully read."
+  (let* ((channel-id (alist-get 'id channel))
+         (unread (disco-state-channel-effective-unread-count channel))
+         (last-read-id (disco-state-channel-last-read-message-id channel-id))
+         (last-message-id (alist-get 'last_message_id channel)))
+    (and (= unread 0)
+         (disco-state-snowflake>= last-read-id last-message-id))))
+
+(defun disco-root--format-trail-tags (tags)
+  "Return human-readable trail string for TAGS list."
+  (when tags
+    (mapconcat (lambda (tag)
+                 (format "[%s]" tag))
+               tags
+               " ")))
+
+(defun disco-root--channel-static-trail-tags (channel)
+  "Return static status trail tags for CHANNEL."
+  (let* ((channel-id (alist-get 'id channel))
+         (channel-type (alist-get 'type channel))
+         (voice-member-count (and channel-id
+                                  (disco-state-channel-voice-member-count channel-id)))
+         (member-count (and channel-id
+                            (disco-state-channel-member-count channel-id)))
+         (voice-start-time (alist-get 'voice_start_time channel))
+         tags)
+    (when (disco-state-channel-has-unread-pins-p channel)
+      (push "pins" tags))
+    (when (eq t (alist-get 'muted channel))
+      (push "muted" tags))
+    (when (disco-state-channel-age-restricted-p channel)
+      (push "18+" tags))
+    (when (and (memq channel-type '(2 13))
+               (numberp voice-member-count)
+               (> voice-member-count 0))
+      (push (format "voice:%d" voice-member-count) tags))
+    (when (and (memq channel-type '(2 13))
+               (numberp member-count)
+               (> member-count 0))
+      (push (format "members:%d" member-count) tags))
+    (when (and (memq channel-type '(2 13))
+               voice-start-time)
+      (push "live" tags))
+    (nreverse tags)))
+
+(defun disco-root--channel-dynamic-trail-tags (channel)
+  "Return dynamic status trail tags for CHANNEL."
+  (let ((mention-count (disco-state-channel-effective-unread-count channel))
+        (has-unread (disco-root--channel-has-unread-p channel))
+        tags)
+    (when has-unread
+      (push "unread" tags))
+    (when (> mention-count 0)
+      (push (format "@%d" mention-count) tags))
+    (nreverse tags)))
+
+(defun disco-root--channel-category-name (channel)
+  "Return category name for CHANNEL, or nil when not categorized."
+  (let* ((parent-id (alist-get 'parent_id channel))
+         (parent-channel (and parent-id (disco-state-channel parent-id)))
+         (category-id (cond
+                       ((and parent-channel
+                             (disco-state-channel-thread-p channel))
+                        (alist-get 'parent_id parent-channel))
+                       ((and parent-channel
+                             (disco-root--channel-category-p parent-channel))
+                        parent-id)
+                       (t nil)))
+         (category (and category-id (disco-state-channel category-id))))
+    (when (and category (disco-root--channel-category-p category))
+      (disco-root--channel-display-name category))))
+
+(defun disco-root--channel-guild-name (channel)
+  "Return guild name for CHANNEL, or nil when channel is non-guild."
+  (when-let* ((guild-id (alist-get 'guild_id channel)))
+    (disco-root--guild-name-by-id guild-id)))
+
+(defun disco-root--thread-parent-channel (thread)
+  "Return parent channel object for THREAD, or nil."
+  (when-let* ((parent-id (alist-get 'parent_id thread)))
+    (disco-state-channel parent-id)))
+
+(defun disco-root--thread-directory-scope (thread)
+  "Return the directory presentation scope for THREAD.
+
+Threads below Forum or Media parents are presented as posts whose preview is
+their starter message.  Threads below timeline parents use their latest
+message.  When the parent is not cached, prefer the latest-message path; parent
+thread-page loading may hydrate that preview with one best-effort guild search."
+  (if (disco-channel-thread-only-parent-p
+       (disco-root--thread-parent-channel thread))
+      'thread-post
+    'timeline-thread))
+
+(defun disco-root--thread-tag-label (tag)
+  "Return human-readable label for one forum/media TAG object."
+  (when (listp tag)
+    (let ((emoji-name (alist-get 'emoji_name tag))
+          (name (alist-get 'name tag)))
+      (string-join
+       (delq nil
+             (list (and (stringp emoji-name)
+                        (not (string-empty-p emoji-name))
+                        emoji-name)
+                   (and (stringp name)
+                        (not (string-empty-p name))
+                        name)))
+       " "))))
+
+(defun disco-root--thread-applied-tag-labels (thread)
+  "Return applied forum/media tag labels for THREAD."
+  (let* ((parent-channel (disco-root--thread-parent-channel thread))
+         (available-tags (and (listp parent-channel)
+                              (alist-get 'available_tags parent-channel)))
+         labels)
+    (dolist (tag-id (or (alist-get 'applied_tags thread) '()))
+      (let* ((normalized-tag-id (and tag-id (format "%s" tag-id)))
+             (tag (and normalized-tag-id
+                       (seq-find
+                        (lambda (candidate)
+                          (equal normalized-tag-id
+                                 (and (listp candidate)
+                                      (format "%s" (alist-get 'id candidate)))))
+                        available-tags)))
+             (label (and tag (disco-root--thread-tag-label tag))))
+        (when (and (stringp label)
+                   (not (string-empty-p label)))
+          (push label labels))))
+    (nreverse labels)))
+
+(defun disco-root--thread-browser-context-label (thread)
+  "Return one-line context label for THREAD browser rows."
+  (let* ((name (disco-root--channel-display-name thread))
+         (tag-labels (disco-root--thread-applied-tag-labels thread))
+         (parts (cons name tag-labels)))
+    (string-join (delq nil parts) " | ")))
+
+(defun disco-root--archived-thread-metadata-preview (thread)
+  "Return metadata preview for archived THREAD rows, or nil."
+  (let* ((status-tags (disco-thread-status-tags thread))
+         (message-count (or (alist-get 'total_message_sent thread)
+                            (alist-get 'message_count thread)))
+         (thread-id (alist-get 'id thread))
+         (member-count (or (alist-get 'member_count thread)
+                           (and thread-id
+                                (disco-state-thread-member-count thread-id))))
+         parts)
+    (dolist (status status-tags)
+      (push status parts))
+    (when (numberp message-count)
+      (push (format "%s msg%s"
+                    (disco-title-compact-count message-count)
+                    (if (= message-count 1)
+                        ""
+                      "s"))
+            parts))
+    (when (numberp member-count)
+      (push (format "%s member%s"
+                    (disco-title-compact-count member-count)
+                    (if (= member-count 1)
+                        ""
+                      "s"))
+            parts))
+    (when parts
+      (string-join (nreverse parts) " · "))))
+
+(defun disco-root--thread-browser-time-label (thread scope &optional message)
+  "Return time label for THREAD browser row under SCOPE."
+  (if (eq scope 'archived-thread)
+      (let* ((archive-timestamp (or (alist-get 'archive_timestamp
+                                               (disco-root--thread-metadata thread))
+                                    (alist-get 'archive_timestamp thread)))
+             (seconds (and archive-timestamp
+                           (ignore-errors
+                             (float-time (date-to-time archive-timestamp))))))
+        (or (and seconds
+                 (ignore-errors
+                   (disco-root--activity-time-string seconds)))
+            (disco-root--channel-last-activity-time-label thread message)))
+    (disco-root--channel-last-activity-time-label thread message)))
+
+(defun disco-root--activity-context-label (channel &optional scope)
+  "Return context label for CHANNEL one-line rows under SCOPE."
+  (pcase scope
+    ((or 'thread-post 'timeline-thread 'archived-thread)
+     (disco-root--thread-browser-context-label channel))
+    ('directory
+     (disco-root--channel-display-name channel))
+    (_
+     (disco-root--activity-primary-label channel))))
+
+(defun disco-root--activity-primary-label (channel)
+  "Return the primary activity-row label for CHANNEL."
+  (let* ((parts (delq nil
+                      (list (disco-root--channel-guild-name channel)
+                            (disco-root--channel-category-name channel)
+                            (disco-root--channel-display-name channel))))
+         (separator
+          (propertize disco-root-activity-context-separator
+                      'face 'disco-root-context-separator)))
+    (if parts
+        (mapconcat #'identity parts separator)
+      (disco-root--channel-display-name channel))))
+
+(defun disco-root--activity-secondary-placeholder (channel)
+  "Return non-message placeholder preview for CHANNEL, or nil."
+  (pcase (disco-channel-open-mode channel)
+    ('inspect
+     (format "(%s view)" (disco-channel-type-name channel)))
+    (_ nil)))
+
+(defun disco-root--activity-secondary-label (channel)
+  "Return fallback activity preview label for CHANNEL.
+
+The label stays message-oriented and avoids transport-status placeholders."
+  (let ((channel-id (alist-get 'id channel)))
+    (or (disco-root--activity-secondary-placeholder channel)
+        (and channel-id
+             (disco-state-channel-conversation-summary-preview channel-id))
+        "")))
+
+(defun disco-root--activity-preview-label (channel &optional scope)
+  "Return fallback preview label for CHANNEL one-line rows under SCOPE."
+  (pcase scope
+    ('archived-thread
+     (or (disco-root--archived-thread-metadata-preview channel)
+         (disco-root--activity-secondary-label channel)))
+    (_
+     (disco-root--activity-secondary-label channel))))
+
+
+(defun disco-root--snowflake-epoch-seconds (snowflake)
+  "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
+  (when (and (stringp snowflake)
+             (string-match-p "\\`[0-9]+\\'" snowflake))
+    (let ((value (string-to-number snowflake)))
+      (when (integerp value)
+        (+ disco-state-discord-epoch-seconds
+           (/ (float (ash value -22)) 1000.0))))))
+
+(defun disco-root--activity-time-format-type (seconds)
+  "Return time format type symbol for SECONDS.
+
+Values match keys in `disco-root-activity-time-format-alist'."
+  (let* ((now (float-time))
+         (day-seconds (* 24 60 60))
+         (ctime (decode-time now))
+         (today00 (float-time (encode-time 0 0 0
+                                           (nth 3 ctime)
+                                           (nth 4 ctime)
+                                           (nth 5 ctime)))))
+    (if (and (> seconds today00)
+             (< seconds (+ today00 day-seconds)))
+        'today
+      (let* ((week-day (nth 6 ctime))
+             (mdays (+ week-day
+                       (- (if (< week-day disco-root-week-start-day) 7 0)
+                          disco-root-week-start-day)))
+             (week-start00 (- today00 (* mdays day-seconds))))
+        (if (and (> seconds week-start00)
+                 (< seconds (+ week-start00 (* 7 day-seconds))))
+            'this-week
+          'old)))))
+
+(defun disco-root--activity-time-string (seconds &optional fmt-type)
+  "Return formatted activity time string for SECONDS.
+
+FMT-TYPE can be a symbol key from
+`disco-root-activity-time-format-alist' or a format string accepted by
+`format-time-string'."
+  (let* ((kind (or fmt-type (disco-root--activity-time-format-type seconds)))
+         (fmt (or (and (stringp kind) kind)
+                  (cdr (assq kind disco-root-activity-time-format-alist))
+                  (cdr (assq 'time disco-root-activity-time-format-alist))
+                  "%H:%M")))
+    (format-time-string fmt (seconds-to-time seconds))))
+
+(defun disco-root--message-author-id (message)
+  "Return author ID from MESSAGE, or nil."
+  (let ((author (and (listp message) (alist-get 'author message))))
+    (and (listp author)
+         (alist-get 'id author))))
+
+(defun disco-root--channel-last-activity-seconds (channel &optional message)
+  "Return latest activity timestamp seconds for CHANNEL, or nil.
+
+When MESSAGE is non-nil, use it as the cached latest message."
+  (or (when-let* ((msg (or message (disco-msg-channel-last-cached-message channel)))
+                  (timestamp (alist-get 'timestamp msg)))
+        (ignore-errors
+          (float-time (date-to-time timestamp))))
+      (disco-root--snowflake-epoch-seconds
+       (alist-get 'last_message_id channel))))
+
+(defun disco-root--activity-time-status-symbol (channel &optional message)
+  "Return telega-like status symbol for CHANNEL timestamp column."
+  (let* ((latest-message (or message (disco-msg-channel-last-cached-message channel)))
+         (current-user-id (and (fboundp 'disco-gateway-current-user-id)
+                               (disco-gateway-current-user-id)))
+         (own-latest-message
+          (and latest-message
+               current-user-id
+               (equal (format "%s" (disco-root--message-author-id latest-message))
+                      (format "%s" current-user-id))))
+         (has-unread (disco-root--channel-has-unread-p channel)))
+    (cond
+     (own-latest-message
+      (if (disco-root--channel-read-p channel)
+          "✔"
+        "✓"))
+     (has-unread
+      "•")
+     (t
+      " "))))
+
+(defun disco-root--activity-time-status-face (channel &optional message)
+  "Return face used for timestamp status indicator in CHANNEL row."
+  (let ((status (disco-root--activity-time-status-symbol channel message)))
+    (cond
+     ((equal status "•") 'font-lock-warning-face)
+     ((or (equal status "✓")
+          (equal status "✔"))
+      'success)
+     (t 'shadow))))
+
+(defun disco-root--channel-last-activity-time-label (channel &optional message)
+  "Return timestamp column text for CHANNEL.
+
+Output includes formatted date/time and a trailing status symbol."
+  (let* ((seconds (disco-root--channel-last-activity-seconds channel message))
+         (time-part (and seconds
+                         (ignore-errors
+                           (disco-root--activity-time-string seconds))))
+         (status (disco-root--activity-time-status-symbol channel message)))
+    (if (and time-part (not (string-empty-p time-part)))
+        (concat time-part status)
+      status)))
+
+(defun disco-root--activity-preview-line (channel &optional message scope)
+  "Return one-line preview text for CHANNEL row under SCOPE.
+
+When MESSAGE is non-nil, use it as cached preview source."
+  (if (eq scope 'thread-post)
+      (if-let* ((starter (disco-thread-starter-message channel)))
+          (disco-msg-preview-line starter)
+        (propertize "Original post unavailable" 'face 'shadow))
+    (or (and message (disco-msg-preview-line message))
+        (disco-msg-channel-preview-line channel)
+        (disco-root--activity-secondary-placeholder channel)
+        (progn
+          (unless (eq scope 'timeline-thread)
+            (disco-preview-request-channel channel))
+          (disco-root--activity-preview-label channel scope)))))
+
+(defun disco-root--activity-icon-inserter (channel &optional scope)
+  "Return an identity icon inserter for CHANNEL under SCOPE, or nil.
+
+Guild activity keeps its Guild identity, Group DMs use their custom channel
+icon, and direct messages use a cached user avatar.  Channel-type glyphs are
+omitted because the context delimiters already encode the stable Discord type."
+  (let ((guild
+         (and (alist-get 'guild_id channel)
+              (disco-root--guild-by-id
+               (alist-get 'guild_id channel)))))
+    (cond
+     ((and guild (memq scope '(activity unread)))
+      (lambda ()
+        (let ((start (point)))
+          (if disco-root-show-guild-icons
+              (disco-root--insert-guild-icon guild)
+            (insert (disco-root--guild-icon-fallback guild)))
+          (add-text-properties start (point) (list 'face 'shadow)))))
+     ((disco-channel-group-dm-p channel)
+      (when-let* ((image (disco-root--channel-icon-image channel))
+                  (display-image (disco-root--scaled-image image)))
+        (lambda () (insert-image display-image " "))))
+     ((disco-channel-direct-message-p channel)
+      (when-let* ((user
+                   (disco-root--private-channel-avatar-user channel))
+                  (image
+                   (disco-avatar-rounded-image
+                    user disco-root-guild-icon-size))
+                  (display-image (disco-root--scaled-image image)))
+        (lambda () (insert-image display-image " ")))))))
+
+(defun disco-root--preview-parts (preview-text message)
+  "Return structured sender and body fragments for PREVIEW-TEXT and MESSAGE."
+  (let* ((text (or preview-text ""))
+         (author (disco-msg-author-display-name message))
+         (sender-end
+          (and author
+               (string-match
+                (format "\\`%s>" (regexp-quote author)) text)
+               (match-end 0))))
+    (if sender-end
+        (list :text (string-trim-left (substring text sender-end))
+              :label author
+              :separator ">"
+              :label-face (disco-room--author-face message))
+      (list :text text))))
+
+(defun disco-root--channel-one-line-row (channel &optional scope)
+  "Return one-line row model for CHANNEL under SCOPE."
+  (let* ((channel-id (alist-get 'id channel))
+         (brackets (disco-channel-title-brackets channel))
+         (latest-message
+          (disco-msg-channel-last-cached-message channel))
+         (preview-message
+          (if (eq scope 'thread-post)
+              (disco-thread-starter-message channel)
+            latest-message))
+         (mention-count (disco-state-channel-effective-unread-count channel))
+         (has-unread (disco-root--channel-has-unread-p channel))
+         (preview-text (disco-root--activity-preview-line
+                        channel preview-message scope))
+         (preview-parts
+          (disco-root--preview-parts preview-text preview-message))
+         (time-text (if (memq scope '(thread-post timeline-thread
+						  archived-thread))
+                        (disco-root--thread-browser-time-label channel scope latest-message)
+                      (disco-root--channel-last-activity-time-label channel latest-message))))
+    (appkit-presentation-one-line-row-create
+     :icon-inserter (disco-root--activity-icon-inserter channel scope)
+     :context (disco-root--activity-context-label channel scope)
+     :context-open (car brackets)
+     :context-close (cadr brackets)
+     :context-trail (and (> mention-count 0) (format "@%d" mention-count))
+     :context-trail-face 'disco-root-unread-badge
+     :preview
+     (disco-media-message-one-line-preview
+      preview-message (plist-get preview-parts :text)
+      :label (plist-get preview-parts :label)
+      :separator (plist-get preview-parts :separator)
+      :label-face (plist-get preview-parts :label-face))
+     :time time-text
+     :time-face 'shadow
+     :time-tail-face (unless (eq scope 'archived-thread)
+                       (disco-root--activity-time-status-face channel latest-message))
+     :line-properties
+     (list 'disco-root-row-type 'channel
+           'disco-channel-id channel-id
+           'disco-unread-count mention-count
+           'disco-has-unread (and has-unread t))
+     :help-echo (and (disco-root--openable-channel-p channel)
+                     (disco-root--channel-open-help-echo channel)))))
+
+(defun disco-root--insert-activity-channel-line
+    (channel indent &optional scope width)
+  "Insert one activity-style CHANNEL row with INDENT under SCOPE.
+
+WIDTH overrides the root buffer's responsive fill column."
+  (let ((row (disco-root--channel-one-line-row channel scope)))
+    (appkit-presentation-insert-one-line-row
+     row
+     :indent indent
+     :width
+     (max 60
+          (or width
+              disco-root--fill-column
+              (disco-root--compute-fill-column)))
+     :icon-slot-width
+     (if (appkit-presentation-one-line-row-icon-inserter row)
+         (max 2
+              (ceiling
+               (* disco-root--activity-icon-slot-width
+                  (disco-root--text-scale-factor))))
+       0)
+     :context-width-spec disco-root-activity-context-width
+     :time-slot-width disco-root-activity-time-column-width)))
+
+(defun disco-root--search-message-seconds (message)
+  "Return MESSAGE timestamp as float seconds, or nil on parse failure."
+  (when-let* ((timestamp (alist-get 'timestamp message)))
+    (ignore-errors
+      (float-time (date-to-time timestamp)))))
+
+(defun disco-root--search-message-time-label (message)
+  "Return formatted time label for search result MESSAGE."
+  (when-let* ((seconds (disco-root--search-message-seconds message)))
+    (disco-root--activity-time-string seconds)))
+
+(defun disco-root--search-context-label (channel)
+  "Return context label for search hit CHANNEL."
+  (cond
+   ((null channel)
+    (disco-root--search-domain-label disco-root--search-domain))
+   ((and (disco-state-private-channel-p channel)
+         (not (alist-get 'guild_id channel)))
+    (or (disco-root--channel-display-name channel)
+        (disco-root--search-domain-label disco-root--search-domain)))
+   (t
+    (or (disco-root--activity-primary-label channel)
+        (disco-root--channel-display-name channel)
+        (disco-root--search-domain-label disco-root--search-domain)))))
+
+(defun disco-root--search-message-one-line-row (message &optional tab)
+  "Return one-line row model for search result MESSAGE in TAB."
+  (let* ((message-id (alist-get 'id message))
+         (channel-id (alist-get 'channel_id message))
+         (channel (disco-root--search-channel channel-id))
+         (brackets
+          (and channel (disco-channel-title-brackets channel)))
+         (preview-text
+          (or (disco-msg-preview-line message)
+              (disco-msg-preview-content message)
+              "(message)"))
+         (preview-parts
+          (disco-root--preview-parts preview-text message)))
+    (appkit-presentation-one-line-row-create
+     :icon-inserter
+     (and channel (disco-root--activity-icon-inserter channel))
+     :context
+     (disco-root--search-context-label channel)
+     :context-open (and brackets (car brackets))
+     :context-close (and brackets (cadr brackets))
+     :preview
+     (disco-media-message-one-line-preview
+      message (plist-get preview-parts :text)
+      :label (plist-get preview-parts :label)
+      :separator (plist-get preview-parts :separator)
+      :label-face (plist-get preview-parts :label-face))
+     :time (or (disco-root--search-message-time-label message) "")
+     :time-face 'shadow
+     :line-properties
+     (list 'disco-root-row-type 'search-message
+           'disco-root-search-tab tab
+           'disco-root-search-message-id message-id
+           'disco-channel-id channel-id
+           'disco-unread-count 0
+           'disco-has-unread nil)
+     :help-echo (and channel-id message-id
+                     (format "Open channel %s and jump to message %s"
+                             channel-id message-id)))))
+
+(defun disco-root--open-search-message (message)
+  "Open exact root search result MESSAGE."
+  (let ((message-id (alist-get 'id message))
+        (channel-id (alist-get 'channel_id message)))
+    (unless (and message-id channel-id)
+      (user-error "disco: search result has no openable message"))
+    (disco-room-jump-to-message message-id channel-id)))
+
+(defun disco-root--insert-search-message-line (message indent &optional tab)
+  "Insert one root search result MESSAGE row with INDENT for TAB."
+  (let ((row (disco-root--search-message-one-line-row message tab))
+        (start (point)))
+    (appkit-presentation-insert-one-line-row
+     row
+     :indent indent
+     :width (max 60 (or disco-root--fill-column
+                        (disco-root--compute-fill-column)))
+     :icon-slot-width
+     (if (appkit-presentation-one-line-row-icon-inserter row)
+         (max 2
+              (ceiling
+               (* disco-root--activity-icon-slot-width
+                  (disco-root--text-scale-factor))))
+       0)
+     :context-width-spec disco-root-activity-context-width
+     :time-slot-width disco-root-activity-time-column-width)
+    (appkit-ui-make-action-row
+     start (point) message #'disco-root--open-search-message
+     :help-echo (appkit-presentation-one-line-row-help-echo row))))
+
+(defun disco-root--channel-label (channel &optional scope)
+  "Return display label for CHANNEL.
+
+SCOPE is a symbol describing where the row is rendered."
+  (let ((name (disco-root--channel-display-name channel))
+        (channel-type (alist-get 'type channel))
+        (channel-id (alist-get 'id channel))
+        (mention-count (disco-state-channel-effective-unread-count channel))
+        (has-unread (disco-root--channel-has-unread-p channel))
+        base-label)
+    (let* ((state-suffix
+            (cond
+             ((> mention-count 0)
+              (propertize (format "  @%d" mention-count)
+                          'face
+                          'disco-root-unread-badge))
+             (has-unread
+              (propertize "  •" 'face 'disco-root-unread-badge))
+             (t
+              "")))
+           (trail-suffix
+            (if (eq scope 'activity)
+                ""
+              (let ((trail
+                     (disco-root--format-trail-tags
+                      (disco-root--channel-static-trail-tags
+                       channel))))
+                (if trail
+                    (concat " " trail)
+                  ""))))
+           (type-suffix
+            (pcase channel-type
+              ((or 10 11 12)
+               (let ((tags (disco-root--thread-status-tags channel)))
+                 (if (string-empty-p tags)
+                     ""
+                   (format " (%s)" tags))))
+              ((or 0 5)
+               (let ((thread-count
+                      (disco-root--thread-count-under-parent
+                       channel)))
+                 (if (> thread-count 0)
+                     (format " (%d threads)" thread-count)
+                   "")))
+              (_ ""))))
+      (setq base-label
+            (disco-channel-format-title
+             channel
+             (concat name type-suffix state-suffix trail-suffix))))
+    (disco-root--append-extra-info
+     base-label
+     'channel
+     channel
+     (list :scope (or scope 'root)
+           :channel-id channel-id
+           :channel-type channel-type
+           :unread mention-count
+           :has-unread has-unread))))
+
+(defun disco-root--guild-label (guild unread-count &optional scope)
+  "Return display label for GUILD with UNREAD-COUNT badge."
+  (let* ((guild-name (or (alist-get 'name guild) "(unnamed-guild)"))
+         (guild-id (alist-get 'id guild))
+         (base-label
+          (disco-title-format
+           'guild
+           (concat
+            guild-name
+            (if (> unread-count 0)
+                (propertize (format "  %d" unread-count)
+                            'face
+                            'disco-root-unread-badge)
+              "")))))
+    (disco-root--append-extra-info
+     base-label
+     'guild
+     guild
+     (list :scope (or scope 'root)
+           :guild-id guild-id
+           :unread unread-count))))
+
+(defun disco-root--channel-has-unread-p (channel)
+  "Return non-nil when CHANNEL has unread messages tracked locally."
+  (disco-state-channel-has-unread-p channel))
+
+(defun disco-root--channel-visible-in-mode-p (channel mode)
+  "Return non-nil when CHANNEL should be visible for MODE."
+  (pcase mode
+    ('unread
+     (disco-root--channel-has-unread-p channel))
+    ('dms
+     (disco-channel-private-p channel))
+    (_ t)))
+
+(defun disco-root--channel-visible-in-view-p (channel)
+  "Return non-nil when CHANNEL should appear under current view mode."
+  (and (disco-root--displayable-channel-p channel)
+       (disco-root--channel-visible-in-mode-p channel disco-root--view-mode)))
+
+(defun disco-root--header-channel-eligible-p (channel)
+  "Return non-nil when CHANNEL belongs in root header metrics."
+  (and (disco-root--displayable-channel-p channel)
+       (not (disco-state-channel-thread-p channel))))
+
+(defun disco-root--private-channels-sorted ()
+  "Return private channels sorted by recency (newest first)."
+  (sort (copy-sequence (disco-state-private-channels))
+        (lambda (a b)
+          (let ((a-last (alist-get 'last_message_id a))
+                (b-last (alist-get 'last_message_id b)))
+            (cond
+             ((and (stringp a-last) (stringp b-last))
+              (disco-state-snowflake< b-last a-last))
+             ((stringp a-last) t)
+             ((stringp b-last) nil)
+             (t (string-lessp (or (alist-get 'id a) "")
+                              (or (alist-get 'id b) ""))))))))
+
+(defun disco-root--visible-private-channels ()
+  "Return private channels that match current root view mode."
+  (seq-filter #'disco-root--channel-visible-in-view-p
+              (disco-root--private-channels-sorted)))
+
+(defun disco-root--collect-visible-unread-channels ()
+  "Return unique unread channels visible in current root view.
+
+Includes private channels, guild channels and thread channels, sorted by
+current sort mode."
+  (let ((seen (make-hash-table :test #'equal))
+        result)
+    (cl-labels
+        ((push-unique (channel)
+           (let ((channel-id (alist-get 'id channel)))
+             (when (and channel-id
+                        (not (gethash channel-id seen))
+                        (disco-root--channel-visible-in-view-p channel)
+                        (disco-root--channel-has-unread-p channel))
+               (puthash channel-id t seen)
+               (push channel result)))))
+      (dolist (channel (disco-state-private-channels))
+        (push-unique channel))
+      (dolist (guild (or (disco-state-guilds) '()))
+        (let ((guild-id (alist-get 'id guild)))
+          (dolist (channel (or (disco-state-guild-channels guild-id) '()))
+            (push-unique channel))
+          (dolist (thread (or (disco-state-guild-threads guild-id) '()))
+            (push-unique thread)))))
+    (disco-root--sort-channels (nreverse result))))
+
+(defun disco-root--collect-header-channels ()
+  "Return unique non-thread channels included in root header metrics."
+  (let ((seen (make-hash-table :test #'equal))
+        result)
+    (cl-labels
+        ((push-unique (channel)
+           (let ((channel-id (alist-get 'id channel)))
+             (when (and channel-id
+                        (not (gethash channel-id seen))
+                        (disco-root--header-channel-eligible-p channel))
+               (puthash channel-id t seen)
+               (push channel result)))))
+      (dolist (channel (disco-state-private-channels))
+        (push-unique channel))
+      (dolist (guild (or (disco-state-guilds) '()))
+        (dolist (channel
+                 (or (disco-state-guild-channels (alist-get 'id guild)) '()))
+          (push-unique channel))))
+    (nreverse result)))
+
+
+(defun disco-root--tree-unread-section-channels (unread-channels)
+  "Return home quick-section channels from UNREAD-CHANNELS."
+  (let ((limit disco-root-tree-unread-section-limit))
+    (if (and (integerp limit)
+             (> limit 0)
+             (> (length unread-channels) limit))
+        (seq-take unread-channels limit)
+      unread-channels)))
+
+(defun disco-root--guild-unread-total (guild-id &optional visible-only)
+  "Return aggregated unread count for GUILD-ID.
+
+When VISIBLE-ONLY is non-nil, only count channels visible in current view."
+  (let ((channels
+         (append (or (disco-state-guild-channels guild-id) '())
+                 (or (disco-state-guild-threads guild-id) '()))))
+    (when visible-only
+      (setq channels (seq-filter #'disco-root--channel-visible-in-view-p channels)))
+    (disco-state-channels-unread-total channels)))
+
+(defun disco-root--channel-activity-score (channel)
+  "Return the recency-sort score for CHANNEL.
+
+Higher scores sort before lower scores."
+  (+ (* 1000 (disco-state-channel-unread-count (alist-get 'id channel)))
+     (if (stringp (alist-get 'last_message_id channel))
+         (string-to-number (alist-get 'last_message_id channel))
+       0)))
+
+(defun disco-root--sort-channels (channels)
+  "Sort CHANNELS according to current root sort mode."
+  (let ((copy (copy-sequence (or channels '()))))
+    (pcase disco-root--sort-mode
+      ('name
+       (sort copy
+             (lambda (a b)
+               (string-lessp (disco-root--channel-display-name a)
+                             (disco-root--channel-display-name b)))))
+      (_
+       (sort copy
+             (lambda (a b)
+               (let ((a-score (disco-root--channel-activity-score a))
+                     (b-score (disco-root--channel-activity-score b)))
+                 (if (= a-score b-score)
+                     (string-lessp (disco-root--channel-display-name a)
+                                   (disco-root--channel-display-name b))
+                   (> a-score b-score)))))))))
+
+(defun disco-root--entry-blank (&optional key)
+  "Return one blank render entry."
+  (disco-root-render-entry-create :key key :type 'blank))
+
+
+(defun disco-root--entry-search-section (tab title loaded-count &optional total-count loading)
+  "Return one search-section render entry."
+  (disco-root-render-entry-create :key (list 'search-section tab)
+                                  :type 'search-section
+                                  :tab tab
+                                  :title title
+                                  :loaded-count loaded-count
+                                  :total-count total-count
+                                  :loading loading))
+
+(defun disco-root--entry-search-message (message indent &optional tab)
+  "Return one search-message render entry."
+  (disco-root-render-entry-create :key (list 'search-message tab
+                                             (alist-get 'id message))
+                                  :type 'search-message
+                                  :message message
+                                  :indent (or indent 2)
+                                  :tab tab))
+
+(defun disco-root--entry-search-note (text &optional face tab)
+  "Return one search-note render entry for TAB."
+  (disco-root-render-entry-create :key (list 'search-note tab)
+                                  :type 'search-note
+                                  :text text
+                                  :face face
+                                  :tab tab))
+
+(defun disco-root--entry-search-action (label action tab)
+  "Return one search-action render entry."
+  (disco-root-render-entry-create :key (list 'search-action tab action)
+                                  :type 'search-action
+                                  :label label
+                                  :action action
+                                  :tab tab))
+
+
+(defun disco-root--search-section-label-row (title loaded-count &optional total-count loading)
+  "Return label row model for one search section heading."
+  (let ((suffix (cond
+                 ((numberp total-count)
+                  (format " (%d/%d)" loaded-count total-count))
+                 (loading
+                  (format " (%d loaded, loading...)" loaded-count))
+                 (t
+                  (format " (%d)" loaded-count)))))
+    (appkit-presentation-label-row-create
+     :label (format "%s%s" (or title "Results") suffix)
+     :face 'font-lock-keyword-face
+     :line-properties (list 'disco-root-row-type 'search-section))))
+
+(defun disco-root--search-note-label-row (text &optional face)
+  "Return label row model for one search note TEXT."
+  (appkit-presentation-label-row-create
+   :label (or text "")
+   :face (or face 'shadow)
+   :line-properties (list 'disco-root-row-type 'search-note)))
+
+(defun disco-root--search-action-label-row (label action tab)
+  "Return label row model for one search action LABEL, ACTION, and TAB."
+  (appkit-presentation-label-row-create
+   :label (or label "Action")
+   :prefix "  ["
+   :suffix "]"
+   :face 'link
+   :line-properties (list 'disco-root-row-type 'search-action
+                          'disco-root-search-action action
+                          'disco-root-search-tab tab)
+   :help-echo label
+   :mouse-face 'highlight))
+
+(defun disco-root--activate-search-action (entry)
+  "Activate exact root search action ENTRY."
+  (pcase (disco-root-render-entry-action entry)
+    ('exit-search
+     (disco-root-view--exit-search))
+    ('load-more
+     (disco-root-view--load-more (disco-root-render-entry-tab entry)))
+    (action
+     (user-error "disco: unsupported search action: %S" action))))
+
+(defun disco-root--insert-search-action-line (entry)
+  "Insert one exact actionable root search ENTRY."
+  (let* ((row (disco-root--search-action-label-row
+               (disco-root-render-entry-label entry)
+               (disco-root-render-entry-action entry)
+               (disco-root-render-entry-tab entry)))
+         (start (point)))
+    (appkit-presentation-insert-label-row row)
+    (appkit-ui-make-action-row
+     start (point) entry #'disco-root--activate-search-action
+     :help-echo (appkit-presentation-label-row-help-echo row)
+     :mouse-face (appkit-presentation-label-row-mouse-face row))))
+
+(defun disco-root--render-entry-label-row (entry)
+  "Return label row model for one search ENTRY, or nil."
+  (pcase (disco-root-render-entry-type entry)
+    ('search-section
+     (disco-root--search-section-label-row (disco-root-render-entry-title entry)
+                                           (or (disco-root-render-entry-loaded-count entry) 0)
+                                           (disco-root-render-entry-total-count entry)
+                                           (disco-root-render-entry-loading entry)))
+    ('search-note
+     (disco-root--search-note-label-row (disco-root-render-entry-text entry)
+                                        (disco-root-render-entry-face entry)))
+    ('search-action
+     (disco-root--search-action-label-row (disco-root-render-entry-label entry)
+                                          (disco-root-render-entry-action entry)
+                                          (disco-root-render-entry-tab entry)))
+    (_ nil)))
+
+(defun disco-root--insert-render-entry (entry)
+  "Insert one root render ENTRY into the current buffer."
+  (let ((start (point)))
+    (pcase (disco-root-render-entry-type entry)
+      ('search-action
+       (disco-root--insert-search-action-line entry))
+      (_
+       (if-let* ((row (disco-root--render-entry-label-row entry)))
+           (appkit-presentation-insert-label-row row)
+         (pcase (disco-root-render-entry-type entry)
+           ('search-message
+            (disco-root--insert-search-message-line
+             (disco-root-render-entry-message entry)
+             (or (disco-root-render-entry-indent entry) 2)
+             (disco-root-render-entry-tab entry)))
+           ('blank
+            (insert "\n"))
+           (_
+            (error "Unknown root render entry type: %S"
+                   (disco-root-render-entry-type entry)))))))
+    (when-let* ((key (disco-root-render-entry-key entry)))
+      (put-text-property start (point) 'disco-root-entry-key key))))
+
+
+(defun disco-root--guild-by-id (guild-id)
+  "Return guild object for GUILD-ID from current state."
+  (seq-find (lambda (guild)
+              (equal (alist-get 'id guild) guild-id))
+            (or (disco-state-guilds) '())))
+
+(defun disco-root--guild-name-by-id (guild-id)
+  "Return guild display name for GUILD-ID."
+  (let ((guild (disco-root--guild-by-id guild-id)))
+    (or (alist-get 'name guild) guild-id "unknown-guild")))
+
+(defun disco-root--thread-parent-candidates ()
+  "Return list of (DISPLAY . CHANNEL) suitable for archived thread lookup."
+  (let (candidates)
+    (dolist (guild (or (disco-state-guilds) '()))
+      (let* ((guild-id (alist-get 'id guild))
+             (guild-name (or (alist-get 'name guild) guild-id "unknown-guild")))
+        (dolist (channel (disco-state-guild-channels guild-id))
+          (when (and (disco-root--thread-parent-channel-p channel)
+                     (disco-state-channel-viewable-p channel nil))
+            (push (cons (format "%s / %s (%s)"
+                                guild-name
+                                (disco-root--channel-label channel)
+                                (alist-get 'id channel))
+                        channel)
+                  candidates)))))
+    (nreverse candidates)))
+
+(defun disco-root--read-thread-parent-channel ()
+  "Prompt user to select one parent channel and return its channel object."
+  (let* ((candidates (disco-root--thread-parent-candidates))
+         (choice (and candidates
+                      (completing-read "Parent channel: " (mapcar #'car candidates) nil t))))
+    (unless choice
+      (user-error "disco: no parent channels available"))
+    (or (cdr (assoc choice candidates))
+        (user-error "disco: invalid channel selection"))))
+
+(defun disco-root--thread-archive-sort-key (thread)
+  "Return sort key for THREAD archive timestamp ordering."
+  (or (alist-get 'archive_timestamp (disco-root--thread-metadata thread))
+      ""))
+
+(defun disco-root--dedupe-threads (threads)
+  "Return THREADS deduped by channel ID."
+  (let ((seen (make-hash-table :test #'equal))
+        result)
+    (dolist (thread threads)
+      (let ((thread-id (alist-get 'id thread)))
+        (when (and thread-id (not (gethash thread-id seen)))
+          (puthash thread-id t seen)
+          (push thread result))))
+    (nreverse result)))
+
+(defun disco-root--sort-threads-by-archive-time (threads)
+  "Return THREADS sorted descending by archive timestamp."
+  (sort threads
+        (lambda (a b)
+          (string>
+           (disco-root--thread-archive-sort-key a)
+           (disco-root--thread-archive-sort-key b)))))
+
+(defun disco-root--reset-archived-pagination-state ()
+  "Reset archived-thread pagination state for current archived buffer."
+  (setq disco-root--archived-before-cursors nil)
+  (setq disco-root--archived-source-has-more nil)
+  (setq disco-root--archived-threads-cache nil)
+  (setq disco-root--archived-last-errors nil)
+  (dolist (source disco-root--archived-thread-sources)
+    (let ((name (car source)))
+      (push (cons name nil) disco-root--archived-before-cursors)
+      (push (cons name t) disco-root--archived-source-has-more)))
+  (setq disco-root--archived-before-cursors
+        (nreverse disco-root--archived-before-cursors))
+  (setq disco-root--archived-source-has-more
+        (nreverse disco-root--archived-source-has-more)))
+
+(defun disco-root--archived-next-before-cursor (source-name threads)
+  "Compute next BEFORE cursor for SOURCE-NAME from THREADS page."
+  (let ((last-thread (car (last threads))))
+    (when last-thread
+      (if (equal source-name "joined-private")
+          (alist-get 'id last-thread)
+        (or (alist-get 'archive_timestamp (disco-root--thread-metadata last-thread))
+            (alist-get 'archive_timestamp last-thread))))))
+
+(defun disco-root--archived-any-source-has-more-p ()
+  "Return non-nil when at least one archived source may return more pages."
+  (seq-some #'cdr disco-root--archived-source-has-more))
+
+(defun disco-root--archived-source-status-string ()
+  "Return human-readable per-source pagination status string."
+  (mapconcat
+   (lambda (source)
+     (let* ((name (car source))
+            (has-more (alist-get name disco-root--archived-source-has-more nil nil #'equal)))
+       (format "%s:%s" name (if has-more "more" "end"))))
+   disco-root--archived-thread-sources
+   "  "))
+
+(defun disco-root--fetch-archived-source-page (source-name source-fn parent-channel-id before)
+  "Fetch one archived page for SOURCE-NAME using SOURCE-FN.
+
+Return plist with keys:
+- `:threads' list
+- `:has-more' boolean
+- `:next-before' cursor (or nil)
+- `:missing-access' when 403/50001
+- `:error' human-readable error string."
+  (condition-case err
+      (let* ((resp (funcall source-fn parent-channel-id before disco-thread-archive-fetch-limit))
+             (threads (or (alist-get 'threads resp) '()))
+             (has-more (eq (alist-get 'has_more resp) t))
+             (next-before (disco-root--archived-next-before-cursor source-name threads)))
+        (when (and has-more (null threads))
+          ;; Prevent endless pagination loops when server returns
+          ;; an empty page without advancing cursor semantics.
+          (setq has-more nil))
+        (list :threads threads
+              :has-more has-more
+              :next-before next-before))
+    (error
+     (if (disco-permission-error-missing-access-p err)
+         (list :missing-access t)
+       (list :error (error-message-string err))))))
+
+(defun disco-root--fetch-archived-threads-page (parent-channel-id &optional reset)
+  "Fetch one archived thread page for PARENT-CHANNEL-ID.
+
+When RESET is non-nil, start pagination from first page for all sources.
+Return plist with keys :threads and :errors for this page only."
+  (when reset
+    (disco-root--reset-archived-pagination-state))
+  (let ((parent-channel (disco-state-channel parent-channel-id))
+        page-threads
+        errors)
+    (dolist (source disco-root--archived-thread-sources)
+      (let* ((source-name (car source))
+             (source-fn (cdr source))
+             (source-allowed
+              (disco-root--archived-source-fetch-allowed-p source-name parent-channel))
+             (should-fetch
+              (or reset
+                  (alist-get source-name
+                             disco-root--archived-source-has-more
+                             nil nil #'equal))))
+        (cond
+         ((not source-allowed)
+          (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                nil))
+         ((not should-fetch)
+          nil)
+         (t
+          (let* ((before (alist-get source-name disco-root--archived-before-cursors nil nil #'equal))
+                 (result (disco-root--fetch-archived-source-page
+                          source-name source-fn parent-channel-id before))
+                 (threads (or (plist-get result :threads) '()))
+                 (has-more (plist-get result :has-more))
+                 (next-before (plist-get result :next-before))
+                 (missing-access (plist-get result :missing-access))
+                 (error-text (plist-get result :error)))
+            (cond
+             (missing-access
+              ;; Missing-access is expected for some sources on user accounts.
+              (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                    nil))
+             (error-text
+              ;; Keep source marked as has-more so temporary failures can be retried.
+              (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                    t)
+              (push (format "%s: %s" source-name error-text) errors))
+             (t
+              (setf (alist-get source-name disco-root--archived-source-has-more nil nil #'equal)
+                    has-more)
+              (when next-before
+                (setf (alist-get source-name disco-root--archived-before-cursors nil nil #'equal)
+                      next-before))
+              (setq page-threads (append page-threads threads)))))))))
+    (list :threads (disco-root--sort-threads-by-archive-time
+                    (disco-root--dedupe-threads page-threads))
+          :errors (nreverse errors))))
+
+(defun disco-root--insert-archived-thread-entry (channel)
+  "Insert one archived thread CHANNEL in a root-related list buffer."
+  (disco-root--insert-channel-line channel 2 'archived-thread))
+
+(defun disco-root--archived-threads-list-spec ()
+  "Return list spec for the current archived-thread buffer."
+  (let* ((parent-channel disco-root--archived-parent-channel)
+         (threads (or disco-root--archived-threads-cache '()))
+         (errors (or disco-root--archived-last-errors '())))
+    (appkit-presentation-list-spec-create
+     :title (format "Archived Threads: %s"
+                    (disco-root--channel-label parent-channel 'archived-parent))
+     :summary (format "Loaded: %d   Sources: %s"
+                      (length threads)
+                      (disco-root--archived-source-status-string))
+     :loading-note (unless (disco-root--archived-any-source-has-more-p)
+                     "(no more archived pages)")
+     :items threads
+     :item-inserter #'disco-root--insert-archived-thread-entry
+     :empty-text "(no archived threads)"
+     :footer-lines (when errors
+                     (append (list "Errors:")
+                             (mapcar (lambda (err)
+                                       (format "  - %s" err))
+                                     errors))))))
+
+(defun disco-root--archived-buffer-name (parent-channel)
+  "Return archived-thread buffer name for PARENT-CHANNEL."
+  (format "*disco:archived:%s (%s)*"
+          (or (alist-get 'name parent-channel) "(no-name)")
+          (alist-get 'id parent-channel)))
+
+(defun disco-root--channel-inspect-buffer-name (channel)
+  "Return inspect buffer name for CHANNEL."
+  (format "*disco-channel:%s*"
+          (or (disco-root--channel-display-name channel)
+              (alist-get 'id channel)
+              "unknown")))
+
+(defun disco-root--render-channel-inspect-buffer ()
+  "Render the current inspect buffer for `disco-root--inspect-channel'."
+  (unless disco-root--inspect-channel
+    (user-error "disco: inspect buffer has no channel context"))
+  (let* ((channel disco-root--inspect-channel)
+         (channel-id (alist-get 'id channel))
+         (channel-name (disco-root--channel-display-name channel))
+         (guild-name (disco-root--channel-guild-name channel))
+         (category-name (disco-root--channel-category-name channel))
+         (parent-id (alist-get 'parent_id channel))
+         (parent (and parent-id (disco-state-channel parent-id)))
+         (parent-name (and parent (disco-root--channel-display-name parent)))
+         (open-mode (disco-channel-open-mode channel))
+         (inspect-note (disco-channel-inspect-note channel))
+         (linked-lobby (alist-get 'linked_lobby channel))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "%s\n" (or channel-name "(no-name)")))
+    (insert (make-string (length (or channel-name "(no-name)")) ?=))
+    (insert "\n\n")
+    (insert (format "Type: %s\n" (disco-channel-type-name channel)))
+    (insert (format "ID: %s\n" (or channel-id "(unknown)")))
+    (when guild-name
+      (insert (format "Guild: %s\n" guild-name)))
+    (when category-name
+      (insert (format "Category: %s\n" category-name)))
+    (when parent-name
+      (insert (format "Parent: %s\n" parent-name)))
+    (when open-mode
+      (insert (format "Open mode: %s\n" open-mode)))
+    (when-let* ((last-message-id (alist-get 'last_message_id channel)))
+      (insert (format "Last message id: %s\n" last-message-id)))
+    (when-let* ((position (alist-get 'position channel)))
+      (insert (format "Position: %s\n" position)))
+    (when (listp linked-lobby)
+      (insert "\nLinked lobby:\n")
+      (when-let* ((lobby-id (alist-get 'lobby_id linked-lobby)))
+        (insert (format "  Lobby ID: %s\n" lobby-id)))
+      (when-let* ((linked-by (alist-get 'linked_by linked-lobby)))
+        (insert (format "  Linked by: %s\n" linked-by)))
+      (when-let* ((linked-at (alist-get 'linked_at linked-lobby)))
+        (insert (format "  Linked at: %s\n" linked-at))))
+    (when inspect-note
+      (insert "\n")
+      (insert inspect-note)
+      (insert "\n"))
+    (insert "\nRaw channel object:\n\n")
+    (insert (pp-to-string channel))
+    (goto-char (point-min))))
+
+(defun disco-root-channel-inspect-refresh ()
+  "Refresh the current inspect buffer from local state."
+  (interactive)
+  (unless disco-root--inspect-channel
+    (user-error "disco: inspect buffer has no channel context"))
+  (when-let* ((channel-id (alist-get 'id disco-root--inspect-channel))
+              (updated (disco-state-channel channel-id)))
+    (setq disco-root--inspect-channel updated))
+  (disco-root--render-channel-inspect-buffer)
+  (message "disco: refreshed channel inspect"))
+
+(defvar-keymap disco-root-channel-inspect-mode-map
+  :doc "Keymap for `disco-root-channel-inspect-mode'."
+  "g" #'disco-root-channel-inspect-refresh
+  "q" #'quit-window)
+
+(define-derived-mode disco-root-channel-inspect-mode special-mode "Disco-Inspect"
+  "Major mode for channel inspect buffers."
+  (setq buffer-read-only t)
+  (setq truncate-lines nil))
+
+(defun disco-root-open-channel-inspect (&optional channel-id)
+  "Open inspect view for CHANNEL-ID."
+  (interactive)
+  (let ((channel (and channel-id (disco-state-channel channel-id))))
+    (unless channel
+      (user-error "disco: channel %s is unavailable" channel-id))
+    (let ((buf (get-buffer-create
+                (disco-root--channel-inspect-buffer-name channel))))
+      (with-current-buffer buf
+        (disco-root-channel-inspect-mode)
+        (setq disco-root--inspect-channel channel)
+        (disco-root--render-channel-inspect-buffer))
+      (pop-to-buffer buf))))
+
+(defun disco-root--open-channel (channel-id)
+  "Open CHANNEL-ID according to channel semantics."
+  (let* ((channel (and channel-id (disco-state-channel channel-id)))
+         (open-mode (and channel (disco-channel-open-mode channel))))
+    (unless channel
+      (user-error "disco: channel %s is unavailable" channel-id))
+    (unless open-mode
+      (user-error "disco: channel %s does not support opening" channel-id))
+    (pcase open-mode
+      ('thread-directory
+       (disco-channel-directory-open-thread-parent channel-id))
+      ('inspect
+       (disco-root-open-channel-inspect channel-id))
+      (_
+       (disco-room-open channel-id (disco-root--channel-display-name channel))))))
+
+(defun disco-root-archived-threads-refresh ()
+  "Refresh archived thread list in current archived-thread buffer."
+  (interactive)
+  (let ((parent-channel disco-root--archived-parent-channel))
+    (unless parent-channel
+      (user-error "disco: archived-thread buffer has no parent context"))
+    (let* ((parent-id (alist-get 'id parent-channel))
+           (result (disco-root--fetch-archived-threads-page parent-id t))
+           (threads (plist-get result :threads)))
+      (setq disco-root--archived-last-errors (plist-get result :errors))
+      (setq disco-root--archived-threads-cache threads)
+      (dolist (thread threads)
+        (disco-state-upsert-channel thread))
+      (disco-root-view--queue-live-update nil t nil)
+      (disco-root--flush-live-updates)
+      (message "disco: loaded %d archived threads" (length threads)))))
+
+(defun disco-root-archived-threads-load-more ()
+  "Load next archived-thread page for current archived buffer."
+  (interactive)
+  (let ((parent-channel disco-root--archived-parent-channel))
+    (unless parent-channel
+      (user-error "disco: archived-thread buffer has no parent context"))
+    (if (not (disco-root--archived-any-source-has-more-p))
+        (message "disco: no more archived thread pages")
+      (let* ((parent-id (alist-get 'id parent-channel))
+             (result (disco-root--fetch-archived-threads-page parent-id nil))
+             (page-threads (plist-get result :threads)))
+        (setq disco-root--archived-last-errors (plist-get result :errors))
+        (setq disco-root--archived-threads-cache
+              (disco-root--sort-threads-by-archive-time
+               (disco-root--dedupe-threads
+                (append disco-root--archived-threads-cache page-threads))))
+        (dolist (thread page-threads)
+          (disco-state-upsert-channel thread))
+        (disco-root-view--queue-live-update nil t nil)
+        (disco-root--flush-live-updates)
+        (message "disco: loaded %d more archived threads (total %d)"
+                 (length page-threads)
+                 (length disco-root--archived-threads-cache))))))
+
+(defvar-keymap disco-root-archived-threads-mode-map
+  :doc "Keymap for `disco-root-archived-threads-mode'."
+  "g" #'disco-root-archived-threads-refresh
+  "m" #'disco-root-archived-threads-load-more
+  "n" #'disco-root-button-forward
+  "p" #'disco-root-button-backward
+  "RET" #'disco-root-open-at-point
+  "<return>" #'disco-root-open-at-point
+  "<mouse-1>" #'disco-root-mouse-open-at-point
+  "?" #'disco-root-view--transient
+  "q" #'quit-window)
+
+(define-derived-mode disco-root-archived-threads-mode special-mode "Disco-Archived"
+  "Major mode for archived thread listing buffers."
+  (setq buffer-read-only t)
+  (setq truncate-lines t))
+
+(defconst disco-root-view--archived-surface-type
+  (appkit-surface-type-create
+   :name 'disco-root-archived-threads
+   :mode #'disco-root-archived-threads-mode
+   :init #'disco-root--surface-init
+   :update #'disco-root--surface-update
+   :renderer-factory #'disco-root--surface-renderer)
+  "Generated Surface type for one archived-thread listing.")
+
+(defun disco-root-list-archived-threads (&optional parent-channel-id)
+  "Open archived threads for PARENT-CHANNEL-ID as a Generated Surface."
+  (interactive)
+  (let* ((parent-channel
+          (or (and parent-channel-id (disco-state-channel parent-channel-id))
+              (disco-root--read-thread-parent-channel)))
+         (parent-id (alist-get 'id parent-channel))
+         (app (disco-runtime-app))
+         (identity (list 'root 'archived-threads parent-id))
+         (existing (appkit-app-surface app identity))
+         (surface
+          (cond
+           ((appkit-surface-live-p existing)
+            (pop-to-buffer (appkit-surface-buffer existing))
+            existing)
+           (existing
+            (error "Disco: archived Surface is unavailable: %S"
+                   (appkit-surface-status existing)))
+           (t
+            (appkit-open-generated-surface
+             disco-root-view--archived-surface-type
+             :app app :identity identity
+             :input (list :archived-parent parent-channel)
+             :buffer-name (disco-root--archived-buffer-name parent-channel)
+             :select t))))
+         (buffer (appkit-surface-buffer surface)))
+    (with-current-buffer buffer
+      (setq-local disco-root--archived-parent-channel parent-channel)
+      (unless existing
+        (disco-root-view--attach-live-updates)
+        (disco-root-archived-threads-refresh)))
+    buffer))
+
+(defun disco-root--insert-channel-line (channel indent &optional scope)
+  "Insert one CHANNEL at INDENT spaces.
+
+SCOPE is forwarded to extra-info providers."
+  (if (memq scope '(activity thread-post timeline-thread archived-thread))
+      (disco-root--insert-activity-channel-line channel indent scope)
+    (let* ((channel-id (alist-get 'id channel))
+           (label (disco-root--channel-label channel scope))
+           (unread-count (disco-state-channel-effective-unread-count channel))
+           (has-unread (disco-root--channel-has-unread-p channel))
+           (padding (make-string indent ?\s)))
+      (let ((line-start (point)))
+        (insert (format "%s%s\n" padding label))
+        (add-text-properties
+         line-start
+         (point)
+         (list 'disco-root-row-type 'channel
+               'disco-channel-id channel-id
+               'disco-unread-count unread-count
+               'disco-has-unread (and has-unread t)))
+        (when (disco-root--openable-channel-p channel)
+          (add-text-properties
+           line-start
+           (point)
+           (list 'help-echo (disco-root--channel-open-help-echo channel))))))))
+
+(defun disco-root-button-forward (&optional n)
+  "Move point to next channel row by N steps."
+  (interactive "p")
+  (if (and (eq major-mode 'disco-root-mode)
+           (not disco-root--search-active-p))
+      (dotimes (_ (max 1 (or n 1)))
+        (appkit-directory-next-item))
+    (let ((steps (max 1 (or n 1)))
+          (positions (disco-root--channel-line-positions))
+          (cursor (line-beginning-position))
+          (ok t)
+          found)
+      (dotimes (_ steps)
+        (when ok
+          (setq found (disco-root--next-position-after positions cursor))
+          (if found
+              (setq cursor found)
+            (setq ok nil))))
+      (if (and ok found)
+          (goto-char found)
+        (message "disco: no next channel")))))
+
+(defun disco-root-button-backward (&optional n)
+  "Move point to previous channel row by N steps."
+  (interactive "p")
+  (if (and (eq major-mode 'disco-root-mode)
+           (not disco-root--search-active-p))
+      (dotimes (_ (max 1 (or n 1)))
+        (appkit-directory-previous-item))
+    (let ((steps (max 1 (or n 1)))
+          (positions (disco-root--channel-line-positions))
+          (cursor (line-beginning-position))
+          (ok t)
+          found)
+      (dotimes (_ steps)
+        (when ok
+          (setq found (disco-root--previous-position-before positions cursor))
+          (if found
+              (setq cursor found)
+            (setq ok nil))))
+      (if (and ok found)
+          (goto-char found)
+        (message "disco: no previous channel")))))
+
+(defun disco-root-open-at-point ()
+  "Open or toggle the exact actionable row at point."
+  (interactive)
+  (cond
+   ((and (eq major-mode 'disco-root-mode)
+         (not disco-root--search-active-p))
+    (appkit-directory-activate))
+   ((and (eq major-mode 'disco-root-mode)
+         disco-root--search-active-p)
+    (if (button-at (point))
+        (push-button (point))
+      (user-error "disco: no search action at point")))
+   (t
+    (let ((guild-id (disco-root--line-guild-id))
+          (channel-id (disco-root--line-channel-id)))
+      (cond
+       ((disco-root--toggle-node-at-point))
+       (guild-id
+        (disco-channel-directory-open guild-id))
+       (channel-id
+        (disco-root--open-channel channel-id))
+       (t
+        (user-error "disco: no openable channel at point")))))))
+
+(defun disco-root-next-unread ()
+  "Jump to next channel row with unread state."
+  (interactive)
+  (if (and (eq major-mode 'disco-root-mode)
+           (not disco-root--search-active-p))
+      (appkit-directory-next-unread)
+    (let* ((positions
+            (disco-root--channel-line-positions
+             (lambda (pos) (disco-root--line-has-unread-p pos))))
+           (origin (line-beginning-position))
+           (found (or (disco-root--next-position-after positions origin)
+                      (car positions))))
+      (if (and found (integerp found))
+          (goto-char found)
+        (message "disco: no unread channels")))))
+
+(defun disco-root-mouse-open-at-point (event)
+  "Handle mouse EVENT by opening or toggling row at clicked point."
+  (interactive "e")
+  (if (and (eq major-mode 'disco-root-mode)
+           (not disco-root--search-active-p))
+      (appkit-directory-mouse-activate event)
+    (mouse-set-point event)
+    (if (and (eq major-mode 'disco-root-mode)
+             disco-root--search-active-p)
+        (when (button-at (point))
+          (push-button (point)))
+      (disco-root-open-at-point))))
+
+
+(defun disco-root--tree-section-key (section)
+  "Return the stable composite root key for SECTION."
+  (list 'root 'section
+        (if (eq section 'private) 'dm section)))
+
+(defun disco-root--tree-section-expanded-p (surface section)
+  "Return effective expansion state for root SECTION in SURFACE."
+  (appkit-directory-fold-expanded-p
+   surface
+   (disco-root--tree-section-key section)
+   (memq section disco-root-tree-default-expanded-sections)))
+
+(defun disco-root--tree-section-entry (surface section label count)
+  "Return foldable top-level SECTION with LABEL and COUNT in SURFACE."
+  (let* ((key (disco-root--tree-section-key section))
+         (expanded (disco-root--tree-section-expanded-p surface section)))
+    (appkit-directory-entry-create
+     :key key
+     :role 'section
+     :label label
+     :trailing (format "  %d" count)
+     :face 'disco-root-section-heading
+     :foldable-p t
+     :fold-key key
+     :fold-default-expanded-p
+     (and (memq section disco-root-tree-default-expanded-sections) t)
+     :expanded-p expanded
+     :help-echo "RET or TAB toggles this section"
+     :properties
+     (list disco-root-directory-row-kind-property 'section
+           'disco-root-row-type 'section
+           'disco-root-section section))))
+
+(defun disco-root--tree-channel-stamp (channel)
+  "Return render-sensitive presentation state for root CHANNEL."
+  (let ((message (disco-msg-channel-last-cached-message channel)))
+    (list (disco-state-channel-effective-unread-count channel)
+          (and (disco-state-channel-has-unread-p channel) t)
+          (alist-get 'last_message_id channel)
+          (and message (sxhash-equal message)))))
+
+(defun disco-root--tree-channel-entry (section channel)
+  "Return rich CHANNEL occurrence beneath root SECTION."
+  (let* ((channel-id (format "%s" (alist-get 'id channel)))
+         (dm-p (eq section 'private))
+         (section-key (disco-root--tree-section-key section)))
+    (appkit-directory-entry-create
+     :key (list 'root (if dm-p 'dm 'unread) 'channel channel-id)
+     :role 'item
+     :section-key section-key
+     :item-p t
+     :unread-p (and (disco-state-channel-has-unread-p channel) t)
+     :payload channel
+     :indent 2
+     :stamp (disco-root--tree-channel-stamp channel)
+     :help-echo (and (disco-root--openable-channel-p channel)
+                     (disco-root--channel-open-help-echo channel))
+     :properties
+     (list disco-root-directory-row-kind-property
+           (if dm-p 'dm-channel 'unread-channel)
+           'disco-root-row-type 'channel
+           'disco-channel-id channel-id))))
+
+(defun disco-root--tree-note-entry (section id label)
+  "Return passive root SECTION note ID displaying LABEL."
+  (appkit-directory-entry-create
+   :key (list 'root (if (eq section 'private) 'dm section) 'note id)
+   :role 'note
+   :section-key (disco-root--tree-section-key section)
+   :label label
+   :indent 2
+   :face 'shadow
+   :properties
+   (list disco-root-directory-row-kind-property 'note
+         'disco-root-row-type 'note)))
+
+(defun disco-root--tree-guild-key (guild-id)
+  "Return the stable root guild occurrence key for GUILD-ID."
+  (list 'root 'guild (format "%s" guild-id)))
+
+(defun disco-root--tree-guild-expanded-p (surface guild-id)
+  "Return non-nil when GUILD-ID is expanded in root SURFACE."
+  (appkit-directory-fold-expanded-p
+   surface (disco-root--tree-guild-key guild-id) nil))
+
+(defun disco-root--tree-guild-entry (surface guild)
+  "Return one foldable GUILD occurrence for root SURFACE."
+  (let* ((guild-id (format "%s" (alist-get 'id guild)))
+         (key (disco-root--tree-guild-key guild-id))
+         (unread-count (disco-root--guild-unread-total guild-id t)))
+    (appkit-directory-entry-create
+     :key key
+     :role 'group
+     :section-key (disco-root--tree-section-key 'guilds)
+     :label (disco-root--guild-label guild unread-count 'root)
+     :face (and (> unread-count 0) 'bold)
+     :indent 2
+     :foldable-p t
+     :fold-key key
+     :fold-default-expanded-p nil
+     :expanded-p (disco-root--tree-guild-expanded-p surface guild-id)
+     :payload guild
+     :stamp (list (alist-get 'name guild)
+                  (alist-get 'icon guild)
+                  unread-count
+                  (disco-directory-guild-status guild-id))
+     :help-echo "RET or TAB toggles this guild's channels"
+     :properties
+     (list
+      disco-root-directory-row-kind-property
+      'guild
+      'disco-root-row-type
+      'guild
+      'disco-root-guild-id
+      guild-id
+      'disco-root-guild-unread-count
+      unread-count))))
+
+(defun disco-root--tree-guild-context (surface guild-id)
+  "Return shared guild projector context for GUILD-ID in root SURFACE."
+  (setq guild-id (format "%s" guild-id))
+  (disco-guild-directory-context-create
+   :guild-id guild-id
+   :surface surface
+   :namespace (list 'root 'guild guild-id)
+   :section-key (disco-root--tree-guild-key guild-id)
+   :group-indent 4
+   :channel-indent 6
+   :thread-indent 8))
+
+(defun disco-root--tree-project-guild (surface guild)
+  "Return GUILD row and lazily projected children in root SURFACE."
+  (let* ((guild-id (format "%s" (alist-get 'id guild)))
+         (entry (disco-root--tree-guild-entry surface guild)))
+    (if (not (appkit-directory-entry-expanded-p entry))
+        (list entry)
+      ;; Expansion, including a preserved expansion after reconnect, is the
+      ;; only ordinary root path that hydrates this guild snapshot.
+      (when (eq (disco-directory-guild-status guild-id) 'unloaded)
+        (disco-directory-load-guild-async guild-id))
+      (cons entry
+            (disco-guild-directory-project
+             (disco-root--tree-guild-context surface guild-id))))))
+
+(defun disco-root--composite-entries (&optional surface)
+  "Return the visible flat entries for the composite root tree SURFACE."
+  (setq surface (or surface
+                    (appkit-directory-current-surface)
+                    (disco-root--ensure-tree-directory-surface)))
+  (let* ((unread-channels (disco-root--collect-visible-unread-channels))
+         (unread-visible
+          (disco-root--tree-unread-section-channels unread-channels))
+         (unread-hidden (- (length unread-channels)
+                           (length unread-visible)))
+         (private-channels (disco-root--visible-private-channels))
+         (guilds (or (disco-state-guilds) '()))
+         entries)
+    (cl-labels ((emit (entry) (push entry entries))
+                (emit-all (items)
+                  (dolist (entry items) (push entry entries))))
+      ;; The three section rows are intentionally emitted in fixed historical
+      ;; order, regardless of whether a section currently has children.
+      (emit (disco-root--tree-section-entry
+             surface 'unread "Unread" (length unread-channels)))
+      (when (disco-root--tree-section-expanded-p surface 'unread)
+        (if unread-visible
+            (dolist (channel unread-visible)
+              (emit (disco-root--tree-channel-entry 'unread channel)))
+          (emit (disco-root--tree-note-entry
+                 'unread 'empty "No unread channels")))
+        (when (> unread-hidden 0)
+          (emit (disco-root--tree-note-entry
+                 'unread 'more
+                 (format "%d more unread channels" unread-hidden)))))
+
+      (emit (disco-root--tree-section-entry
+             surface 'private "Direct messages" (length private-channels)))
+      (when (disco-root--tree-section-expanded-p surface 'private)
+        (if private-channels
+            (dolist (channel private-channels)
+              (emit (disco-root--tree-channel-entry 'private channel)))
+          (emit (disco-root--tree-note-entry
+                 'private 'empty "No direct messages"))))
+
+      (emit (disco-root--tree-section-entry
+             surface 'guilds "Guilds" (length guilds)))
+      (when (disco-root--tree-section-expanded-p surface 'guilds)
+        (cond
+         ((eq disco-root--view-mode 'dms)
+          (emit (disco-root--tree-note-entry
+                 'guilds 'hidden "Guilds hidden by the DMs lens")))
+         (guilds
+          (dolist (guild guilds)
+            (emit-all (disco-root--tree-project-guild surface guild))))
+         (t
+          (emit (disco-root--tree-note-entry
+                 'guilds 'empty "No guilds")))))
+      (nreverse entries))))
+
+(defun disco-root--tree-channel-occurrence-keys (entries channel-id)
+  "Return every visible occurrence key for CHANNEL-ID in ENTRIES."
+  (setq channel-id (and channel-id (format "%s" channel-id)))
+  (let (keys)
+    (dolist (entry entries (nreverse keys))
+      (let ((payload (appkit-directory-entry-payload entry)))
+        (when (and (listp payload)
+                   (equal channel-id
+                          (and (alist-get 'id payload)
+                               (format "%s" (alist-get 'id payload)))))
+          (push (appkit-directory-entry-key entry) keys))))))
+
+(defun disco-root--tree-force-keys (entries)
+  "Return retained ENTRIES that the next root tree reconcile must redraw."
+  (if disco-root--tree-force-all-rows-p
+      (mapcar #'appkit-directory-entry-key entries)
+    (let (keys)
+      (dolist (channel-id disco-root--tree-force-channel-ids)
+        (setq keys
+              (nconc (disco-root--tree-channel-occurrence-keys
+                      entries channel-id)
+                     keys)))
+      (delete-dups keys))))
+
+(defun disco-root--tree-entry-inserter (_surface entry)
+  "Render root-owned non-item directory ENTRY, returning non-nil if handled."
+  (when (eq
+         (plist-get
+          (appkit-directory-entry-properties entry)
+          disco-root-directory-row-kind-property)
+         'guild)
+    (let* ((guild (appkit-directory-entry-payload entry))
+           (properties (appkit-directory-entry-properties entry))
+           (unread-count
+            (or (plist-get properties 'disco-root-guild-unread-count)
+                0))
+           (brackets (disco-title-brackets 'guild)))
+      (appkit-presentation-insert-one-line-row
+       (appkit-presentation-one-line-row-create
+        :icon-inserter
+        (lambda () (disco-root--insert-guild-icon guild))
+        :context
+        (or (alist-get 'name guild) "(unnamed-guild)")
+        :context-open
+        (car brackets)
+        :context-close
+        (cadr brackets)
+        :context-trail
+        (and (> unread-count 0) (number-to-string unread-count))
+        :context-trail-face 'disco-root-unread-badge
+        :preview
+        (appkit-ui-one-line-preview-create :text ""))
+       :width
+       (max 60
+            (or disco-root--fill-column
+                (disco-root--compute-fill-column)))
+       :icon-slot-width
+       (max 2
+            (ceiling
+             (* disco-root--activity-icon-slot-width
+                (disco-root--text-scale-factor))))
+       :context-width-spec disco-root-activity-context-width))
+    t))
+
+(defun disco-root--tree-item-inserter (_surface entry)
+  "Render one rich channel occurrence from composite root ENTRY."
+  (pcase (disco-guild-directory-entry-row-kind entry)
+    ((or 'parent-threads-load
+         'parent-threads-load-more
+         'parent-threads-retry)
+     (insert (or (appkit-directory-entry-label entry) "") "\n"))
+    (_
+     (let* ((channel (appkit-directory-entry-payload entry))
+            (root-kind
+             (plist-get (appkit-directory-entry-properties entry)
+                        disco-root-directory-row-kind-property))
+            (scope
+             (pcase root-kind
+               ('unread-channel 'unread)
+               ('dm-channel 'dm)
+               (_ (if (disco-state-channel-thread-p channel)
+                      (disco-root--thread-directory-scope channel)
+                    'directory)))))
+       (disco-root--insert-activity-channel-line channel 0 scope)))))
+
+(defun disco-root--tree-activate-item (_surface entry)
+  "Open the exact non-fold composite root channel ENTRY."
+  (let ((parent-id
+         (disco-guild-directory-entry-thread-parent-id entry)))
+    (pcase (disco-guild-directory-entry-row-kind entry)
+      ('parent-threads-load
+       (disco-directory-load-parent-threads-async parent-id))
+      ('parent-threads-load-more
+       (disco-directory-load-more-parent-threads-async parent-id))
+      ('parent-threads-retry
+       (disco-directory-retry-parent-threads-async parent-id))
+      (_
+       (let* ((channel (appkit-directory-entry-payload entry))
+              (channel-id (alist-get 'id channel))
+              (scoped-thread-p
+               (and (disco-state-channel-thread-p channel)
+                    parent-id
+                    (disco-directory-parent-thread-viewable-p
+                     parent-id channel))))
+         (unless channel-id
+           (user-error "disco: directory row has no channel"))
+         (when (and (disco-state-channel-thread-p channel)
+                    parent-id
+                    (not scoped-thread-p))
+           (user-error "disco: thread %s is not viewable below %s"
+                       channel-id parent-id))
+         (disco-root--open-channel channel-id))))))
+
+(defun disco-root--tree-fold-changed (_surface entry expanded-p)
+  "Apply composite root fold change for ENTRY with EXPANDED-P."
+  (let ((root-kind
+         (plist-get (appkit-directory-entry-properties entry)
+                    disco-root-directory-row-kind-property))
+        (guild-kind (disco-guild-directory-entry-row-kind entry)))
+    (cond
+     ((eq root-kind 'section)
+      (when-let* ((section
+                   (plist-get (appkit-directory-entry-properties entry)
+                              'disco-root-section)))
+        (disco-root--set-section-expanded section expanded-p)))
+     ((and (eq guild-kind 'thread-parent) expanded-p)
+      (when-let* ((parent-id
+                   (disco-guild-directory-entry-thread-parent-id entry)))
+        (disco-directory-load-parent-threads-async parent-id)))
+     ;; Category folds are pure projection changes.  Guild hydration happens
+     ;; below in `disco-root--tree-project-guild' only while expanded.
+     ((or (eq root-kind 'guild) (eq guild-kind 'group)) nil))
+    (disco-root-render)))
+
+(defun disco-root--ensure-tree-directory-surface ()
+  "Return the sole Appkit directory surface owned by the composite root."
+  (unless (hash-table-p disco-root--tree-fold-state)
+    (setq-local disco-root--tree-fold-state (make-hash-table :test #'equal)))
+  (let ((surface
+         (or (appkit-directory-current-surface)
+             (appkit-directory-initialize
+              :fold-state disco-root--tree-fold-state))))
+    (appkit-directory-configure
+     surface
+     :entry-inserter #'disco-root--tree-entry-inserter
+     :item-inserter #'disco-root--tree-item-inserter
+     :activate-function #'disco-root--tree-activate-item
+     :fold-function #'disco-root--tree-fold-changed
+     :action-rows-p nil
+     :anchor-property appkit-directory-key-property)
+    surface))
+
+(defun disco-root--retire-tree-directory-surface ()
+  "Retire the current tree surface while preserving its independent folds."
+  (when-let* ((fold-state (appkit-directory-retire)))
+    (setq-local disco-root--tree-fold-state fold-state)))
+
+(defun disco-root--build-composite-render-spec ()
+  "Return a keyed Appkit directory view spec for the composite root tree."
+  (let* ((surface (disco-root--ensure-tree-directory-surface))
+         (entries (disco-root--composite-entries surface)))
+    (disco-root-render-directory-spec-create
+     surface entries
+     :force-keys (disco-root--tree-force-keys entries))))
+
+
+(defun disco-root--search-render-entries ()
+  "Return entries for the active temporary root search."
+  (let (result)
+    (dolist (tab disco-root--search-tab-order)
+      (let* ((state (disco-root--search-tab-state tab))
+             (items (or (plist-get state :items) '()))
+             (loading (plist-get state :loading))
+             (error (plist-get state :error))
+             (cursor (plist-get state :cursor))
+             (total (plist-get state :total-results)))
+        ;; Like Telega's root search, keep the primary result section visible
+        ;; and suppress empty optional sections after they settle.
+        (when (or (eq tab 'messages) items loading error cursor)
+          (push (disco-root--entry-search-section
+                 tab
+                 (disco-root--search-tab-label tab)
+                 (length items)
+                 total
+                 loading)
+                result)
+          (cond
+           (items
+            (dolist (message items)
+              (push (disco-root--entry-search-message message 2 tab)
+                    result)))
+           (loading
+            (push (disco-root--entry-search-note "  (loading...)" 'shadow tab)
+                  result))
+           (error
+            (push (disco-root--entry-search-note (format "  (%s)" error)
+                                                 'font-lock-warning-face tab)
+                  result))
+           (t
+            (push (disco-root--entry-search-note "  (no results)" 'shadow tab)
+                  result)))
+          (when cursor
+            (push (disco-root--entry-search-action "Show more" 'load-more tab)
+                  result))
+          (push (disco-root--entry-blank (list 'search-blank tab)) result))))
+    (nconc (list (disco-root--entry-search-action
+                  "Back to root" 'exit-search nil)
+                 (disco-root--entry-blank '(search back-separator)))
+           (nreverse result))))
+
+(defun disco-root--build-search-list-spec ()
+  "Return list spec for the active temporary root search."
+  (let ((content (plist-get disco-root--search-query-spec :content)))
+    (appkit-presentation-list-spec-create
+     :title (format "Search%s in %s"
+                    (if (and (stringp content)
+                             (not (string-empty-p content)))
+                        (format " \"%s\"" content)
+                      "")
+                    (disco-root--search-domain-label disco-root--search-domain))
+     :items (disco-root--search-render-entries)
+     :item-inserter #'disco-root--insert-render-entry)))
+
+(defun disco-root--build-search-render-spec ()
+  "Return view spec for the active temporary root search."
+  (disco-root-render-list-spec-create
+   (disco-root--build-search-list-spec)))
+
+
+(provide 'disco-root-view)
+
+;;; disco-root-view.el ends here
