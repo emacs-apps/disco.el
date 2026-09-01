@@ -22,6 +22,7 @@
 (require 'appkit-chatbuf)
 (require 'appkit-chat-timeline)
 (require 'appkit-ui)
+(require 'appkit-scroll)
 (require 'disco-customize)
 (require 'disco-msg)
 (require 'disco-thread)
@@ -81,6 +82,7 @@ This is a search boundary, not the remote/latest protocol frontier.")
 (defvar-local disco-room--revealed-spoiler-message-id nil)
 (defvar-local disco-room--optimistic-read-ack-seq 0)
 (defvar-local disco-room--pending-optimistic-read-ack nil)
+(defvar-local disco-room--scroll-observer nil)
 
 (defconst disco-room--message-flag-has-thread (ash 1 5)
   "Bit mask indicating message has an associated starter thread.")
@@ -400,13 +402,14 @@ dead view never degrades this guard to channel identity alone."
 
 ;;; History and message windows
 
-(defun disco-room--maybe-auto-load-older ()
-  "Load older channel history when point approaches the timeline top."
+(defun disco-room--maybe-auto-load-older (&optional position)
+  "Load older channel history when POSITION approaches the timeline top."
   (when (and disco-room--channel-id
              (not (disco-room--msg-filter-active-p))
              (not (appkit-chatbuf-point-in-input-p))
              (appkit-chat-history-autoload-older-p
-              (point) (point-min) disco-room-history-auto-load-threshold))
+              (or position (point)) (point-min)
+              disco-room-history-auto-load-threshold))
     (disco-room-load-older-messages t)))
 
 (defun disco-room--maybe-auto-load-newer (&optional position)
@@ -422,23 +425,31 @@ dead view never degrades this guard to channel identity alone."
                 (appkit-chatbuf-composer-idle-p)))
       (disco-room-load-newer-messages t))))
 
-(defun disco-room--window-scroll (window _display-start)
-  "Auto-load newer history from WINDOW's actual visible timeline edge.
+(defun disco-room--install-scroll-observer (view)
+  "Install VIEW's lifecycle-owned history edge observer."
+  (unless (and (appkit-scroll-observer-p disco-room--scroll-observer)
+               (appkit-scroll-observer-active-p
+                disco-room--scroll-observer)
+               (eq view
+                   (appkit-scroll-observer-owner
+                    disco-room--scroll-observer)))
+    (when (appkit-scroll-observer-p disco-room--scroll-observer)
+      (appkit-scroll-observer-cancel disco-room--scroll-observer))
+    (setq-local
+     disco-room--scroll-observer
+     (appkit-scroll-observer-install
+      view
+      :end-boundary-function #'appkit-chat-timeline-footer-start-position
+      :start-function
+      (lambda (_window position _start)
+        (disco-room--maybe-auto-load-older position))
+      :end-function
+      (lambda (_window position _end)
+        (disco-room--maybe-auto-load-newer position))))))
 
-`post-command-hook' covers keyboard motion through point.  Window scrolling
-can move the viewport without moving point, so use AppKit's composer-clamped
-visible end for both selected and inactive room windows."
-  (when (and (window-live-p window)
-             (buffer-live-p (window-buffer window)))
-    (with-current-buffer (window-buffer window)
-      (when (derived-mode-p 'disco-room-mode)
-        (when-let* ((position
-                     (appkit-chat-timeline-window-visible-end-position
-                      window)))
-          (disco-room--maybe-auto-load-newer position))))))
 
 (defun disco-room--post-command ()
-  "Maintain Disco-specific row and history behavior after each command."
+  "Maintain Disco-specific row behavior after each command."
   (unless (appkit-chatbuf-rendering-p)
     (let ((current-message-id (or (get-text-property (point) 'disco-message-id)
                                   (get-text-property (line-beginning-position)
@@ -450,9 +461,7 @@ visible end for both selected and inactive room windows."
           (setq disco-room--revealed-spoiler-message-id nil)
           (when-let* ((view (appkit-current-view)))
             (when (appkit-view-live-p view)
-              (appkit-request-sync view :entry previous))))))
-    (disco-room--maybe-auto-load-newer)
-    (disco-room--maybe-auto-load-older)))
+              (appkit-request-sync view :entry previous))))))))
 
 (defun disco-room--read-state-snapshot-fields (state)
   "Return writable read-state fields copied from STATE."
@@ -1270,7 +1279,9 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
        ((or resources entries)
         (disco-room--sync-timeline
          :force-keys entries
-         :changed-resources resources))))))
+         :changed-resources resources)))
+      (when (appkit-scroll-observer-p disco-room--scroll-observer)
+        (appkit-scroll-observer-check disco-room--scroll-observer)))))
 
 (defun disco-room--ensure-view ()
   "Return the live appkit view owning the current room buffer."
@@ -1310,6 +1321,7 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
                 (disco-room--reset-view-local-state
                  channel-id channel-name))
               attached)))))
+    (disco-room--install-scroll-observer view)
     (appkit-view-enable-responsive-geometry view)
     view))
 
@@ -2283,6 +2295,7 @@ its same-mode buffer survives."
   (setq-local disco-room--pending-optimistic-read-ack nil)
   (setq-local disco-room--gateway-handler nil)
   (setq-local disco-room--live-update-handle nil)
+  (setq-local disco-room--scroll-observer nil)
   (funcall #'disco-company-setup-room-buffer)
   (when (disco-current-token)
     (disco-sticker-ensure-ready disco-room--guild-id)))
@@ -2299,7 +2312,6 @@ its same-mode buffer survives."
               #'disco-room--sync-draft-from-buffer)
   (add-hook 'text-scale-mode-hook #'disco-room--on-text-scale-change nil t)
   (add-hook 'post-command-hook #'disco-room--post-command t t)
-  (add-hook 'window-scroll-functions #'disco-room--window-scroll nil t)
   (appkit-chatbuf-use-timeline-mode #'disco-room-timeline-mode))
 
 (defun disco-room-open (channel-id channel-name)
@@ -2325,6 +2337,7 @@ its same-mode buffer survives."
          (buf (appkit-view-buffer view)))
     (with-current-buffer buf
       (setq disco-room--channel-id channel-id)
+      (disco-room--install-scroll-observer view)
       (setq disco-room--channel-name channel-name)
       (let ((channel (disco-state-channel channel-id)))
         (setq disco-room--guild-id (and channel (alist-get 'guild_id channel))))
