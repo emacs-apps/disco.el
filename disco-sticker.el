@@ -764,7 +764,8 @@ multi-line sticker size.  MAX-WIDTH bounds completion previews and defaults to
   "Return lazy Appkit affixation prefix function for STICKER."
   (lambda (_candidate)
     (if-let* ((image (disco-sticker-image sticker 'completion)))
-        (concat (appkit-media-image-display-string image " ") " ")
+        (concat
+         (appkit-media-one-line-image-display-string image " ") " ")
       "")))
 
 (defun disco-sticker-image-slice-rows (sticker)

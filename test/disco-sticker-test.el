@@ -53,6 +53,21 @@
                   :sticker-id)
                  "222"))))))
 
+(ert-deftest disco-sticker-completion-uses-one-line-image-display ()
+  "Sticker completion should use Appkit's one-line display contract."
+  (let (displayed)
+    (cl-letf (((symbol-function 'disco-sticker-image)
+               (lambda (&rest _arguments) 'sticker-image))
+              ((symbol-function
+                'appkit-media-one-line-image-display-string)
+               (lambda (image fallback)
+                 (setq displayed (list image fallback))
+                 "preview")))
+      (should
+       (equal "preview "
+              (funcall (disco-sticker-completion-prefix 'sticker) nil)))
+      (should (equal displayed '(sticker-image " "))))))
+
 (ert-deftest disco-sticker-ensure-catalogs-allows-one-authoritative-source ()
   (let ((standard-loaded nil)
         (guild-loaded nil)
