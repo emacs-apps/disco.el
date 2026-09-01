@@ -223,7 +223,8 @@
                      (lambda (file &optional _max-width)
                        (should (equal file path))
                        '(:composer-preview)))
-                    ((symbol-function 'appkit-media-image-display-string)
+                    ((symbol-function
+                      'appkit-media-one-line-image-display-string)
                      (lambda (image fallback)
                        (propertize fallback 'display image))))
             (let* ((object

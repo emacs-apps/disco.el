@@ -211,7 +211,7 @@
   "Return EMOJI-ID image display text or FALLBACK while unavailable."
   (let ((fallback (or fallback "")))
     (if-let* ((image (disco-emoji-image-image emoji-id animated)))
-        (appkit-media-image-display-string
+        (appkit-media-one-line-image-display-string
          image (if (string-empty-p fallback) " " fallback))
       fallback)))
 

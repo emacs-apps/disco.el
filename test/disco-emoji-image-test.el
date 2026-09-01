@@ -76,7 +76,11 @@
   (let ((available nil)
         (prefix (disco-emoji-image-completion-prefix "123" nil)))
     (cl-letf (((symbol-function 'disco-emoji-image-image)
-               (lambda (&rest _) (and available 'image-object))))
+               (lambda (&rest _) (and available 'image-object)))
+              ((symbol-function
+                'appkit-media-one-line-image-display-string)
+               (lambda (image fallback)
+                 (propertize fallback 'display image))))
       (should (equal "" (funcall prefix nil)))
       (setq available t)
       (let ((value (funcall prefix nil)))
