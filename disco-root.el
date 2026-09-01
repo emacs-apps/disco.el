@@ -45,7 +45,7 @@
 
 (autoload 'disco-reset-session-state "disco" nil t)
 
-(declare-function disco-root-view--reset-guild-icon-cache-state
+(declare-function disco-root-view--reset-icon-cache-state
                   "disco-root-view" ())
 (declare-function disco-root--private-channel-avatar-user
                   "disco-root-view" (channel))
@@ -271,8 +271,13 @@ channels and threads."
   :type 'boolean
   :group 'disco)
 
+(defcustom disco-root-show-group-dm-icons t
+  "When non-nil, show custom Group DM icons in root channel rows."
+  :type 'boolean
+  :group 'disco)
+
 (defcustom disco-root-guild-icon-size 18
-  "Pixel size used for inline guild icons in root rows."
+  "Pixel size used for Guild and private-channel icons in root rows."
   :type 'integer
   :group 'disco)
 
@@ -381,19 +386,19 @@ fragments are joined and appended to the row label."
 (defvar disco-root--extra-info-provider-error-cache (make-hash-table :test #'eq)
   "Provider symbols already reported for `disco-root-extra-info-functions'.")
 
-(defvar disco-root--guild-icon-image-cache (make-hash-table :test #'equal)
-  "Global guild icon image cache keyed by guild icon cache key.
+(defvar disco-root--icon-image-cache (make-hash-table :test #'equal)
+  "Global root identity icon cache keyed by resource kind, ID, hash, and size.
 
 Values are image objects or the symbol `:missing'.")
 
-(defvar disco-root--guild-icon-fetching (make-hash-table :test #'equal)
-  "Guild icon request owners keyed by icon cache key.
+(defvar disco-root--icon-fetching (make-hash-table :test #'equal)
+  "Root identity icon request owners keyed by icon cache key.
 
 Each owner is a unique plist containing its generation and exact `plz'
 process, so late callbacks cannot affect a replacement account session.")
 
-(defvar disco-root--guild-icon-fetch-generation 0
-  "Generation used to revoke root guild icon request callbacks.")
+(defvar disco-root--icon-fetch-generation 0
+  "Generation used to revoke root identity icon request callbacks.")
 
 (defvar disco-root--session-cache-reset-in-progress nil
   "Non-nil while account-scoped root cache state is being retired.")
@@ -401,15 +406,15 @@ process, so late callbacks cannot affect a replacement account session.")
 (defun disco-root--clear-session-cache-memory ()
   "Clear account-scoped root cache bookkeeping without running callbacks."
   (setq disco-root-search-history nil)
-  (clrhash disco-root--guild-icon-fetching)
-  (clrhash disco-root--guild-icon-image-cache)
+  (clrhash disco-root--icon-fetching)
+  (clrhash disco-root--icon-image-cache)
   (clrhash disco-root--extra-info-provider-error-cache))
 
 (defun disco-root-reset-session-cache-state ()
   "Destructively clear account-scoped root caches without redrawing."
   (let ((disco-root--session-cache-reset-in-progress t))
     (unwind-protect
-        (disco-root-view--reset-guild-icon-cache-state)
+        (disco-root-view--reset-icon-cache-state)
       ;; A cancellation sentinel may mutate globals synchronously.  Clear a
       ;; second time without ever asking Appkit to rebuild a retired view.
       (disco-root--clear-session-cache-memory))))
