@@ -1230,6 +1230,29 @@
         (should (eq 'avatar-image inserted-image))
         (should (equal "A" (buffer-string)))))))
 
+(ert-deftest disco-root-group-dm-icon-uses-channel-icon-cdn ()
+  (with-temp-buffer
+    (let ((channel '((id . "group1") (type . 3) (icon . "icon-hash")))
+          inserted-image)
+      (should
+       (equal
+        "https://cdn.discordapp.com/channel-icons/group1/icon-hash.png?size=64"
+        (disco-root--channel-icon-url channel)))
+      (should
+       (equal
+        (format "channel:group1:icon-hash:%s" disco-root-guild-icon-size)
+        (disco-root--channel-icon-cache-key channel)))
+      (cl-letf (((symbol-function 'disco-root--channel-icon-image)
+                 (lambda (_channel) 'channel-image))
+                ((symbol-function 'disco-root--scaled-image) #'identity)
+                ((symbol-function 'insert-image)
+                 (lambda (image &rest _args)
+                   (setq inserted-image image)
+                   (insert "G"))))
+        (funcall (disco-root--activity-icon-inserter channel 'dm))
+        (should (eq 'channel-image inserted-image))
+        (should (equal "G" (buffer-string)))))))
+
 (ert-deftest disco-root-avatar-resource-maps-to-all-private-channel-ids ()
   (let* ((self '((id . "self") (avatar . "self-hash")))
          (alice '((id . "alice") (avatar . "hash-a")))
@@ -2783,10 +2806,10 @@
 
 (ert-deftest disco-root-session-cache-reset-revokes-old-icon-callbacks ()
   (let ((disco-root--session-cache-reset-in-progress nil)
-        (disco-root--guild-icon-fetch-generation 8)
-        (disco-root--guild-icon-image-cache
+        (disco-root--icon-fetch-generation 8)
+        (disco-root--icon-image-cache
          (make-hash-table :test #'equal))
-        (disco-root--guild-icon-fetching
+        (disco-root--icon-fetching
          (make-hash-table :test #'equal))
         (disco-root--extra-info-provider-error-cache
          (make-hash-table :test #'eq))
@@ -2797,7 +2820,7 @@
         (plz-calls 0)
         (rerender-count 0))
     (puthash "old-cache" "https://OLD_ACCOUNT_SECRET.invalid/icon.png"
-             disco-root--guild-icon-image-cache)
+             disco-root--icon-image-cache)
     (puthash 'old-provider t disco-root--extra-info-provider-error-cache)
     (cl-letf (((symbol-function 'plz)
                (lambda (_method _url &rest args)
@@ -2811,48 +2834,48 @@
                (lambda (process)
                  (setq canceled process)
                  (funcall then-callback "OLD_ACCOUNT_SECRET-bytes")
-                 (disco-root--start-guild-icon-fetch
+                 (disco-root--start-icon-fetch
                   "reentrant"
                   "https://OLD_ACCOUNT_SECRET.invalid/reentrant.png")))
               ((symbol-function 'create-image)
                (lambda (&rest _args) :image))
-              ((symbol-function 'disco-root--guild-icon-image-valid-p)
+              ((symbol-function 'disco-root--icon-image-valid-p)
                (lambda (image) (eq image :image)))
               ((symbol-function 'disco-root--rerender-open-root-buffers)
                (lambda () (cl-incf rerender-count))))
-      (disco-root--start-guild-icon-fetch
+      (disco-root--start-icon-fetch
        "live-icon" "https://OLD_ACCOUNT_SECRET.invalid/live.png")
       (should (= 1 plz-calls))
       (should (eq 'old-root-icon-process
                   (plist-get
-                   (gethash "live-icon" disco-root--guild-icon-fetching)
+                   (gethash "live-icon" disco-root--icon-fetching)
                    :process)))
       (disco-root-reset-session-cache-state)
       (should (eq 'old-root-icon-process canceled))
       (should (= 1 plz-calls))
       (should (= 0 rerender-count))
       (should-not disco-root-search-history)
-      (should (= 0 (hash-table-count disco-root--guild-icon-image-cache)))
-      (should (= 0 (hash-table-count disco-root--guild-icon-fetching)))
+      (should (= 0 (hash-table-count disco-root--icon-image-cache)))
+      (should (= 0 (hash-table-count disco-root--icon-fetching)))
       (should (= 0 (hash-table-count
                     disco-root--extra-info-provider-error-cache)))
       (funcall then-callback "OLD_ACCOUNT_SECRET-late")
       (funcall else-callback '(:message "OLD_ACCOUNT_SECRET-late"))
       (should (= 0 rerender-count))
-      (should (= 0 (hash-table-count disco-root--guild-icon-image-cache))))))
+      (should (= 0 (hash-table-count disco-root--icon-image-cache))))))
 
 (ert-deftest disco-root-session-cache-reset-clears-after-cancel-throw ()
-  (let ((disco-root--guild-icon-fetch-generation 1)
-        (disco-root--guild-icon-image-cache
+  (let ((disco-root--icon-fetch-generation 1)
+        (disco-root--icon-image-cache
          (make-hash-table :test #'equal))
-        (disco-root--guild-icon-fetching
+        (disco-root--icon-fetching
          (make-hash-table :test #'equal))
         (disco-root--extra-info-provider-error-cache
          (make-hash-table :test #'eq)))
     (puthash "secret" "OLD_ACCOUNT_SECRET"
-             disco-root--guild-icon-image-cache)
+             disco-root--icon-image-cache)
     (puthash "secret" (list :generation 1 :process 'process)
-             disco-root--guild-icon-fetching)
+             disco-root--icon-fetching)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
               ((symbol-function 'delete-process)
                (lambda (_process) (throw 'cancel-escape :escaped))))
@@ -2860,8 +2883,8 @@
                   (catch 'cancel-escape
                     (disco-root-reset-session-cache-state)
                     :returned)))
-      (should (= 0 (hash-table-count disco-root--guild-icon-image-cache)))
-      (should (= 0 (hash-table-count disco-root--guild-icon-fetching))))))
+      (should (= 0 (hash-table-count disco-root--icon-image-cache)))
+      (should (= 0 (hash-table-count disco-root--icon-fetching))))))
 
 (ert-deftest disco-root-icon-process-cancel-drain-is-stack-safe ()
   (let ((max-lisp-eval-depth 800)
@@ -2869,7 +2892,7 @@
     (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
               ((symbol-function 'delete-process)
                (lambda (_process) (cl-incf canceled))))
-      (disco-root-view--cancel-guild-icon-processes
+      (disco-root-view--cancel-icon-processes
        (number-sequence 1 2000)))
     (should (= 2000 canceled)))
   (let (canceled)
@@ -2880,7 +2903,7 @@
                  (throw 'cancel-escape process))))
       (should (eq 'third
                   (catch 'cancel-escape
-                    (disco-root-view--cancel-guild-icon-processes
+                    (disco-root-view--cancel-icon-processes
                      '(escape second third))
                     :returned))))
     (should (equal '(third second escape) canceled))))

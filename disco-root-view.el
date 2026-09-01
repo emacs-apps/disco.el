@@ -56,14 +56,15 @@
 (defvar disco-root--sort-mode)
 (defvar disco-root--fill-column)
 (defvar disco-root--activity-icon-slot-width)
-(defvar disco-root--guild-icon-fetching)
-(defvar disco-root--guild-icon-image-cache)
-(defvar disco-root--guild-icon-fetch-generation)
+(defvar disco-root--icon-fetching)
+(defvar disco-root--icon-image-cache)
+(defvar disco-root--icon-fetch-generation)
 (defvar disco-root--session-cache-reset-in-progress)
 (defvar disco-root--extra-info-provider-error-cache)
 (defvar disco-root-extra-info-functions)
 (defvar disco-root-guild-icon-size)
 (defvar disco-root-show-guild-icons)
+(defvar disco-root-show-group-dm-icons)
 (defvar disco-root-activity-context-width)
 (defvar disco-root-activity-context-separator)
 (defvar disco-root-activity-time-format-alist)
@@ -619,17 +620,17 @@ Exclude the current user when its ID is known."
       (disco-root--private-channel-display-name channel)
     (or (alist-get 'name channel) "(no-name)")))
 
-(defun disco-root--guild-icon-hash (guild)
-  "Return icon hash string from GUILD, or nil when unavailable."
-  (let ((icon (alist-get 'icon guild)))
+(defun disco-root--icon-hash (object)
+  "Return non-empty icon hash from OBJECT, or nil when unavailable."
+  (let ((icon (alist-get 'icon object)))
     (and (stringp icon)
          (not (string-empty-p icon))
          icon)))
 
 (defun disco-root--guild-icon-url (guild)
-  "Return Discord CDN guild icon URL for GUILD, or nil."
+  "Return Discord CDN Guild icon URL for GUILD, or nil."
   (let ((guild-id (alist-get 'id guild))
-        (icon-hash (disco-root--guild-icon-hash guild)))
+        (icon-hash (disco-root--icon-hash guild)))
     (when (and guild-id icon-hash)
       (format "https://cdn.discordapp.com/icons/%s/%s.png?size=64"
               guild-id icon-hash))))
@@ -637,9 +638,26 @@ Exclude the current user when its ID is known."
 (defun disco-root--guild-icon-cache-key (guild)
   "Build stable cache key for GUILD icon image."
   (let ((guild-id (alist-get 'id guild))
-        (icon-hash (disco-root--guild-icon-hash guild)))
+        (icon-hash (disco-root--icon-hash guild)))
     (when (and guild-id icon-hash)
-      (format "%s:%s:%s" guild-id icon-hash disco-root-guild-icon-size))))
+      (format "guild:%s:%s:%s"
+              guild-id icon-hash disco-root-guild-icon-size))))
+
+(defun disco-root--channel-icon-url (channel)
+  "Return Discord CDN Group DM icon URL for CHANNEL, or nil."
+  (let ((channel-id (alist-get 'id channel))
+        (icon-hash (disco-root--icon-hash channel)))
+    (when (and channel-id icon-hash)
+      (format "https://cdn.discordapp.com/channel-icons/%s/%s.png?size=64"
+              channel-id icon-hash))))
+
+(defun disco-root--channel-icon-cache-key (channel)
+  "Build stable cache key for CHANNEL icon image."
+  (let ((channel-id (alist-get 'id channel))
+        (icon-hash (disco-root--icon-hash channel)))
+    (when (and channel-id icon-hash)
+      (format "channel:%s:%s:%s"
+              channel-id icon-hash disco-root-guild-icon-size))))
 
 (defun disco-root--guild-icon-fallback (guild)
   "Return fallback textual icon for GUILD when image is unavailable."
@@ -649,21 +667,21 @@ Exclude the current user when its ID is known."
                     "?")))
     (format "[%s]" initial)))
 
-(defun disco-root--guild-icon-image-valid-p (image)
+(defun disco-root--icon-image-valid-p (image)
   "Return non-nil when IMAGE object appears renderable."
   (and image
        (ignore-errors (image-size image t) t)))
 
-(defun disco-root--guild-icon-rendering-available-p ()
-  "Return non-nil when inline guild icons can be rendered."
-  (and disco-root-show-guild-icons
+(defun disco-root--icon-rendering-available-p (enabled)
+  "Return non-nil when ENABLED root identity icons can be rendered."
+  (and enabled
        (not disco-root--session-cache-reset-in-progress)
        (display-images-p)
        (image-type-available-p 'png)
        (fboundp 'plz)))
 
 (defun disco-root--rerender-open-root-buffers ()
-  "Invalidate live root projections after guild icon updates."
+  "Invalidate live root projections after identity icon updates."
   (unless disco-root--session-cache-reset-in-progress
     (dolist (buffer (buffer-list))
       (when (buffer-live-p buffer)
@@ -671,14 +689,14 @@ Exclude the current user when its ID is known."
           (when (eq major-mode 'disco-root-mode)
             (disco-root-view--queue-live-update nil t nil)))))))
 
-(defun disco-root-view--guild-icon-owner-current-p (cache-key owner)
+(defun disco-root-view--icon-owner-current-p (cache-key owner)
   "Return non-nil when OWNER still owns CACHE-KEY in this account session."
   (and (not disco-root--session-cache-reset-in-progress)
        (= (or (plist-get owner :generation) -1)
-          disco-root--guild-icon-fetch-generation)
-       (eq owner (gethash cache-key disco-root--guild-icon-fetching))))
+          disco-root--icon-fetch-generation)
+       (eq owner (gethash cache-key disco-root--icon-fetching))))
 
-(defun disco-root-view--cancel-guild-icon-process (process)
+(defun disco-root-view--cancel-icon-process (process)
   "Cancel PROCESS when live, isolating ordinary cancellation failures."
   (when process
     (condition-case nil
@@ -686,45 +704,45 @@ Exclude the current user when its ID is known."
           (delete-process process))
       ((error quit) nil))))
 
-(defun disco-root-view--cancel-guild-icon-processes (processes)
+(defun disco-root-view--cancel-icon-processes (processes)
   "Cancel PROCESSES while guaranteeing every remaining cancellation attempt."
   (let ((remaining processes))
     (unwind-protect
         (while remaining
-          (disco-root-view--cancel-guild-icon-process (pop remaining)))
+          (disco-root-view--cancel-icon-process (pop remaining)))
       (when remaining
-        (disco-root-view--cancel-guild-icon-processes remaining)))))
+        (disco-root-view--cancel-icon-processes remaining)))))
 
-(defun disco-root-view--guild-icon-finish (cache-key owner image)
+(defun disco-root-view--icon-finish (cache-key owner image)
   "Publish IMAGE for CACHE-KEY when OWNER remains exact and current."
-  (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
+  (when (disco-root-view--icon-owner-current-p cache-key owner)
     (puthash cache-key
-             (if (disco-root--guild-icon-image-valid-p image) image :missing)
-             disco-root--guild-icon-image-cache)
-    (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
-      (remhash cache-key disco-root--guild-icon-fetching)
+             (if (disco-root--icon-image-valid-p image) image :missing)
+             disco-root--icon-image-cache)
+    (when (disco-root-view--icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-root--icon-fetching)
       (when (and (not disco-root--session-cache-reset-in-progress)
                  (= (plist-get owner :generation)
-                    disco-root--guild-icon-fetch-generation))
+                    disco-root--icon-fetch-generation))
         (disco-root--rerender-open-root-buffers)))))
 
-(defun disco-root-view--guild-icon-fail (cache-key owner)
+(defun disco-root-view--icon-fail (cache-key owner)
   "Publish a missing icon for CACHE-KEY only when OWNER remains current."
-  (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
-    (puthash cache-key :missing disco-root--guild-icon-image-cache)
-    (when (disco-root-view--guild-icon-owner-current-p cache-key owner)
-      (remhash cache-key disco-root--guild-icon-fetching))))
+  (when (disco-root-view--icon-owner-current-p cache-key owner)
+    (puthash cache-key :missing disco-root--icon-image-cache)
+    (when (disco-root-view--icon-owner-current-p cache-key owner)
+      (remhash cache-key disco-root--icon-fetching))))
 
-(defun disco-root--start-guild-icon-fetch (cache-key url)
-  "Start asynchronous guild icon fetch for CACHE-KEY from URL."
+(defun disco-root--start-icon-fetch (cache-key url)
+  "Start asynchronous root icon fetch for CACHE-KEY from URL."
   (unless (or disco-root--session-cache-reset-in-progress
-              (gethash cache-key disco-root--guild-icon-fetching)
-              (gethash cache-key disco-root--guild-icon-image-cache))
-    (let* ((generation disco-root--guild-icon-fetch-generation)
+              (gethash cache-key disco-root--icon-fetching)
+              (gethash cache-key disco-root--icon-image-cache))
+    (let* ((generation disco-root--icon-fetch-generation)
            (owner (list :generation generation :process nil))
            process
            returned-p)
-      (puthash cache-key owner disco-root--guild-icon-fetching)
+      (puthash cache-key owner disco-root--icon-fetching)
       (unwind-protect
           (progn
             (setq process
@@ -734,7 +752,7 @@ Exclude the current user when its ID is known."
                        '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
                        :then
                        (lambda (bytes)
-                         (when (disco-root-view--guild-icon-owner-current-p
+                         (when (disco-root-view--icon-owner-current-p
                                 cache-key owner)
                            (let ((image
                                   (ignore-errors
@@ -743,67 +761,75 @@ Exclude the current user when its ID is known."
                                      :width disco-root-guild-icon-size
                                      :height disco-root-guild-icon-size
                                      :ascent 'center))))
-                             (disco-root-view--guild-icon-finish
+                             (disco-root-view--icon-finish
                               cache-key owner image))))
                        :else
                        (lambda (_err)
-                         (disco-root-view--guild-icon-fail
+                         (disco-root-view--icon-fail
                           cache-key owner))))
             (setq returned-p t))
         (cond
          ((and returned-p
-               (disco-root-view--guild-icon-owner-current-p cache-key owner))
+               (disco-root-view--icon-owner-current-p cache-key owner))
           (setf (plist-get owner :process) process))
-         ((disco-root-view--guild-icon-owner-current-p cache-key owner)
-          (remhash cache-key disco-root--guild-icon-fetching))
+         ((disco-root-view--icon-owner-current-p cache-key owner)
+          (remhash cache-key disco-root--icon-fetching))
          (returned-p
-          (disco-root-view--cancel-guild-icon-process process))))))
+          (disco-root-view--cancel-icon-process process))))))
   nil)
 
-(defun disco-root-view--reset-guild-icon-cache-state ()
-  "Revoke root guild icon work and clear its account-scoped caches."
+(defun disco-root-view--reset-icon-cache-state ()
+  "Revoke root icon work and clear its account-scoped caches."
   (let ((disco-root--session-cache-reset-in-progress t)
         processes)
-    (cl-incf disco-root--guild-icon-fetch-generation)
+    (cl-incf disco-root--icon-fetch-generation)
     (maphash
      (lambda (_cache-key owner)
        (when-let* ((process (and (listp owner)
                                  (plist-get owner :process))))
          (push process processes)))
-     disco-root--guild-icon-fetching)
+     disco-root--icon-fetching)
     (unwind-protect
-        (disco-root-view--cancel-guild-icon-processes processes)
-      (clrhash disco-root--guild-icon-fetching)
-      (clrhash disco-root--guild-icon-image-cache))))
+        (disco-root-view--cancel-icon-processes processes)
+      (clrhash disco-root--icon-fetching)
+      (clrhash disco-root--icon-image-cache))))
+
+(defun disco-root--icon-image (cache-key url enabled)
+  "Return cached icon for CACHE-KEY, fetching URL when ENABLED and absent."
+  (when (disco-root--icon-rendering-available-p enabled)
+    (let ((cached (and cache-key
+                       (gethash cache-key disco-root--icon-image-cache))))
+      (cond
+       ((null cache-key) nil)
+       ((eq cached :missing) nil)
+       ((disco-root--icon-image-valid-p cached) cached)
+       (t
+        (when url
+          (disco-root--start-icon-fetch cache-key url))
+        nil)))))
 
 (defun disco-root--guild-icon-image (guild)
-  "Return image object for GUILD icon when available, otherwise nil.
+  "Return GUILD icon image, asynchronously fetching it when needed."
+  (disco-root--icon-image
+   (disco-root--guild-icon-cache-key guild)
+   (disco-root--guild-icon-url guild)
+   disco-root-show-guild-icons))
 
-Starts asynchronous fetch when cache miss occurs."
-  (when (disco-root--guild-icon-rendering-available-p)
-    (let* ((cache-key (disco-root--guild-icon-cache-key guild))
-           (cached (and cache-key
-                        (gethash cache-key disco-root--guild-icon-image-cache))))
-      (cond
-       ((null cache-key)
-        nil)
-       ((eq cached :missing)
-        nil)
-       ((disco-root--guild-icon-image-valid-p cached)
-        cached)
-       (t
-        (let ((url (disco-root--guild-icon-url guild)))
-          (when url
-            (disco-root--start-guild-icon-fetch cache-key url)))
-        nil)))))
+(defun disco-root--channel-icon-image (channel)
+  "Return Group DM CHANNEL icon image, asynchronously fetching it when needed."
+  (when (disco-channel-group-dm-p channel)
+    (disco-root--icon-image
+     (disco-root--channel-icon-cache-key channel)
+     (disco-root--channel-icon-url channel)
+     disco-root-show-group-dm-icons)))
 
 (defun disco-root--insert-guild-icon (guild)
   "Insert one guild icon for GUILD, falling back to text when needed."
   (let* ((fallback (disco-root--guild-icon-fallback guild))
          (image (disco-root--guild-icon-image guild))
-         (display-image (and (disco-root--guild-icon-image-valid-p image)
+         (display-image (and (disco-root--icon-image-valid-p image)
                              (disco-root--scaled-image image))))
-    (if (disco-root--guild-icon-image-valid-p display-image)
+    (if (disco-root--icon-image-valid-p display-image)
         (insert-image display-image fallback)
       (insert fallback))))
 
@@ -1217,9 +1243,9 @@ When MESSAGE is non-nil, use it as cached preview source."
 (defun disco-root--activity-icon-inserter (channel &optional scope)
   "Return an identity icon inserter for CHANNEL under SCOPE, or nil.
 
-Guild activity keeps its Guild identity and direct messages keep a cached
-user avatar.  Channel-type glyphs are omitted because the context delimiters
-already encode the stable Discord type."
+Guild activity keeps its Guild identity, Group DMs use their custom channel
+icon, and direct messages use a cached user avatar.  Channel-type glyphs are
+omitted because the context delimiters already encode the stable Discord type."
   (let ((guild
          (and (alist-get 'guild_id channel)
               (disco-root--guild-by-id
@@ -1232,6 +1258,10 @@ already encode the stable Discord type."
               (disco-root--insert-guild-icon guild)
             (insert (disco-root--guild-icon-fallback guild)))
           (add-text-properties start (point) (list 'face 'shadow)))))
+     ((disco-channel-group-dm-p channel)
+      (when-let* ((image (disco-root--channel-icon-image channel))
+                  (display-image (disco-root--scaled-image image)))
+        (lambda () (insert-image display-image " "))))
      ((disco-channel-direct-message-p channel)
       (when-let* ((user
                    (disco-root--private-channel-avatar-user channel))

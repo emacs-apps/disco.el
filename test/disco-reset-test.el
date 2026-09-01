@@ -587,13 +587,13 @@
          (disco-room--session-cache-reset-in-progress nil)
          (disco-room-draft-history-search-history (list secret))
          (disco-room-search-inplace-history (list old-url))
-         (disco-root--guild-icon-image-cache
+         (disco-root--icon-image-cache
           (make-hash-table :test #'equal))
-         (disco-root--guild-icon-fetching
+         (disco-root--icon-fetching
           (make-hash-table :test #'equal))
          (disco-root--extra-info-provider-error-cache
           (make-hash-table :test #'eq))
-         (disco-root--guild-icon-fetch-generation 40)
+         (disco-root--icon-fetch-generation 40)
          (disco-root--session-cache-reset-in-progress nil)
          (disco-root-search-history (list secret old-url))
          (disco-root--debug-log-buffer nil)
@@ -634,8 +634,8 @@
                 disco-room--avatar-round-image-cache
                 disco-room--forward-guild-icon-image-cache
                 disco-room--forward-guild-icon-fetching
-                disco-root--guild-icon-image-cache
-                disco-root--guild-icon-fetching
+                disco-root--icon-image-cache
+                disco-root--icon-fetching
                 disco-root--extra-info-provider-error-cache)))
     (unwind-protect
         (progn
@@ -668,9 +668,9 @@
                    disco-room--forward-guild-icon-image-cache)
           (puthash old-url (list :generation 30 :process nil)
                    disco-room--forward-guild-icon-fetching)
-          (puthash old-url secret disco-root--guild-icon-image-cache)
+          (puthash old-url secret disco-root--icon-image-cache)
           (puthash old-url (list :generation 40 :process nil)
-                   disco-root--guild-icon-fetching)
+                   disco-root--icon-fetching)
           (puthash 'old-provider secret
                    disco-root--extra-info-provider-error-cache)
           (with-current-buffer buffer
@@ -692,7 +692,7 @@
                         disco-media--attachment-download-state-table)
                (puthash old-url (list :url old-url :reason secret)
                         disco-avatar--failures)
-               (puthash old-url secret disco-root--guild-icon-image-cache)
+               (puthash old-url secret disco-root--icon-image-cache)
                (puthash old-url secret disco-avatar--rounded-image-cache))
              nil t))
           (let ((disco-media-rerender-hook

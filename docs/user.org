@@ -83,8 +83,10 @@ for group DM, =[[guild]]= for a Guild container, and
 channels use =⟪announcement⟫=, =⟨thread⟩=, =⦇private thread⦈=, =「voice」=,
 =『stage』=, =⟦forum⟧=, =【media】=, =〔directory〕=, and =⌜lobby⌝=.  Category is
 only an unbracketed path fragment, not a conversation row.  Redundant leading
-type glyphs such as =#=, =◎=, and =↳= are omitted; cached user avatars and
-Guild identity icons remain.  Guild channels without ~VIEW_CHANNEL~ are
+type glyphs such as =#=, =◎=, and =↳= are omitted; cached user avatars,
+custom Group DM icons, and Guild identity icons remain.  Customize
+~disco-root-show-group-dm-icons~ to disable Group DM icon loading.  Guild
+channels without ~VIEW_CHANNEL~ are
 hidden.  Mention badges ~@N~ are right-aligned inside the row's delimiter;
 Disco does not infer a per-channel unread message count.  ~[read]~ means the
 local cursor reached ~last_message_id~.
