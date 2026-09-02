@@ -399,7 +399,8 @@
   (let ((owner (list 'exact-disco-app))
         (video-file (make-temp-file "disco-media-owner" nil ".mp4"))
         local-owner
-        remote-owner)
+        remote-owner
+        remote-cache-key)
     (unwind-protect
         (progn
           (cl-letf (((symbol-function 'disco-media-attachment-download-state)
@@ -415,13 +416,18 @@
                        '(:status not-downloaded :path nil)))
                     ((symbol-function 'appkit-media-play-video-url)
                      (lambda (_url _label &rest options)
-                       (setq remote-owner (plist-get options :owner)))))
+                       (setq remote-owner (plist-get options :owner)
+                             remote-cache-key
+                             (plist-get options :cache-key)))))
             (disco-media-play-attachment-video
-             '((filename . "remote.mp4")
+             '((id . "remote-id")
+               (filename . "remote.mp4")
                (url . "https://example.invalid/remote.mp4"))
              owner))
           (should (eq owner local-owner))
-          (should (eq owner remote-owner)))
+          (should (eq owner remote-owner))
+          (should
+           (equal remote-cache-key "disco-attachment:remote-id")))
       (ignore-errors (delete-file video-file)))))
 
 (ert-deftest disco-media-resource-adapter-forwards-video-owner ()

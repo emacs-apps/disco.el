@@ -1797,17 +1797,22 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
     (appkit-media-open-file path)))
 
 (defun disco-media-play-attachment-video (attachment &optional owner)
-  "Play ATTACHMENT video preferring local file when available.
+  "Play ATTACHMENT video, reusing its persistent Appkit cache.
 
-OWNER is the exact Appkit app or view that owns the external player."
+OWNER is the exact Appkit app or view that owns the pending transfer and
+resulting video viewer."
   (let* ((entry (disco-media-attachment-download-state attachment))
          (path (plist-get entry :path))
-         (url (disco-media-attachment-download-url attachment)))
+         (url (disco-media-attachment-download-url attachment))
+         (cache-key
+          (format "disco-attachment:%s"
+                  (disco-media-attachment-download-key attachment))))
     (cond
      ((and (stringp path) (file-exists-p path))
       (appkit-media-play-video-file path "disco" :owner owner))
      ((appkit-media-url-present-p url)
-      (appkit-media-play-video-url url "disco" :owner owner))
+      (appkit-media-play-video-url
+       url "disco" :owner owner :cache-key cache-key))
      (t
       (user-error "disco: video attachment has no playable source")))))
 

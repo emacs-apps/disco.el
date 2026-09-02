@@ -98,6 +98,11 @@ Keeps original line breaks and applies markdown renderer pipeline."
         :spoiler-message-id disco-embed--current-spoiler-message-id
         :reveal-spoilers disco-embed--reveal-spoilers)))
 
+(defun disco-embed--video-cache-key (msg embed-index)
+  "Return stable video cache identity for MSG's EMBED-INDEX."
+  (when-let* ((message-id (alist-get 'id msg)))
+    (format "disco-embed:%s:%s" message-id embed-index)))
+
 (defun disco-embed--truncate-text (text limit)
   "Truncate TEXT to LIMIT characters with ellipsis when needed."
   (cond
@@ -883,6 +888,8 @@ OWNER is captured exactly by external video playback properties."
   (let* ((preview-rendering-available
           (and disco-embed-show-image-previews
                (appkit-media-inline-image-rendering-available-p)))
+         (video-cache-key
+          (disco-embed--video-cache-key msg embed-index))
          (embed-images (disco-embed--embed-image-objects embed)))
     (if (> (length embed-images) 1)
         (let ((items '())
@@ -979,7 +986,8 @@ OWNER is captured exactly by external video playback properties."
                        (point)
                        play-video-url
                        "disco"
-                       :owner owner)))
+                       :owner owner
+                       :cache-key video-cache-key)))
                 (error
                  (insert (if video-preview-p
                              "[video preview unavailable]"
@@ -1022,14 +1030,16 @@ in-Emacs media behavior."
     'image)
    (t 'page)))
 
-(defun disco-embed--add-url-properties (start end url kind &optional owner)
+(defun disco-embed--add-url-properties
+    (start end url kind &optional owner cache-key)
   "Make URL between START and END interactive according to KIND.
 
-OWNER is captured exactly when KIND launches an external video player."
+OWNER is captured exactly when KIND launches a video player.  CACHE-KEY is its
+stable playback-cache identity."
   (pcase kind
     ('video
      (appkit-media-add-play-video-properties
-      start end url "disco" :owner owner))
+      start end url "disco" :owner owner :cache-key cache-key))
     ('image
      (appkit-media-add-open-image-properties
       start end `((url . ,url))
@@ -1038,14 +1048,16 @@ OWNER is captured exactly when KIND launches an external video player."
     (_
      (appkit-media-add-open-url-properties start end url))))
 
-(defun disco-embed--url-action (url kind &optional owner)
+(defun disco-embed--url-action (url kind &optional owner cache-key)
   "Return callback and help text for opening URL according to KIND.
 
-OWNER is captured exactly when KIND launches an external video player."
+OWNER is captured exactly when KIND launches a video player.  CACHE-KEY is its
+stable playback-cache identity."
   (pcase kind
     ('video
      (list (lambda ()
-             (appkit-media-play-video-url url "disco" :owner owner))
+             (appkit-media-play-video-url
+              url "disco" :owner owner :cache-key cache-key))
            "Play embed video"))
     ('image
      (list (lambda ()
@@ -1056,15 +1068,19 @@ OWNER is captured exactly when KIND launches an external video player."
 
 (defun disco-embed--insert-action-row
     (main-url main-url-kind media-url video-url author-url provider-url
-              author-icon-url embed prefix-str &optional owner)
-  "Insert compact action buttons row for one embed.
+              author-icon-url embed prefix-str video-cache-key &optional owner)
+  "Insert compact action buttons for one EMBED using PREFIX-STR.
 
-OWNER is captured exactly by all external video playback actions."
+MAIN-URL and MAIN-URL-KIND define the primary action.  MEDIA-URL, VIDEO-URL,
+AUTHOR-URL, PROVIDER-URL, and AUTHOR-ICON-URL supply secondary actions.
+VIDEO-CACHE-KEY identifies video playback cache entries, and OWNER owns their
+viewer buffers."
   (let ((actions '())
         (media-kind (car (disco-embed--media-entry embed))))
     (when (appkit-media-url-present-p main-url)
       (let ((main-action
-             (disco-embed--url-action main-url main-url-kind owner)))
+             (disco-embed--url-action
+              main-url main-url-kind owner video-cache-key)))
         (push (list "[Open]" (car main-action) (cadr main-action)) actions))
       (push (list "[Copy]"
                   (lambda ()
@@ -1077,7 +1093,8 @@ OWNER is captured exactly by all external video playback actions."
       (push (list "[Play]"
                   (lambda ()
                     (appkit-media-play-video-url
-                     video-url "disco" :owner owner))
+                     video-url "disco" :owner owner
+                     :cache-key video-cache-key))
                   "Play embed video")
             actions))
     (when (and (memq media-kind '(image thumbnail))
@@ -1133,6 +1150,8 @@ OWNER is captured exactly by all external video playback actions."
 
 OWNER is the exact Appkit app or view captured by video actions."
   (let* ((summary (disco-embed--summary embed))
+         (video-cache-key
+          (disco-embed--video-cache-key msg embed-index))
          (meta-fallback (disco-embed--meta-line embed))
          (description (disco-embed--description-line embed))
          (fields (or (alist-get 'fields embed) '()))
@@ -1197,7 +1216,7 @@ OWNER is the exact Appkit app or view captured by video actions."
       (insert summary)
       (when (appkit-media-url-present-p main-url)
         (disco-embed--add-url-properties
-         title-start (point) main-url main-url-kind owner))
+         title-start (point) main-url main-url-kind owner video-cache-key))
       (insert "\n")
       (appkit-ui-apply-line-prefix title-start (point) prefix-str)
       (appkit-ui-append-face title-start (point) title-face))
@@ -1242,6 +1261,7 @@ OWNER is the exact Appkit app or view captured by video actions."
      (or author-icon-source-url author-icon-url)
      embed
      prefix-str
+     video-cache-key
      owner)
     (when disco-embed-show-urls
       (let ((raw-media-url (or media-source-url media-url))
@@ -1270,7 +1290,8 @@ OWNER is the exact Appkit app or view captured by video actions."
                      (equal raw-url raw-icon-url))
                  'image)
                 (t 'page))
-               owner)
+               owner
+               video-cache-key)
               (appkit-ui-apply-line-prefix url-start (point) prefix-str)
               (appkit-ui-append-face url-start (point) shadow-face))))))))
 
