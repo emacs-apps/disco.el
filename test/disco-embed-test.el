@@ -180,7 +180,8 @@
     (with-temp-buffer
       (let ((disco-embed-show-urls t))
         (cl-letf (((symbol-function 'disco-embed--add-url-properties)
-                   (lambda (_start _end _url _kind &optional received-owner)
+                   (lambda (_start _end _url _kind
+                            &optional received-owner _cache-key)
                      (push received-owner captured-owners)))
                   ((symbol-function 'disco-embed--insert-preview-row)
                    (lambda (&rest arguments)
@@ -202,36 +203,48 @@
 (ert-deftest disco-embed-video-properties-and-actions-capture-exact-owner ()
   (let ((owner (list 'exact-disco-app))
         property-owner
+        property-cache-key
         main-action-owner
+        main-cache-key
         play-action-owner
+        play-cache-key
         play-action)
     (with-temp-buffer
       (insert "video")
       (cl-letf (((symbol-function 'appkit-media-add-play-video-properties)
                  (lambda (_start _end _url _label &rest options)
-                   (setq property-owner (plist-get options :owner))))
+                   (setq property-owner (plist-get options :owner)
+                         property-cache-key
+                         (plist-get options :cache-key))))
                 ((symbol-function 'appkit-media-play-video-url)
                  (lambda (_url _label &rest options)
                    (if play-action
-                       (setq play-action-owner (plist-get options :owner))
-                     (setq main-action-owner (plist-get options :owner)))))
+                       (setq play-action-owner (plist-get options :owner)
+                             play-cache-key (plist-get options :cache-key))
+                     (setq main-action-owner (plist-get options :owner)
+                           main-cache-key (plist-get options :cache-key)))))
                 ((symbol-function 'disco-embed--insert-action-button)
                  (lambda (label callback _help)
                    (when (equal label "[Play]")
                      (setq play-action callback))
                    (insert label))))
         (disco-embed--add-url-properties
-         (point-min) (point-max) "https://example.invalid/clip.mp4" 'video owner)
+         (point-min) (point-max) "https://example.invalid/clip.mp4"
+         'video owner "embed-cache")
         (funcall (car (disco-embed--url-action
-                       "https://example.invalid/main.mp4" 'video owner)))
+                       "https://example.invalid/main.mp4"
+                       'video owner "embed-cache")))
         (disco-embed--insert-action-row
          nil 'page nil "https://example.invalid/extra.mp4"
-         nil nil nil nil "" owner)
+         nil nil nil nil "" "embed-cache" owner)
         (should (functionp play-action))
         (funcall play-action)))
     (should (eq owner property-owner))
+    (should (equal property-cache-key "embed-cache"))
     (should (eq owner main-action-owner))
-    (should (eq owner play-action-owner))))
+    (should (equal main-cache-key "embed-cache"))
+    (should (eq owner play-action-owner))
+    (should (equal play-cache-key "embed-cache"))))
 
 (ert-deftest disco-embed-message-preview-cache-keys-cover-media-and-author-icon ()
   (let* ((msg
