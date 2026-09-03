@@ -20,6 +20,7 @@
 (require 'appkit-core)
 (require 'appkit-directory)
 (require 'appkit-invalidation)
+(require 'appkit-projection)
 (require 'appkit-transaction)
 (require 'appkit-view)
 (require 'appkit-position)
@@ -2575,19 +2576,27 @@ When HEADER-P is non-nil, the root header is invalidated too."
 
 (defun disco-root--sync-invalidations (view invalidations _events)
   "Synchronize VIEW from Appkit INVALIDATIONS."
-  (let ((dirty-channel-ids
-         (copy-sequence (appkit-invalidations-entry-keys invalidations)))
-        (needs-structural
-         (appkit-invalidations-structure-p invalidations))
-        (needs-header
-         (memq 'header (appkit-invalidations-parts invalidations)))
-        (needs-geometry
-         (or (memq 'geometry (appkit-invalidations-parts invalidations))
-             (appkit-invalidations-position-p invalidations))))
+  (let* ((parts (appkit-invalidations-parts invalidations))
+         (resources (appkit-invalidations-resource-keys invalidations))
+         (needs-header (memq 'header parts))
+         (needs-geometry (memq 'geometry parts))
+         (all-resources-p (memq 'all resources))
+         (needs-structural
+          (or (appkit-invalidations-structure-p invalidations)
+              (memq 'content parts)))
+         (diff
+          (appkit-projection-diff-derive
+           invalidations :reconcile-parts '(content)))
+         (dirty-channel-ids
+          (appkit-projection-diff-force-keys diff))
+         (needs-reconcile
+          (appkit-projection-diff-reconcile-p diff))
+         (force-all-rows-p
+          (or needs-geometry all-resources-p)))
     (appkit-with-content-update view
       (cond
        ((eq major-mode 'disco-root-archived-threads-mode)
-        (when (or dirty-channel-ids needs-structural needs-header needs-geometry)
+        (when (or needs-reconcile needs-header)
           (appkit-view-render-list-spec-preserving-position
            (disco-root--archived-threads-list-spec)
            :anchor-property 'disco-channel-id
@@ -2604,15 +2613,15 @@ When HEADER-P is non-nil, the root header is invalidated too."
          (and needs-geometry t))
         (if disco-root--search-active-p
             (cond
-             ((or needs-structural needs-geometry)
+             (needs-reconcile
               (disco-root--render-preserving-position))
              (needs-header
               (disco-root--refresh-header-line)))
           (cond
-           ((or needs-structural needs-geometry dirty-channel-ids)
+           (needs-reconcile
             (setq disco-root--tree-force-channel-ids dirty-channel-ids
                   disco-root--tree-force-all-rows-p
-                  (and needs-geometry t))
+                  (and force-all-rows-p t))
             (disco-root--render-preserving-position))
            (needs-header
             (disco-root--refresh-header-line)))))))))

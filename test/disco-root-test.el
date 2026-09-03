@@ -7,12 +7,15 @@
 
 (require 'disco-root)
 
-(cl-defun disco-root-test--invalidations (&key entries structure parts)
-  "Return Appkit invalidations with ENTRIES, STRUCTURE, and PARTS."
+(cl-defun disco-root-test--invalidations
+    (&key entries structure parts resources position)
+  "Return invalidations with ENTRIES, STRUCTURE, PARTS, RESOURCES, and POSITION."
   (let ((invalidations (appkit-invalidations-create)))
     (setf (appkit-invalidations-entry-keys invalidations) entries
           (appkit-invalidations-structure-p invalidations) structure
-          (appkit-invalidations-parts invalidations) parts)
+          (appkit-invalidations-parts invalidations) parts
+          (appkit-invalidations-resource-keys invalidations) resources
+          (appkit-invalidations-position-p invalidations) position)
     invalidations))
 
 (defun disco-root-test--current-live-view ()
@@ -559,6 +562,32 @@
          (disco-root-test--invalidations :entries '("c1"))
          nil)
         (should rendered)))))
+
+(ert-deftest disco-root-resource-all-forces-every-tree-row ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--view-mode 'unread)
+          rendered)
+      (cl-letf (((symbol-function 'disco-root--render-preserving-position)
+                 (lambda () (setq rendered t))))
+        (disco-root--sync-invalidations
+         (disco-root-test--current-live-view)
+         (disco-root-test--invalidations :resources '(all))
+         nil)
+        (should rendered)
+        (should disco-root--tree-force-all-rows-p)))))
+
+(ert-deftest disco-root-position-only-skips-render ()
+  (with-temp-buffer
+    (disco-root-mode)
+    (let ((disco-root--view-mode 'unread))
+      (cl-letf (((symbol-function 'disco-root--render-preserving-position)
+                 (lambda ()
+                   (ert-fail "position-only sync rendered root rows"))))
+        (disco-root--sync-invalidations
+         (disco-root-test--current-live-view)
+         (disco-root-test--invalidations :position t)
+         nil)))))
 
 (ert-deftest disco-root-sync-invalidations-rerenders-archived-thread-buffer ()
   (with-temp-buffer
