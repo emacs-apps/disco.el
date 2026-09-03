@@ -14,6 +14,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'url-util)
+(require 'appkit-core)
 (require 'disco-customize)
 (require 'disco-http)
 (require 'disco-api-normalize)
@@ -40,6 +41,99 @@
 
 (defvar disco-api--retry-owners nil
   "Exact owners of scheduled asynchronous API dispatch/retry timers.")
+
+(cl-defstruct (disco-api--owned-request
+               (:constructor disco-api--owned-request-create))
+  "One cancellable logical API request attached to an Appkit owner."
+  generation
+  timer
+  handle
+  active-p)
+
+(defvar disco-api--owned-requests nil
+  "Active logical API requests attached to Appkit lifecycle owners.")
+
+(defun disco-api--owned-request-current-p (request)
+  "Return non-nil when owned API REQUEST may dispatch or publish."
+  (and (disco-api--owned-request-p request)
+       (disco-api--owned-request-active-p request)
+       (disco-api--session-current-p
+        (disco-api--owned-request-generation request))
+       (memq request disco-api--owned-requests)
+       (when-let* ((handle (disco-api--owned-request-handle request)))
+         (appkit-handle-alive-p handle))))
+
+(defun disco-api--cancel-owned-request (request)
+  "Cancel logical API REQUEST without publishing an outcome."
+  (when (and (disco-api--owned-request-p request)
+             (disco-api--owned-request-active-p request))
+    (let ((timer (disco-api--owned-request-timer request)))
+      (setf (disco-api--owned-request-active-p request) nil
+            (disco-api--owned-request-timer request) nil)
+      (setq disco-api--owned-requests
+            (delq request disco-api--owned-requests))
+      (when (timerp timer)
+        (cancel-timer timer)))
+    t))
+
+(defun disco-api--retire-owned-request (request)
+  "Retire logical API REQUEST after normal settlement."
+  (when (disco-api--cancel-owned-request request)
+    (when-let* ((handle (disco-api--owned-request-handle request)))
+      (when (appkit-handle-alive-p handle)
+        (appkit-retire-handle handle)))
+    t))
+
+(defun disco-api--cancel-owned-request-handle (request)
+  "Cancel logical API REQUEST through its Appkit handle when live."
+  (if-let* ((handle (and (disco-api--owned-request-p request)
+                         (disco-api--owned-request-handle request)))
+            ((appkit-handle-alive-p handle)))
+      (appkit-cancel-handle handle)
+    (disco-api--cancel-owned-request request)))
+
+(defun disco-api--start-owned-request (owner generation)
+  "Create a logical request for Appkit OWNER in API GENERATION."
+  (let ((request
+         (disco-api--owned-request-create
+          :generation generation :active-p t)))
+    (push request disco-api--owned-requests)
+    (condition-case error-data
+        (progn
+          (setf (disco-api--owned-request-handle request)
+                (appkit-register-handle
+                 owner 'disco-api-request request
+                 #'disco-api--cancel-owned-request))
+          request)
+      ((error quit)
+       (disco-api--cancel-owned-request request)
+       (signal (car error-data) (cdr error-data))))))
+
+(defun disco-api--schedule-owned-request (request delay function)
+  "Run FUNCTION after DELAY while logical API REQUEST remains current."
+  (when (disco-api--owned-request-current-p request)
+    (let (timer returned-p fired-p)
+      (unwind-protect
+          (progn
+            (setq timer
+                  (run-at-time
+                   (max 0 (or delay 0.0)) nil
+                   (lambda ()
+                     (setq fired-p t)
+                     (when (disco-api--owned-request-current-p request)
+                       (setf (disco-api--owned-request-timer request) nil)
+                       (funcall function)))))
+            (setq returned-p t)
+            (if (and (not fired-p)
+                     (disco-api--owned-request-current-p request))
+                (setf (disco-api--owned-request-timer request) timer)
+              (when (and (not fired-p) (timerp timer))
+                (cancel-timer timer)))
+            timer)
+        (unless returned-p
+          (when (timerp timer)
+            (cancel-timer timer))
+          (disco-api--retire-owned-request request))))))
 
 (defvar-local disco-api--rate-limit-buffer-owner-p nil
   "Non-nil when this buffer is a Disco rate-limit projection.")
@@ -227,16 +321,22 @@ Each element is (KEY . remaining-seconds)."
 (defun disco-api-reset-rate-limit-state ()
   "Revoke asynchronous API work and clear cached rate-limit state."
   (let ((disco-api--reset-in-progress t)
-        (owners disco-api--retry-owners))
+        (retry-owners disco-api--retry-owners)
+        (owned-requests disco-api--owned-requests))
     ;; Generation/list revocation must precede cancellation because an
-    ;; instrumented timer cancellation may synchronously invoke old code.
+    ;; instrumented cancellation may synchronously invoke old code.
     (cl-incf disco-api--generation)
-    (setq disco-api--retry-owners nil)
+    (setq disco-api--retry-owners nil
+          disco-api--owned-requests nil)
     (unwind-protect
-        (disco-api--run-cleanup-items owners
-                                      #'disco-api--cancel-retry-owner)
-      (setq disco-api--retry-owners nil)
-      (disco-api--clear-rate-limit-memory))))
+        (disco-api--run-cleanup-items
+         owned-requests #'disco-api--cancel-owned-request-handle)
+      (unwind-protect
+          (disco-api--run-cleanup-items
+           retry-owners #'disco-api--cancel-retry-owner)
+        (setq disco-api--retry-owners nil
+              disco-api--owned-requests nil)
+        (disco-api--clear-rate-limit-memory)))))
 
 (defun disco-api--now ()
   "Return current unix timestamp as float."
@@ -515,14 +615,17 @@ BODY-TYPE is forwarded to transport layer."
                    status
                    body)))))))))
 
-(cl-defun disco-api--request-async (method endpoint &key payload query unauthenticated on-success on-error
-                                           raw-body extra-headers body-type)
+(cl-defun disco-api--request-async
+    (method endpoint
+            &key payload query unauthenticated owner on-success on-error
+            raw-body extra-headers body-type)
   "Execute METHOD request to ENDPOINT asynchronously.
 
-ON-SUCCESS receives decoded JSON body.
-ON-ERROR receives plist `(:status :body :message)'.
-RAW-BODY and EXTRA-HEADERS enable non-JSON requests (for example multipart).
-BODY-TYPE is forwarded to transport layer."
+PAYLOAD is JSON data and QUERY is a URL parameter alist.  UNAUTHENTICATED omits
+account credentials.  OWNER, when non-nil, owns one cancellable logical request
+across retries.  ON-SUCCESS receives decoded JSON; ON-ERROR receives
+`(:status :body :message)'.  RAW-BODY and EXTRA-HEADERS enable non-JSON
+requests.  BODY-TYPE is forwarded to the transport layer."
   (when (and payload raw-body)
     (error "disco: payload and raw-body cannot be combined"))
   (disco-api--ensure-start-allowed)
@@ -550,35 +653,50 @@ BODY-TYPE is forwarded to transport layer."
                                   (when raw-body 'binary)))
          (url (disco-api--build-url endpoint query))
          (route-key (disco-api--route-key method endpoint))
-         (attempt 0))
+         (attempt 0)
+         (owned-request
+          (and owner (disco-api--start-owned-request owner generation))))
     (cl-labels
-        ((emit-error (status body message)
-           (when (and on-error
-                      (disco-api--session-current-p generation))
+        ((request-current-p ()
+           (and (disco-api--session-current-p generation)
+                (or (null owned-request)
+                    (disco-api--owned-request-current-p owned-request))))
+         (retire-request ()
+           (when owned-request
+             (disco-api--retire-owned-request owned-request)))
+         (emit-error (status body message)
+           (when (request-current-p)
              (let ((error-data
                     (disco-api--error-plist status body message)))
-               (when (disco-api--session-current-p generation)
+               (retire-request)
+               (when on-error
                  (funcall on-error error-data)))))
          (schedule-next (delay)
-           (when (disco-api--session-current-p generation)
-             (disco-api--schedule-session-timer
-              generation delay #'dispatch-request)))
+           (when (request-current-p)
+             (if owned-request
+                 (disco-api--schedule-owned-request
+                  owned-request delay #'dispatch-request)
+               (disco-api--schedule-session-timer
+                generation delay #'dispatch-request))))
          (handle-response (response)
-           (when (disco-api--session-current-p generation)
+           (if (not (request-current-p))
+               (retire-request)
              (let* ((status (or (plist-get response :status) 0))
                     (raw-body (or (plist-get response :body) ""))
-                    (response-headers (or (plist-get response :headers) nil))
+                    (response-headers
+                     (or (plist-get response :headers) nil))
                     (body (disco-api--decode-json raw-body))
                     (retry-after
                      (disco-api--extract-retry-after response-headers body)))
-               (when (disco-api--session-current-p generation)
+               (when (request-current-p)
                  (disco-api--update-rate-limit-state
                   route-key status response-headers body generation)
                  ;; An instrumented state update or nested callback may reset
                  ;; the account.  Never publish or retry after that boundary.
-                 (when (disco-api--session-current-p generation)
+                 (when (request-current-p)
                    (cond
                     ((and (>= status 200) (< status 300))
+                     (retire-request)
                      (when on-success
                        (funcall on-success body)))
                     ((= status 429)
@@ -604,11 +722,13 @@ BODY-TYPE is forwarded to transport layer."
                       (disco-api--http-error-message
                        status raw-body body)))))))))
          (dispatch-request ()
-           (when (disco-api--session-current-p generation)
-             (let* ((deadline (max disco-api--global-rate-limit-until
-                                   (disco-api--route-deadline route-key)))
+           (if (not (request-current-p))
+               (retire-request)
+             (let* ((deadline
+                     (max disco-api--global-rate-limit-until
+                          (disco-api--route-deadline route-key)))
                     (wait-time (- deadline (disco-api--now))))
-               (when (disco-api--session-current-p generation)
+               (when (request-current-p)
                  (if (> wait-time 0)
                      (schedule-next wait-time)
                    (disco-http-request-async
@@ -620,7 +740,14 @@ BODY-TYPE is forwarded to transport layer."
                     :timeout disco-http-timeout
                     :on-success #'handle-response
                     :on-error #'handle-response)))))))
-      (dispatch-request))))
+      (condition-case error-data
+          (let ((transport (dispatch-request)))
+            (or (and owned-request
+                     (disco-api--owned-request-handle owned-request))
+                transport))
+        ((error quit)
+         (retire-request)
+         (signal (car error-data) (cdr error-data)))))))
 
 (defun disco-api-current-user ()
   "Fetch current user object."
@@ -1226,12 +1353,13 @@ LIMIT defaults to `disco-message-fetch-limit'."
     (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
 
 (cl-defun disco-api-channel-messages-async
-    (channel-id &key before after limit on-success on-error)
+    (channel-id &key before after limit owner on-success on-error)
   "Fetch messages in CHANNEL-ID asynchronously.
 
 BEFORE and AFTER are mutually exclusive Discord message cursors.  LIMIT is
-the maximum page size.  ON-SUCCESS receives the newest-first message array;
-ON-ERROR receives the transport error."
+the maximum page size.  OWNER controls logical request cancellation.
+ON-SUCCESS receives the newest-first message array; ON-ERROR receives the
+transport error."
   (when (and before after)
     (error "disco: channel messages accepts only one of before/after"))
   (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit))))))
@@ -1243,6 +1371,7 @@ ON-ERROR receives the transport error."
      "GET"
      (format "/channels/%s/messages" channel-id)
      :query query
+     :owner owner
      :on-success on-success
      :on-error on-error)))
 
@@ -1329,14 +1458,16 @@ transport error."
                  ("around" . ,(format "%s" message-id)))))
     (disco-api--request "GET" (format "/channels/%s/messages" channel-id) nil query nil)))
 
-(cl-defun disco-api-channel-messages-around-async (channel-id message-id &key limit on-success on-error)
-  "Fetch one message page around MESSAGE-ID in CHANNEL-ID asynchronously."
+(cl-defun disco-api-channel-messages-around-async
+    (channel-id message-id &key limit owner on-success on-error)
+  "Fetch a message page around MESSAGE-ID in CHANNEL-ID for optional OWNER."
   (let ((query `(("limit" . ,(number-to-string (or limit disco-message-fetch-limit)))
                  ("around" . ,(format "%s" message-id)))))
     (disco-api--request-async
      "GET"
      (format "/channels/%s/messages" channel-id)
      :query query
+     :owner owner
      :on-success on-success
      :on-error on-error)))
 

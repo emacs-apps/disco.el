@@ -921,13 +921,10 @@ newest-first render contract.  Local pending rows join attached latest windows
          (target-id disco-room--pending-jump-message-id)
          (request-revision (disco-state-message-revision channel-id))
          (limit (max 1 (or disco-room-jump-context-limit 50)))
-         (owner (list :kind 'around-history
-                      :channel-id channel-id
-                      :target-id target-id
-                      :frontier-at-start disco-room--remote-latest-message-id)))
+         owner)
     (unless (and (stringp target-id) (not (string-empty-p target-id)))
       (user-error "disco: pending jump target is empty"))
-    (appkit-chat-history-request-begin 'around owner)
+    (setq owner (appkit-chat-history-request-start view 'around))
     (appkit-chat-history-older-loaded-set nil)
     (appkit-chat-history-newer-stalled-clear)
     (appkit-request-sync view :part 'frame)
@@ -935,12 +932,12 @@ newest-first render contract.  Local pending rows join attached latest windows
      channel-id
      target-id
      :limit limit
+     :owner owner
      :on-success
      (lambda (messages)
        (when (disco-room--callback-active-p room-buffer channel-id view)
          (with-current-buffer room-buffer
-           (when (appkit-chat-history-request-current-p owner)
-             (appkit-chat-history-request-end owner)
+           (when (appkit-chat-history-request-end owner)
              (let* ((raw-page (disco-room--normalize-history-page messages))
                     (merged
                      (disco-state-merge-message-page
@@ -983,8 +980,7 @@ newest-first render contract.  Local pending rows join attached latest windows
      (lambda (err)
        (when (disco-room--callback-active-p room-buffer channel-id view)
          (with-current-buffer room-buffer
-           (when (appkit-chat-history-request-current-p owner)
-             (appkit-chat-history-request-end owner)
+           (when (appkit-chat-history-request-end owner)
              (setq disco-room--pending-jump-message-id nil)
              (disco-room--request-render view)
              (message "disco: jump fetch failed: %s"
@@ -1609,20 +1605,18 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
            (view (disco-room--ensure-view))
            (request-revision (disco-state-message-revision channel-id))
            (request-limit (max 1 disco-message-fetch-limit))
-           (owner (list :kind 'latest-history
-                        :channel-id channel-id
-                        :frontier-at-start
-                        disco-room--remote-latest-message-id)))
-      (appkit-chat-history-request-begin 'latest owner)
+           (frontier-at-start disco-room--remote-latest-message-id)
+           (owner (appkit-chat-history-request-start view 'latest)))
       (appkit-request-sync view :part 'frame)
       (disco-api-channel-messages-async
        channel-id
        :limit request-limit
+       :owner owner
        :on-success
        (lambda (messages)
          (when (disco-room--callback-active-p room-buffer channel-id view)
            (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-current-p owner)
+             (when (appkit-chat-history-request-end owner)
                (let* ((raw-page (disco-room--normalize-history-page messages))
                       (merged
                        (disco-state-merge-message-page
@@ -1633,10 +1627,9 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
                       (result
                        (disco-room--establish-latest-history-window
                         page
-                        (plist-get owner :frontier-at-start)
+                        frontier-at-start
                         (length raw-page)
                         request-limit)))
-                 (appkit-chat-history-request-end owner)
                  (unless (eq result 'conflicted)
                    (disco-room--mark-read nil t))
                  (disco-room--request-render view)
@@ -1647,8 +1640,7 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
        (lambda (err)
          (when (disco-room--callback-active-p room-buffer channel-id view)
            (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-current-p owner)
-               (appkit-chat-history-request-end owner)
+             (when (appkit-chat-history-request-end owner)
                (disco-room--request-render view)
                (message "disco: room refresh failed: %s"
                         (disco-room--async-error-message err))))))))))
@@ -1832,20 +1824,18 @@ When QUIET is non-nil, suppress progress messages."
                        (user-error
                         "disco: no oldest message cursor; refresh first")))
            (request-limit (max 1 disco-message-fetch-limit))
-           (owner (list :kind 'older-history
-                        :channel-id channel-id
-                        :cursor before)))
-      (appkit-chat-history-request-begin 'older owner)
+           (owner (appkit-chat-history-request-start view 'older)))
       (appkit-request-sync view :part 'frame)
       (disco-api-channel-messages-async
        channel-id
        :before before
        :limit request-limit
+       :owner owner
        :on-success
        (lambda (older)
          (when (disco-room--callback-active-p room-buffer channel-id view)
            (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-current-p owner)
+             (when (appkit-chat-history-request-end owner)
                (let* ((raw-page (disco-room--normalize-history-page older))
                       (merged
                        (disco-state-merge-message-page
@@ -1861,7 +1851,6 @@ When QUIET is non-nil, suppress progress messages."
                        (and oldest
                             (disco-room--message-id-after-p
                              before oldest canonical-oldest))))
-                 (appkit-chat-history-request-end owner)
                  (when progressed
                    (appkit-chat-history-window-set
                     oldest (appkit-chat-history-window-last-key)))
@@ -1881,8 +1870,7 @@ When QUIET is non-nil, suppress progress messages."
          (lambda (err)
            (when (disco-room--callback-active-p room-buffer channel-id view)
              (with-current-buffer room-buffer
-               (when (appkit-chat-history-request-current-p owner)
-                 (appkit-chat-history-request-end owner)
+               (when (appkit-chat-history-request-end owner)
                  (disco-room--request-render view)
                  (message "disco: older history load failed: %s"
                           (disco-room--async-error-message err))))))))))))
@@ -1910,22 +1898,18 @@ When QUIET is non-nil, suppress progress messages."
            (cursor (appkit-chat-history-window-last-key))
            (request-revision (disco-state-message-revision channel-id))
            (request-limit (max 1 disco-message-fetch-limit))
-           (owner (list :kind 'newer-history
-                        :channel-id channel-id
-                        :cursor cursor
-                        :frontier-at-start
-                        disco-room--remote-latest-message-id)))
-      (appkit-chat-history-request-begin 'newer owner)
+           (owner (appkit-chat-history-request-start view 'newer)))
       (appkit-request-sync view :part 'frame)
       (disco-api-channel-messages-async
        channel-id
        :after cursor
        :limit request-limit
+       :owner owner
        :on-success
        (lambda (newer)
          (when (disco-room--callback-active-p room-buffer channel-id view)
            (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-current-p owner)
+             (when (appkit-chat-history-request-end owner)
                (let* ((raw-page (disco-room--normalize-history-page newer))
                       (merged
                        (disco-state-merge-message-page
@@ -1952,7 +1936,6 @@ When QUIET is non-nil, suppress progress messages."
                            (and short-page
                                 (or (null frontier)
                                     edge-after-frontier)))))
-                 (appkit-chat-history-request-end owner)
                  (cond
                   (finished
                    (setq disco-room--remote-latest-message-id edge)
@@ -1979,8 +1962,7 @@ When QUIET is non-nil, suppress progress messages."
          (lambda (err)
            (when (disco-room--callback-active-p room-buffer channel-id view)
              (with-current-buffer room-buffer
-               (when (appkit-chat-history-request-current-p owner)
-                 (appkit-chat-history-request-end owner)
+               (when (appkit-chat-history-request-end owner)
                  (disco-room--request-render view)
                  (message "disco: newer history load failed: %s"
                           (disco-room--async-error-message err))))))))))))

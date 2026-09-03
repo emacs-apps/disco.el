@@ -2145,21 +2145,33 @@
        ((id . "200") (channel_id . "chan"))))
     (setq disco-room--remote-latest-message-id "300")
     (appkit-chat-history-window-set "200" nil)
-    (let (older-callback latest-callback)
+    (let (older-callback latest-callback canceled)
       (cl-letf (((symbol-function 'disco-api-channel-messages-async)
                  (lambda (_channel-id &rest args)
-                   (if (plist-get args :before)
-                       (setq older-callback (plist-get args :on-success))
-                     (setq latest-callback (plist-get args :on-success)))))
+                   (let* ((owner (plist-get args :owner))
+                          (callback (plist-get args :on-success))
+                          (handle
+                           (appkit-register-handle
+                            owner 'test-history owner
+                            (lambda (object) (push object canceled))))
+                          (settle
+                           (lambda (messages)
+                             (appkit-retire-handle handle)
+                             (funcall callback messages))))
+                     (if (plist-get args :before)
+                         (setq older-callback settle)
+                       (setq latest-callback settle)))))
                 ((symbol-function 'disco-room-render) #'ignore)
                 ((symbol-function 'disco-room--update-frame) #'ignore)
                 ((symbol-function 'disco-room--mark-read) #'ignore)
                 ((symbol-function 'message) #'ignore))
         (disco-room-load-older-messages t)
         (let ((older-owner (appkit-chat-history-request-owner)))
+          (should (appkit-view-operation-p older-owner))
           (disco-room-refresh)
           (should-not
-           (appkit-chat-history-request-current-p older-owner)))
+           (appkit-chat-history-request-current-p older-owner))
+          (should (equal canceled (list older-owner))))
         (funcall latest-callback
                  '(((id . "500") (channel_id . "chan"))
                    ((id . "400") (channel_id . "chan"))))
