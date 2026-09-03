@@ -201,28 +201,39 @@
         (should (eq t (plist-get (cdr captured) :include-nsfw)))))))
 
 (ert-deftest disco-room-filter-live-delete-invalidates-hidden-edge ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (disco-room-test-setup-channel)
-    ;; Gateway state mutation precedes room event delivery, so the deleted
-    ;; frontier is already absent from the canonical cache here.
-    (disco-state-put-messages
-     "chan"
-     '(((id . "200") (channel_id . "chan"))
-       ((id . "100") (channel_id . "chan"))))
-    (setq disco-room--remote-latest-message-id "300"
-          disco-room--msg-filter
-          '(:active t
-		    :query "needle"
-		    :items (((id . "200") (channel_id . "chan")))))
-    (appkit-chat-history-window-set "100" "300")
-    (let ((owner (appkit-chat-history-request-begin 'latest)))
-      (disco-room--apply-gateway-event
-       '(:type message-delete :channel-id "chan" :message-id "300"))
-      (should-not (appkit-chat-history-request-current-p owner)))
-    (should (equal "200" disco-room--remote-latest-message-id))
-    (should-not (appkit-chat-history-loading-p))
-    (should-not (appkit-chat-history-window-known-p))))
+  (let ((app
+         (appkit-start-app
+          'disco :id (make-symbol "filter-delete") :shutdown #'ignore)))
+    (unwind-protect
+        (with-temp-buffer
+          (disco-room-mode)
+          (disco-room-test-setup-channel)
+          ;; Gateway state mutation precedes room event delivery, so the
+          ;; deleted frontier is already absent from the canonical cache here.
+          (disco-state-put-messages
+           "chan"
+           '(((id . "200") (channel_id . "chan"))
+             ((id . "100") (channel_id . "chan"))))
+          (setq disco-room--remote-latest-message-id "300"
+                disco-room--msg-filter
+                '(:active t
+                  :query "needle"
+                  :items (((id . "200") (channel_id . "chan")))))
+          (appkit-chat-history-window-set "100" "300")
+          (let* ((view
+                  (appkit-attach-view
+                   :app app :id '(room "chan") :state "chan"
+                   :mode major-mode))
+                 (owner
+                  (appkit-chat-history-request-start view 'latest)))
+            (disco-room--apply-gateway-event
+             '(:type message-delete :channel-id "chan" :message-id "300"))
+            (should-not (appkit-chat-history-request-current-p owner)))
+          (should (equal "200" disco-room--remote-latest-message-id))
+          (should-not (appkit-chat-history-loading-p))
+          (should-not (appkit-chat-history-window-known-p)))
+      (when (appkit-app-live-p app)
+        (appkit-stop-app app)))))
 
 (ert-deftest disco-room-filter-delete-removes-result-and-rejects-load-more ()
   (with-temp-buffer
