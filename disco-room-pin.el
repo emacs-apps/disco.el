@@ -416,7 +416,8 @@ When RESET is non-nil, the returned page replaces the cached projection."
      (when disco-room-pinned-messages--error
        (list (format "Error: %s" disco-room-pinned-messages--error))))))
 
-(defun disco-room-pinned-messages--sync-invalidations (view _invalidations)
+(defun disco-room-pinned-messages--sync-invalidations
+    (view _invalidations _events)
   "Synchronize pinned-message VIEW from its local controller state."
   (appkit-with-content-update view
     (appkit-view-render-list-spec-preserving-position
