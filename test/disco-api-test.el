@@ -11,6 +11,7 @@
   `(let ((disco-api--generation 7)
          (disco-api--reset-in-progress nil)
          (disco-api--retry-owners nil)
+         (disco-api--owned-requests nil)
          (disco-api--global-rate-limit-until 0.0)
          (disco-api--route-rate-limit-until
           (make-hash-table :test #'equal))
@@ -183,12 +184,14 @@
             "123"
             :after "456"
             :limit 25
+            :owner 'history-operation
             :on-success #'ignore
             :on-error #'ignore)))
       (should
        (equal
         '("GET" "/channels/123/messages"
           (:query (("limit" . "25") ("after" . "456"))
+                  :owner history-operation
                   :on-success ignore
                   :on-error ignore))
         captured)))))
@@ -197,6 +200,36 @@
   (should-error
    (disco-api-channel-messages-async "123" :before "100" :after "200")
    :type 'error))
+
+(ert-deftest disco-api-owned-request-cancellation-fences-callback ()
+  (disco-api-test--with-session-state
+    (appkit-register-app-kind 'disco-api-test nil)
+    (let ((app (appkit-start-app 'disco-api-test :id 'owned))
+          request-options
+          published)
+      (unwind-protect
+          (cl-letf (((symbol-function 'disco-api--now)
+                     (lambda () 100.0))
+                    ((symbol-function 'disco-http-request-async)
+                     (lambda (&rest options)
+                       (setq request-options options)
+                       'transport)))
+            (let ((handle
+                   (disco-api--request-async
+                    "GET" "/owned"
+                    :unauthenticated t
+                    :owner app
+                    :on-success (lambda (_body) (setq published t)))))
+              (should (appkit-handle-alive-p handle))
+              (should (= 1 (length disco-api--owned-requests)))
+              (appkit-cancel-handle handle)
+              (should-not disco-api--owned-requests)
+              (funcall
+               (plist-get request-options :on-success)
+               '(:status 200 :body "{}" :headers nil))
+              (should-not published)))
+        (when (appkit-app-live-p app)
+          (appkit-stop-app app))))))
 
 (ert-deftest disco-api-preload-channel-messages-async-builds-payload ()
   (let (captured)
