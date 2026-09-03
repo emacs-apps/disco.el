@@ -10,6 +10,15 @@
           "disco-room-test-support"
           (file-name-directory (or load-file-name buffer-file-name))))
 
+(ert-deftest disco-room-pinned-messages-frame-only-skips-render ()
+  (let ((invalidations (appkit-invalidations-create)))
+    (setf (appkit-invalidations-parts invalidations) '(frame))
+    (cl-letf (((symbol-function 'disco-room-pinned-messages--list-spec)
+               (lambda ()
+                 (ert-fail "frame-only sync rendered pinned messages"))))
+      (disco-room-pinned-messages--sync-invalidations
+       'unused invalidations nil))))
+
 (ert-deftest disco-room-mode-is-not-special-mode ()
   (with-temp-buffer
     (disco-room-mode)

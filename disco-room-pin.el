@@ -10,6 +10,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'appkit-core)
+(require 'appkit-invalidation)
 (require 'appkit-ui)
 (require 'appkit-view)
 (require 'disco-api)
@@ -417,13 +418,14 @@ When RESET is non-nil, the returned page replaces the cached projection."
        (list (format "Error: %s" disco-room-pinned-messages--error))))))
 
 (defun disco-room-pinned-messages--sync-invalidations
-    (view _invalidations _events)
-  "Synchronize pinned-message VIEW from its local controller state."
-  (appkit-with-content-update view
-    (appkit-view-render-list-spec-preserving-position
-     (disco-room-pinned-messages--list-spec)
-     :anchor-property 'disco-message-id
-     :preserve-window-start t)))
+    (view invalidations _events)
+  "Synchronize pinned-message VIEW from INVALIDATIONS and controller state."
+  (when (appkit-invalidations-affect-p invalidations '(content header))
+    (appkit-with-content-update view
+      (appkit-view-render-list-spec-preserving-position
+       (disco-room-pinned-messages--list-spec)
+       :anchor-property 'disco-message-id
+       :preserve-window-start t))))
 
 (defvar-keymap disco-room-pinned-messages-mode-map
   :doc "Keymap for `disco-room-pinned-messages-mode'."

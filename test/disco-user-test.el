@@ -33,6 +33,14 @@
     (mutual_friends_count . 2)
     (connected_accounts . (((type . "github") (name . "alice"))))))
 
+(ert-deftest disco-user-frame-only-skips-profile-render ()
+  (let ((invalidations (appkit-invalidations-create)))
+    (setf (appkit-invalidations-parts invalidations) '(frame))
+    (cl-letf (((symbol-function 'disco-user-render)
+               (lambda ()
+                 (ert-fail "frame-only sync rendered user profile"))))
+      (disco-user--sync-invalidations 'unused invalidations nil))))
+
 (ert-deftest disco-user-render-separates-server-and-global-profile ()
   (with-temp-buffer
     (disco-user-mode)

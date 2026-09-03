@@ -1162,6 +1162,43 @@
                          '("c1" "c2")))
                 reconciled))))))
 
+(ert-deftest disco-channel-directory-hidden-resource-reconciles-when-visible ()
+  (disco-channel-directory-test--with-appkit-guild
+    (let ((displayed nil)
+          reconciles)
+      (cl-letf (((symbol-function 'disco-channel-directory--displayed-p)
+                 (lambda () displayed))
+                ((symbol-function 'disco-state-guild-channels-loaded-p)
+                 (lambda (_guild-id) t))
+                ((symbol-function 'disco-channel-directory--reconcile)
+                 (lambda (&rest _arguments)
+                   (setq reconciles (1+ (or reconciles 0))))))
+        (appkit-request-sync
+         view
+         :resource
+         (disco-channel-directory--guild-snapshot-resource-key))
+        (appkit-sync-invalidations view)
+        (should disco-channel-directory--deferred-reconcile-p)
+        (should-not reconciles)
+        (setq displayed t)
+        (disco-channel-directory--schedule-deferred-sync view)
+        (appkit-sync-invalidations view)
+        (should (= 1 reconciles))
+        (should-not disco-channel-directory--deferred-reconcile-p)))))
+
+(ert-deftest disco-channel-directory-frame-only-skips-hydration ()
+  (disco-channel-directory-test--with-appkit-guild
+    (cl-letf (((symbol-function 'disco-channel-directory--displayed-p)
+               (lambda () t))
+              ((symbol-function 'disco-directory-load-guild-async)
+               (lambda (&rest _arguments)
+                 (ert-fail "frame-only sync started directory hydration")))
+              ((symbol-function
+                'disco-channel-directory--refresh-header-line)
+               #'ignore))
+      (appkit-request-sync view :part 'frame)
+      (appkit-sync-invalidations view))))
+
 (ert-deftest disco-channel-directory-visible-sync-does-not-force-redisplay ()
   (disco-channel-directory-test--with-appkit-guild
     (let ((forced 0))

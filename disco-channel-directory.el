@@ -17,6 +17,7 @@
 (require 'appkit-core)
 (require 'appkit-directory)
 (require 'appkit-invalidation)
+(require 'appkit-projection)
 (require 'appkit-transaction)
 (require 'appkit-view)
 (require 'disco-api)
@@ -540,19 +541,18 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
   (when (appkit-view-live-p view)
     (let* ((parts (appkit-invalidations-parts invalidations))
            (resources (appkit-invalidations-resource-keys invalidations))
-           (structure-p
-            (or disco-channel-directory--deferred-structure-p
-                (appkit-invalidations-structure-p invalidations)))
            (position-p
             (or disco-channel-directory--deferred-position-p
                 (appkit-invalidations-position-p invalidations)))
-           (entry-keys
-            (delete-dups
-             (append (appkit-invalidations-entry-keys invalidations)
-                     disco-channel-directory--deferred-entry-keys)))
-           (entries-p
-            (or disco-channel-directory--deferred-reconcile-p
-                structure-p position-p entry-keys (memq 'entries parts)))
+           (displayed-p (disco-channel-directory--displayed-p))
+           (diff
+            (appkit-projection-diff-derive
+             invalidations
+             :reconcile-parts '(entries)
+             :reconcile disco-channel-directory--deferred-reconcile-p
+             :force-keys disco-channel-directory--deferred-entry-keys))
+           (entry-keys (appkit-projection-diff-force-keys diff))
+           (entries-p (appkit-projection-diff-reconcile-p diff))
            (frame-p (or entries-p (memq 'frame parts))))
       (when (and (member
                   (disco-channel-directory--guild-snapshot-resource-key)
@@ -561,10 +561,10 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                        disco-channel-directory--guild-id)))
         (disco-directory-load-guild-async
          disco-channel-directory--guild-id))
-      (if (not (disco-channel-directory--displayed-p))
+      (if (not displayed-p)
           (when (or entries-p frame-p)
             (disco-channel-directory--defer-invalidations invalidations))
-        (when position-p
+        (when (and entries-p position-p)
           (setq entry-keys
                 (delete-dups
                  (append (disco-channel-directory--all-entry-keys)
