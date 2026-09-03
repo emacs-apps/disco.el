@@ -78,7 +78,7 @@
               (appkit-chatbuf-input-history-push "old history")
               (appkit-chat-history-window-set "100" "200")
               (setq history-owner
-                    (appkit-chat-history-request-begin 'older '(old-owner)))
+                    (appkit-chat-history-request-start old-view 'older))
               (setq-local disco-room--pending-reply-to "reply-old"
                           disco-room--pending-edit '(:type edit :message-id "edit-old")
                           disco-room--pending-jump-message-id "jump-old"
@@ -2355,39 +2355,51 @@
         (should (equal '((newer t) (older t)) calls))))))
 
 (ert-deftest disco-room-scroll-observer-callbacks-respect-client-gates ()
-  (with-temp-buffer
-    (disco-room-mode)
-    (disco-room-test-setup-channel)
-    (appkit-chat-history-window-set "100" "300")
-    (let ((disco-room-history-auto-load-threshold 100)
-          (composer-idle-p t)
-          calls)
-      (cl-letf (((symbol-function 'appkit-chatbuf-composer-idle-p)
-                 (lambda () composer-idle-p))
-                ((symbol-function 'appkit-chat-timeline-footer-start-position)
-                 (lambda () 1000))
-                ((symbol-function 'disco-room-load-newer-messages)
-                 (lambda (&optional quiet) (push quiet calls))))
-        ;; The viewport is still far from the footer.
-        (disco-room--maybe-auto-load-newer 800)
-        (should-not calls)
-        ;; An active filter suppresses history paging.
-        (setq disco-room--msg-filter '(:active t :query "needle"))
-        (disco-room--maybe-auto-load-newer 950)
-        (should-not calls)
-        ;; An active composer interaction also suppresses paging.
-        (setq disco-room--msg-filter nil
-              composer-idle-p nil)
-        (disco-room--maybe-auto-load-newer 950)
-        (should-not calls)
-        ;; Appkit's shared loading gate suppresses overlapping requests.
-        (setq composer-idle-p t)
-        (let ((owner (appkit-chat-history-request-begin 'newer)))
-          (unwind-protect
-              (progn
-                (disco-room--maybe-auto-load-newer 950)
-                (should-not calls))
-            (appkit-chat-history-request-end owner)))))))
+  (let ((app
+         (appkit-start-app
+          'disco :id (make-symbol "scroll-gates") :shutdown #'ignore)))
+    (unwind-protect
+        (with-temp-buffer
+          (disco-room-mode)
+          (disco-room-test-setup-channel)
+          (appkit-chat-history-window-set "100" "300")
+          (let ((disco-room-history-auto-load-threshold 100)
+                (composer-idle-p t)
+                (view
+                 (appkit-attach-view
+                  :app app :id '(room "chan") :state "chan"
+                  :mode major-mode))
+                calls)
+            (cl-letf (((symbol-function 'appkit-chatbuf-composer-idle-p)
+                       (lambda () composer-idle-p))
+                      ((symbol-function
+                        'appkit-chat-timeline-footer-start-position)
+                       (lambda () 1000))
+                      ((symbol-function 'disco-room-load-newer-messages)
+                       (lambda (&optional quiet) (push quiet calls))))
+              ;; The viewport is still far from the footer.
+              (disco-room--maybe-auto-load-newer 800)
+              (should-not calls)
+              ;; An active filter suppresses history paging.
+              (setq disco-room--msg-filter '(:active t :query "needle"))
+              (disco-room--maybe-auto-load-newer 950)
+              (should-not calls)
+              ;; An active composer interaction also suppresses paging.
+              (setq disco-room--msg-filter nil
+                    composer-idle-p nil)
+              (disco-room--maybe-auto-load-newer 950)
+              (should-not calls)
+              ;; Appkit's shared loading gate suppresses overlapping requests.
+              (setq composer-idle-p t)
+              (let ((owner
+                     (appkit-chat-history-request-start view 'newer)))
+                (unwind-protect
+                    (progn
+                      (disco-room--maybe-auto-load-newer 950)
+                      (should-not calls))
+                  (appkit-chat-history-request-end owner))))))
+      (when (appkit-app-live-p app)
+        (appkit-stop-app app)))))
 
 (ert-deftest disco-room-sync-rechecks-scroll-observer-after-projection ()
   (let ((invalidations (appkit-invalidations-create))
