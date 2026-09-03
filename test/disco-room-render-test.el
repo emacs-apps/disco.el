@@ -682,12 +682,12 @@
         (setq view (disco-room--ensure-view)
               width 90)
         (run-hook-with-args
-         'window-size-change-functions (selected-window))
+         'window-state-change-functions (selected-window))
         (should (eq view (car request)))
         (should (eq 'geometry (plist-get (cdr request) :part)))
         (setq request nil)
         (run-hook-with-args
-         'window-size-change-functions (selected-window))
+         'window-state-change-functions (selected-window))
         (should-not request)))))
 
 (ert-deftest disco-room-session-cache-reset-revokes-icon-callbacks-without-sync ()

@@ -547,7 +547,7 @@ RESOURCE identifies a presentation-only avatar dependency update."
   (when (disco-user--view-current-p view)
     (appkit-sync-invalidations view)))
 
-(defun disco-user--sync-invalidations (view invalidations)
+(defun disco-user--sync-invalidations (view invalidations _events)
   "Render user profile VIEW from coalesced INVALIDATIONS."
   (when (and (disco-user--view-current-p view)
              (appkit-invalidations-any-p invalidations))

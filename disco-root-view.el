@@ -79,7 +79,7 @@
 (declare-function disco-root--set-section-expanded
                   "disco-root" (section expanded))
 (declare-function disco-root--sync-invalidations
-                  "disco-root" (view invalidations))
+                  "disco-root" (view invalidations events))
 (declare-function disco-root--toggle-node-at-point "disco-root" ())
 (declare-function disco-root-render "disco-root" ())
 (declare-function disco-channel-directory-open "disco-channel-directory" (guild-id))

@@ -535,7 +535,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
         disco-channel-directory--deferred-structure-p nil
         disco-channel-directory--deferred-position-p nil))
 
-(defun disco-channel-directory--sync-invalidations (view invalidations)
+(defun disco-channel-directory--sync-invalidations (view invalidations _events)
   "Synchronize VIEW from coalesced Appkit INVALIDATIONS."
   (when (appkit-view-live-p view)
     (let* ((parts (appkit-invalidations-parts invalidations))

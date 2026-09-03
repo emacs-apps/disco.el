@@ -343,7 +343,7 @@
           (disco-root-mode)
           (let ((view (disco-root--ensure-view)))
             (setf (appkit-view-sync-function view)
-                  (lambda (_view invalidations)
+                  (lambda (_view invalidations _events)
                     (push invalidations snapshots)))
             (cl-letf (((symbol-function 'run-at-time)
                        (lambda (_time _repeat _function &rest _args)
@@ -556,7 +556,8 @@
                    (setq rendered t))))
         (disco-root--sync-invalidations
          (disco-root-test--current-live-view)
-         (disco-root-test--invalidations :entries '("c1")))
+         (disco-root-test--invalidations :entries '("c1"))
+         nil)
         (should rendered)))))
 
 (ert-deftest disco-root-sync-invalidations-rerenders-archived-thread-buffer ()
@@ -570,7 +571,8 @@
                    (setq rendered t))))
         (disco-root--sync-invalidations
          (disco-root-test--current-live-view)
-         (disco-root-test--invalidations :entries '("t1")))
+         (disco-root-test--invalidations :entries '("t1"))
+         nil)
         (should rendered)))))
 
 

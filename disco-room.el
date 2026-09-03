@@ -1254,17 +1254,22 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
      :structure t
      :parts '(frame timeline composer))))
 
-(defun disco-room--sync-invalidations (view invalidations)
-  "Synchronize current room from coalesced appkit INVALIDATIONS."
-  (let ((events (appkit-view-pending-events-snapshot view))
-        (parts (appkit-invalidations-parts invalidations))
-        (resources (appkit-invalidations-resource-keys invalidations))
-        (entries (appkit-invalidations-entry-keys invalidations)))
+(defun disco-room--sync-invalidations (view invalidations events)
+  "Synchronize VIEW's current room from INVALIDATIONS and EVENTS."
+  (let* ((parts (appkit-invalidations-parts invalidations))
+         (diff
+          (appkit-projection-diff-derive
+           invalidations
+           :existing-keys
+           (and (or (memq 'geometry parts)
+                    (memq 'all
+                          (appkit-invalidations-resource-keys invalidations)))
+                (appkit-chat-timeline-live-p)
+                (appkit-chat-timeline-keys))
+           :reconcile-parts '(timeline))))
     (dolist (event events)
       (when (appkit-view-live-p view)
         (disco-room--apply-gateway-event event)))
-    (when (appkit-view-live-p view)
-      (appkit-view-acknowledge-events view (length events)))
     (when (appkit-view-live-p view)
       (cond
        ((or (appkit-invalidations-structure-p invalidations)
@@ -1276,10 +1281,11 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
         ;; History callbacks only record their new window and request this sync.
         ;; Resolve jumps after projection so message positions are current.
         (disco-room--resolve-pending-jump))
-       ((or resources entries)
+       ((appkit-projection-diff-reconcile-p diff)
         (disco-room--sync-timeline
-         :force-keys entries
-         :changed-resources resources)))
+         :force-keys (appkit-projection-diff-force-keys diff)
+         :changed-resources
+         (appkit-projection-diff-changed-dependencies diff))))
       (when (appkit-scroll-observer-p disco-room--scroll-observer)
         (appkit-scroll-observer-check disco-room--scroll-observer)))))
 

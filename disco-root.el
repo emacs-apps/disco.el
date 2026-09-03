@@ -2573,7 +2573,7 @@ When HEADER-P is non-nil, the root header is invalidated too."
        :structure structural-p
        :part (and header-p 'header)))))
 
-(defun disco-root--sync-invalidations (view invalidations)
+(defun disco-root--sync-invalidations (view invalidations _events)
   "Synchronize VIEW from Appkit INVALIDATIONS."
   (let ((dirty-channel-ids
          (copy-sequence (appkit-invalidations-entry-keys invalidations)))

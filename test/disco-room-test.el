@@ -2384,15 +2384,11 @@
     (with-temp-buffer
       (setq-local disco-room--scroll-observer observer)
       (cl-letf (((symbol-function 'appkit-view-live-p) (lambda (_view) t))
-                ((symbol-function 'appkit-view-pending-events-snapshot)
-                 (lambda (_view) nil))
-                ((symbol-function 'appkit-view-acknowledge-events)
-                 #'ignore)
                 ((symbol-function 'appkit-scroll-observer-check)
                  (lambda (candidate &optional _window)
                    (should (eq candidate observer))
                    (setq checks (1+ (or checks 0))))))
-        (disco-room--sync-invalidations 'view invalidations)
+        (disco-room--sync-invalidations 'view invalidations nil)
         (should (= 1 checks))))))
 
 (ert-deftest disco-room-delete-message-errors-without-manage-messages ()
