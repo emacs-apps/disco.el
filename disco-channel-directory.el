@@ -567,7 +567,8 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
    :merge #'disco-channel-directory--merge-invalidations
    :render (lambda (surface _app-read-view _model request)
              (disco-channel-directory--render-invalidations
-              surface request))
+              surface request)
+             nil)
    :recover nil
    :unmount
    (lambda (_surface)
