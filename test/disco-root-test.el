@@ -18,12 +18,12 @@
           (appkit-invalidations-position-p invalidations) position)
     invalidations))
 
-(defun disco-root-test--current-live-view ()
-  "Attach and return a live Appkit view for the current test buffer."
+(defun disco-root-test--current-live-surface ()
+  "Attach and return a live Generated Surface for the current test buffer."
   (when (and (eq major-mode 'disco-root-archived-threads-mode)
              (null disco-root--archived-parent-channel))
     (setq-local disco-root--archived-parent-channel '((id . "parent"))))
-  (disco-root--ensure-view))
+  (disco-root--ensure-surface))
 
 (defun disco-root-test--primary-click (window position)
   "Return a real primary-click event pair in WINDOW at POSITION."
@@ -282,12 +282,14 @@
   (with-temp-buffer
     (disco-root-mode)
     (let (queued)
-      (cl-letf (((symbol-function 'appkit-current-view) (lambda () 'view))
-                ((symbol-function 'appkit-view-live-p) (lambda (_view) t))
+      (cl-letf (((symbol-function 'appkit-current-surface)
+                 (lambda () 'surface))
+                ((symbol-function 'appkit-surface-live-p)
+                 (lambda (surface) (eq surface 'surface)))
                 ((symbol-function 'disco-root--queue-live-update)
-                 (lambda (channel-ids &optional structural-p header-p)
+                 (lambda (channel-ids &optional structural-p header-p _geometry-p)
                    (setq queued (list channel-ids structural-p header-p)))))
-	(disco-root--handle-state-reset))
+        (disco-root--handle-state-reset))
       (should (equal '(nil t t) queued)))))
 
 (ert-deftest disco-root-attach-live-updates-does-not-own-render-timer ()
@@ -318,112 +320,87 @@
                      (lambda () (cl-incf watch-count)))
                     ((symbol-function 'disco-gateway-unwatch-global)
                      (lambda () (cl-incf unwatch-count))))
-            (let* ((view (disco-root--attach-live-updates))
+            (let* ((surface (disco-root--attach-live-updates))
                    (gateway disco-root--gateway-handler)
                    (directory disco-root--directory-handler)
-                   (preview disco-root--preview-handler)
-                   (handle disco-root--live-updates-handle))
+                   (preview disco-root--preview-handler))
               (should (= 1 watch-count))
-              (should (appkit-handle-alive-p handle))
+              (should (appkit-surface-live-p surface))
               (should (memq gateway disco-gateway-event-hook))
               (should (memq directory disco-directory-event-hook))
               (should (memq preview disco-preview-update-hook))
-              (appkit-kill-view view)
+              (appkit-surface-stop surface)
               (should (= 1 unwatch-count))
-              (should-not (appkit-handle-alive-p handle))
-              (should-not disco-root--live-updates-handle)
+              (should-not (appkit-surface-live-p surface))
               (should-not (memq gateway disco-gateway-event-hook))
               (should-not (memq directory disco-directory-event-hook))
               (should-not (memq preview disco-preview-update-hook)))))
       (disco-runtime-stop))))
 
 (ert-deftest disco-root-queue-live-update-coalesces-in-appkit ()
-  (let ((disco-runtime--app nil)
-        (scheduled-count 0)
-        snapshots)
+  (let ((disco-runtime--app nil) snapshots)
     (unwind-protect
         (with-temp-buffer
           (disco-root-mode)
-          (let ((view (disco-root--ensure-view)))
-            (setf (appkit-view-sync-function view)
-                  (lambda (_view invalidations _events)
-                    (push invalidations snapshots)))
-            (cl-letf (((symbol-function 'run-at-time)
-                       (lambda (_time _repeat _function &rest _args)
-                         (cl-incf scheduled-count)
-                         'fake-root-sync-timer)))
-              (disco-root--queue-live-update '("c1") nil nil)
-              (disco-root--queue-live-update '("c2" "c1") t nil)
-              (disco-root--queue-live-update nil nil t)
-              (let* ((pending (appkit-view-invalidations view))
-                     (handle
-                      (appkit-invalidations-scheduled-handle pending)))
-                (should (= 1 scheduled-count))
-                (should (appkit-handle-alive-p handle))
-                (should (appkit-invalidations-structure-p pending))
-                (should (equal '("c1" "c2")
-                               (sort
-                                (copy-sequence
-                                 (appkit-invalidations-entry-keys pending))
-                                #'string-lessp)))
-                (should (equal '(header)
-                               (appkit-invalidations-parts pending))))
-              (appkit-sync-invalidations view)
-              (should (= 1 (length snapshots)))
-              (let ((snapshot (car snapshots)))
-                (should (appkit-invalidations-structure-p snapshot))
-                (should (memq 'header
-                              (appkit-invalidations-parts snapshot)))))))
+          (disco-root--ensure-surface)
+          (cl-letf (((symbol-function 'disco-root--render-invalidations)
+                     (lambda (_surface invalidations)
+                       (push invalidations snapshots))))
+            (disco-root--queue-live-update '("c1") nil nil)
+            (disco-root--queue-live-update '("c2" "c1") t nil)
+            (disco-root--queue-live-update nil nil t)
+            (disco-root--flush-live-updates)
+            (should (= 1 (length snapshots)))
+            (let ((snapshot (car snapshots)))
+              (should (appkit-invalidations-structure-p snapshot))
+              (should (equal '("c1" "c2")
+                             (sort (copy-sequence
+                                    (appkit-invalidations-entry-keys snapshot))
+                                   #'string-lessp)))
+              (should (equal '(header)
+                             (appkit-invalidations-parts snapshot))))))
       (disco-runtime-stop))))
 
 (ert-deftest disco-root-queue-live-update-keeps-exact-invalidation-domains ()
-  (let ((disco-runtime--app nil))
+  (let ((disco-runtime--app nil) snapshots)
     (unwind-protect
         (with-temp-buffer
           (disco-root-mode)
-          (let ((view (disco-root--ensure-view)))
-            (cl-letf (((symbol-function 'appkit-schedule-sync) #'ignore))
-              (disco-root--queue-live-update '("c1" "c1") nil nil)
-              (let ((invalidations (appkit-view-invalidations view)))
-                (should (equal '("c1")
-                               (appkit-invalidations-entry-keys invalidations)))
-                (should-not
-                 (appkit-invalidations-structure-p invalidations))
-                (should-not (appkit-invalidations-parts invalidations)))
-              (disco-root--queue-live-update nil nil t)
-              (let ((invalidations (appkit-view-invalidations view)))
-                (should (equal '(header)
-                               (appkit-invalidations-parts invalidations)))
-                (should-not
-                 (appkit-invalidations-structure-p invalidations))))))
+          (disco-root--ensure-surface)
+          (cl-letf (((symbol-function 'disco-root--render-invalidations)
+                     (lambda (_surface invalidations)
+                       (push invalidations snapshots))))
+            (disco-root--queue-live-update '("c1" "c1") nil nil)
+            (disco-root--flush-live-updates)
+            (let ((invalidations (pop snapshots)))
+              (should (equal '("c1")
+                             (appkit-invalidations-entry-keys invalidations)))
+              (should-not (appkit-invalidations-structure-p invalidations))
+              (should-not (appkit-invalidations-parts invalidations)))
+            (disco-root--queue-live-update nil nil t)
+            (disco-root--flush-live-updates)
+            (let ((invalidations (pop snapshots)))
+              (should (equal '(header)
+                             (appkit-invalidations-parts invalidations)))
+              (should-not (appkit-invalidations-structure-p invalidations)))))
       (disco-runtime-stop))))
 
 (ert-deftest disco-root-killed-view-cancels-sync-and-stales-callback ()
-  (let ((disco-runtime--app nil)
-        callback-called)
+  (let ((disco-runtime--app nil) callback-called)
     (cl-letf (((symbol-function 'disco-gateway-watch-global) #'ignore)
-              ((symbol-function 'disco-gateway-unwatch-global) #'ignore)
-              ((symbol-function 'run-at-time)
-               (lambda (_time _repeat _function &rest _args)
-                 'fake-root-sync-timer)))
+              ((symbol-function 'disco-gateway-unwatch-global) #'ignore))
       (unwind-protect
           (with-temp-buffer
             (disco-root-mode)
-            (let* ((view (disco-root--attach-live-updates))
+            (let* ((surface (disco-root--attach-live-updates))
                    (callback disco-root--gateway-handler))
               (disco-root--queue-live-update '("c1") nil nil)
-              (let ((handle
-                     (appkit-invalidations-scheduled-handle
-                      (appkit-view-invalidations view))))
-                (should (appkit-handle-alive-p handle))
-                (appkit-kill-view view)
-                (should-not (appkit-view-live-p view))
-                (should-not (appkit-handle-alive-p handle))
-                (cl-letf (((symbol-function 'disco-root--handle-gateway-event)
-                           (lambda (_event) (setq callback-called t))))
-                  (funcall callback '(:type message-create
-					    :channel-id "c1")))
-                (should-not callback-called))))
+              (appkit-surface-stop surface)
+              (should-not (appkit-surface-live-p surface))
+              (cl-letf (((symbol-function 'disco-root--handle-gateway-event)
+                         (lambda (_event) (setq callback-called t))))
+                (funcall callback '(:type message-create :channel-id "c1")))
+              (should-not callback-called)))
         (disco-runtime-stop)))))
 
 (ert-deftest disco-root-async-callbacks-only-queue-invalidations ()
@@ -431,12 +408,10 @@
     (disco-root-mode)
     (let (queued)
       (cl-letf (((symbol-function 'disco-root--queue-live-update)
-                 (lambda (channel-ids &optional structural-p header-p)
+                 (lambda (channel-ids &optional structural-p header-p _geometry-p)
                    (push (list channel-ids structural-p header-p) queued)))
                 ((symbol-function 'disco-root--render-preserving-position)
-                 (lambda () (ert-fail "async callback rendered directly")))
-                ((symbol-function 'appkit-sync-invalidations)
-                 (lambda (_view) (ert-fail "async callback synced directly"))))
+                 (lambda () (ert-fail "async callback rendered directly"))))
         (disco-root--handle-gateway-event
          '(:type message-create :channel-id "c1"))
         (disco-root--handle-directory-event '(:type index-loading))
@@ -552,28 +527,21 @@
 (ert-deftest disco-root-sync-invalidations-renders-in-unread-view ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((disco-root--view-mode 'unread)
-          rendered)
+    (let ((disco-root--view-mode 'unread) rendered)
       (cl-letf (((symbol-function 'disco-root--render-preserving-position)
-                 (lambda ()
-                   (setq rendered t))))
-        (disco-root--sync-invalidations
-         (disco-root-test--current-live-view)
-         (disco-root-test--invalidations :entries '("c1"))
-         nil)
+                 (lambda () (setq rendered t))))
+        (disco-root--render-invalidations
+         nil (disco-root-test--invalidations :entries '("c1")))
         (should rendered)))))
 
 (ert-deftest disco-root-resource-all-forces-every-tree-row ()
   (with-temp-buffer
     (disco-root-mode)
-    (let ((disco-root--view-mode 'unread)
-          rendered)
+    (let ((disco-root--view-mode 'unread) rendered)
       (cl-letf (((symbol-function 'disco-root--render-preserving-position)
                  (lambda () (setq rendered t))))
-        (disco-root--sync-invalidations
-         (disco-root-test--current-live-view)
-         (disco-root-test--invalidations :resources '(all))
-         nil)
+        (disco-root--render-invalidations
+         nil (disco-root-test--invalidations :resources '(all)))
         (should rendered)
         (should disco-root--tree-force-all-rows-p)))))
 
@@ -583,11 +551,9 @@
     (let ((disco-root--view-mode 'unread))
       (cl-letf (((symbol-function 'disco-root--render-preserving-position)
                  (lambda ()
-                   (ert-fail "position-only sync rendered root rows"))))
-        (disco-root--sync-invalidations
-         (disco-root-test--current-live-view)
-         (disco-root-test--invalidations :position t)
-         nil)))))
+                   (ert-fail "position-only request rendered root rows"))))
+        (disco-root--render-invalidations
+         nil (disco-root-test--invalidations :position t))))))
 
 (ert-deftest disco-root-sync-invalidations-rerenders-archived-thread-buffer ()
   (with-temp-buffer
@@ -596,12 +562,9 @@
       (cl-letf (((symbol-function 'disco-root--archived-threads-list-spec)
                  (lambda () 'spec))
                 ((symbol-function 'appkit-view-render-list-spec-preserving-position)
-                 (lambda (_spec &rest _args)
-                   (setq rendered t))))
-        (disco-root--sync-invalidations
-         (disco-root-test--current-live-view)
-         (disco-root-test--invalidations :entries '("t1"))
-         nil)
+                 (lambda (_spec &rest _args) (setq rendered t))))
+        (disco-root--render-invalidations
+         nil (disco-root-test--invalidations :entries '("t1")))
         (should rendered)))))
 
 
@@ -609,18 +572,21 @@
   (let (queued)
     (with-temp-buffer
       (disco-root-mode)
-      (cl-letf (((symbol-function 'disco-root--queue-live-update)
-                 (lambda (channel-ids &optional structural-p header-p)
-                   (push (list (current-buffer) channel-ids structural-p header-p)
-                         queued))))
-        (disco-root--rerender-open-root-buffers)
-        (should (= 1 (length queued)))
-        (pcase-let ((`(,buffer ,channel-ids ,structural-p ,header-p)
-                     (car queued)))
-          (should (buffer-live-p buffer))
-          (should-not channel-ids)
-          (should structural-p)
-          (should-not header-p))))))
+      (let ((target (current-buffer)))
+        (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                   (lambda (channel-ids &optional structural-p header-p _geometry-p)
+                     (push (list (current-buffer) channel-ids
+                                 structural-p header-p)
+                           queued))))
+          (disco-root--rerender-open-root-buffers)
+          (let ((request (seq-find (lambda (entry) (eq (car entry) target))
+                                   queued)))
+            (should request)
+            (pcase-let ((`(,_buffer ,channel-ids ,structural-p ,header-p)
+                         request))
+              (should-not channel-ids)
+              (should structural-p)
+              (should-not header-p))))))))
 
 (ert-deftest disco-root-render-fill-column-hidden-buffer-reuses-last-width ()
   (with-temp-buffer
@@ -786,17 +752,15 @@
     (disco-root-mode)
     (let (requested)
       (disco-root--ensure-tree-directory-surface)
-      (let ((view (disco-root-test--current-live-view)))
-        (cl-letf (((symbol-function 'appkit-request-sync)
-                   (lambda (candidate &rest arguments)
-                     (setq requested (cons candidate arguments))))
-                  ((symbol-function 'appkit-sync-invalidations) #'ignore)
-                  ((symbol-function 'message) (lambda (&rest _args) nil)))
-          (should (disco-root--section-expanded-p 'unread))
-          (disco-root-toggle-unread-lens)
-          (should (eq view (car requested)))
-          (should (plist-get (cdr requested) :structure))
-          (should-not (disco-root--section-expanded-p 'unread)))))))
+      (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                 (lambda (channel-ids &optional structural-p header-p _geometry-p)
+                   (setq requested (list channel-ids structural-p header-p))))
+                ((symbol-function 'disco-root--flush-live-updates) #'ignore)
+                ((symbol-function 'message) (lambda (&rest _args) nil)))
+        (should (disco-root--section-expanded-p 'unread))
+        (disco-root-toggle-unread-lens)
+        (should (equal '(nil t t) requested))
+        (should-not (disco-root--section-expanded-p 'unread))))))
 
 (ert-deftest disco-root-tree-collapsed-guild-does-not-project-or-load-children ()
   (with-temp-buffer
@@ -1412,13 +1376,13 @@
                   ((symbol-function 'disco-root-view--attach-live-updates)
                    (lambda () (cl-incf attachments))))
           (let* ((first-buffer (disco-root-list-archived-threads "forum"))
-                 (first-view (with-current-buffer first-buffer
-                               (appkit-current-view)))
+                 (first-surface (with-current-buffer first-buffer
+                                  (appkit-current-surface)))
                  (second-buffer (disco-root-list-archived-threads "forum"))
-                 (second-view (with-current-buffer second-buffer
-                                (appkit-current-view))))
+                 (second-surface (with-current-buffer second-buffer
+                                   (appkit-current-surface))))
             (should (eq first-buffer second-buffer))
-            (should (eq first-view second-view))
+            (should (eq first-surface second-surface))
             (should (= 1 refreshes))
             (should (= 1 attachments))))
       (disco-runtime-stop)
@@ -1435,9 +1399,9 @@
     (should-not disco-root--search-active-p)))
 
 (ert-deftest disco-root-open-attaches-view-before-initial-sync ()
-  (let ((disco-root-buffer-name " *disco-root-open-test*")
-        order
-        displayed)
+  (let ((disco-runtime--app nil)
+        (disco-root-buffer-name " *disco-root-open-test*")
+        order displayed)
     (cl-letf (((symbol-function 'pop-to-buffer)
                (lambda (buffer &rest _args)
                  (push 'pop order)
@@ -1449,15 +1413,14 @@
       (unwind-protect
           (let ((result (disco-root-open)))
             (should (eq displayed result))
-            (should (equal '(pop attach render) (nreverse order)))
+            (should (equal '(render pop attach) (nreverse order)))
             (with-current-buffer result
-              (let ((view (appkit-current-view)))
-                (should (appkit-view-live-p view))
-                (should (equal '(root main) (appkit-view-id view)))
-                (should (eq #'disco-root--sync-invalidations
-                            (appkit-view-sync-function view))))))
-        (when (buffer-live-p displayed)
-          (kill-buffer displayed))))))
+              (let ((surface (appkit-current-surface)))
+                (should (appkit-surface-live-p surface))
+                (should (equal '(root main)
+                               (appkit-surface-identity surface))))))
+        (when (buffer-live-p displayed) (kill-buffer displayed))
+        (disco-runtime-stop)))))
 
 (ert-deftest disco-root-open-reuses-live-view-without-full-resync ()
   (let ((disco-runtime--app nil)
@@ -1482,10 +1445,7 @@
 (ert-deftest disco-root-fresh-view-preserves-presentation-and-resets-session-state ()
   (let ((disco-runtime--app nil)
         (disco-root-buffer-name " *disco-root-session-reuse-test*")
-        (sync-count 0)
-        first
-        second
-        first-view)
+        (sync-count 0) first second first-surface)
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'disco-root--attach-live-updates) #'ignore)
               ((symbol-function 'disco-root--render-preserving-position)
@@ -1494,43 +1454,24 @@
           (progn
             (setq first (disco-root-open))
             (with-current-buffer first
-              (setq first-view (appkit-current-view))
-              (setq-local disco-root--sort-mode 'name)
-              (setq-local disco-root--view-mode 'dms)
-              (puthash '(root section unread) nil
-                       disco-root--tree-fold-state)
-              (puthash '(root section dm) t
-                       disco-root--tree-fold-state)
-              (puthash '(root section guilds) t
-                       disco-root--tree-fold-state)
-              (puthash '(root guild "g1") t
-                       disco-root--tree-fold-state)
-              (setq-local disco-root--search-query "old")
-              (setq-local disco-root--search-tabs '((messages :loading t))))
+              (setq first-surface (appkit-current-surface))
+              (setq-local disco-root--sort-mode 'name
+                          disco-root--view-mode 'dms
+                          disco-root--search-query "old"
+                          disco-root--search-tabs '((messages :loading t))))
             (disco-runtime-stop)
-            (should-not (appkit-view-live-p first-view))
+            (should-not (appkit-surface-live-p first-surface))
             (setq second (disco-root-open))
-            (should (eq first second))
+            (should-not (eq first second))
             (with-current-buffer second
-              (should-not (eq first-view (appkit-current-view)))
-              (should-not disco-root--search-active-p)
-              (should (eq 'name disco-root--sort-mode))
-              (should (eq 'dms disco-root--view-mode))
-              (should-not
-               (gethash '(root section unread)
-                        disco-root--tree-fold-state))
-              (should
-               (gethash '(root section dm) disco-root--tree-fold-state))
-              (should
-               (gethash '(root section guilds)
-                        disco-root--tree-fold-state))
-              (should
-               (gethash '(root guild "g1") disco-root--tree-fold-state))
+              (should-not (eq first-surface (appkit-current-surface)))
+              (should (eq 'activity disco-root--sort-mode))
+              (should (eq 'all disco-root--view-mode))
               (should-not disco-root--search-query)
               (should-not disco-root--search-tabs))
             (should (= 2 sync-count)))
-        (when (buffer-live-p first)
-          (kill-buffer first))
+        (when (buffer-live-p first) (kill-buffer first))
+        (when (buffer-live-p second) (kill-buffer second))
         (disco-runtime-stop)))))
 
 (ert-deftest disco-root-fresh-view-exits-session-bound-search ()
@@ -2010,19 +1951,17 @@
         (should (equal '(nil t nil) queued))))))
 
 (ert-deftest disco-root-search-response-cannot-land-in-replacement-view ()
-  (let ((disco-runtime--app nil)
-        error-callback)
+  (let ((disco-runtime--app nil) error-callback)
     (unwind-protect
         (with-temp-buffer
           (disco-root-mode)
-          (setq-local disco-root--search-active-p t)
-          (setq-local disco-root--search-domain
-                      '(:kind dms :id nil :label "DMs"))
-          (setq-local disco-root--search-query-spec
-                      '(:content "old" :sort-by timestamp :sort-order desc))
-          (setq-local disco-root--search-generation 1)
+          (setq-local disco-root--search-active-p t
+                      disco-root--search-domain '(:kind dms :id nil :label "DMs")
+                      disco-root--search-query-spec
+                      '(:content "old" :sort-by timestamp :sort-order desc)
+                      disco-root--search-generation 1)
           (disco-root--search-reset-tab-states)
-          (let ((old-view (disco-root--ensure-view)))
+          (let ((old-surface (disco-root--ensure-surface)))
             (cl-letf (((symbol-function 'disco-root--search-render-if-visible)
                        #'ignore)
                       ((symbol-function 'disco-api-user-search-messages-tabs-async)
@@ -2032,14 +1971,14 @@
               (disco-root--search-dispatch
                1 (disco-root--search-request-tabs nil)))
             (should (functionp error-callback))
-            (appkit-kill-view old-view)
-            (let ((replacement (disco-root--ensure-view))
+            (appkit-surface-stop old-surface)
+            (let ((replacement (disco-root--ensure-surface))
                   (replacement-tabs
                    '((messages :items (((id . "new")))
                                :loading nil :error "new state" :cursor nil))))
-              (should-not (eq old-view replacement))
-              (setq-local disco-root--search-generation 1)
-              (setq-local disco-root--search-tabs replacement-tabs)
+              (should-not (eq old-surface replacement))
+              (setq-local disco-root--search-generation 1
+                          disco-root--search-tabs replacement-tabs)
               (funcall error-callback '(:message "old response"))
               (should (equal replacement-tabs disco-root--search-tabs)))))
       (disco-runtime-stop))))
@@ -2642,19 +2581,21 @@
     '((id . "th1") (guild_id . "g1") (type . 11)) 'timeline-thread)))
 
 (ert-deftest disco-root-auto-fill-to-width-requests-geometry-sync-on-change ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (let ((disco-root--fill-column 80)
-          requested)
-      (let ((view (disco-root-test--current-live-view)))
-        (cl-letf (((symbol-function 'appkit-request-sync)
-                   (lambda (candidate &rest arguments)
-                     (setq requested (cons candidate arguments)))))
-          (should (disco-root--auto-fill-to-width 100))
-          (should (= 100 disco-root--fill-column))
-          (should (eq view (car requested)))
-          (should (eq 'geometry (plist-get (cdr requested) :part)))
-          (should (plist-get (cdr requested) :position)))))))
+  (let ((disco-runtime--app nil))
+    (unwind-protect
+        (with-temp-buffer
+          (disco-root-mode)
+          (let ((disco-root--fill-column 80) requested)
+            (disco-root-test--current-live-surface)
+            (cl-letf (((symbol-function 'disco-root--queue-live-update)
+                       (lambda (channel-ids &optional structural-p header-p geometry-p)
+                         (setq requested
+                               (list channel-ids structural-p
+                                     header-p geometry-p)))))
+              (should (disco-root--auto-fill-to-width 100))
+              (should (= 100 disco-root--fill-column))
+              (should (equal '(nil nil nil t) requested)))))
+      (disco-runtime-stop))))
 
 (ert-deftest disco-root-auto-fill-to-width-noop-when-unchanged ()
   (with-temp-buffer

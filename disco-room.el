@@ -16,6 +16,7 @@
 (require 'ewoc)
 (require 'plz)
 (require 'appkit-core)
+(require 'appkit-surface)
 (require 'appkit-invalidation)
 (require 'appkit-media)
 (require 'appkit-chat-history)
@@ -67,8 +68,8 @@ meaning is only that the projected window is attached to latest.")
 (defvar-local disco-room--oldest-message-id nil
   "Oldest canonical message in the currently visible history window.
 
-Kept for `disco-room-search' boundary compatibility; pagination ownership and
-exhaustion live exclusively in `appkit-chat-history'.")
+Retained as the search boundary cache; pagination ownership and exhaustion
+live exclusively in `appkit-chat-history'.")
 (defvar-local disco-room--newest-message-id nil
   "Newest canonical message in the currently visible history window.
 
@@ -255,13 +256,13 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "Expire stale typing entries for room BUFFER owned by VIEW."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      ;; A room buffer can survive its Appkit view.  Never let the predecessor's
-      ;; timer clear or redraw state belonging to a replacement view.
-      (when (and (eq view (appkit-current-view))
-                 (appkit-view-live-p view))
+      ;; A room buffer can survive its Generated Surface.  Never let the
+      ;; predecessor's timer alter a replacement Surface.
+      (when (and (eq view (appkit-current-surface))
+                 (appkit-surface-live-p view))
         (setq disco-room--typing-expire-timer nil)
         (when (disco-room--typing-prune-expired)
-          (appkit-request-sync view :part 'frame))
+          (disco-room--queue-update view :parts '(frame)))
         (disco-room--typing-reschedule-expire-timer)))))
 
 (defun disco-room--typing-reschedule-expire-timer ()
@@ -271,8 +272,8 @@ This is a search boundary, not the remote/latest protocol frontier.")
     (when next-expiry
       (let ((delay (max 0.1 (- next-expiry (float-time))))
             (room-buffer (current-buffer))
-            (view (appkit-current-view)))
-        (when (appkit-view-live-p view)
+            (view (appkit-current-surface)))
+        (when (appkit-surface-live-p view)
           (setq disco-room--typing-expire-timer
                 (run-at-time delay nil
                              #'disco-room--typing-expire-timer-callback
@@ -385,20 +386,20 @@ operations keep their own protocol-specific sequence/token validation."
        (with-current-buffer room-buffer
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)
-              (eq view (appkit-current-view))
-              (appkit-view-live-p view)))))
+              (eq view (appkit-current-surface))
+              (appkit-surface-live-p view)))))
 
 (defun disco-room--channel-buffer-p (room-buffer channel-id view)
   "Return non-nil when ROOM-BUFFER is still bound to CHANNEL-ID and VIEW.
 
-VIEW is the exact Appkit view captured when asynchronous work began.  A nil or
-dead view never degrades this guard to channel identity alone."
+VIEW is the exact Generated Surface captured when asynchronous work began.
+A nil or stopped Surface never degrades this guard to channel identity alone."
   (and (buffer-live-p room-buffer)
-       (appkit-view-live-p view)
+       (appkit-surface-live-p view)
        (with-current-buffer room-buffer
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)
-              (eq view (appkit-current-view))))))
+              (eq view (appkit-current-surface))))))
 
 ;;; History and message windows
 
@@ -425,12 +426,12 @@ dead view never degrades this guard to channel identity alone."
                 (appkit-chatbuf-composer-idle-p)))
       (disco-room-load-newer-messages t))))
 
-(defun disco-room--install-scroll-observer (view)
-  "Install VIEW's lifecycle-owned history edge observer."
+(defun disco-room--install-scroll-observer (surface)
+  "Install SURFACE's lifecycle-owned history edge observer."
   (unless (and (appkit-scroll-observer-p disco-room--scroll-observer)
                (appkit-scroll-observer-active-p
                 disco-room--scroll-observer)
-               (eq view
+               (eq surface
                    (appkit-scroll-observer-owner
                     disco-room--scroll-observer)))
     (when (appkit-scroll-observer-p disco-room--scroll-observer)
@@ -438,7 +439,7 @@ dead view never degrades this guard to channel identity alone."
     (setq-local
      disco-room--scroll-observer
      (appkit-scroll-observer-install
-      view
+      surface
       :end-boundary-function #'appkit-chat-timeline-footer-start-position
       :start-function
       (lambda (_window position _start)
@@ -459,9 +460,9 @@ dead view never degrades this guard to channel identity alone."
                              disco-room--revealed-spoiler-message-id)))
         (let ((previous disco-room--revealed-spoiler-message-id))
           (setq disco-room--revealed-spoiler-message-id nil)
-          (when-let* ((view (appkit-current-view)))
-            (when (appkit-view-live-p view)
-              (appkit-request-sync view :entry previous))))))))
+          (when-let* ((view (appkit-current-surface)))
+            (when (appkit-surface-live-p view)
+              (disco-room--queue-update view :entries (list previous)))))))))
 
 (defun disco-room--read-state-snapshot-fields (state)
   "Return writable read-state fields copied from STATE."
@@ -546,7 +547,7 @@ Unread counters are always cleared locally.  When DEFER-SYNC-P is non-nil, the
 caller is already inside, or will request, an Appkit projection transaction."
   (let* ((room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (channel (disco-room--channel-object))
          (target-id (or message-id
                         (disco-room--latest-message-id)
@@ -577,23 +578,23 @@ caller is already inside, or will request, an Appkit projection transaction."
                  (when (disco-room--optimistic-read-ack-clear optimistic-seq)
                    (disco-state-apply-message-ack channel-id target-id 0)
                    (disco-state-apply-channel-ack-response channel-id response)
-                   (appkit-request-sync view :part 'timeline)))))
+                   (disco-room--queue-update view :parts '(timeline))))))
            :on-error
            (lambda (err)
              (when (disco-room--callback-active-p room-buffer channel-id view)
                (with-current-buffer room-buffer
                  (when (disco-room--optimistic-read-ack-rollback optimistic-seq)
-                   (appkit-request-sync view :part 'timeline))
+                   (disco-room--queue-update view :parts '(timeline)))
                  (message "disco: read-state ack failed for %s: %s"
                           channel-id
                           (disco-room--async-error-message err)))))))
       (disco-state-apply-message-ack channel-id nil 0))
     (unless defer-sync-p
-      (appkit-request-sync view :part 'timeline)
+      (disco-room--queue-update view :parts '(timeline))
       ;; This state transition is also used as an explicit local action in
       ;; tests/commands.  Consume its invalidation through Appkit, never by
       ;; calling the timeline projector directly.
-      (appkit-sync-invalidations view))))
+      (disco-room--flush-updates view))))
 
 (defun disco-room--pending-message-p (message)
   "Return non-nil when MESSAGE is a local optimistic row."
@@ -917,7 +918,7 @@ newest-first render contract.  Local pending rows join attached latest windows
   "Fetch one message page around current pending jump target."
   (let* ((room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (target-id disco-room--pending-jump-message-id)
          (request-revision (disco-state-message-revision channel-id))
          (limit (max 1 (or disco-room-jump-context-limit 50)))
@@ -927,12 +928,14 @@ newest-first render contract.  Local pending rows join attached latest windows
     (setq owner (appkit-chat-history-request-start view 'around))
     (appkit-chat-history-older-loaded-set nil)
     (appkit-chat-history-newer-stalled-clear)
-    (appkit-request-sync view :part 'frame)
-    (disco-api-channel-messages-around-async
+    (disco-room--queue-update view :parts '(frame))
+    (appkit-chat-history-request-bind-handle
+     owner
+     (disco-api-channel-messages-around-async
      channel-id
      target-id
      :limit limit
-     :owner owner
+     :owner view
      :on-success
      (lambda (messages)
        (when (disco-room--callback-active-p room-buffer channel-id view)
@@ -984,7 +987,7 @@ newest-first render contract.  Local pending rows join attached latest windows
              (setq disco-room--pending-jump-message-id nil)
              (disco-room--request-render view)
              (message "disco: jump fetch failed: %s"
-                      (disco-room--async-error-message err)))))))))
+                      (disco-room--async-error-message err))))))))))
 
 (defun disco-room--jump-to-visible-message (message-id)
   "Jump to visible MESSAGE-ID in current room buffer and recenter.
@@ -1001,23 +1004,28 @@ Return non-nil when jump succeeds without fetching older history."
       t)))
 
 (defun disco-room--resolve-pending-jump ()
-  "Resolve `disco-room--pending-jump-message-id' in current room buffer."
+  "Resolve a pending jump only when its row is now visible."
   (when (and (stringp disco-room--pending-jump-message-id)
-             (not (string-empty-p disco-room--pending-jump-message-id)))
-    (if (disco-room--jump-to-visible-message disco-room--pending-jump-message-id)
-        (let ((target disco-room--pending-jump-message-id))
-          (setq disco-room--pending-jump-message-id nil)
-          (message "disco: jumped to message %s" target))
-      (unless (eq (appkit-chat-history-loading) 'around)
-        (disco-room--fetch-around-pending-jump)))))
+             (not (string-empty-p disco-room--pending-jump-message-id))
+             (disco-room--jump-to-visible-message
+              disco-room--pending-jump-message-id))
+    (let ((target disco-room--pending-jump-message-id))
+      (setq disco-room--pending-jump-message-id nil)
+      (message "disco: jumped to message %s" target))))
 
-(defun disco-room--queue-jump (message-id view)
-  "Record a jump to MESSAGE-ID and request positioning in originating VIEW."
-  (when (and (appkit-view-live-p view)
-             (eq view (appkit-current-view)))
+(defun disco-room--queue-jump (message-id surface)
+  "Record a jump to MESSAGE-ID for the originating SURFACE."
+  (when (and (appkit-surface-live-p surface)
+             (eq surface (appkit-current-surface)))
     (setq disco-room--pending-jump-message-id
           (disco-msg-normalize-id message-id))
-    (appkit-request-sync view :part 'timeline :position t)))
+    (if (disco-room--jump-to-visible-message
+         disco-room--pending-jump-message-id)
+        (progn
+          (setq disco-room--pending-jump-message-id nil)
+          (disco-room--queue-update surface :position t))
+      (unless (eq (appkit-chat-history-loading) 'around)
+        (disco-room--fetch-around-pending-jump)))))
 
 (defun disco-room--jump-required-permissions (channel)
   "Return channel permissions required to jump into CHANNEL.
@@ -1081,11 +1089,11 @@ message id and render that context before jumping."
     (unless (and (stringp target-id) (not (string-empty-p target-id)))
       (user-error "disco: message id is empty"))
     (if (or (null target-channel) (equal target-channel current-channel))
-        (let ((view (disco-room--ensure-view)))
+        (let ((view (disco-room--ensure-surface)))
           (disco-room--queue-jump target-id view)
           ;; Explicit commands may consume the request immediately, while all
           ;; actual projection and positioning still runs through room sync.
-          (appkit-sync-invalidations view))
+          (disco-room--flush-updates view))
       (let* ((target-chan-obj (disco-room--resolve-target-channel target-channel))
              (target-name (or (and (listp target-chan-obj)
                                    (alist-get 'name target-chan-obj))
@@ -1096,9 +1104,9 @@ message id and render that context before jumping."
         ;; reconstructing and looking up its original display name.
         (when-let* ((target-buffer (disco-room-open target-channel target-name)))
           (with-current-buffer target-buffer
-            (let ((view (disco-room--ensure-view)))
+            (let ((view (disco-room--ensure-surface)))
               (disco-room--queue-jump target-id view)
-              (appkit-sync-invalidations view))))))))
+              (disco-room--flush-updates view))))))))
 
 (defun disco-room--message-flags (msg)
   "Return normalized integer flags value from message MSG."
@@ -1127,8 +1135,7 @@ message id and render that context before jumping."
   "Return frozen current-user identity for reaction/poll EVENT.
 
 New Gateway events carry `:self-p' because queued events can outlive the READY
-session that supplied `disco-gateway-current-user-id'.  The fallback keeps
-directly constructed legacy events and tests compatible."
+session that supplied `disco-gateway-current-user-id'.  Events without that marker fall back to the captured Gateway session identity."
   (if (plist-member event :self-p)
       (and (plist-get event :self-p) t)
     (disco-room--same-user-id-p
@@ -1207,7 +1214,7 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
 
 (defun disco-room--ensure-timeline (&optional channel draft)
   "Ensure current room buffer owns one shared projected timeline."
-  (disco-room--ensure-view)
+  (disco-room--ensure-surface)
   (appkit-chat-timeline-ensure
    :printer #'disco-room--ewoc-printer
    :anchor-property 'disco-message-id
@@ -1215,8 +1222,8 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
    :footer (disco-room--footer-text draft)
    :after-mutation-function #'appkit-chatbuf-update-context-mode))
 
-(defun disco-room--view-id ()
-  "Return the opaque appkit view id for the current room."
+(defun disco-room--surface-id ()
+  "Return the opaque Appkit Surface identity for the current room."
   (unless disco-room--channel-id
     (error "disco: room buffer has no channel id"))
   (list 'room disco-room--channel-id))
@@ -1227,36 +1234,89 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
 The REST create response is authoritative state, but presentation still uses
 the same message-create lifecycle as Gateway delivery.  This preserves the
 optimistic row node while its nonce key becomes the server message id."
-  (when (and (appkit-view-live-p view)
+  (when (and (appkit-surface-live-p view)
              (listp message)
              (alist-get 'id message))
-    (appkit-view-enqueue-event
-     view
+    (disco-room--queue-update
+     view :event
      (list :type 'message-create
            :channel-id (disco-msg-normalize-id channel-id)
            :message (copy-tree message)
            :self-p t))
-    (appkit-request-sync view :part 'timeline)
     t))
 
-(defun disco-room--request-render (view)
-  "Request one coalesced full room projection for live VIEW.
+(cl-defstruct (disco-room--render-request
+               (:constructor disco-room--render-request-create)
+               (:copier nil))
+  invalidations
+  events)
 
-Asynchronous callbacks use this boundary after updating canonical/controller
-state.  Generated buffer content is mutated later by the Appkit sync function."
-  (when (appkit-view-live-p view)
-    (appkit-request-sync
-     view
-     :structure t
-     :parts '(frame timeline composer))))
+(cl-defun disco-room--make-invalidations
+    (&key structure parts entries resources position)
+  "Create one owned room invalidation set."
+  (let ((state (appkit-invalidations-create)))
+    (setf (appkit-invalidations-structure-p state) (and structure t)
+          (appkit-invalidations-parts state) (delete-dups (delq nil parts))
+          (appkit-invalidations-entry-keys state)
+          (delete-dups (delq nil (copy-sequence entries)))
+          (appkit-invalidations-resource-keys state)
+          (delete-dups (delq nil (copy-sequence resources)))
+          (appkit-invalidations-position-p state) (and position t))
+    state))
 
-(defun disco-room--sync-invalidations (view invalidations events)
-  "Synchronize VIEW's current room from INVALIDATIONS and EVENTS."
-  (let* ((parts (appkit-invalidations-parts invalidations))
+(cl-defun disco-room--queue-update
+    (surface &key structure part parts entry entries resource resources
+             position event)
+  "Queue one bounded room render request on SURFACE."
+  (when (appkit-surface-live-p surface)
+    (appkit-surface-post
+     surface
+     (disco-room--render-request-create
+      :invalidations
+      (disco-room--make-invalidations
+       :structure structure
+       :parts (if part (cons part parts) parts)
+       :entries (if entry (cons entry entries) entries)
+       :resources (if resource (cons resource resources) resources)
+       :position position)
+      :events (and event (list event))))))
+
+(defun disco-room--flush-updates (&optional surface)
+  "Synchronously commit queued room work on SURFACE."
+  (when-let* ((surface (or surface (appkit-current-surface)))
+              ((appkit-surface-live-p surface)))
+    (appkit-surface-send
+     surface
+     (disco-room--render-request-create
+      :invalidations (disco-room--make-invalidations)))))
+
+(defun disco-room--merge-render-requests (left right)
+  "Merge room requests LEFT and RIGHT without losing event order."
+  (let ((invalidations (appkit-invalidations-create)))
+    (appkit-invalidations-merge
+     invalidations (disco-room--render-request-invalidations left))
+    (appkit-invalidations-merge
+     invalidations (disco-room--render-request-invalidations right))
+    (disco-room--render-request-create
+     :invalidations invalidations
+     :events (append (disco-room--render-request-events left)
+                     (disco-room--render-request-events right)))))
+
+(defun disco-room--request-render (surface)
+  "Request one coalesced full room projection for live SURFACE."
+  (when (appkit-surface-live-p surface)
+    (disco-room--queue-update
+     surface :structure t :parts '(frame timeline composer))))
+
+(defun disco-room--render-request (_surface request)
+  "Apply one coalesced room render REQUEST in the current host."
+  (let* ((invalidations (disco-room--render-request-invalidations request))
+         (events (disco-room--render-request-events request))
+         (parts (appkit-invalidations-parts invalidations))
          (diff
           (appkit-projection-diff-derive
            invalidations
-           :existing-keys
+           :force-keys
            (and (or (memq 'geometry parts)
                     (memq 'all
                           (appkit-invalidations-resource-keys invalidations)))
@@ -1264,68 +1324,47 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
                 (appkit-chat-timeline-keys))
            :reconcile-parts '(timeline))))
     (dolist (event events)
-      (when (appkit-view-live-p view)
-        (disco-room--apply-gateway-event event)))
-    (when (appkit-view-live-p view)
-      (cond
-       ((or (appkit-invalidations-structure-p invalidations)
-            parts
-            (appkit-invalidations-position-p invalidations))
-        (disco-room-render)
-        (when (memq 'geometry parts)
-          (disco-room--refresh-timeline-layout))
-        ;; History callbacks only record their new window and request this sync.
-        ;; Resolve jumps after projection so message positions are current.
-        (disco-room--resolve-pending-jump))
-       ((appkit-projection-diff-reconcile-p diff)
-        (disco-room--sync-timeline
-         :force-keys (appkit-projection-diff-force-keys diff)
-         :changed-resources
-         (appkit-projection-diff-changed-dependencies diff))))
-      (when (appkit-scroll-observer-p disco-room--scroll-observer)
-        (appkit-scroll-observer-check disco-room--scroll-observer)))))
+      (disco-room--apply-gateway-event event))
+    (cond
+     ((or (appkit-invalidations-structure-p invalidations)
+          parts
+          (appkit-invalidations-position-p invalidations))
+      (disco-room-render)
+      (when (memq 'geometry parts)
+        (disco-room--refresh-timeline-layout))
+      (disco-room--resolve-pending-jump))
+     ((appkit-projection-diff-reconcile-p diff)
+      (disco-room--sync-timeline
+       :force-keys (appkit-projection-diff-force-keys diff)
+       :changed-resources
+       (appkit-projection-diff-changed-dependencies diff))))
+    (when (appkit-scroll-observer-p disco-room--scroll-observer)
+      (appkit-scroll-observer-check disco-room--scroll-observer))))
 
-(defun disco-room--ensure-view ()
-  "Return the live appkit view owning the current room buffer."
+(defun disco-room--ensure-surface ()
+  "Return the live Generated Surface owning the current room buffer."
   (let* ((app (disco-runtime-app))
-         (id (disco-room--view-id))
-         (current (appkit-current-view))
-         (view
+         (identity (disco-room--surface-id))
+         (current (appkit-current-surface))
+         (surface
           (cond
-           ((and (appkit-view-live-p current)
-                 (eq app (appkit-view-app current))
-                 (equal id (appkit-view-id current)))
-            (setf (appkit-view-state current) disco-room--channel-id
-                  (appkit-view-sync-function current)
-                  #'disco-room--sync-invalidations
-                  (appkit-view-parts current)
-                  '(frame timeline composer geometry))
+           ((and (appkit-surface-p current)
+                 (eq (appkit-surface-status current) 'running)
+                 (eq app (appkit-surface-app current))
+                 (equal identity (appkit-surface-identity current)))
             current)
-           ((appkit-view-live-p current)
-            (error "disco: room buffer belongs to a different appkit view"))
+           ((appkit-surface-p current)
+            (error "disco: room buffer belongs to another Surface"))
            (t
-            (let* ((channel-id disco-room--channel-id)
-                   (channel-name disco-room--channel-name)
-                   (replacement-p
-                    (and (boundp 'appkit--view-fingerprint)
-                         appkit--view-fingerprint))
-                   (attached
-                    (appkit-attach-view
-                     :app app
-                     :id id
-                     :state channel-id
-                     :mode 'disco-room-mode
-                     :sync-function #'disco-room--sync-invalidations
-                     :parts '(frame timeline composer geometry))))
-              ;; A same-mode buffer may outlive its previous Appkit view.
-              ;; Replacements must not inherit dead controller state.
-              (when replacement-p
-                (disco-room--reset-view-local-state
-                 channel-id channel-name))
-              attached)))))
-    (disco-room--install-scroll-observer view)
-    (appkit-view-enable-responsive-geometry view)
-    view))
+            (appkit-open-generated-surface
+             disco-room--surface-type
+             :app app :identity identity
+             :input (list :channel-id disco-room--channel-id
+                          :channel-name disco-room--channel-name)
+             :buffer (current-buffer))))))
+    (when (appkit-surface-live-p surface)
+      (disco-room--install-scroll-observer surface))
+    surface))
 
 (defun disco-room--update-frame (&optional channel draft)
   "Update current room header, footer, and composer in place."
@@ -1560,7 +1599,7 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
             'filtered)
         (when (eq event-type 'message-delete)
           (disco-room--repair-history-window-after-delete message-id))
-        ;; This helper runs only while `disco-room--sync-invalidations' consumes
+        ;; This helper runs only while `disco-room--render-request' consumes
         ;; a gateway event.  Preserve keyed-node identity for optimistic sends
         ;; inside that projection transaction.
         (disco-room--sync-timeline
@@ -1602,16 +1641,18 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
       (disco-room-filter-refresh)
     (let* ((room-buffer (current-buffer))
            (channel-id disco-room--channel-id)
-           (view (disco-room--ensure-view))
+           (view (disco-room--ensure-surface))
            (request-revision (disco-state-message-revision channel-id))
            (request-limit (max 1 disco-message-fetch-limit))
            (frontier-at-start disco-room--remote-latest-message-id)
            (owner (appkit-chat-history-request-start view 'latest)))
-      (appkit-request-sync view :part 'frame)
-      (disco-api-channel-messages-async
+      (disco-room--queue-update view :parts '(frame))
+      (appkit-chat-history-request-bind-handle
+     owner
+     (disco-api-channel-messages-async
        channel-id
        :limit request-limit
-       :owner owner
+       :owner view
        :on-success
        (lambda (messages)
          (when (disco-room--callback-active-p room-buffer channel-id view)
@@ -1643,7 +1684,7 @@ state.  Generated buffer content is mutated later by the Appkit sync function."
              (when (appkit-chat-history-request-end owner)
                (disco-room--request-render view)
                (message "disco: room refresh failed: %s"
-                        (disco-room--async-error-message err))))))))))
+                        (disco-room--async-error-message err)))))))))))
 
 (defun disco-room--close-for-deleted-channel (reason)
   "Close current room because its backing channel is no longer valid.
@@ -1731,21 +1772,20 @@ REASON is shown in the minibuffer."
       (disco-room--apply-live-poll-vote-event event)))))
 
 (defun disco-room--attach-live-updates ()
-  "Attach this room's Appkit view to the live gateway event stream."
-  (let ((view (disco-room--ensure-view)))
+  "Attach this room's Generated Surface to the live gateway event stream."
+  (let ((surface (disco-room--ensure-surface)))
     (if (and (functionp disco-room--gateway-handler)
              (appkit-handle-p disco-room--live-update-handle)
              (appkit-handle-alive-p disco-room--live-update-handle)
-             (eq view (appkit-handle-owner disco-room--live-update-handle)))
-        view
+             (eq surface (appkit-handle-owner disco-room--live-update-handle)))
+        surface
       (disco-room--detach-live-updates)
       (let* ((buffer (current-buffer))
              (channel-id disco-room--channel-id)
              (handler
               (lambda (event)
-                (when (appkit-view-live-p view)
-                  (appkit-view-enqueue-event view event)
-                  (appkit-request-sync view :part 'timeline))))
+                (when (appkit-surface-live-p surface)
+                  (disco-room--queue-update surface :event event))))
              (hook-installed-p nil)
              (watch-installed-p nil)
              (cleanup-active-p t)
@@ -1753,8 +1793,8 @@ REASON is shown in the minibuffer."
              (cleanup
               (lambda ()
                 ;; The handle and this guard jointly make cleanup idempotent.  The
-                ;; captured identities also keep an old view from removing a
-                ;; replacement view's handler or watch.
+                ;; captured identities also keep an old surface from removing a
+                ;; replacement surface's handler or watch.
                 (when cleanup-active-p
                   (setq cleanup-active-p nil)
                   (when hook-installed-p
@@ -1775,13 +1815,13 @@ REASON is shown in the minibuffer."
               (setq hook-installed-p t)
               (setq watch-installed-p t)
               (disco-gateway-watch-channel channel-id)
-              (setq handle (appkit-register-handle view 'function cleanup))
+              (setq handle (appkit-register-handle surface 'function cleanup))
               (setq disco-room--gateway-handler handler
                     disco-room--live-update-handle handle))
           (error
            (funcall cleanup)
            (signal (car err) (cdr err))))
-        view))))
+        surface))))
 
 (defun disco-room--detach-live-updates ()
   "Detach this room buffer from the live update event stream exactly once."
@@ -1793,8 +1833,6 @@ REASON is shown in the minibuffer."
      ((and (appkit-handle-p handle) (appkit-handle-alive-p handle))
       (appkit-cancel-handle handle))
      (handler
-      ;; Compatibility cleanup for buffers attached before lifecycle ownership
-      ;; was installed.  Clearing HANDLER makes repeated detach calls inert.
       (remove-hook 'disco-gateway-event-hook handler)
       (setq disco-room--gateway-handler nil)
       (when channel-id
@@ -1818,19 +1856,21 @@ When QUIET is non-nil, suppress progress messages."
    (t
     (let* ((room-buffer (current-buffer))
            (channel-id disco-room--channel-id)
-           (view (disco-room--ensure-view))
+           (view (disco-room--ensure-surface))
            (request-revision (disco-state-message-revision channel-id))
            (before (or (appkit-chat-history-window-first-key)
                        (user-error
                         "disco: no oldest message cursor; refresh first")))
            (request-limit (max 1 disco-message-fetch-limit))
            (owner (appkit-chat-history-request-start view 'older)))
-      (appkit-request-sync view :part 'frame)
-      (disco-api-channel-messages-async
+      (disco-room--queue-update view :parts '(frame))
+      (appkit-chat-history-request-bind-handle
+     owner
+     (disco-api-channel-messages-async
        channel-id
        :before before
        :limit request-limit
-       :owner owner
+       :owner view
        :on-success
        (lambda (older)
          (when (disco-room--callback-active-p room-buffer channel-id view)
@@ -1873,7 +1913,7 @@ When QUIET is non-nil, suppress progress messages."
                (when (appkit-chat-history-request-end owner)
                  (disco-room--request-render view)
                  (message "disco: older history load failed: %s"
-                          (disco-room--async-error-message err))))))))))))
+                          (disco-room--async-error-message err)))))))))))))
 
 (defun disco-room-load-newer-messages (&optional quiet)
   "Extend a partial around-message window toward the live frontier.
@@ -1894,17 +1934,19 @@ When QUIET is non-nil, suppress progress messages."
    (t
     (let* ((room-buffer (current-buffer))
            (channel-id disco-room--channel-id)
-           (view (disco-room--ensure-view))
+           (view (disco-room--ensure-surface))
            (cursor (appkit-chat-history-window-last-key))
            (request-revision (disco-state-message-revision channel-id))
            (request-limit (max 1 disco-message-fetch-limit))
            (owner (appkit-chat-history-request-start view 'newer)))
-      (appkit-request-sync view :part 'frame)
-      (disco-api-channel-messages-async
+      (disco-room--queue-update view :parts '(frame))
+      (appkit-chat-history-request-bind-handle
+     owner
+     (disco-api-channel-messages-async
        channel-id
        :after cursor
        :limit request-limit
-       :owner owner
+       :owner view
        :on-success
        (lambda (newer)
          (when (disco-room--callback-active-p room-buffer channel-id view)
@@ -1965,7 +2007,7 @@ When QUIET is non-nil, suppress progress messages."
                (when (appkit-chat-history-request-end owner)
                  (disco-room--request-render view)
                  (message "disco: newer history load failed: %s"
-                          (disco-room--async-error-message err))))))))))))
+                          (disco-room--async-error-message err)))))))))))))
 
 (defun disco-room--lottie-sticker-at-point ()
   "Return the native Lottie Sticker projected at point, or nil."
@@ -1999,7 +2041,7 @@ When QUIET is non-nil, suppress progress messages."
     (when (y-or-n-p (format "Delete message %s? " message-id))
       (let ((room-buffer (current-buffer))
             (channel-id disco-room--channel-id)
-            (view (disco-room--ensure-view)))
+            (view (disco-room--ensure-surface)))
         (disco-api-delete-message-async
          channel-id
          message-id
@@ -2238,12 +2280,11 @@ _MSG is ignored because the transient resolves availability from point."
 (defun disco-room--reset-view-local-state (&optional channel-id channel-name)
   "Reset controller state owned by one room view.
 
-CHANNEL-ID and CHANNEL-NAME bind a newly attached replacement view.  This is
-separate from major-mode initialization because an Appkit view can die while
+CHANNEL-ID and CHANNEL-NAME bind a newly attached replacement Surface.  This
+is separate from major-mode initialization because a Surface can stop while
 its same-mode buffer survives."
   (disco-room--detach-live-updates)
-  (when (fboundp 'disco-company--teardown-room-buffer)
-    (disco-company--teardown-room-buffer))
+  (disco-company--teardown-room-buffer)
   (disco-room--typing-cancel-expire-timer)
   (appkit-chatbuf-reset-state disco-room-input-history-size)
   (appkit-chat-history-reset-state)
@@ -2288,6 +2329,35 @@ its same-mode buffer survives."
   (when (disco-current-token)
     (disco-sticker-ensure-ready disco-room--guild-id)))
 
+(defun disco-room--surface-init (_context input)
+  "Initialize a room Surface from INPUT."
+  (let ((channel-id (plist-get input :channel-id))
+        (channel-name (plist-get input :channel-name)))
+    (disco-room--reset-view-local-state channel-id channel-name)
+    (appkit-next
+     :model channel-id
+     :render
+     (disco-room--render-request-create
+      :invalidations
+      (disco-room--make-invalidations
+       :structure t :parts '(frame timeline composer))))))
+
+(defun disco-room--surface-update (_context model message)
+  "Request room presentation described by MESSAGE."
+  (if (disco-room--render-request-p message)
+      (appkit-next :model model :render message)
+    (appkit-next-reject 'invalid-room-render-request)))
+
+(defun disco-room--surface-renderer (_surface)
+  "Create one Generated Renderer for a room."
+  (appkit-generated-renderer-create
+   :mount #'ignore
+   :merge #'disco-room--merge-render-requests
+   :render (lambda (surface _app-read-view _model request)
+             (disco-room--render-request surface request))
+   :recover nil
+   :unmount (lambda (_surface) (disco-room--detach-live-updates))))
+
 (define-derived-mode disco-room-mode appkit-chatbuf-mode "Disco-Room"
   "Major mode for disco.el room buffers."
   ;; Avoid visible seams between vertically sliced inline images.
@@ -2302,40 +2372,44 @@ its same-mode buffer survives."
   (add-hook 'post-command-hook #'disco-room--post-command t t)
   (appkit-chatbuf-use-timeline-mode #'disco-room-timeline-mode))
 
+(defconst disco-room--surface-type
+  (appkit-surface-type-create
+   :name 'disco-room
+   :mode #'disco-room-mode
+   :init #'disco-room--surface-init
+   :update #'disco-room--surface-update
+   :renderer-factory #'disco-room--surface-renderer)
+  "Generated Surface type for Discord rooms.")
+
 (defun disco-room-open (channel-id channel-name)
-  "Open room for CHANNEL-ID with CHANNEL-NAME and return its actual buffer."
+  "Open CHANNEL-ID as a Generated room Surface."
   (let* ((app (disco-runtime-app))
-         (view-id (list 'room channel-id))
-         (existing (appkit-view-for-id app view-id))
-         (view
-          (appkit-open-view
-           :app app
-           :id view-id
-           :mode 'disco-room-mode
-           :buffer-name (disco-room--buffer-name channel-name channel-id)
-           :state channel-id
-           :sync-function #'disco-room--sync-invalidations
-           :parts '(frame timeline composer geometry)
-           :setup
-           (lambda (_view)
-             ;; The buffer may outlive a killed predecessor view.  SETUP runs
-             ;; only for a new attachment, so live view reuse keeps its draft,
-             ;; history window, controller generations, and request ownership.
-             (disco-room--reset-view-local-state channel-id channel-name))))
-         (buf (appkit-view-buffer view)))
-    (with-current-buffer buf
-      (setq disco-room--channel-id channel-id)
-      (disco-room--install-scroll-observer view)
-      (setq disco-room--channel-name channel-name)
-      (let ((channel (disco-state-channel channel-id)))
-        (setq disco-room--guild-id (and channel (alist-get 'guild_id channel))))
-      (disco-room--attach-live-updates)
+         (identity (list 'room channel-id))
+         (existing (appkit-app-surface app identity))
+         (surface
+          (cond
+           ((appkit-surface-live-p existing)
+            (pop-to-buffer (appkit-surface-buffer existing))
+            existing)
+           (existing
+            (error "disco: room Surface is unavailable: %S"
+                   (appkit-surface-status existing)))
+           (t
+            (appkit-open-generated-surface
+             disco-room--surface-type
+             :app app :identity identity
+             :input (list :channel-id channel-id :channel-name channel-name)
+             :buffer-name (disco-room--buffer-name channel-name channel-id)
+             :select t))))
+         (buffer (appkit-surface-buffer surface)))
+    (with-current-buffer buffer
       (unless existing
-        (disco-room-refresh)))
-    (pop-to-buffer buf)
-    (with-current-buffer buf
-      (appkit-view-refresh-responsive-geometry))
-    buf))
+        (disco-room--install-scroll-observer surface)
+        (disco-room--attach-live-updates)
+        (disco-room-refresh))
+      (disco-room--queue-update surface :parts '(geometry))
+      (disco-room--flush-updates surface))
+    buffer))
 
 (provide 'disco-room)
 

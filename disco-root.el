@@ -21,7 +21,6 @@
 (require 'appkit-directory)
 (require 'appkit-invalidation)
 (require 'appkit-projection)
-(require 'appkit-transaction)
 (require 'appkit-view)
 (require 'appkit-position)
 (require 'disco-api)
@@ -95,9 +94,6 @@
 
 (defvar-local disco-root--sticker-handler nil
   "Buffer-local Sticker resource handler closure.")
-
-(defvar-local disco-root--live-updates-handle nil
-  "Appkit lifecycle handle owning this root buffer's global subscriptions.")
 
 (defvar-local disco-root--refresh-in-flight nil
   "Non-nil while an async root refresh is in progress.")
@@ -468,8 +464,7 @@ process, so late callbacks cannot affect a replacement account session.")
   (let ((expanded (not (disco-root--section-expanded-p 'unread))))
     (disco-root--set-section-expanded 'unread expanded)
     (disco-root--queue-live-update nil t t)
-    (when-let* ((view (appkit-current-view)))
-      (appkit-sync-invalidations view))
+    (disco-root--flush-live-updates)
     (message "disco: home unread section %s"
              (if expanded "expanded" "collapsed"))))
 
@@ -2046,20 +2041,19 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
         (disco-root--search-set-tab-state tab state)))
     (disco-root--search-render-if-visible)))
 
-(defun disco-root--search-deliver-to-view (view buffer function &rest arguments)
-  "Call FUNCTION with ARGUMENTS for the still-current VIEW in BUFFER.
-Late responses are inert after VIEW is killed or BUFFER is attached to a
-replacement view."
-  (when (and (appkit-view-live-p view)
-             (eq buffer (appkit-view-buffer view)))
+(defun disco-root--search-deliver-to-surface
+    (surface buffer function &rest arguments)
+  "Call FUNCTION for the still-current SURFACE in BUFFER."
+  (when (and (appkit-surface-live-p surface)
+             (eq buffer (appkit-surface-buffer surface)))
     (with-current-buffer buffer
-      (when (eq view (appkit-current-view))
+      (when (eq surface (appkit-current-surface))
         (apply function arguments)))))
 
 (defun disco-root--search-dispatch (generation tabs-alist)
   "Dispatch async root search request for GENERATION using TABS-ALIST."
   (let* ((root-buffer (current-buffer))
-         (request-view (appkit-current-view))
+         (request-surface (appkit-current-surface))
          (domain disco-root--search-domain)
          (channel-ids (or (disco-root--search-domain-fixed-channel-ids disco-root--search-domain)
                           (plist-get disco-root--search-query-spec :channel-ids)))
@@ -2076,13 +2070,13 @@ replacement view."
         :include-nsfw include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
-                      (disco-root--search-deliver-to-view
-                       request-view root-buffer
+                      (disco-root--search-deliver-to-surface
+                       request-surface root-buffer
                        #'disco-root--search-handle-success
                        generation tabs-alist body))
         :on-error (lambda (err)
-                    (disco-root--search-deliver-to-view
-                     request-view root-buffer
+                    (disco-root--search-deliver-to-surface
+                     request-surface root-buffer
                      #'disco-root--search-handle-error
                      generation tabs-alist err))))
       ('channel
@@ -2094,13 +2088,13 @@ replacement view."
             :include-nsfw include-nsfw
             :track-exact-total-hits disco-root-search-track-exact-total-hits
             :on-success (lambda (body)
-                          (disco-root--search-deliver-to-view
-                           request-view root-buffer
+                          (disco-root--search-deliver-to-surface
+                           request-surface root-buffer
                            #'disco-root--search-handle-success
                            generation tabs-alist body))
             :on-error (lambda (err)
-                        (disco-root--search-deliver-to-view
-                         request-view root-buffer
+                        (disco-root--search-deliver-to-surface
+                         request-surface root-buffer
                          #'disco-root--search-handle-error
                          generation tabs-alist err)))
          (disco-api-channel-search-messages-tabs-async
@@ -2109,13 +2103,13 @@ replacement view."
           :include-nsfw include-nsfw
           :track-exact-total-hits disco-root-search-track-exact-total-hits
           :on-success (lambda (body)
-                        (disco-root--search-deliver-to-view
-                         request-view root-buffer
+                        (disco-root--search-deliver-to-surface
+                         request-surface root-buffer
                          #'disco-root--search-handle-success
                          generation tabs-alist body))
           :on-error (lambda (err)
-                      (disco-root--search-deliver-to-view
-                       request-view root-buffer
+                      (disco-root--search-deliver-to-surface
+                       request-surface root-buffer
                        #'disco-root--search-handle-error
                        generation tabs-alist err)))))
       (_
@@ -2124,13 +2118,13 @@ replacement view."
         :include-nsfw include-nsfw
         :track-exact-total-hits disco-root-search-track-exact-total-hits
         :on-success (lambda (body)
-                      (disco-root--search-deliver-to-view
-                       request-view root-buffer
+                      (disco-root--search-deliver-to-surface
+                       request-surface root-buffer
                        #'disco-root--search-handle-success
                        generation tabs-alist body))
         :on-error (lambda (err)
-                    (disco-root--search-deliver-to-view
-                     request-view root-buffer
+                    (disco-root--search-deliver-to-surface
+                     request-surface root-buffer
                      #'disco-root--search-handle-error
                      generation tabs-alist err)))))))
 
@@ -2143,8 +2137,7 @@ replacement view."
               disco-root--search-in-flight nil
               disco-root--search-generation (1+ disco-root--search-generation))
   (disco-root--queue-live-update nil t t)
-  (when-let* ((view (appkit-current-view)))
-    (appkit-sync-invalidations view))
+  (disco-root--flush-live-updates)
   (message "disco: search closed"))
 
 
@@ -2402,8 +2395,8 @@ When FORCE is non-nil, reflow even if WIDTH matches current value."
              (or force
                  (not (eq width disco-root--fill-column))))
     (setq disco-root--fill-column width)
-    (when-let* ((view (appkit-current-view)))
-      (appkit-request-sync view :part 'geometry :position t))
+    (when (appkit-surface-live-p (appkit-current-surface))
+      (disco-root--queue-live-update nil nil nil t))
     t))
 
 (defun disco-root-buffer-auto-fill (&optional force)
@@ -2476,7 +2469,7 @@ With FORCE non-nil, reproject even if width has not changed."
   (disco-root--set-section-expanded
    section (not (disco-root--section-expanded-p section)))
   (disco-root--queue-live-update nil t nil)
-  (appkit-sync-invalidations (appkit-current-view)))
+  (disco-root--flush-live-updates))
 
 (defun disco-root--toggle-node-at-point ()
   "Toggle the root section at point and return non-nil on success."
@@ -2512,70 +2505,114 @@ With FORCE non-nil, reproject even if width has not changed."
   (memq major-mode '(disco-root-mode
                      disco-root-archived-threads-mode)))
 
-(defun disco-root--view-id ()
-  "Return the Appkit view id for the current root-related buffer."
+(cl-defun disco-root--make-invalidations
+    (&key structure parts entries resources position)
+  "Create one owned root invalidation request."
+  (let ((state (appkit-invalidations-create)))
+    (setf (appkit-invalidations-structure-p state) (and structure t)
+          (appkit-invalidations-parts state) (delete-dups (delq nil parts))
+          (appkit-invalidations-entry-keys state)
+          (delete-dups
+           (delq nil
+                 (cond ((null entries) nil)
+                       ((listp entries) (copy-sequence entries))
+                       (t (list entries)))))
+          (appkit-invalidations-resource-keys state)
+          (delete-dups (delq nil (copy-sequence resources)))
+          (appkit-invalidations-position-p state) (and position t))
+    state))
+
+(defun disco-root--merge-invalidations (left right)
+  "Return an owned invalidation request containing LEFT and RIGHT."
+  (let ((merged (appkit-invalidations-create)))
+    (appkit-invalidations-merge merged left)
+    (appkit-invalidations-merge merged right)))
+
+(defun disco-root--flush-live-updates ()
+  "Synchronously commit every queued root render request."
+  (when-let* ((surface (appkit-current-surface))
+              ((appkit-surface-live-p surface)))
+    (appkit-surface-send surface (disco-root--make-invalidations))))
+
+(defun disco-root--surface-init (_context input)
+  "Initialize a root Surface from INPUT."
+  (when-let* ((parent (plist-get input :archived-parent)))
+    (setq-local disco-root--archived-parent-channel parent))
+  (disco-root--reset-session-controller-state)
+  (appkit-next
+   :model nil
+   :render (disco-root--make-invalidations
+            :structure t :parts '(header))))
+
+(defun disco-root--surface-update (_context model message)
+  "Request root presentation described by invalidation MESSAGE."
+  (if (appkit-invalidations-p message)
+      (appkit-next :model model :render message)
+    (appkit-next-reject 'invalid-root-render-request)))
+
+(defun disco-root--surface-renderer (_surface)
+  "Create the Generated Renderer shared by root-style Surfaces."
+  (appkit-generated-renderer-create
+   :mount #'ignore
+   :merge #'disco-root--merge-invalidations
+   :render (lambda (surface _app-read-view _model request)
+             (disco-root--render-invalidations surface request))
+   :recover nil
+   :unmount (lambda (_surface) (disco-root--detach-live-updates))))
+
+(defun disco-root--surface-id ()
+  "Return the Appkit Surface identity for the current root buffer."
   (pcase major-mode
     ('disco-root-mode '(root main))
     ('disco-root-archived-threads-mode
      (let ((parent-id (alist-get 'id disco-root--archived-parent-channel)))
        (unless parent-id
-         (error "Disco: archived root view has no parent channel"))
+         (error "Disco: archived root Surface has no parent channel"))
        (list 'root 'archived-threads parent-id)))
-    (_
-     (error "Disco: unsupported root view mode: %S" major-mode))))
+    (_ (error "Disco: unsupported root Surface mode: %S" major-mode))))
 
-(defun disco-root--ensure-view ()
-  "Return the live Appkit view owning the current root-related buffer."
+(defun disco-root--ensure-surface ()
+  "Return the live Generated Surface owning the current root buffer."
   (unless (disco-root--live-updatable-buffer-mode-p)
     (error "Disco: current buffer does not support root live updates"))
   (let* ((app (disco-runtime-app))
-         (id (disco-root--view-id))
-         (current (appkit-current-view)))
+         (identity (disco-root--surface-id))
+         (current (appkit-current-surface)))
     (cond
-     ((and (appkit-view-live-p current)
-           (eq app (appkit-view-app current))
-           (equal id (appkit-view-id current)))
-      (setf (appkit-view-sync-function current)
-            #'disco-root--sync-invalidations)
+     ((and (appkit-surface-live-p current)
+           (eq app (appkit-surface-app current))
+           (equal identity (appkit-surface-identity current)))
       current)
-     ((appkit-view-live-p current)
-      (error "Disco: root buffer belongs to a different Appkit view"))
+     ((appkit-surface-p current)
+      (error "Disco: root buffer belongs to another Appkit Surface"))
      (t
-      (appkit-attach-view
-       :app app
-       :id id
-       :mode major-mode
-       :sync-function #'disco-root--sync-invalidations
-       :parts '(content header geometry))))))
+      (appkit-open-generated-surface
+       (pcase major-mode
+         ('disco-root-mode disco-root--surface-type)
+         ('disco-root-archived-threads-mode
+          disco-root-view--archived-surface-type))
+       :app app :identity identity :buffer (current-buffer))))))
 
-(defun disco-root--queue-live-update (channel-ids &optional structural-p header-p)
-  "Invalidate root projections affected by CHANNEL-IDS.
-
-When STRUCTURAL-P is non-nil, the next Appkit sync performs full reconcile.
-When HEADER-P is non-nil, the root header is invalidated too."
-  (let* ((ids (delete-dups
-               (delq nil
-                     (copy-sequence
-                      (cond
-                       ((null channel-ids) nil)
-                       ((listp channel-ids) channel-ids)
-                       (t (list channel-ids)))))))
-         (view (appkit-current-view)))
+(defun disco-root--queue-live-update
+    (channel-ids &optional structural-p header-p geometry-p)
+  "Queue one bounded root render request for changed CHANNEL-IDS."
+  (let ((surface (appkit-current-surface))
+        (invalidations
+         (disco-root--make-invalidations
+          :entries channel-ids
+          :structure structural-p
+          :parts (delq nil (list (and header-p 'header)
+                                 (and geometry-p 'geometry)))
+          :position geometry-p)))
     (disco-root--debug-log
-     "queue-live-update ids=%s structural=%s header=%s"
-     ids
-     (and structural-p t)
-     (and header-p t))
-    (when (and (appkit-view-live-p view)
-               (or ids structural-p header-p))
-      (appkit-request-sync
-       view
-       :entries ids
-       :structure structural-p
-       :part (and header-p 'header)))))
+     "queue-live-update ids=%s structural=%s header=%s geometry=%s"
+     channel-ids (and structural-p t) (and header-p t) (and geometry-p t))
+    (when (and (appkit-surface-live-p surface)
+               (appkit-invalidations-any-p invalidations))
+      (appkit-surface-post surface invalidations))))
 
-(defun disco-root--sync-invalidations (view invalidations _events)
-  "Synchronize VIEW from Appkit INVALIDATIONS."
+(defun disco-root--render-invalidations (_surface invalidations)
+  "Render root content selected by INVALIDATIONS in the current host."
   (let* ((parts (appkit-invalidations-parts invalidations))
          (resources (appkit-invalidations-resource-keys invalidations))
          (needs-header (memq 'header parts))
@@ -2584,47 +2621,43 @@ When HEADER-P is non-nil, the root header is invalidated too."
          (needs-structural
           (or (appkit-invalidations-structure-p invalidations)
               (memq 'content parts)))
-         (diff
-          (appkit-projection-diff-derive
-           invalidations :reconcile-parts '(content)))
-         (dirty-channel-ids
-          (appkit-projection-diff-force-keys diff))
-         (needs-reconcile
-          (appkit-projection-diff-reconcile-p diff))
-         (force-all-rows-p
-          (or needs-geometry all-resources-p)))
-    (appkit-with-content-update view
-      (cond
-       ((eq major-mode 'disco-root-archived-threads-mode)
-        (when (or needs-reconcile needs-header)
-          (appkit-view-render-list-spec-preserving-position
-           (disco-root--archived-threads-list-spec)
-           :anchor-property 'disco-channel-id
-           :preserve-window-start t
-           :after-restore #'disco-root--update-window-points)))
-       ((eq major-mode 'disco-root-mode)
-        (disco-root--debug-log
-         "sync-invalidations projection=%s view=%s dirty=%d structural=%s header=%s geometry=%s"
-         (if disco-root--search-active-p 'search 'root)
-         disco-root--view-mode
-         (length dirty-channel-ids)
-         (and needs-structural t)
-         (and needs-header t)
-         (and needs-geometry t))
-        (if disco-root--search-active-p
+         (diff (appkit-projection-diff-derive
+                invalidations :reconcile-parts '(content)))
+         (dirty-channel-ids (appkit-projection-diff-force-keys diff))
+         (needs-reconcile (appkit-projection-diff-reconcile-p diff))
+         (force-all-rows-p (or needs-geometry all-resources-p))
+         (old-modified-p (buffer-modified-p))
+         (buffer-undo-list t)
+         (inhibit-read-only t))
+    (unwind-protect
+        (cond
+         ((eq major-mode 'disco-root-archived-threads-mode)
+          (when (or needs-reconcile needs-header)
+            (appkit-view-render-list-spec-preserving-position
+             (disco-root--archived-threads-list-spec)
+             :anchor-property 'disco-channel-id
+             :preserve-window-start t
+             :after-restore #'disco-root--update-window-points)))
+         ((eq major-mode 'disco-root-mode)
+          (disco-root--debug-log
+           "render-invalidations projection=%s view=%s dirty=%d structural=%s header=%s geometry=%s"
+           (if disco-root--search-active-p 'search 'root)
+           disco-root--view-mode (length dirty-channel-ids)
+           (and needs-structural t) (and needs-header t)
+           (and needs-geometry t))
+          (if disco-root--search-active-p
+              (cond
+               (needs-reconcile (disco-root--render-preserving-position))
+               (needs-header (disco-root--refresh-header-line)))
             (cond
              (needs-reconcile
+              (setq disco-root--tree-force-channel-ids dirty-channel-ids
+                    disco-root--tree-force-all-rows-p
+                    (and force-all-rows-p t))
               (disco-root--render-preserving-position))
-             (needs-header
-              (disco-root--refresh-header-line)))
-          (cond
-           (needs-reconcile
-            (setq disco-root--tree-force-channel-ids dirty-channel-ids
-                  disco-root--tree-force-all-rows-p
-                  (and force-all-rows-p t))
-            (disco-root--render-preserving-position))
-           (needs-header
-            (disco-root--refresh-header-line)))))))))
+             (needs-header (disco-root--refresh-header-line)))))
+         (t (error "Disco: unsupported root Surface mode: %S" major-mode)))
+      (set-buffer-modified-p old-modified-p))))
 
 (defun disco-root--handle-gateway-event (event)
   "Apply one gateway EVENT to root buffer view."
@@ -2757,42 +2790,39 @@ When HEADER-P is non-nil, the root header is invalidated too."
      (disco-root--queue-live-update nil t nil))))
 
 (defun disco-root--attach-live-updates ()
-  "Attach root buffer to global gateway update stream."
-  (let ((view (disco-root--ensure-view)))
-    (when (and (appkit-handle-p disco-root--live-updates-handle)
-               (appkit-handle-alive-p disco-root--live-updates-handle))
-      (appkit-cancel-handle disco-root--live-updates-handle))
+  "Attach the current root Surface to global update streams."
+  (let ((surface (disco-root--ensure-surface)))
     (disco-root--detach-live-updates)
     (setq disco-root--gateway-handler
           (lambda (event)
-            (when (appkit-view-live-p view)
-              (with-current-buffer (appkit-view-buffer view)
+            (when (appkit-surface-live-p surface)
+              (with-current-buffer (appkit-surface-buffer surface)
                 (disco-root--handle-gateway-event event)))))
     (when (eq major-mode 'disco-root-mode)
       (setq disco-root--directory-handler
             (lambda (event)
-              (when (appkit-view-live-p view)
-                (with-current-buffer (appkit-view-buffer view)
-                  (disco-root--handle-directory-event event)))))
-      (setq disco-root--preview-handler
+              (when (appkit-surface-live-p surface)
+                (with-current-buffer (appkit-surface-buffer surface)
+                  (disco-root--handle-directory-event event))))
+            disco-root--preview-handler
             (lambda (channel-id)
-              (when (appkit-view-live-p view)
-                (with-current-buffer (appkit-view-buffer view)
-                  (disco-root--handle-preview-update channel-id)))))
-      (setq disco-root--avatar-handler
+              (when (appkit-surface-live-p surface)
+                (with-current-buffer (appkit-surface-buffer surface)
+                  (disco-root--handle-preview-update channel-id))))
+            disco-root--avatar-handler
             (lambda (resources)
-              (when (appkit-view-live-p view)
-                (with-current-buffer (appkit-view-buffer view)
+              (when (appkit-surface-live-p surface)
+                (with-current-buffer (appkit-surface-buffer surface)
                   (disco-root--handle-avatar-resources-updated resources))))))
     (setq disco-root--media-handler
           (lambda (kind key)
-            (when (appkit-view-live-p view)
-              (with-current-buffer (appkit-view-buffer view)
-                (disco-root--handle-media-rerender kind key)))))
-    (setq disco-root--sticker-handler
+            (when (appkit-surface-live-p surface)
+              (with-current-buffer (appkit-surface-buffer surface)
+                (disco-root--handle-media-rerender kind key))))
+          disco-root--sticker-handler
           (lambda (resources)
-            (when (appkit-view-live-p view)
-              (with-current-buffer (appkit-view-buffer view)
+            (when (appkit-surface-live-p surface)
+              (with-current-buffer (appkit-surface-buffer surface)
                 (disco-root--handle-one-line-resources-updated resources)))))
     (add-hook 'disco-gateway-event-hook disco-root--gateway-handler)
     (when disco-root--directory-handler
@@ -2801,22 +2831,10 @@ When HEADER-P is non-nil, the root header is invalidated too."
       (add-hook 'disco-preview-update-hook disco-root--preview-handler))
     (when disco-root--avatar-handler
       (add-hook 'disco-avatar-resources-updated-hook disco-root--avatar-handler))
-    (when disco-root--media-handler
-      (add-hook 'disco-media-rerender-hook disco-root--media-handler))
-    (when disco-root--sticker-handler
-      (add-hook 'disco-sticker-resources-updated-hook
-                disco-root--sticker-handler))
+    (add-hook 'disco-media-rerender-hook disco-root--media-handler)
+    (add-hook 'disco-sticker-resources-updated-hook disco-root--sticker-handler)
     (disco-gateway-watch-global)
-    (let ((buffer (current-buffer)))
-      (setq disco-root--live-updates-handle
-            (appkit-register-handle
-             view 'function
-             (lambda ()
-               (when (buffer-live-p buffer)
-                 (with-current-buffer buffer
-                   (setq disco-root--live-updates-handle nil)
-                   (disco-root--detach-live-updates)))))))
-    view))
+    surface))
 
 (defun disco-root--detach-live-updates ()
   "Detach root buffer from global gateway update stream."
@@ -2844,12 +2862,12 @@ When HEADER-P is non-nil, the root header is invalidated too."
       (disco-gateway-unwatch-global))))
 
 (defun disco-root--handle-state-reset ()
-  "Invalidate open root views after canonical state is reset."
+  "Invalidate every live primary root Surface after canonical reset."
   (dolist (buffer (buffer-list))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (when (and (eq major-mode 'disco-root-mode)
-                   (appkit-view-live-p (appkit-current-view)))
+                   (appkit-surface-live-p (appkit-current-surface)))
           (disco-root--queue-live-update nil t t))))))
 
 (add-hook 'disco-state-reset-hook #'disco-root--handle-state-reset)
@@ -2859,7 +2877,7 @@ When HEADER-P is non-nil, the root header is invalidated too."
   (interactive)
   (setq disco-root--sort-mode (if (eq disco-root--sort-mode 'activity) 'name 'activity))
   (disco-root--queue-live-update nil t nil)
-  (appkit-sync-invalidations (appkit-current-view))
+  (disco-root--flush-live-updates)
   (message "disco: root sort mode -> %s" disco-root--sort-mode))
 
 (defun disco-root-cycle-view-mode ()
@@ -2871,7 +2889,7 @@ When HEADER-P is non-nil, the root header is invalidated too."
      ('unread 'dms)
      (_ 'all)))
   (disco-root--queue-live-update nil t t)
-  (appkit-sync-invalidations (appkit-current-view))
+  (disco-root--flush-live-updates)
   (message "disco: root view mode -> %s" disco-root--view-mode))
 
 
@@ -3181,7 +3199,6 @@ Temporary search results and projection indexes do not."
   (setq-local disco-root--directory-handler nil)
   (setq-local disco-root--preview-handler nil)
   (setq-local disco-root--avatar-handler nil)
-  (setq-local disco-root--live-updates-handle nil)
   (setq-local disco-root--refresh-in-flight nil)
   (setq-local disco-root--rendering nil)
   (setq-local disco-root--render-pending nil)
@@ -3221,30 +3238,40 @@ Temporary search results and projection indexes do not."
   (add-hook 'text-scale-mode-hook #'disco-root-buffer-auto-fill nil t)
   (disco-root--reset-controller-state))
 
+(defconst disco-root--surface-type
+  (appkit-surface-type-create
+   :name 'disco-root
+   :mode #'disco-root-mode
+   :init #'disco-root--surface-init
+   :update #'disco-root--surface-update
+   :renderer-factory #'disco-root--surface-renderer)
+  "Generated Surface type for the canonical Disco root.")
+
 (defun disco-root-open ()
-  "Open root buffer and render current state."
+  "Open the canonical root Generated Surface and render current state."
   (interactive)
   (let* ((app (disco-runtime-app))
-         (existing (appkit-view-for-id app '(root main)))
-         (view
-          (appkit-open-view
-           :app app
-           :id '(root main)
-           :mode 'disco-root-mode
-           :buffer-name disco-root-buffer-name
-           :sync-function #'disco-root--sync-invalidations
-           :parts '(content header geometry)
-           :setup (lambda (_view)
-                    (disco-root--reset-session-controller-state))
-           :select t))
-         (buf (appkit-view-buffer view)))
-    (with-current-buffer buf
+         (identity '(root main))
+         (existing (appkit-app-surface app identity))
+         (surface
+          (cond
+           ((appkit-surface-live-p existing)
+            (pop-to-buffer (appkit-surface-buffer existing))
+            existing)
+           (existing
+            (error "Disco: root Surface is unavailable: %S"
+                   (appkit-surface-status existing)))
+           (t
+            (appkit-open-generated-surface
+             disco-root--surface-type
+             :app app :identity identity
+             :buffer-name disco-root-buffer-name :select t))))
+         (buffer (appkit-surface-buffer surface)))
+    (with-current-buffer buffer
       (setq-local buffer-undo-list t)
-      (disco-root--attach-live-updates)
       (unless existing
-        (appkit-invalidate view :structure t :part 'header)
-        (appkit-sync-invalidations view)))
-    buf))
+        (disco-root--attach-live-updates)))
+    buffer))
 
 (setq disco-root-view-attach-live-updates-function
       #'disco-root--attach-live-updates

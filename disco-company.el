@@ -156,10 +156,10 @@ as any Appkit view attaches, so nil can never degrade into replacement access."
        (with-current-buffer buffer
          (and (eq owner-token disco-company--owner-token)
               (if view
-                  (and (appkit-view-live-p view)
-                       (eq view (appkit-current-view))
-                       (eq buffer (appkit-view-buffer view)))
-                (null (appkit-current-view)))))))
+                  (and (appkit-surface-live-p view)
+                       (eq view (appkit-current-surface))
+                       (eq buffer (appkit-surface-buffer view)))
+                (null (appkit-current-surface)))))))
 
 (defun disco-company--install-gateway-handler (view owner-token)
   "Install a VIEW-owned completion Gateway hook for OWNER-TOKEN."
@@ -205,14 +205,14 @@ as any Appkit view attaches, so nil can never degrade into replacement access."
   (when (disco-current-token)
     (disco-settings-ensure-loaded)
     (disco-company--ensure-guild-top-emojis disco-room--guild-id))
-  (let ((view (appkit-current-view)))
+  (let ((view (appkit-current-surface)))
     (cond
-     ((and (appkit-view-live-p view)
+     ((and (appkit-surface-live-p view)
            (functionp disco-company--gateway-handler)
            (appkit-handle-p disco-company--gateway-handle)
            (appkit-handle-alive-p disco-company--gateway-handle)
            (eq view (appkit-handle-owner disco-company--gateway-handle))))
-     ((appkit-view-live-p view)
+     ((appkit-surface-live-p view)
       (disco-company--teardown-room-buffer)
       (let ((owner-token (disco-company--ensure-owner-token)))
         (disco-company--install-gateway-handler view owner-token)))
@@ -415,7 +415,7 @@ This public query lets the room RET dispatcher guard against an active
              nil
              #'disco-company--run-debounced-member-search
              (current-buffer)
-             (appkit-current-view)
+             (appkit-current-surface)
              (disco-company--ensure-owner-token)
              guild-id raw-query))))))
 
@@ -436,7 +436,7 @@ Gateway chunk can advance the same room token's completion model."
          (key (and guild-id (cons guild-id query-key)))
          (now (float-time))
          (buffer (current-buffer))
-         (view (appkit-current-view))
+         (view (appkit-current-surface))
          (owner-token (disco-company--ensure-owner-token))
          entry)
     (disco-company--prune-member-search-requests now)

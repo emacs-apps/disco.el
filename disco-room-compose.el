@@ -38,7 +38,7 @@
 (declare-function disco-room--channel-message-by-id "disco-room" (channel-id message-id))
 (declare-function disco-room--channel-object "disco-room" ())
 (declare-function disco-room--ensure-jump-permissions "disco-room" (channel-id &optional channel))
-(declare-function disco-room--ensure-view "disco-room" ())
+(declare-function disco-room--ensure-surface "disco-room" ())
 (declare-function disco-room--latest-message-id "disco-room" ())
 (declare-function disco-room--line-fill-column "disco-room-render" ())
 (declare-function disco-room--lottie-sticker-at-point "disco-room" ())
@@ -1746,11 +1746,11 @@ the attachment as a spoiler."
         (message "disco: send already in progress")
       (let ((room-buffer (current-buffer))
             (channel-id disco-room--channel-id)
-            (view (disco-room--ensure-view))
+            (view (disco-room--ensure-surface))
             (request-revision
              (disco-state-message-revision disco-room--channel-id)))
         (setq disco-room--send-in-flight t)
-        (appkit-request-sync view :part 'frame)
+        (disco-room--queue-update view :part 'frame)
         (disco-api-send-message-async
          channel-id nil
          :sticker-ids (list sticker-id)
@@ -1802,7 +1802,7 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
     (let ((room-buffer (current-buffer))
           (channel-id disco-room--channel-id)
           (guild-id disco-room--guild-id)
-          (view (disco-room--ensure-view)))
+          (view (disco-room--ensure-surface)))
       (setq disco-room--sticker-picker-pending t)
       (message "disco: loading sticker catalog…")
       (disco-sticker-ensure-ready
@@ -1932,7 +1932,7 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
      :plan plan
      :room-buffer (current-buffer)
      :channel-id disco-room--channel-id
-     :view (disco-room--ensure-view)
+     :view (disco-room--ensure-surface)
      :slot slot
      :recovery-slot (copy-tree slot))))
 
@@ -1957,7 +1957,7 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
       (setf (disco-room--send-operation-cleared-revision operation)
             (disco-room--clear-composer-operation-slot))
       (setq disco-room--send-in-flight t)
-      (appkit-request-sync view :part 'frame)))
+      (disco-room--queue-update view :part 'frame)))
   operation)
 
 (defun disco-room--abort-send-operation (operation)
@@ -2492,7 +2492,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
                  (unless (string-empty-p trimmed)
                    trimmed))))
          (room-buffer (current-buffer))
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          request-revision
          (allowed-mentions
           (and normalized-content (disco-room--send-allowed-mentions)))
@@ -2511,7 +2511,7 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
     (setq request-revision
           (disco-state-message-revision target-channel-id))
     (setq disco-room--send-in-flight t)
-    (appkit-request-sync view :part 'frame)
+    (disco-room--queue-update view :part 'frame)
     (cl-labels
         ((room-active-p
            ()

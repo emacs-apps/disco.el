@@ -3,13 +3,14 @@
 ;;; Commentary:
 
 ;; Room-local pin mutations, pin acknowledgements, and the independently owned
-;; pinned-message Appkit view.
+;; pinned-message Generated Surface.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
 (require 'appkit-core)
+(require 'appkit-surface)
 (require 'appkit-invalidation)
 (require 'appkit-ui)
 (require 'appkit-view)
@@ -23,7 +24,7 @@
 (declare-function disco-room--callback-active-p "disco-room" (buffer channel-id view))
 (declare-function disco-room--channel-buffer-p "disco-room" (buffer channel-id view))
 (declare-function disco-room--channel-object "disco-room" ())
-(declare-function disco-room--ensure-view "disco-room" ())
+(declare-function disco-room--ensure-surface "disco-room" ())
 (declare-function disco-room--message-at-point "disco-room" ())
 (declare-function disco-room--message-by-id "disco-room" (message-id))
 (declare-function disco-room--update-message-locally "disco-room" (message-id function))
@@ -64,7 +65,7 @@
   (interactive)
   (let* ((room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (channel (disco-room--channel-object))
          (last-pin-timestamp (and channel (alist-get 'last_pin_timestamp channel))))
     (cond
@@ -88,7 +89,7 @@
                (when (= ack-seq disco-room--pins-ack-seq)
                  (disco-state-apply-channel-pins-ack
                   channel-id last-pin-timestamp)
-                 (appkit-request-sync view :part 'frame)
+                 (disco-room--queue-update view :part 'frame)
                  (message "disco: acknowledged pins for %s" channel-id)))))
          :on-error
          (lambda (err)
@@ -161,7 +162,7 @@
      "toggle message pins")
     (let* ((room-buffer (current-buffer))
            (channel-id disco-room--channel-id)
-           (view (disco-room--ensure-view))
+           (view (disco-room--ensure-surface))
            (pending (disco-room--pin-op-for target-id))
            (pinned (not (if pending
                             (plist-get pending :pinned)
@@ -183,7 +184,7 @@
                 (lambda (message)
                   (disco-room--message-with-pinned-state message pinned)))
                (disco-room--pin-op-finish target-id op-token)
-               (appkit-request-sync view :entry target-id)
+               (disco-room--queue-update view :entry target-id)
                (message "disco: message %s" verb)))))
        :on-error
        (lambda (err)
@@ -210,7 +211,7 @@
   "Non-nil when the pinned-message endpoint reports another page.")
 
 (defvar-local disco-room-pinned-messages--loading-p nil
-  "Non-nil while this pinned-message view owns an active request.")
+  "Non-nil while this pinned-message Surface owns an active request.")
 
 (defvar-local disco-room-pinned-messages--error nil
   "Most recent pinned-message request error.")
@@ -218,8 +219,8 @@
 (defvar-local disco-room-pinned-messages--generation 0
   "Monotonic owner token for pinned-message page requests.")
 
-(defun disco-room-pinned-messages--view-id (channel-id)
-  "Return the stable Appkit view identity for CHANNEL-ID."
+(defun disco-room-pinned-messages--surface-id (channel-id)
+  "Return the stable Appkit Surface identity for CHANNEL-ID."
   (list 'room 'pinned-messages channel-id))
 
 (defun disco-room-pinned-messages--buffer-name (channel-id channel-name)
@@ -230,11 +231,11 @@
     (buffer channel-id view generation)
   "Return non-nil when BUFFER still owns pinned request GENERATION."
   (and (buffer-live-p buffer)
-       (appkit-view-live-p view)
+       (appkit-surface-live-p view)
        (with-current-buffer buffer
          (and (eq major-mode 'disco-room-pinned-messages-mode)
               (equal disco-room-pinned-messages--channel-id channel-id)
-              (eq view (appkit-current-view))
+              (eq view (appkit-current-surface))
               (eql generation disco-room-pinned-messages--generation)))))
 
 (defun disco-room-pinned-messages--entry-message-id (entry)
@@ -281,12 +282,13 @@ uses the final Message Pin's `pinned_at' timestamp as the continuation cursor."
           :has-more has-more
           :next-before next-before)))
 
-(defun disco-room-pinned-messages--request-sync (view)
-  "Schedule a structural render of pinned-message VIEW."
-  (appkit-request-sync view :structure t))
+(defun disco-room-pinned-messages--request-sync (surface)
+  "Schedule one pinned-message render on SURFACE."
+  (when (appkit-surface-live-p surface)
+    (appkit-surface-post surface 'render)))
 
 (defun disco-room-pinned-messages--complete-error (view error)
-  "Set current pinned-message VIEW request failure to ERROR."
+  "Set current pinned-message Surface request failure to ERROR."
   (setq-local disco-room-pinned-messages--loading-p nil
               disco-room-pinned-messages--error
               (disco-room--async-error-message error))
@@ -298,7 +300,7 @@ uses the final Message Pin's `pinned_at' timestamp as the continuation cursor."
 When RESET is non-nil, the returned page replaces the cached projection."
   (let ((channel-id disco-room-pinned-messages--channel-id))
     (unless (and (stringp channel-id) (not (string-empty-p channel-id)))
-      (user-error "disco: pinned-message view has no channel"))
+      (user-error "disco: pinned-message Surface has no channel"))
     (when (and (not reset) disco-room-pinned-messages--loading-p)
       (user-error "disco: pinned messages are already loading"))
     (when (and (not reset) (not disco-room-pinned-messages--has-more-p))
@@ -320,6 +322,7 @@ When RESET is non-nil, the returned page replaces the cached projection."
          channel-id
          :before before
          :limit 50
+         :owner view
          :on-success
          (lambda (response)
            (when (disco-room-pinned-messages--callback-active-p
@@ -356,12 +359,12 @@ When RESET is non-nil, the returned page replaces the cached projection."
 (defun disco-room-pinned-messages-refresh ()
   "Refresh the pinned-message projection in the current browser buffer."
   (interactive)
-  (disco-room-pinned-messages--request-page (appkit-current-view) t))
+  (disco-room-pinned-messages--request-page (appkit-current-surface) t))
 
 (defun disco-room-pinned-messages-load-more ()
   "Load the next pinned-message page in the current browser buffer."
   (interactive)
-  (disco-room-pinned-messages--request-page (appkit-current-view) nil))
+  (disco-room-pinned-messages--request-page (appkit-current-surface) nil))
 
 (defun disco-room-pinned-messages--open-entry (entry)
   "Open the nested message from Message Pin ENTRY."
@@ -417,15 +420,13 @@ When RESET is non-nil, the returned page replaces the cached projection."
      (when disco-room-pinned-messages--error
        (list (format "Error: %s" disco-room-pinned-messages--error))))))
 
-(defun disco-room-pinned-messages--sync-invalidations
-    (view invalidations _events)
-  "Synchronize pinned-message VIEW from INVALIDATIONS and controller state."
-  (when (appkit-invalidations-affect-p invalidations '(content header))
-    (appkit-with-content-update view
-      (appkit-view-render-list-spec-preserving-position
-       (disco-room-pinned-messages--list-spec)
-       :anchor-property 'disco-message-id
-       :preserve-window-start t))))
+(defun disco-room-pinned-messages--render (surface)
+  "Render pinned messages in SURFACE's exact host buffer."
+  (appkit-with-content-update surface
+    (appkit-view-render-list-spec-preserving-position
+     (disco-room-pinned-messages--list-spec)
+     :anchor-property 'disco-message-id
+     :preserve-window-start t)))
 
 (defvar-keymap disco-room-pinned-messages-mode-map
   :doc "Keymap for `disco-room-pinned-messages-mode'."
@@ -440,6 +441,45 @@ When RESET is non-nil, the returned page replaces the cached projection."
   (setq buffer-read-only t)
   (setq truncate-lines t))
 
+(defun disco-room-pinned-messages--surface-init (_context input)
+  "Initialize a pinned-message Surface from INPUT."
+  (setq-local disco-room-pinned-messages--channel-id
+              (plist-get input :channel-id)
+              disco-room-pinned-messages--channel-name
+              (plist-get input :channel-name)
+              disco-room-pinned-messages--items nil
+              disco-room-pinned-messages--next-before nil
+              disco-room-pinned-messages--has-more-p nil
+              disco-room-pinned-messages--loading-p nil
+              disco-room-pinned-messages--error nil
+              disco-room-pinned-messages--generation 0)
+  (appkit-next :model nil :render t))
+
+(defun disco-room-pinned-messages--surface-update (_context model message)
+  "Handle one pinned-message Surface MESSAGE."
+  (if (eq message 'render)
+      (appkit-next :model model :render t)
+    (appkit-next-reject 'invalid-pinned-message-command)))
+
+(defun disco-room-pinned-messages--renderer (_surface)
+  "Create the pinned-message Generated Renderer."
+  (appkit-generated-renderer-create
+   :mount #'ignore
+   :merge (lambda (_left right) right)
+   :render (lambda (surface _app-read-view _model _request)
+             (disco-room-pinned-messages--render surface))
+   :recover nil
+   :unmount #'ignore))
+
+(defconst disco-room-pinned-messages--surface-type
+  (appkit-surface-type-create
+   :name 'disco-room-pinned-messages
+   :mode #'disco-room-pinned-messages-mode
+   :init #'disco-room-pinned-messages--surface-init
+   :update #'disco-room-pinned-messages--surface-update
+   :renderer-factory #'disco-room-pinned-messages--renderer)
+  "Generated Surface type for pinned-message browsers.")
+
 (defun disco-room-list-pinned-messages (&optional channel-id)
   "Open the pinned-message browser for CHANNEL-ID or the current room."
   (interactive)
@@ -449,29 +489,25 @@ When RESET is non-nil, the returned page replaces the cached projection."
     (unless (and (stringp channel-id) (not (string-empty-p channel-id)))
       (user-error "disco: room is not bound to a channel"))
     (let* ((app (disco-runtime-app))
-           (view-id (disco-room-pinned-messages--view-id channel-id))
-           (existing (appkit-view-for-id app view-id))
-           (view
-            (appkit-open-view
-             :app app
-             :id view-id
-             :mode 'disco-room-pinned-messages-mode
-             :buffer-name
-             (disco-room-pinned-messages--buffer-name channel-id channel-name)
-             :sync-function #'disco-room-pinned-messages--sync-invalidations
-             :parts '(content header geometry)
-             :setup
-             (lambda (_view)
-               (setq-local disco-room-pinned-messages--channel-id channel-id
-                           disco-room-pinned-messages--channel-name channel-name
-                           disco-room-pinned-messages--items nil
-                           disco-room-pinned-messages--next-before nil
-                           disco-room-pinned-messages--has-more-p nil
-                           disco-room-pinned-messages--loading-p nil
-                           disco-room-pinned-messages--error nil
-                           disco-room-pinned-messages--generation 0))
-             :select t))
-           (buffer (appkit-view-buffer view)))
+           (identity (disco-room-pinned-messages--surface-id channel-id))
+           (existing (appkit-app-surface app identity))
+           (surface
+            (cond
+             ((appkit-surface-live-p existing)
+              (pop-to-buffer (appkit-surface-buffer existing))
+              existing)
+             (existing
+              (error "disco: pinned-message Surface is unavailable: %S"
+                     (appkit-surface-status existing)))
+             (t
+              (appkit-open-generated-surface
+               disco-room-pinned-messages--surface-type
+               :app app :identity identity
+               :input (list :channel-id channel-id :channel-name channel-name)
+               :buffer-name
+               (disco-room-pinned-messages--buffer-name channel-id channel-name)
+               :select t))))
+           (buffer (appkit-surface-buffer surface)))
       (with-current-buffer buffer
         (setq-local disco-room-pinned-messages--channel-name channel-name)
         (unless existing

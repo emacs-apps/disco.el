@@ -17,8 +17,8 @@
 (require 'appkit-core)
 (require 'appkit-directory)
 (require 'appkit-invalidation)
+(require 'appkit-surface)
 (require 'appkit-projection)
-(require 'appkit-transaction)
 (require 'appkit-view)
 (require 'disco-api)
 (require 'disco-channel-type)
@@ -93,9 +93,6 @@
 (defvar-local disco-channel-directory--preview-handler nil
   "Buffer-local preview update handler closure.")
 
-(defvar-local disco-channel-directory--live-update-handle nil
-  "Appkit lifecycle handle owning this directory's shared event hooks.")
-
 (defvar-local disco-channel-directory--rendering nil
   "Non-nil while an EWOC reconciliation is active.")
 
@@ -138,28 +135,28 @@
   "Return the stable channel-directory buffer name for GUILD-ID."
   (format "*disco:guild:%s*" guild-id))
 
-(defun disco-channel-directory--view-id (guild-id)
-  "Return the Appkit view identity for GUILD-ID."
+(defun disco-channel-directory--surface-id (guild-id)
+  "Return the Generated Surface identity for GUILD-ID."
   (list 'channel-directory
         (or (disco-channel-directory--normalize-id guild-id)
-            (error "Disco: channel-directory view requires a guild id"))))
+            (error "Disco: channel-directory Surface requires a guild id"))))
 
-(defun disco-channel-directory--view-current-p (view guild-id)
-  "Return non-nil when VIEW still owns GUILD-ID's directory."
-  (and (appkit-view-live-p view)
-       (with-current-buffer (appkit-view-buffer view)
+(defun disco-channel-directory--surface-current-p (surface guild-id)
+  "Return non-nil when SURFACE still owns GUILD-ID's directory."
+  (and (appkit-surface-live-p surface)
+       (with-current-buffer (appkit-surface-buffer surface)
          (and (derived-mode-p 'disco-channel-directory-mode)
-              (eq view (appkit-current-view))
+              (eq surface (appkit-current-surface))
               (equal guild-id disco-channel-directory--guild-id)
-              (equal (appkit-view-id view)
-                     (disco-channel-directory--view-id guild-id))))))
+              (equal (appkit-surface-identity surface)
+                     (disco-channel-directory--surface-id guild-id))))))
 
 (defun disco-channel-directory--profile-current-p
-    (view buffer guild-id owner)
-  "Return non-nil when OWNER still loads GUILD-ID for VIEW and BUFFER."
+    (surface buffer guild-id owner)
+  "Return non-nil when OWNER still loads GUILD-ID for SURFACE."
   (and (buffer-live-p buffer)
-       (eq buffer (appkit-view-buffer view))
-       (disco-channel-directory--view-current-p view guild-id)
+       (eq buffer (appkit-surface-buffer surface))
+       (disco-channel-directory--surface-current-p surface guild-id)
        (with-current-buffer buffer
          (eq owner disco-channel-directory--profile-owner))))
 
@@ -167,31 +164,25 @@
   "Return the Appkit resource key for the current guild channel snapshot."
   (list 'guild-channel-snapshot disco-channel-directory--guild-id))
 
-(defun disco-channel-directory--ensure-view ()
-  "Return the live Appkit view owning the current directory buffer."
+(defun disco-channel-directory--ensure-surface ()
+  "Return the live Generated Surface owning the current directory."
   (let* ((app (disco-runtime-app))
-         (id (disco-channel-directory--view-id
-              disco-channel-directory--guild-id))
-         (current (appkit-current-view)))
+         (identity (disco-channel-directory--surface-id
+                    disco-channel-directory--guild-id))
+         (current (appkit-current-surface)))
     (cond
-     ((and (appkit-view-live-p current)
-           (eq app (appkit-view-app current))
-           (equal id (appkit-view-id current)))
-      (setf (appkit-view-state current) disco-channel-directory--guild-id
-            (appkit-view-sync-function current)
-            #'disco-channel-directory--sync-invalidations
-            (appkit-view-parts current) '(frame entries))
+     ((and (appkit-surface-live-p current)
+           (eq app (appkit-surface-app current))
+           (equal identity (appkit-surface-identity current)))
       current)
-     ((appkit-view-live-p current)
-      (error "Disco: channel-directory buffer belongs to another Appkit view"))
+     ((appkit-surface-p current)
+      (error "Disco: channel-directory buffer belongs to another Surface"))
      (t
-      (appkit-attach-view
-       :app app
-       :id id
-       :state disco-channel-directory--guild-id
-       :mode 'disco-channel-directory-mode
-       :sync-function #'disco-channel-directory--sync-invalidations
-       :parts '(frame entries))))))
+      (appkit-open-generated-surface
+       disco-channel-directory--surface-type
+       :app app :identity identity
+       :input disco-channel-directory--guild-id
+       :buffer (current-buffer))))))
 
 (defun disco-channel-directory--projection-context ()
   "Return the shared projector context for the current standalone directory."
@@ -536,56 +527,100 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
         disco-channel-directory--deferred-structure-p nil
         disco-channel-directory--deferred-position-p nil))
 
-(defun disco-channel-directory--sync-invalidations (view invalidations _events)
-  "Synchronize VIEW from coalesced Appkit INVALIDATIONS."
-  (when (appkit-view-live-p view)
-    (let* ((parts (appkit-invalidations-parts invalidations))
-           (resources (appkit-invalidations-resource-keys invalidations))
-           (position-p
-            (or disco-channel-directory--deferred-position-p
-                (appkit-invalidations-position-p invalidations)))
-           (displayed-p (disco-channel-directory--displayed-p))
-           (diff
-            (appkit-projection-diff-derive
-             invalidations
-             :reconcile-parts '(entries)
-             :reconcile disco-channel-directory--deferred-reconcile-p
-             :force-keys disco-channel-directory--deferred-entry-keys))
-           (entry-keys (appkit-projection-diff-force-keys diff))
-           (entries-p (appkit-projection-diff-reconcile-p diff))
-           (frame-p (or entries-p (memq 'frame parts))))
-      (when (and (member
-                  (disco-channel-directory--guild-snapshot-resource-key)
-                  resources)
-                 (not (disco-state-guild-channels-loaded-p
-                       disco-channel-directory--guild-id)))
-        (disco-directory-load-guild-async
-         disco-channel-directory--guild-id))
-      (if (not displayed-p)
-          (when (or entries-p frame-p)
-            (disco-channel-directory--defer-invalidations invalidations))
-        (when (and entries-p position-p)
-          (setq entry-keys
-                (delete-dups
-                 (append (disco-channel-directory--all-entry-keys)
-                         entry-keys))))
-        (appkit-with-content-update view
+(cl-defun disco-channel-directory--make-invalidations
+    (&key structure parts entries resources position)
+  "Create one owned directory render request."
+  (let ((state (appkit-invalidations-create)))
+    (setf (appkit-invalidations-structure-p state) (and structure t)
+          (appkit-invalidations-parts state) (delete-dups (delq nil parts))
+          (appkit-invalidations-entry-keys state)
+          (delete-dups (delq nil (copy-sequence entries)))
+          (appkit-invalidations-resource-keys state)
+          (delete-dups (delq nil (copy-sequence resources)))
+          (appkit-invalidations-position-p state) (and position t))
+    state))
+
+(defun disco-channel-directory--merge-invalidations (left right)
+  "Return a render request containing LEFT and RIGHT."
+  (let ((merged (appkit-invalidations-create)))
+    (appkit-invalidations-merge merged left)
+    (appkit-invalidations-merge merged right)))
+
+(defun disco-channel-directory--surface-init (_context guild-id)
+  "Initialize a channel directory Surface for GUILD-ID."
+  (setq-local disco-channel-directory--guild-id guild-id)
+  (appkit-next
+   :model guild-id
+   :render (disco-channel-directory--make-invalidations
+            :structure t :parts '(frame entries))))
+
+(defun disco-channel-directory--surface-update (_context model message)
+  "Request directory presentation described by MESSAGE."
+  (if (appkit-invalidations-p message)
+      (appkit-next :model model :render message)
+    (appkit-next-reject 'invalid-channel-directory-render-request)))
+
+(defun disco-channel-directory--surface-renderer (_surface)
+  "Create one Generated Renderer for a channel directory."
+  (appkit-generated-renderer-create
+   :mount #'ignore
+   :merge #'disco-channel-directory--merge-invalidations
+   :render (lambda (surface _app-read-view _model request)
+             (disco-channel-directory--render-invalidations
+              surface request))
+   :recover nil
+   :unmount
+   (lambda (_surface)
+     (disco-channel-directory--remove-live-updates))))
+
+(defun disco-channel-directory--render-invalidations (_surface invalidations)
+  "Render coalesced INVALIDATIONS in the current directory host."
+  (let* ((parts (appkit-invalidations-parts invalidations))
+         (resources (appkit-invalidations-resource-keys invalidations))
+         (position-p
+          (or disco-channel-directory--deferred-position-p
+              (appkit-invalidations-position-p invalidations)))
+         (displayed-p (disco-channel-directory--displayed-p))
+         (diff
+          (appkit-projection-diff-derive
+           invalidations
+           :reconcile-parts '(entries)
+           :reconcile disco-channel-directory--deferred-reconcile-p
+           :force-keys disco-channel-directory--deferred-entry-keys))
+         (entry-keys (appkit-projection-diff-force-keys diff))
+         (entries-p (appkit-projection-diff-reconcile-p diff))
+         (frame-p (or entries-p (memq 'frame parts)))
+         (old-modified-p (buffer-modified-p))
+         (buffer-undo-list t)
+         (inhibit-read-only t))
+    (when (and (member
+                (disco-channel-directory--guild-snapshot-resource-key)
+                resources)
+               (not (disco-state-guild-channels-loaded-p
+                     disco-channel-directory--guild-id)))
+      (disco-directory-load-guild-async disco-channel-directory--guild-id))
+    (if (not displayed-p)
+        (when (or entries-p frame-p)
+          (disco-channel-directory--defer-invalidations invalidations))
+      (when (and entries-p position-p)
+        (setq entry-keys
+              (delete-dups
+               (append (disco-channel-directory--all-entry-keys)
+                       entry-keys))))
+      (unwind-protect
           (cond
            (entries-p
             (disco-channel-directory--reconcile nil entry-keys))
            (frame-p
-            (disco-channel-directory--refresh-header-line))))
-        (disco-channel-directory--clear-deferred-invalidations)))))
+            (disco-channel-directory--refresh-header-line)))
+        (set-buffer-modified-p old-modified-p))
+      (disco-channel-directory--clear-deferred-invalidations))))
 
-(cl-defun disco-channel-directory--queue-view-update
-    (view &key channel-ids structure position hydrate)
-  "Queue one Appkit update for VIEW.
-
-CHANNEL-IDS identify exact rows.  STRUCTURE marks membership or ordering
-changes.  POSITION requests a geometry-sensitive reflow.  HYDRATE marks the
-guild channel snapshot as a resource that sync may need to resolve."
-  (when (appkit-view-live-p view)
-    (appkit-with-live-view view
+(cl-defun disco-channel-directory--queue-surface-update
+    (surface &key channel-ids structure position hydrate)
+  "Queue one bounded render request for SURFACE."
+  (when (appkit-surface-live-p surface)
+    (with-current-buffer (appkit-surface-buffer surface)
       (let ((entry-keys
              (delete-dups
               (delq nil
@@ -596,44 +631,42 @@ guild channel snapshot as a resource that sync may need to resolve."
                                      channel-id)))
                          (disco-channel-directory--entry-key-for-channel id)))
                      channel-ids)))))
-        (appkit-request-sync
-         view
-         :structure structure
-         :parts '(frame entries)
-         :entries entry-keys
-         :resource
-         (and hydrate
-              (disco-channel-directory--guild-snapshot-resource-key))
-         :position position)
+        (appkit-surface-post
+         surface
+         (disco-channel-directory--make-invalidations
+          :structure structure
+          :parts '(frame entries)
+          :entries entry-keys
+          :resources
+          (and hydrate
+               (list
+                (disco-channel-directory--guild-snapshot-resource-key)))
+          :position position))
         t))))
 
 (defun disco-channel-directory--request-reconcile
-    (&optional force-channel-ids structure-p position-p view)
-  "Queue an Appkit reconciliation for FORCE-CHANNEL-IDS.
-
-STRUCTURE-P marks membership or ordering changes.  POSITION-P marks geometry
-changes.  VIEW defaults to the Appkit view attached to the current buffer."
-  (when-let* ((view (or view (appkit-current-view))))
-    (when (appkit-view-live-p view)
-      (disco-channel-directory--queue-view-update
-       view
-       :channel-ids force-channel-ids
-       :structure structure-p
-       :position position-p))))
+    (&optional force-channel-ids structure-p position-p surface)
+  "Queue directory reconciliation on SURFACE or the current Surface."
+  (when-let* ((surface (or surface (appkit-current-surface)))
+              ((appkit-surface-live-p surface)))
+    (disco-channel-directory--queue-surface-update
+     surface :channel-ids force-channel-ids
+     :structure structure-p :position position-p)))
 
 (defun disco-channel-directory--invalidate-and-sync
     (&optional force-channel-ids structure-p position-p)
-  "Immediately sync explicit directory changes through the current Appkit view.
-
-FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
+  "Synchronously commit explicit directory invalidations."
   (when (disco-channel-directory--request-reconcile
          force-channel-ids structure-p position-p)
-    (appkit-sync-invalidations (appkit-current-view))))
+    (when-let* ((surface (appkit-current-surface))
+                ((appkit-surface-live-p surface)))
+      (appkit-surface-send
+       surface (disco-channel-directory--make-invalidations)))))
 
-(defun disco-channel-directory--request-profile (view &optional force)
-  "Load VIEW's Guild Profile, retrying when FORCE is non-nil."
-  (when (and (disco-channel-directory--view-current-p
-              view disco-channel-directory--guild-id)
+(defun disco-channel-directory--request-profile (surface &optional force)
+  "Load SURFACE's Guild Profile, retrying when FORCE is non-nil."
+  (when (and (disco-channel-directory--surface-current-p
+              surface disco-channel-directory--guild-id)
              (or force
                  (and (null disco-channel-directory--guild-profile)
                       (not disco-channel-directory--profile-loading))))
@@ -643,14 +676,14 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
       (setq disco-channel-directory--profile-owner owner
             disco-channel-directory--profile-loading t
             disco-channel-directory--profile-error nil)
-      (disco-channel-directory--queue-view-update view :structure t)
+      (disco-channel-directory--queue-surface-update surface :structure t)
       (condition-case request-error
           (disco-api-guild-profile-async
            guild-id
            :on-success
            (lambda (profile)
              (when (disco-channel-directory--profile-current-p
-                    view buffer guild-id owner)
+                    surface buffer guild-id owner)
                (with-current-buffer buffer
                  (setq disco-channel-directory--guild-profile
                        (and (consp profile) profile)
@@ -659,52 +692,53 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
                        (unless (consp profile)
                          "Server details returned an invalid response")
                        disco-channel-directory--profile-owner nil)
-                 (disco-channel-directory--queue-view-update
-                  view :structure t))))
+                 (disco-channel-directory--queue-surface-update
+                  surface :structure t))))
            :on-error
            (lambda (error-data)
              (when (disco-channel-directory--profile-current-p
-                    view buffer guild-id owner)
+                    surface buffer guild-id owner)
                (with-current-buffer buffer
                  (setq disco-channel-directory--profile-loading nil
                        disco-channel-directory--profile-error
                        (format "Unable to load server details: %s"
                                (error-message-string error-data))
                        disco-channel-directory--profile-owner nil)
-                 (disco-channel-directory--queue-view-update
-                  view :structure t)))))
+                 (disco-channel-directory--queue-surface-update
+                  surface :structure t)))))
         (error
          (when (disco-channel-directory--profile-current-p
-                view buffer guild-id owner)
+                surface buffer guild-id owner)
            (setq disco-channel-directory--profile-loading nil
                  disco-channel-directory--profile-error
                  (format "Unable to load server details: %s"
                          (error-message-string request-error))
                  disco-channel-directory--profile-owner nil)
-           (disco-channel-directory--queue-view-update
-            view :structure t))))
+           (disco-channel-directory--queue-surface-update
+            surface :structure t))))
       owner)))
 
-(defun disco-channel-directory--schedule-deferred-sync (view)
-  "Schedule VIEW to consume invalidations deferred while it was hidden."
+(defun disco-channel-directory--schedule-deferred-sync (surface)
+  "Queue deferred invalidations on live SURFACE."
   (when (and disco-channel-directory--deferred-reconcile-p
-             (appkit-view-live-p view))
-    (appkit-request-sync
-     view
-     :structure disco-channel-directory--deferred-structure-p
-     :parts '(frame entries)
-     :entries disco-channel-directory--deferred-entry-keys
-     :position disco-channel-directory--deferred-position-p)
+             (appkit-surface-live-p surface))
+    (appkit-surface-post
+     surface
+     (disco-channel-directory--make-invalidations
+      :structure disco-channel-directory--deferred-structure-p
+      :parts '(frame entries)
+      :entries disco-channel-directory--deferred-entry-keys
+      :position disco-channel-directory--deferred-position-p))
     t))
 
 (defun disco-channel-directory--window-buffer-change (window)
-  "Flush deferred directory updates when WINDOW displays the current buffer."
+  "Flush deferred directory updates when WINDOW displays this host."
   (when (and (window-live-p window)
              (eq (window-buffer window) (current-buffer)))
     (disco-channel-directory--reflow-to-width
      (disco-channel-directory--usable-width))
-    (when-let* ((view (appkit-current-view)))
-      (disco-channel-directory--schedule-deferred-sync view))))
+    (when-let* ((surface (appkit-current-surface)))
+      (disco-channel-directory--schedule-deferred-sync surface))))
 
 (defun disco-channel-directory--line-property (property &optional position)
   "Return PROPERTY from row at POSITION or point."
@@ -869,8 +903,8 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
       (user-error "Disco: this guild is no longer available"))
     (disco-directory-load-guild-async
      disco-channel-directory--guild-id :force t)
-    (when-let* ((view (appkit-current-view)))
-      (disco-channel-directory--request-profile view t))
+    (when-let* ((surface (appkit-current-surface)))
+      (disco-channel-directory--request-profile surface t))
     (message "Disco: refreshing %s channels…"
              (disco-channel-directory--guild-name))))
 
@@ -913,13 +947,12 @@ FORCE-CHANNEL-IDS, STRUCTURE-P, and POSITION-P describe the invalidation."
     thread-create thread-update thread-delete thread-list-sync)
   "Gateway event types that may change directory membership or ordering.")
 
-(defun disco-channel-directory--handle-gateway-event (event &optional view)
-  "Queue precise Appkit invalidations for a relevant gateway EVENT.
-
-VIEW defaults to the current buffer's Appkit view."
-  (let ((view (or view (appkit-current-view))))
-    (when (appkit-view-live-p view)
-      (appkit-with-live-view view
+(defun disco-channel-directory--handle-gateway-event
+    (event &optional surface)
+  "Queue precise invalidations for a relevant gateway EVENT."
+  (let ((surface (or surface (appkit-current-surface))))
+    (when (appkit-surface-live-p surface)
+      (with-current-buffer (appkit-surface-buffer surface)
         (when (disco-channel-directory--event-relevant-p event)
           (let* ((type (plist-get event :type))
                  (channel-ids (disco-gateway-event-channel-ids event))
@@ -927,20 +960,18 @@ VIEW defaults to the current buffer's Appkit view."
                   (or (memq type
                             disco-channel-directory--structural-gateway-events)
                       (null channel-ids))))
-            (disco-channel-directory--queue-view-update
-             view
-             :channel-ids channel-ids
-             :structure structure-p
+            (disco-channel-directory--queue-surface-update
+             surface :channel-ids channel-ids :structure structure-p
              :hydrate (memq type '(guild-sync guild-create guild-update
-                                   channel-create channel-update channel-sync)))))))))
+                                   channel-create channel-update
+                                   channel-sync)))))))))
 
-(defun disco-channel-directory--handle-directory-event (event &optional view)
-  "Queue Appkit invalidations for one relevant directory lifecycle EVENT.
-
-VIEW defaults to the current buffer's Appkit view."
-  (let ((view (or view (appkit-current-view))))
-    (when (appkit-view-live-p view)
-      (appkit-with-live-view view
+(defun disco-channel-directory--handle-directory-event
+    (event &optional surface)
+  "Queue invalidations for one relevant directory lifecycle EVENT."
+  (let ((surface (or surface (appkit-current-surface))))
+    (when (appkit-surface-live-p surface)
+      (with-current-buffer (appkit-surface-buffer surface)
         (let ((type (plist-get event :type))
               (guild-id
                (disco-channel-directory--normalize-id
@@ -948,21 +979,19 @@ VIEW defaults to the current buffer's Appkit view."
           (when (or (eq type 'index-loaded)
                     (and guild-id
                          (equal guild-id disco-channel-directory--guild-id)))
-            (disco-channel-directory--queue-view-update
-             view
+            (disco-channel-directory--queue-surface-update
+             surface
              :channel-ids
-             (delq nil
-                   (list (plist-get event :parent-id)
-                         (plist-get event :channel-id)))
+             (delq nil (list (plist-get event :parent-id)
+                             (plist-get event :channel-id)))
              :structure t)))))))
 
-(defun disco-channel-directory--handle-preview-update (channel-id &optional view)
-  "Queue an exact row invalidation for preview CHANNEL-ID in this guild.
-
-VIEW defaults to the current buffer's Appkit view."
-  (let ((view (or view (appkit-current-view))))
-    (when (appkit-view-live-p view)
-      (appkit-with-live-view view
+(defun disco-channel-directory--handle-preview-update
+    (channel-id &optional surface)
+  "Queue the exact preview CHANNEL-ID row on live SURFACE."
+  (let ((surface (or surface (appkit-current-surface))))
+    (when (appkit-surface-live-p surface)
+      (with-current-buffer (appkit-surface-buffer surface)
         (when-let* ((channel-id
                      (disco-channel-directory--normalize-id channel-id))
                     (channel (disco-state-channel channel-id))
@@ -970,11 +999,11 @@ VIEW defaults to the current buffer's Appkit view."
                      (disco-channel-directory--normalize-id
                       (alist-get 'guild_id channel))))
           (when (equal guild-id disco-channel-directory--guild-id)
-            (disco-channel-directory--queue-view-update
-             view :channel-ids (list channel-id))))))))
+            (disco-channel-directory--queue-surface-update
+             surface :channel-ids (list channel-id))))))))
 
 (defun disco-channel-directory--remove-live-updates ()
-  "Remove this buffer's shared event hooks without touching Appkit ownership."
+  "Remove this buffer's shared event hooks."
   (let ((watched-p (functionp disco-channel-directory--gateway-handler)))
     (when disco-channel-directory--gateway-handler
       (remove-hook 'disco-gateway-event-hook
@@ -987,68 +1016,53 @@ VIEW defaults to the current buffer's Appkit view."
                    disco-channel-directory--preview-handler))
     (setq disco-channel-directory--gateway-handler nil
           disco-channel-directory--directory-handler nil
-          disco-channel-directory--preview-handler nil
-          disco-channel-directory--live-update-handle nil)
-    (when watched-p
-      (disco-gateway-unwatch-global))))
+          disco-channel-directory--preview-handler nil)
+    (when watched-p (disco-gateway-unwatch-global))))
 
 (defun disco-channel-directory--detach-live-updates ()
   "Detach the current directory from shared update streams."
-  (let ((handle disco-channel-directory--live-update-handle))
-    (setq disco-channel-directory--live-update-handle nil)
-    (if (and (appkit-handle-p handle)
-             (appkit-handle-alive-p handle))
-        (appkit-cancel-handle handle)
-      (disco-channel-directory--remove-live-updates))))
+  (disco-channel-directory--remove-live-updates))
 
 (defun disco-channel-directory--handle-state-reset ()
-  "Queue live directory views after canonical state is reset."
+  "Queue live directory Surfaces after canonical state reset."
   (dolist (buffer (buffer-list))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when (eq major-mode 'disco-channel-directory-mode)
-          (when-let* ((view (appkit-current-view)))
-            (disco-channel-directory--queue-view-update
-             view :structure t)))))))
+        (when (and (eq major-mode 'disco-channel-directory-mode)
+                   (appkit-surface-live-p (appkit-current-surface)))
+          (disco-channel-directory--queue-surface-update
+           (appkit-current-surface) :structure t))))))
 
 (add-hook 'disco-state-reset-hook
           #'disco-channel-directory--handle-state-reset)
 
 (defun disco-channel-directory--attach-live-updates ()
-  "Attach the current Appkit view to gateway, directory, and preview events."
-  (let ((view (disco-channel-directory--ensure-view)))
-    (disco-channel-directory--detach-live-updates)
-    (let ((buffer (current-buffer)))
-      (setq disco-channel-directory--gateway-handler
-            (lambda (event)
-              (disco-channel-directory--handle-gateway-event event view)))
-      (setq disco-channel-directory--directory-handler
-            (lambda (event)
-              (disco-channel-directory--handle-directory-event event view)))
-      (setq disco-channel-directory--preview-handler
-            (lambda (channel-id)
-              (disco-channel-directory--handle-preview-update
-               channel-id view)))
-      (condition-case err
-          (progn
-            (add-hook 'disco-gateway-event-hook
-                      disco-channel-directory--gateway-handler)
-            (add-hook 'disco-directory-event-hook
-                      disco-channel-directory--directory-handler)
-            (add-hook 'disco-preview-update-hook
-                      disco-channel-directory--preview-handler)
-            (disco-gateway-watch-global)
-            (setq disco-channel-directory--live-update-handle
-                  (appkit-register-handle
-                   view 'function
-                   (lambda ()
-                     (when (buffer-live-p buffer)
-                       (with-current-buffer buffer
-                         (disco-channel-directory--remove-live-updates)))))))
-        (error
-         (disco-channel-directory--remove-live-updates)
-         (signal (car err) (cdr err)))))
-    view))
+  "Attach the current directory Surface to shared event streams."
+  (let ((surface (disco-channel-directory--ensure-surface)))
+    (disco-channel-directory--remove-live-updates)
+    (setq disco-channel-directory--gateway-handler
+          (lambda (event)
+            (disco-channel-directory--handle-gateway-event event surface))
+          disco-channel-directory--directory-handler
+          (lambda (event)
+            (disco-channel-directory--handle-directory-event event surface))
+          disco-channel-directory--preview-handler
+          (lambda (channel-id)
+            (disco-channel-directory--handle-preview-update
+             channel-id surface)))
+    (condition-case condition
+        (progn
+          (add-hook 'disco-gateway-event-hook
+                    disco-channel-directory--gateway-handler)
+          (add-hook 'disco-directory-event-hook
+                    disco-channel-directory--directory-handler)
+          (add-hook 'disco-preview-update-hook
+                    disco-channel-directory--preview-handler)
+          (disco-gateway-watch-global)
+          surface)
+      (error
+       (disco-channel-directory--remove-live-updates)
+       (signal (car condition) (cdr condition))))))
 
 (defun disco-channel-directory--reflow-to-width (width)
   "Queue a position-preserving directory reflow when WIDTH changed."
@@ -1128,7 +1142,6 @@ VIEW defaults to the current buffer's Appkit view."
   (setq-local disco-channel-directory--header-line-cache "")
   (setq-local disco-channel-directory--rendering nil)
   (setq-local disco-channel-directory--render-pending nil)
-  (setq-local disco-channel-directory--live-update-handle nil)
   (setq-local disco-channel-directory--deferred-reconcile-p nil)
   (setq-local disco-channel-directory--deferred-entry-keys nil)
   (setq-local disco-channel-directory--deferred-structure-p nil)
@@ -1147,12 +1160,20 @@ VIEW defaults to the current buffer's Appkit view."
   (disco-channel-directory--ensure-window-size-hook)
   (add-hook 'window-buffer-change-functions
             #'disco-channel-directory--window-buffer-change nil t)
-  (add-hook 'kill-buffer-hook
-            #'disco-channel-directory--detach-live-updates nil t))
+  )
+
+(defconst disco-channel-directory--surface-type
+  (appkit-surface-type-create
+   :name 'disco-channel-directory
+   :mode #'disco-channel-directory-mode
+   :init #'disco-channel-directory--surface-init
+   :update #'disco-channel-directory--surface-update
+   :renderer-factory #'disco-channel-directory--surface-renderer)
+  "Generated Surface type for per-guild channel directories.")
 
 ;;;###autoload
 (defun disco-channel-directory-open (guild-id)
-  "Open the lazy channel directory for GUILD-ID."
+  "Open the Generated channel directory Surface for GUILD-ID."
   (interactive
    (let* ((guilds (disco-state-guilds))
           (choices
@@ -1176,32 +1197,33 @@ VIEW defaults to the current buffer's Appkit view."
                 (disco-state-guilds)))
     (user-error "Disco: unknown guild %s" guild-id))
   (let* ((app (disco-runtime-app))
-         (view-id (disco-channel-directory--view-id guild-id))
-         (fresh-p (null (appkit-view-for-id app view-id)))
-         (view
-          (appkit-open-view
-           :app app
-           :id view-id
-           :mode 'disco-channel-directory-mode
-           :buffer-name (disco-channel-directory--buffer-name guild-id)
-           :state guild-id
-           :sync-function #'disco-channel-directory--sync-invalidations
-           :parts '(frame entries)
-           :setup
-           (lambda (_view)
-             (setq-local disco-channel-directory--guild-id guild-id))
-           :select t))
-         (buffer (appkit-view-buffer view)))
+         (identity (disco-channel-directory--surface-id guild-id))
+         (existing (appkit-app-surface app identity))
+         (surface
+          (cond
+           ((appkit-surface-live-p existing)
+            (pop-to-buffer (appkit-surface-buffer existing))
+            existing)
+           (existing
+            (error "Disco: channel directory is unavailable: %S"
+                   (appkit-surface-status existing)))
+           (t
+            (appkit-open-generated-surface
+             disco-channel-directory--surface-type
+             :app app :identity identity :input guild-id
+             :buffer-name (disco-channel-directory--buffer-name guild-id)
+             :select t))))
+         (buffer (appkit-surface-buffer surface)))
     (with-current-buffer buffer
-      (setq disco-channel-directory--guild-id guild-id)
-      (disco-channel-directory--attach-live-updates)
-      (disco-channel-directory--reflow-to-width
-       (disco-channel-directory--usable-width))
-      (disco-channel-directory--request-profile view)
-      (disco-channel-directory--request-reconcile nil t nil view)
-      (disco-directory-load-guild-async guild-id)
-      (when fresh-p
-        (appkit-sync-invalidations view)))
+      (unless existing
+        (disco-channel-directory--attach-live-updates)
+        (disco-channel-directory--reflow-to-width
+         (disco-channel-directory--usable-width))
+        (disco-channel-directory--request-profile surface)
+        (disco-channel-directory--request-reconcile nil t nil surface)
+        (disco-directory-load-guild-async guild-id)
+        (appkit-surface-send
+         surface (disco-channel-directory--make-invalidations))))
     buffer))
 
 ;;;###autoload
