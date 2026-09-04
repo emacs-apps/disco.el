@@ -11,7 +11,6 @@
 (require 'subr-x)
 (require 'appkit-core)
 (require 'appkit-surface)
-(require 'appkit-invalidation)
 (require 'appkit-ui)
 (require 'appkit-presentation)
 (require 'disco-api)
@@ -39,6 +38,7 @@
   "Current message pin operation keyed by message id.")
 (defvar-local disco-room--pins-ack-seq 0
   "Monotonic owner token for pinned-message acknowledgements.")
+
 (defun disco-room-pin-reset ()
   "Reset pin-local state in the current room buffer."
   (setq-local disco-room--pin-op-seq 0
@@ -48,6 +48,7 @@
 (defun disco-room-pin-forget-message (message-id)
   "Discard pending pin state belonging to deleted MESSAGE-ID."
   (disco-room--pin-ops-clear-message message-id))
+
 (defun disco-room--pin-message-unavailable-reason (&optional msg)
   "Return reason toggling a message pin is unavailable for MSG, or nil."
   (let ((msg (or msg (ignore-errors (disco-room--message-at-point)))))
@@ -60,6 +61,7 @@
       "current room has no channel")
      (t
       (disco-room--channel-permission-reason '(pin-messages))))))
+
 (defun disco-room-ack-channel-pins ()
   "Acknowledge currently pinned messages in the active room channel."
   (interactive)
@@ -89,7 +91,8 @@
                (when (= ack-seq disco-room--pins-ack-seq)
                  (disco-state-apply-channel-pins-ack
                   channel-id last-pin-timestamp)
-                 (disco-room--queue-update view :part 'frame)
+                 (disco-room--queue-update view 'frame)
+
                  (message "disco: acknowledged pins for %s" channel-id)))))
          :on-error
          (lambda (err)
@@ -99,6 +102,7 @@
                  (message "disco: pins ack failed for %s: %s"
                           channel-id
                           (disco-room--async-error-message err))))))))))))
+
 (defun disco-room--pin-op-key (message-id)
   "Return normalized key for a message pin operation."
   (format "%s" message-id))
@@ -134,6 +138,7 @@
   "Invalidate the pending pin operation for MESSAGE-ID."
   (when (hash-table-p disco-room--pin-ops)
     (remhash (disco-room--pin-op-key message-id) disco-room--pin-ops)))
+
 (defun disco-room--message-pinned-p (msg)
   "Return non-nil when MSG is pinned."
   (eq (alist-get 'pinned msg) t))
@@ -184,7 +189,8 @@
                 (lambda (message)
                   (disco-room--message-with-pinned-state message pinned)))
                (disco-room--pin-op-finish target-id op-token)
-               (disco-room--queue-update view :entry target-id)
+               (disco-room--queue-update view (list 'rows-changed (list target-id)))
+
                (message "disco: message %s" verb)))))
        :on-error
        (lambda (err)
@@ -355,7 +361,6 @@ When RESET is non-nil, the returned page replaces the cached projection."
              (with-current-buffer buffer
                (disco-room-pinned-messages--complete-error view error)))))))))
 
-
 (defun disco-room-pinned-messages-refresh ()
   "Refresh the pinned-message projection in the current browser buffer."
   (interactive)
@@ -464,7 +469,7 @@ When RESET is non-nil, the returned page replaces the cached projection."
 (defun disco-room-pinned-messages--renderer (_surface)
   "Create the pinned-message Generated Renderer."
   (appkit-generated-renderer-create
-   :mount #'ignore
+   :mount #'disco-runtime-retain-surface-owner
    :merge (lambda (_left right) right)
    :render (lambda (surface _app-read-view _model _request)
              (disco-room-pinned-messages--render surface)

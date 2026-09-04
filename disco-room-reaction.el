@@ -30,6 +30,7 @@
 (declare-function disco-room--update-message-locally "disco-room" (message-id function))
 
 (defvar disco-room--channel-id)
+
 (defun disco-room-reaction-insert (message prefix)
   "Insert MESSAGE reaction chips using timeline PREFIX."
   (when disco-room-show-reactions
@@ -39,10 +40,12 @@
      :selected-face 'disco-room-reaction-selected
      :unselected-face 'disco-room-reaction
      :line-face 'disco-room-message-meta)))
+
 (defvar-local disco-room--reaction-op-seq 0
   "Monotonic owner token for reaction requests in this room view.")
 (defvar-local disco-room--reaction-ops nil
   "Current reaction operation keyed by message id and emoji identity.")
+
 (defun disco-room-reaction-reset ()
   "Reset reaction-local state in the current room buffer."
   (setq-local disco-room--reaction-op-seq 0
@@ -51,9 +54,11 @@
 (defun disco-room-reaction-forget-message (message-id)
   "Discard reaction-local state belonging to deleted MESSAGE-ID."
   (disco-room--reaction-ops-clear-message message-id))
+
 (defun disco-room--reaction-unavailable-reason (&optional _msg)
   "Return reason reaction actions are unavailable, or nil."
   (disco-room--room-send-restriction-reason '(add-reactions)))
+
 (defun disco-room--parse-reaction-input (emoji)
   "Parse user EMOJI input into plist with :id/:name.
 
@@ -133,6 +138,7 @@ Custom emoji identity is its id, independent of a later name change."
   (when (hash-table-p disco-room--reaction-ops)
     (remhash (disco-room--reaction-op-key message-id emoji)
              disco-room--reaction-ops)))
+
 (defun disco-room--reaction-matches-input-p (reaction emoji)
   "Return non-nil when REACTION matches EMOJI input string."
   (let* ((spec (disco-room--parse-reaction-input emoji))
@@ -292,6 +298,7 @@ Return non-nil when a local message update was applied."
          (when (stringp emoji-input)
            (disco-room--reaction-op-clear-emoji message-id emoji-input))))
       (_ nil))))
+
 (defun disco-room--default-reaction-emoji (msg)
   "Return best default reaction emoji suggestion from MSG."
   (let* ((reactions (disco-msg-reactions msg))
@@ -421,7 +428,8 @@ versions or rooms without a catalog retain the unrestricted text fallback."
                    msg emoji-text t t)))
                (disco-room--reaction-op-finish
                 target-id emoji-text op-token)
-               (disco-room--queue-update view :entry target-id)
+               (disco-room--queue-update view (list 'rows-changed (list target-id)))
+
                (message "disco: reaction added (%s)" emoji-text)))))
        :on-error
        (lambda (err)
@@ -495,7 +503,8 @@ versions or rooms without a catalog retain the unrestricted text fallback."
                    msg emoji-text nil t)))
                (disco-room--reaction-op-finish
                 target-id emoji-text op-token)
-               (disco-room--queue-update view :entry target-id)
+               (disco-room--queue-update view (list 'rows-changed (list target-id)))
+
                (message "disco: reaction removed (%s)" emoji-text)))))
        :on-error
        (lambda (err)

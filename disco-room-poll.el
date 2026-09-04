@@ -48,6 +48,7 @@
   "Monotonic owner token for poll vote requests in this room view.")
 (defvar-local disco-room--poll-vote-ops nil
   "Current poll vote operation keyed by message id.")
+
 (defun disco-room-poll-reset ()
   "Reset poll-local state in the current room buffer."
   (setq-local disco-room--poll-selection-drafts (make-hash-table :test #'equal)
@@ -137,6 +138,7 @@
       "only poll author can end this poll")
      (t
       (disco-room--room-send-restriction-reason '(send-polls))))))
+
 (cl-defun disco-room--poll-owned-by-current-user-p (msg &optional (unknown-value t))
   "Return non-nil when poll in MSG is owned by current user.
 
@@ -165,6 +167,7 @@ If current user identity is unknown, return UNKNOWN-VALUE."
          (disco-permission-channel-has-all-p
           (disco-room--channel-object)
           (disco-room--poll-expire-required-permissions)))))
+
 (defun disco-room--poll-draft-selection (message-id)
   "Return staged poll selection list for MESSAGE-ID.
 
@@ -197,6 +200,7 @@ This may return nil when a staged empty selection exists."
   (when (and (hash-table-p disco-room--poll-selection-drafts)
              message-id)
     (remhash message-id disco-room--poll-selection-drafts)))
+
 (defun disco-room--poll-selection-key (answer-ids)
   "Return canonical set-like key for poll ANSWER-IDS."
   (sort (copy-sequence
@@ -418,6 +422,7 @@ otherwise remove.  SELF-P non-nil makes the own-vote transition idempotent."
       ;; and never clear a newer draft merely because an older echo arrived.
       (disco-room--poll-vote-op-confirm-convergence message-id))
     applied))
+
 (defun disco-room--insert-message-poll (msg)
   "Insert poll detail block for MSG when present."
   (when disco-room-show-polls
@@ -537,6 +542,7 @@ otherwise remove.  SELF-P non-nil makes the own-vote transition idempotent."
                                  `(disco-message-id ,message-id))
             (appkit-ui-append-face
              actions-start (point) disco-room-poll-meta-face)))))))
+
 (defun disco-room--poll-message-required (&optional message-id)
   "Return poll message object by MESSAGE-ID or point, or raise user error."
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
@@ -659,7 +665,8 @@ CONTENT is optional extra text sent alongside the poll."
     (setq request-revision
           (disco-state-message-revision channel-id))
     (setq disco-room--send-in-flight t)
-    (disco-room--queue-update view :part 'frame)
+    (disco-room--queue-update view 'frame)
+
     (disco-api-create-message-async
      channel-id
      :content content
@@ -728,7 +735,8 @@ CONTENT is optional extra text sent alongside the poll."
                (when (disco-room--poll-draft-matches-p target-id normalized)
                  (disco-room--poll-clear-draft-selection target-id))
                (disco-room--poll-vote-op-finish target-id op-token)
-               (disco-room--queue-update view :entry target-id)
+               (disco-room--queue-update view (list 'rows-changed (list target-id)))
+
                (message "disco: poll vote updated")))))
        :on-error
        (lambda (err)
@@ -873,6 +881,7 @@ send votes to Discord."
          (when (disco-room--channel-buffer-p room-buffer channel-id view)
            (message "disco: end poll failed: %s"
                     (disco-room--async-error-message err))))))))
+
 (transient-define-prefix disco-room-poll-transient ()
   "Transient for the poll at point."
   :refresh-suffixes t

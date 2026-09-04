@@ -124,6 +124,7 @@
   "Return non-secret provider context for one room capture."
   (list :channel-id disco-room--channel-id
         :guild-id disco-room--guild-id))
+
 (defun disco-room--compose-object-classifier (value _text)
   "Classify structured compose VALUE for Discord output."
   (if (disco-room--attachment-input-object-p value)
@@ -909,9 +910,9 @@ recoverable."
     (text &key reset-history-p defer-live-update-p)
   "Apply draft TEXT to cache/live input and return update metadata.
 
-When a visible tail input exists and attachment-derived footer state is
-unchanged, update the live input directly in telega-like fashion.  Otherwise,
-callers can use the returned metadata to decide whether a frame refresh is
+When a visible tail input exists, update it directly.  Attachment-derived
+footer changes are projected separately without rebuilding that input.
+Callers use the returned metadata to decide whether a frame refresh is
 needed.  When DEFER-LIVE-UPDATE-P is non-nil, only controller state changes;
 an Appkit sync must project the resulting composer."
   (let ((old-attachments (copy-tree disco-room--pending-attachments))
@@ -926,14 +927,13 @@ an Appkit sync must project the resulting composer."
       (disco-room--sync-pending-attachments-from-draft draft)
       (let ((attachments-changed-p
              (not (equal old-attachments disco-room--pending-attachments))))
-        (when (and live-input-p (not attachments-changed-p))
+        (when live-input-p
           (appkit-chatbuf-with-generated-update
             (appkit-chatbuf-input-replace draft)
             (disco-room--apply-input-text-properties)))
         (list :draft (appkit-chatbuf-copy-string draft)
               :attachments-changed-p attachments-changed-p
-              :live-input-updated-p (and live-input-p
-                                         (not attachments-changed-p)))))))
+              :live-input-updated-p (and live-input-p t))))))
 
 (defun disco-room--set-draft (text)
   "Set room draft TEXT and refresh composer surfaces as needed."
@@ -1295,7 +1295,6 @@ current effective input-options state.  Return the normalized state plist."
     (if (string-empty-p next)
         (message "disco: cleared description for %s" (plist-get ref :label))
       (message "disco: updated description for %s" (plist-get ref :label)))))
-
 
 (defun disco-room-toggle-attachment-spoiler ()
   "Toggle spoiler status for one queued attachment."
@@ -1719,7 +1718,6 @@ the attachment as a spoiler."
 
 ;;; Send pipeline
 
-
 (defun disco-room--write-long-message-temp-attachment (content)
   "Write CONTENT to a temporary text file attachment plist."
   (let ((path (make-temp-file "disco-message-" nil ".txt"))
@@ -1750,7 +1748,8 @@ the attachment as a spoiler."
             (request-revision
              (disco-state-message-revision disco-room--channel-id)))
         (setq disco-room--send-in-flight t)
-        (disco-room--queue-update view :part 'frame)
+        (disco-room--queue-update view 'frame)
+
         (disco-api-send-message-async
          channel-id nil
          :sticker-ids (list sticker-id)
@@ -1957,7 +1956,8 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
       (setf (disco-room--send-operation-cleared-revision operation)
             (disco-room--clear-composer-operation-slot))
       (setq disco-room--send-in-flight t)
-      (disco-room--queue-update view :part 'frame)))
+      (disco-room--queue-update view 'frame)
+      ))
   operation)
 
 (defun disco-room--abort-send-operation (operation)
@@ -2136,9 +2136,9 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
           (with-current-buffer
               (disco-room--send-operation-room-buffer operation)
             (when-let* ((message
-                        (disco-room--channel-message-by-id
-                         channel-id
-                         (alist-get 'id accepted-response))))
+                         (disco-room--channel-message-by-id
+                          channel-id
+                          (alist-get 'id accepted-response))))
               (disco-room--enqueue-local-create-response
                (disco-room--send-operation-view operation)
                channel-id message))))
@@ -2511,7 +2511,8 @@ FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
     (setq request-revision
           (disco-state-message-revision target-channel-id))
     (setq disco-room--send-in-flight t)
-    (disco-room--queue-update view :part 'frame)
+    (disco-room--queue-update view 'frame)
+
     (cl-labels
         ((room-active-p
            ()

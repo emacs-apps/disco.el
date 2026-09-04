@@ -771,25 +771,17 @@ Keeps original line breaks and applies markdown renderer pipeline."
       0)))
 
 (defun disco-embed--insert-preview-image-slice
-    (image slice-index url &optional fallback cache-key)
-  "Insert one preview line slice for IMAGE at SLICE-INDEX.
-
-When URL is non-nil, make the inserted slice clickable.  FALLBACK is used as
-image alt text."
-  (let* ((slice-height-px (max 1
-                               (or (ignore-errors (line-pixel-height))
-                                   (frame-char-height))))
+    (image slice-index url owner &optional fallback cache-key)
+  "Insert one Surface-owned preview slice for IMAGE."
+  (let* ((slice-height-px (max 1 (or (ignore-errors (line-pixel-height)) (frame-char-height))))
          (slice-start (point))
-         (slice (list 0
-                      (* slice-index slice-height-px)
-                      1.0
-                      slice-height-px)))
+         (slice (list 0 (* slice-index slice-height-px) 1.0 slice-height-px)))
     (insert-image image (or fallback "[image]") nil slice)
-    (appkit-media-add-open-image-properties
-     slice-start (point) `((url . ,url))
-     :cache-key cache-key
-     :cache-directory disco-media-preview-cache-directory
-     :client-label "disco")))
+    (disco-media-add-open-properties
+     slice-start (point)
+     (appkit-media-resource-create
+      :url url)
+     'image cache-key owner)))
 
 (defun disco-embed--grid-item-label (item)
   "Return fallback text label for preview grid ITEM."
@@ -816,13 +808,12 @@ image alt text."
      (t 0))))
 
 (defun disco-embed--insert-grid-item-line (item line-index)
-  "Insert ITEM content for LINE-INDEX in a multi-image preview grid.
-
-Return non-nil when anything was inserted."
-  (let ((image (plist-get item :image))
-        (url (plist-get item :url))
-        (cache-key (plist-get item :cache-key))
-        (label (disco-embed--grid-item-label item)))
+  "Insert ITEM content for LINE-INDEX in a multi-image preview grid."
+  (let
+      ((image (plist-get item :image)) (url (plist-get item :url))
+       (cache-key (plist-get item :cache-key))
+       (owner (plist-get item :owner))
+       (label (disco-embed--grid-item-label item)))
     (cond
      (image
       (let ((slice-count (disco-embed--grid-item-line-count item)))
@@ -830,16 +821,17 @@ Return non-nil when anything was inserted."
              (condition-case _
                  (progn
                    (disco-embed--insert-preview-image-slice
-                    image line-index url "[image]" cache-key)
+                    image
+                    line-index
+                    url
+                    owner
+                    "[image]"
+                    cache-key)
                    t)
                (error
                 (when (zerop line-index)
-                  (insert "[image unavailable]")
-                  t))))))
-     ((and (zerop line-index)
-           (stringp label))
-      (insert label)
-      t)
+                  (insert "[image unavailable]") t))))))
+     ((and (zerop line-index) (stringp label)) (insert label) t)
      (t nil))))
 
 (defun disco-embed--insert-grid-item-padding (item)
@@ -885,82 +877,87 @@ Return non-nil when anything was inserted."
   "Insert media preview row for EMBED in MSG.
 
 OWNER is captured exactly by external video playback properties."
-  (let* ((preview-rendering-available
-          (and disco-embed-show-image-previews
-               (appkit-media-inline-image-rendering-available-p)))
-         (video-cache-key
-          (disco-embed--video-cache-key msg embed-index))
-         (embed-images (disco-embed--embed-image-objects embed)))
+  (let*
+      ((preview-rendering-available
+        (and disco-embed-show-image-previews
+             (appkit-media-inline-image-rendering-available-p)))
+       (video-cache-key (disco-embed--video-cache-key msg embed-index))
+       (embed-images (disco-embed--embed-image-objects embed)))
     (if (> (length embed-images) 1)
-        (let ((items '())
-              (image-index 0)
-              (grid-max-width (disco-embed--preview-grid-max-width)))
+        (let
+            ((items 'nil) (image-index 0)
+             (grid-max-width (disco-embed--preview-grid-max-width)))
           (dolist (image embed-images)
             (setq image-index (1+ image-index))
-            (let* ((image-url (disco-embed--image-object-url msg image))
-                   (source-url
-                    (disco-embed--image-object-source-url msg image))
-                   (open-url (or source-url image-url))
-                   (status 'loading)
-                   (display-image nil)
-                   (open-cache-key
-                    (and open-url
-                         (format "embed-open-image:%s" open-url)))
-                   (attachment (and (appkit-media-url-present-p image-url)
-                                    (disco-embed--image-preview-attachment
-                                     msg
-                                     embed-index
-                                     image-index
-                                     image
-                                     image-url
-                                     source-url))))
+            (let*
+                ((image-url (disco-embed--image-object-url msg image))
+                 (source-url
+                  (disco-embed--image-object-source-url msg image))
+                 (open-url (or source-url image-url))
+                 (status 'loading) (display-image nil)
+                 (open-cache-key
+                  (and open-url
+                       (format "embed-open-image:%s" open-url)))
+                 (attachment
+                  (and (appkit-media-url-present-p image-url)
+                       (disco-embed--image-preview-attachment
+                        msg
+                        embed-index
+                        image-index
+                        image
+                        image-url
+                        source-url))))
               (cond
                ((not preview-rendering-available)
                 (setq status 'disabled))
                ((not (appkit-media-url-present-p image-url))
                 (setq status 'no-url))
-               ((not attachment)
-                (setq status 'no-url))
-               (t
-                (disco-media-attachment-preview-image attachment t)
-                (setq display-image
-                      (disco-embed--preview-image-for-attachment attachment grid-max-width))
-                (let* ((preview-cache-key
-                        (disco-media-attachment-preview-cache-key attachment))
+               ((not attachment) (setq status 'no-url))
+               (t (disco-media-attachment-preview-image attachment t)
+                  (setq display-image
+                        (disco-embed--preview-image-for-attachment
+                         attachment grid-max-width))
+                  (let*
+                      ((preview-cache-key
+                        (disco-media-attachment-preview-cache-key
+                         attachment))
                        (cache-state
                         (and preview-cache-key
                              (disco-media-attachment-preview-cache-state
                               preview-cache-key))))
-                  (setq status
-                        (cond
-                         (display-image 'ready)
-                         ((eq cache-state :missing) 'missing)
-                         (t 'loading))))))
-              (push (list :image display-image
-                          :status status
-                          :url open-url
-                          :cache-key open-cache-key)
-                    items)))
-          (disco-embed--insert-grid-preview-row (nreverse items) embed prefix-str))
-      (let* ((preview-attachment (disco-embed--preview-attachment msg embed embed-index))
-             (preview (and preview-attachment
-                           preview-rendering-available
-                           (disco-media-attachment-preview-image preview-attachment t)))
-             (preview-cache-key (and preview-attachment
-                                     (disco-media-attachment-preview-cache-key
-                                      preview-attachment)))
-             (preview-cache-state (and preview-cache-key
-                                       (disco-media-attachment-preview-cache-state
-                                        preview-cache-key)))
-             (content-start (point))
-             (video-preview-p (or (eq media-kind 'video)
-                                  (appkit-media-url-present-p video-url)))
-             (open-image-url (or media-source-url media-url))
-             (play-video-url (or video-source-url
-                                 video-url
-                                 media-source-url
-                                 media-url))
-             (apply-meta-face t))
+                    (setq status
+                          (cond (display-image 'ready)
+                                ((eq cache-state :missing) 'missing)
+                                (t 'loading))))))
+              (push
+               (list :image display-image :status status :url open-url
+                     :cache-key open-cache-key :owner owner)
+               items)))
+          (disco-embed--insert-grid-preview-row (nreverse items) embed
+                                                prefix-str))
+      (let*
+          ((preview-attachment
+            (disco-embed--preview-attachment msg embed embed-index))
+           (preview
+            (and preview-attachment preview-rendering-available
+                 (disco-media-attachment-preview-image
+                  preview-attachment t)))
+           (preview-cache-key
+            (and preview-attachment
+                 (disco-media-attachment-preview-cache-key
+                  preview-attachment)))
+           (preview-cache-state
+            (and preview-cache-key
+                 (disco-media-attachment-preview-cache-state
+                  preview-cache-key)))
+           (content-start (point))
+           (video-preview-p
+            (or (eq media-kind 'video)
+                (appkit-media-url-present-p video-url)))
+           (open-image-url (or media-source-url media-url))
+           (play-video-url
+            (or video-source-url video-url media-source-url media-url))
+           (apply-meta-face t))
         (cond
          ((memq media-kind '(image thumbnail video))
           (if preview
@@ -969,52 +966,63 @@ OWNER is captured exactly by external video playback properties."
                     (setq apply-meta-face nil)
                     (appkit-media-insert-image-slices
                      preview
-                     (and (not video-preview-p)
-                          (appkit-media-url-present-p open-image-url)
-                          (lambda ()
-                            (disco-media-open-discord-resource
-                             `((url . ,open-image-url)) 'image)))
+                     (and
+                      (not
+                       video-preview-p)
+                      (appkit-media-url-present-p
+                       open-image-url)
+                      (lambda ()
+                        (disco-media-open-discord-resource
+                         (appkit-media-resource-create
+                          :url open-image-url)
+                         'image nil
+                         :owner owner)))
                      nil
-                     (if video-preview-p "[video]" "[image]")
-                     (if video-preview-p
+                     (if
+                         video-preview-p
+                         "[video]"
+                       "[image]")
+                     (if
+                         video-preview-p
                          "Play embed video"
                        "Open embed image in Emacs"))
-                    (when (and video-preview-p
-                               (appkit-media-url-present-p play-video-url))
-                      (appkit-media-add-play-video-properties
+                    (when
+                        (and video-preview-p
+                             (appkit-media-url-present-p
+                              play-video-url))
+                      (disco-media-add-open-properties
                        slice-start
                        (point)
-                       play-video-url
-                       "disco"
-                       :owner owner
-                       :cache-key video-cache-key)))
+                       (appkit-media-resource-create
+                        :url
+                        play-video-url)
+                       'video
+                       video-cache-key
+                       owner)))
                 (error
-                 (insert (if video-preview-p
-                             "[video preview unavailable]"
-                           "[image unavailable]"))))
+                 (insert
+                  (if video-preview-p "[video preview unavailable]"
+                    "[image unavailable]"))))
             (cond
              ((not preview-rendering-available)
               (insert "[preview disabled]"))
              ((not (appkit-media-url-present-p media-url))
               (insert "[no preview URL]"))
              ((eq preview-cache-state :missing)
-              (insert (if video-preview-p
-                          "[video preview unavailable]"
-                        "[image unavailable]")))
-             (t
-              (insert "[loading preview]")))))
-         (t
-          (insert "[no preview]")))
+              (insert
+               (if video-preview-p "[video preview unavailable]"
+                 "[image unavailable]")))
+             (t (insert "[loading preview]")))))
+         (t (insert "[no preview]")))
         (insert "\n")
         (appkit-ui-apply-line-prefix content-start (point) prefix-str)
-        (appkit-ui-append-face
-         content-start
-         (point)
-         (if apply-meta-face
-             (appkit-ui-combine-faces
-              (disco-embed--background-face embed)
-              'disco-room-embed-card-meta)
-           (disco-embed--background-face embed)))))))
+        (appkit-ui-append-face content-start (point)
+                               (if apply-meta-face
+                                   (appkit-ui-combine-faces
+                                    (disco-embed--background-face
+                                     embed)
+                                    'disco-room-embed-card-meta)
+                                 (disco-embed--background-face embed)))))))
 
 (defun disco-embed--main-url-kind
     (main-url media-kind media-source-url media-url video-source-url video-url)
@@ -1032,118 +1040,120 @@ in-Emacs media behavior."
 
 (defun disco-embed--add-url-properties
     (start end url kind &optional owner cache-key)
-  "Make URL between START and END interactive according to KIND.
-
-OWNER is captured exactly when KIND launches a video player.  CACHE-KEY is its
-stable playback-cache identity."
+  "Make URL between START and END interactive according to KIND.\n\nOWNER is captured exactly when KIND launches a video player.  CACHE-KEY is its\nstable playback-cache identity."
   (pcase kind
     ('video
-     (appkit-media-add-play-video-properties
-      start end url "disco" :owner owner :cache-key cache-key))
+     (disco-media-add-open-properties start end
+                                      (appkit-media-resource-create
+                                       :url url)
+                                      'video cache-key owner))
     ('image
-     (appkit-media-add-open-image-properties
-      start end `((url . ,url))
-      :cache-directory disco-media-preview-cache-directory
-      :client-label "disco"))
-    (_
-     (appkit-media-add-open-url-properties start end url))))
+     (disco-media-add-open-properties start end
+                                      (appkit-media-resource-create
+                                       :url url)
+                                      'image nil owner))
+    (_ (appkit-media-add-open-url-properties start end url))))
 
 (defun disco-embed--url-action (url kind &optional owner cache-key)
-  "Return callback and help text for opening URL according to KIND.
-
-OWNER is captured exactly when KIND launches a video player.  CACHE-KEY is its
-stable playback-cache identity."
+  "Return callback and help text for opening URL according to KIND.\n\nOWNER is captured exactly when KIND launches a video player.  CACHE-KEY is its\nstable playback-cache identity."
   (pcase kind
     ('video
-     (list (lambda ()
-             (appkit-media-play-video-url
-              url "disco" :owner owner :cache-key cache-key))
-           "Play embed video"))
+     (list
+      (lambda ()
+        (disco-media-open-discord-resource
+         (appkit-media-resource-create :url url) 'video cache-key
+         :owner owner))
+      "Play embed video"))
     ('image
-     (list (lambda ()
-             (disco-media-open-discord-resource `((url . ,url)) 'image))
-           "Open embed image in Emacs"))
-    (_
-     (list (lambda () (browse-url url t)) "Open embed URL"))))
+     (list
+      (lambda ()
+        (disco-media-open-discord-resource
+         (appkit-media-resource-create :url url) 'image nil :owner
+         owner))
+      "Open embed image in Emacs"))
+    (_ (list (lambda () (browse-url url t)) "Open embed URL"))))
 
 (defun disco-embed--insert-action-row
-    (main-url main-url-kind media-url video-url author-url provider-url
-              author-icon-url embed prefix-str video-cache-key &optional owner)
-  "Insert compact action buttons for one EMBED using PREFIX-STR.
-
-MAIN-URL and MAIN-URL-KIND define the primary action.  MEDIA-URL, VIDEO-URL,
-AUTHOR-URL, PROVIDER-URL, and AUTHOR-ICON-URL supply secondary actions.
-VIDEO-CACHE-KEY identifies video playback cache entries, and OWNER owns their
-viewer buffers."
-  (let ((actions '())
-        (media-kind (car (disco-embed--media-entry embed))))
+    (main-url main-url-kind media-url video-url author-url
+              provider-url author-icon-url embed prefix-str
+              video-cache-key &optional owner)
+  "Insert compact action buttons for one EMBED using PREFIX-STR.\n\nMAIN-URL and MAIN-URL-KIND define the primary action.  MEDIA-URL, VIDEO-URL,\nAUTHOR-URL, PROVIDER-URL, and AUTHOR-ICON-URL supply secondary actions.\nVIDEO-CACHE-KEY identifies video playback cache entries, and OWNER owns their\nviewer buffers."
+  (let
+      ((actions 'nil)
+       (media-kind (car (disco-embed--media-entry embed))))
     (when (appkit-media-url-present-p main-url)
-      (let ((main-action
-             (disco-embed--url-action
-              main-url main-url-kind owner video-cache-key)))
-        (push (list "[Open]" (car main-action) (cadr main-action)) actions))
-      (push (list "[Copy]"
-                  (lambda ()
-                    (kill-new main-url)
-                    (message "disco: copied embed URL"))
-                  "Copy embed URL")
-            actions))
-    (when (and (appkit-media-url-present-p video-url)
-               (not (equal video-url main-url)))
-      (push (list "[Play]"
-                  (lambda ()
-                    (appkit-media-play-video-url
-                     video-url "disco" :owner owner
-                     :cache-key video-cache-key))
-                  "Play embed video")
-            actions))
-    (when (and (memq media-kind '(image thumbnail))
-               (appkit-media-url-present-p media-url)
-               (not (equal media-url main-url)))
-      (push (list "[Media]"
-                  (lambda ()
-                    (disco-media-open-discord-resource
-                     `((url . ,media-url)) 'image))
-                  "Open embed image in Emacs")
-            actions))
-    (when (and (appkit-media-url-present-p author-url)
-               (not (equal author-url main-url)))
-      (push (list "[Author]"
-                  (lambda () (browse-url author-url t))
-                  "Open embed author URL")
-            actions))
-    (when (and (appkit-media-url-present-p provider-url)
-               (not (equal provider-url main-url))
-               (not (equal provider-url author-url)))
-      (push (list "[Provider]"
-                  (lambda () (browse-url provider-url t))
-                  "Open embed provider URL")
-            actions))
-    (when (and (appkit-media-url-present-p author-icon-url)
-               (not (equal author-icon-url main-url)))
-      (push (list "[Icon]"
-                  (lambda ()
-                    (disco-media-open-discord-resource
-                     `((url . ,author-icon-url)) 'image))
-                  "Open embed author icon in Emacs")
-            actions))
+      (let
+          ((main-action
+            (disco-embed--url-action main-url main-url-kind owner
+                                     video-cache-key)))
+        (push (list "[Open]" (car main-action) (cadr main-action))
+              actions))
+      (push
+       (list "[Copy]"
+             (lambda () (kill-new main-url)
+               (message "disco: copied embed URL"))
+             "Copy embed URL")
+       actions))
+    (when
+        (and (appkit-media-url-present-p video-url)
+             (not (equal video-url main-url)))
+      (push
+       (list "[Play]"
+             (lambda ()
+               (disco-media-open-discord-resource
+                (appkit-media-resource-create :url video-url) 'video
+                video-cache-key :owner owner))
+             "Play embed video")
+       actions))
+    (when
+        (and (memq media-kind '(image thumbnail))
+             (appkit-media-url-present-p media-url)
+             (not (equal media-url main-url)))
+      (push
+       (list "[Media]"
+             (lambda ()
+               (disco-media-open-discord-resource
+                (appkit-media-resource-create :url media-url) 'image nil
+                :owner owner))
+             "Open embed image in Emacs")
+       actions))
+    (when
+        (and (appkit-media-url-present-p author-url)
+             (not (equal author-url main-url)))
+      (push
+       (list "[Author]" (lambda () (browse-url author-url t))
+             "Open embed author URL")
+       actions))
+    (when
+        (and (appkit-media-url-present-p provider-url)
+             (not (equal provider-url main-url))
+             (not (equal provider-url author-url)))
+      (push
+       (list "[Provider]" (lambda () (browse-url provider-url t))
+             "Open embed provider URL")
+       actions))
+    (when
+        (and (appkit-media-url-present-p author-icon-url)
+             (not (equal author-icon-url main-url)))
+      (push
+       (list "[Icon]"
+             (lambda ()
+               (disco-media-open-discord-resource
+                (appkit-media-resource-create :url author-icon-url) 'image nil
+                :owner owner))
+             "Open embed author icon in Emacs")
+       actions))
     (when actions
-      (let ((content-start (point))
-            (first t))
+      (let ((content-start (point)) (first t))
         (dolist (action (nreverse actions))
-          (unless first
-            (insert " "))
-          (setq first nil)
-          (disco-embed--insert-action-button
-           (nth 0 action)
-           (nth 1 action)
-           (nth 2 action)))
+          (unless first (insert " ")) (setq first nil)
+          (disco-embed--insert-action-button (nth 0 action)
+                                             (nth 1 action)
+                                             (nth 2 action)))
         (insert "\n")
         (appkit-ui-apply-line-prefix content-start (point) prefix-str)
-        (appkit-ui-append-face
-         content-start
-         (point)
-         (disco-embed--background-face embed))))))
+        (appkit-ui-append-face content-start (point)
+                               (disco-embed--background-face embed))))))
 
 (defun disco-embed-insert-card (msg embed embed-index &optional owner)
   "Insert one telega-inspired rich embed card for EMBED from MSG.

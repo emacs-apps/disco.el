@@ -59,7 +59,7 @@
               (should (eq buffer (disco-root-open)))
               (should (= watch-count 1))
               (with-current-buffer buffer
-                (disco-root--queue-live-update nil t t)
+                (disco-root--queue-live-update '(:type refresh))
                 (disco-root--flush-live-updates))
               (should (eq (appkit-surface-status surface) 'running))
               (kill-buffer buffer)
@@ -161,7 +161,7 @@
               (with-current-buffer buffer
                 (setq-local visual-fill-column-mode nil)
                 (appkit-chat-history-window-set "m1" nil)
-                (disco-room--queue-update surface :structure t)
+                (disco-room--queue-update surface 'refresh)
                 (disco-room--flush-updates surface)
                 (should (= 95 (disco-room--line-fill-column)))
                 (should (string-match-p "Alice" (buffer-string)))

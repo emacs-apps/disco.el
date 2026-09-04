@@ -7,7 +7,6 @@
 (require 'disco-ins)
 (require 'appkit-ui)
 
-
 (ert-deftest disco-ins-insert-reference-line-makes-preview-navigable ()
   (with-temp-buffer
     (let (clicked)
@@ -21,8 +20,9 @@
       (should (equal "↪ preview\n" (buffer-string)))
       (should (eq 'shadow (get-text-property (point) 'face)))
       (should (equal "Open reply" (get-text-property (point) 'help-echo)))
-      (call-interactively
-       (lookup-key (get-text-property (point) 'keymap) (kbd "RET")))
+      (search-forward "preview")
+      (goto-char (match-beginning 0))
+      (should (appkit-ui-activate-at (point)))
       (should clicked))))
 
 (ert-deftest disco-ins-insert-reaction-line-renders-selected-and-unselected-chips ()
@@ -93,8 +93,9 @@
       (should-not (string-match-p (regexp-quote "[Jump") (buffer-string)))
       (goto-char (point-min))
       (should (equal "Open source" (get-text-property (point) 'help-echo)))
-      (call-interactively
-       (lookup-key (get-text-property (point) 'keymap) (kbd "RET")))
+      (search-forward "Guild / channel")
+      (goto-char (match-beginning 0))
+      (should (appkit-ui-activate-at (point)))
       (should clicked))))
 
 (ert-deftest disco-ins-insert-attachment-lines-renders-summary-and-url ()
@@ -113,7 +114,6 @@
       (should (eq 'bold (get-text-property (point) 'face)))
       (search-forward "https://example.invalid/doc.txt")
       (should (eq 'shadow (get-text-property (match-beginning 0) 'face))))))
-
 
 (ert-deftest disco-ins-insert-attachment-spoiler-placeholder-renders-reveal-button ()
   (with-temp-buffer

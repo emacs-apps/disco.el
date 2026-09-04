@@ -16,7 +16,6 @@
 (require 'subr-x)
 (require 'appkit-core)
 (require 'appkit-directory)
-(require 'appkit-invalidation)
 (require 'appkit-surface)
 (require 'appkit-projection)
 (require 'appkit-presentation)
@@ -99,17 +98,8 @@
 (defvar-local disco-channel-directory--render-pending nil
   "Non-nil when another reconciliation was requested while rendering.")
 
-(defvar-local disco-channel-directory--deferred-reconcile-p nil
-  "Non-nil when hidden-buffer updates await a display window.")
-
-(defvar-local disco-channel-directory--deferred-entry-keys nil
-  "Stable entry keys accumulated while this directory has no display window.")
-
-(defvar-local disco-channel-directory--deferred-structure-p nil
-  "Non-nil when hidden updates require structural reconciliation.")
-
-(defvar-local disco-channel-directory--deferred-position-p nil
-  "Non-nil when hidden updates require geometry-sensitive row reflow.")
+(defvar-local disco-channel-directory--deferred-change nil
+  "Projection change retained until this directory has a display window.")
 
 (defun disco-channel-directory--normalize-id (value)
   "Return VALUE as an ID string, or nil."
@@ -335,7 +325,6 @@
    (disco-guild-directory-project
     (disco-channel-directory--projection-context))))
 
-
 (defun disco-channel-directory--usable-width ()
   "Return current usable directory width in columns."
   (or (when-let* ((widths
@@ -400,9 +389,9 @@
             (disco-guild-directory-entry-thread-parent-id entry)))
        (when expanded-p
          (disco-directory-load-parent-threads-async parent-id))
-       (disco-channel-directory--invalidate-and-sync (list parent-id) t)))
+       (disco-channel-directory--refresh-and-sync (list parent-id) t)))
     ('group
-     (disco-channel-directory--invalidate-and-sync nil t))
+     (disco-channel-directory--refresh-and-sync nil t))
     (_
      (error "Disco: unsupported guild-directory fold row %S"
             (disco-guild-directory-entry-row-kind entry)))))
@@ -448,7 +437,7 @@
      (if loaded-p
          (format "  %d channels · %d unread" (length channels) unread)
        (format "  %s" (disco-directory-guild-status
-                        disco-channel-directory--guild-id)))
+                       disco-channel-directory--guild-id)))
      (if (string-empty-p lens) "" (concat "  [" lens "]")))))
 
 (defun disco-channel-directory--refresh-header-line ()
@@ -462,7 +451,7 @@
   "Reconcile the directory, forcing channel IDs and stable entry keys.
 
 FORCE-CHANNEL-IDS is retained for direct interactive callers.
-FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
+FORCE-ENTRY-KEYS contains stable projection keys to redraw."
   (if disco-channel-directory--rendering
       (setq disco-channel-directory--render-pending t)
     (let ((disco-channel-directory--rendering t)
@@ -506,67 +495,52 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                node-table))
     keys))
 
-(defun disco-channel-directory--defer-invalidations (invalidations)
-  "Retain Appkit INVALIDATIONS until this directory has a display window."
-  (setq disco-channel-directory--deferred-reconcile-p t
-        disco-channel-directory--deferred-structure-p
-        (or disco-channel-directory--deferred-structure-p
-            (appkit-invalidations-structure-p invalidations))
-        disco-channel-directory--deferred-position-p
-        (or disco-channel-directory--deferred-position-p
-            (appkit-invalidations-position-p invalidations))
-        disco-channel-directory--deferred-entry-keys
-        (delete-dups
-         (append (appkit-invalidations-entry-keys invalidations)
-                 disco-channel-directory--deferred-entry-keys))))
-
-(defun disco-channel-directory--clear-deferred-invalidations ()
-  "Forget hidden-buffer invalidations after a successful visible sync."
-  (setq disco-channel-directory--deferred-reconcile-p nil
-        disco-channel-directory--deferred-entry-keys nil
-        disco-channel-directory--deferred-structure-p nil
-        disco-channel-directory--deferred-position-p nil))
-
-(cl-defun disco-channel-directory--make-invalidations
-    (&key structure parts entries resources position)
-  "Create one owned directory render request."
-  (let ((state (appkit-invalidations-create)))
-    (setf (appkit-invalidations-structure-p state) (and structure t)
-          (appkit-invalidations-parts state) (delete-dups (delq nil parts))
-          (appkit-invalidations-entry-keys state)
-          (delete-dups (delq nil (copy-sequence entries)))
-          (appkit-invalidations-resource-keys state)
-          (delete-dups (delq nil (copy-sequence resources)))
-          (appkit-invalidations-position-p state) (and position t))
-    state))
-
-(defun disco-channel-directory--merge-invalidations (left right)
-  "Return a render request containing LEFT and RIGHT."
-  (let ((merged (appkit-invalidations-create)))
-    (appkit-invalidations-merge merged left)
-    (appkit-invalidations-merge merged right)))
-
 (defun disco-channel-directory--surface-init (_context guild-id)
   "Initialize a channel directory Surface for GUILD-ID."
   (setq-local disco-channel-directory--guild-id guild-id)
   (appkit-next
    :model guild-id
-   :render (disco-channel-directory--make-invalidations
-            :structure t :parts '(frame entries))))
+   :render (appkit-projection-change-create :full-p t :frame-p t)))
 
 (defun disco-channel-directory--surface-update (_context model message)
-  "Request directory presentation described by MESSAGE."
-  (if (appkit-invalidations-p message)
-      (appkit-next :model model :render message)
-    (appkit-next-reject 'invalid-channel-directory-render-request)))
+  "Translate directory client MESSAGE into a projection change."
+  (pcase message
+    ('refresh
+     (appkit-next :model model :render
+                  (appkit-projection-change-create :full-p t :frame-p t)))
+    ('geometry
+     (appkit-next :model model :render
+                  (appkit-projection-change-create
+                   :geometry-p t :position 'preserve)))
+    ('frame
+     (appkit-next :model model :render
+                  (appkit-projection-change-create :frame-p t)))
+    ('display
+     (appkit-next :model model :render
+                  (appkit-projection-change-create)))
+    ('guild-snapshot
+     (appkit-next :model model :render
+                  (appkit-projection-change-create
+                   :full-p t :frame-p t
+                   :resources
+                   (list (disco-channel-directory--guild-snapshot-resource-key)))))
+    (`(channels-changed ,channel-ids)
+     (appkit-next
+      :model model :render
+      (appkit-projection-change-create
+       :keys (delete-dups
+              (mapcar #'disco-channel-directory--entry-key-for-channel
+                      channel-ids))
+       :frame-p t)))
+    (_ (appkit-next-reject 'unknown-channel-directory-message))))
 
 (defun disco-channel-directory--surface-renderer (_surface)
   "Create one Generated Renderer for a channel directory."
   (appkit-generated-renderer-create
-   :mount #'ignore
-   :merge #'disco-channel-directory--merge-invalidations
+   :mount #'disco-runtime-retain-surface-owner
+   :merge #'appkit-projection-change-merge
    :render (lambda (surface _app-read-view _model request)
-             (disco-channel-directory--render-invalidations
+             (disco-channel-directory--render-change
               surface request)
              nil)
    :recover nil
@@ -574,40 +548,26 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
    (lambda (_surface)
      (disco-channel-directory--remove-live-updates))))
 
-(defun disco-channel-directory--render-invalidations (_surface invalidations)
-  "Render coalesced INVALIDATIONS in the current directory host."
-  (let* ((parts (appkit-invalidations-parts invalidations))
-         (resources (appkit-invalidations-resource-keys invalidations))
-         (position-p
-          (or disco-channel-directory--deferred-position-p
-              (appkit-invalidations-position-p invalidations)))
-         (displayed-p (disco-channel-directory--displayed-p))
-         (diff
-          (appkit-projection-diff-derive
-           invalidations
-           :reconcile-parts '(entries)
-           :reconcile disco-channel-directory--deferred-reconcile-p
-           :force-keys disco-channel-directory--deferred-entry-keys))
-         (entry-keys (appkit-projection-diff-force-keys diff))
-         (entries-p (appkit-projection-diff-reconcile-p diff))
-         (frame-p (or entries-p (memq 'frame parts)))
+(defun disco-channel-directory--render-change (_surface change)
+  "Render CHANGE, retaining hidden presentation work until displayed."
+  (let* ((change (if disco-channel-directory--deferred-change
+                     (appkit-projection-change-merge
+                      disco-channel-directory--deferred-change change)
+                   change))
+         (entry-keys (appkit-projection-change-keys change))
+         (all-rows-p (or (appkit-projection-change-full-p change)
+                         (appkit-projection-change-geometry-p change)))
+         (entries-p (or all-rows-p entry-keys
+                        (appkit-projection-change-resources change)))
+         (frame-p (or entries-p (appkit-projection-change-frame-p change)))
          (old-modified-p (buffer-modified-p))
          (buffer-undo-list t)
          (inhibit-read-only t))
-    (when (and (member
-                (disco-channel-directory--guild-snapshot-resource-key)
-                resources)
-               (not (disco-state-guild-channels-loaded-p
-                     disco-channel-directory--guild-id)))
-      (disco-directory-load-guild-async disco-channel-directory--guild-id))
-    (if (not displayed-p)
+    (if (not (disco-channel-directory--displayed-p))
         (when (or entries-p frame-p)
-          (disco-channel-directory--defer-invalidations invalidations))
-      (when (and entries-p position-p)
-        (setq entry-keys
-              (delete-dups
-               (append (disco-channel-directory--all-entry-keys)
-                       entry-keys))))
+          (setq disco-channel-directory--deferred-change change))
+      (when all-rows-p
+        (setq entry-keys (disco-channel-directory--all-entry-keys)))
       (unwind-protect
           (cond
            (entries-p
@@ -615,54 +575,35 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
            (frame-p
             (disco-channel-directory--refresh-header-line)))
         (set-buffer-modified-p old-modified-p))
-      (disco-channel-directory--clear-deferred-invalidations))))
+      (setq disco-channel-directory--deferred-change nil))))
 
-(cl-defun disco-channel-directory--queue-surface-update
-    (surface &key channel-ids structure position hydrate)
-  "Queue one bounded render request for SURFACE."
+(defun disco-channel-directory--queue-surface-update (surface message)
+  "Queue directory client MESSAGE on live SURFACE."
   (when (appkit-surface-live-p surface)
-    (with-current-buffer (appkit-surface-buffer surface)
-      (let ((entry-keys
-             (delete-dups
-              (delq nil
-                    (mapcar
-                     (lambda (channel-id)
-                       (when-let* ((id
-                                    (disco-channel-directory--normalize-id
-                                     channel-id)))
-                         (disco-channel-directory--entry-key-for-channel id)))
-                     channel-ids)))))
-        (appkit-surface-post
-         surface
-         (disco-channel-directory--make-invalidations
-          :structure structure
-          :parts '(frame entries)
-          :entries entry-keys
-          :resources
-          (and hydrate
-               (list
-                (disco-channel-directory--guild-snapshot-resource-key)))
-          :position position))
-        t))))
+    (appkit-surface-post surface message)
+    t))
 
 (defun disco-channel-directory--request-reconcile
     (&optional force-channel-ids structure-p position-p surface)
   "Queue directory reconciliation on SURFACE or the current Surface."
   (when-let* ((surface (or surface (appkit-current-surface)))
               ((appkit-surface-live-p surface)))
+    (when position-p
+      (disco-channel-directory--queue-surface-update surface 'geometry))
     (disco-channel-directory--queue-surface-update
-     surface :channel-ids force-channel-ids
-     :structure structure-p :position position-p)))
+     surface (if (or structure-p (null force-channel-ids))
+                 'refresh
+               (list 'channels-changed force-channel-ids)))))
 
-(defun disco-channel-directory--invalidate-and-sync
+(defun disco-channel-directory--refresh-and-sync
     (&optional force-channel-ids structure-p position-p)
-  "Synchronously commit explicit directory invalidations."
+  "Synchronously commit a directory refresh."
   (when (disco-channel-directory--request-reconcile
          force-channel-ids structure-p position-p)
     (when-let* ((surface (appkit-current-surface))
                 ((appkit-surface-live-p surface)))
       (appkit-surface-send
-       surface (disco-channel-directory--make-invalidations)))))
+       surface 'display))))
 
 (defun disco-channel-directory--request-profile (surface &optional force)
   "Load SURFACE's Guild Profile, retrying when FORCE is non-nil."
@@ -677,7 +618,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
       (setq disco-channel-directory--profile-owner owner
             disco-channel-directory--profile-loading t
             disco-channel-directory--profile-error nil)
-      (disco-channel-directory--queue-surface-update surface :structure t)
+      (disco-channel-directory--queue-surface-update surface 'refresh)
       (condition-case request-error
           (disco-api-guild-profile-async
            guild-id
@@ -694,7 +635,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                          "Server details returned an invalid response")
                        disco-channel-directory--profile-owner nil)
                  (disco-channel-directory--queue-surface-update
-                  surface :structure t))))
+                  surface 'refresh))))
            :on-error
            (lambda (error-data)
              (when (disco-channel-directory--profile-current-p
@@ -706,7 +647,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                                (error-message-string error-data))
                        disco-channel-directory--profile-owner nil)
                  (disco-channel-directory--queue-surface-update
-                  surface :structure t)))))
+                  surface 'refresh)))))
         (error
          (when (disco-channel-directory--profile-current-p
                 surface buffer guild-id owner)
@@ -716,21 +657,13 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                          (error-message-string request-error))
                  disco-channel-directory--profile-owner nil)
            (disco-channel-directory--queue-surface-update
-            surface :structure t))))
+            surface 'refresh))))
       owner)))
 
 (defun disco-channel-directory--schedule-deferred-sync (surface)
-  "Queue deferred invalidations on live SURFACE."
-  (when (and disco-channel-directory--deferred-reconcile-p
-             (appkit-surface-live-p surface))
-    (appkit-surface-post
-     surface
-     (disco-channel-directory--make-invalidations
-      :structure disco-channel-directory--deferred-structure-p
-      :parts '(frame entries)
-      :entries disco-channel-directory--deferred-entry-keys
-      :position disco-channel-directory--deferred-position-p))
-    t))
+  "Queue display of deferred presentation work on live SURFACE."
+  (when disco-channel-directory--deferred-change
+    (disco-channel-directory--queue-surface-update surface 'display)))
 
 (defun disco-channel-directory--window-buffer-change (window)
   "Flush deferred directory updates when WINDOW displays this host."
@@ -865,21 +798,21 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
         (when-let* ((value (string-trim (or filter ""))))
           (unless (string-empty-p value)
             (downcase value))))
-  (disco-channel-directory--invalidate-and-sync nil t))
+  (disco-channel-directory--refresh-and-sync nil t))
 
 (defun disco-channel-directory-clear-filter ()
   "Clear all active directory lenses."
   (interactive)
   (setq disco-channel-directory--filter nil
         disco-channel-directory--unread-only nil)
-  (disco-channel-directory--invalidate-and-sync nil t))
+  (disco-channel-directory--refresh-and-sync nil t))
 
 (defun disco-channel-directory-toggle-unread-only ()
   "Toggle the current directory's unread-only lens."
   (interactive)
   (setq disco-channel-directory--unread-only
         (not disco-channel-directory--unread-only))
-  (disco-channel-directory--invalidate-and-sync nil t)
+  (disco-channel-directory--refresh-and-sync nil t)
   (message "Disco: guild unread lens %s"
            (if disco-channel-directory--unread-only "enabled" "disabled")))
 
@@ -950,7 +883,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
 
 (defun disco-channel-directory--handle-gateway-event
     (event &optional surface)
-  "Queue precise invalidations for a relevant gateway EVENT."
+  "Queue channel changes and request missing snapshots for gateway EVENT."
   (let ((surface (or surface (appkit-current-surface))))
     (when (appkit-surface-live-p surface)
       (with-current-buffer (appkit-surface-buffer surface)
@@ -960,16 +893,23 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                  (structure-p
                   (or (memq type
                             disco-channel-directory--structural-gateway-events)
-                      (null channel-ids))))
+                      (null channel-ids)))
+                 (snapshot-p
+                  (memq type '(guild-sync guild-create guild-update
+                               channel-create channel-update channel-sync))))
             (disco-channel-directory--queue-surface-update
-             surface :channel-ids channel-ids :structure structure-p
-             :hydrate (memq type '(guild-sync guild-create guild-update
-                                   channel-create channel-update
-                                   channel-sync)))))))))
+             surface (cond (snapshot-p 'guild-snapshot)
+                           (structure-p 'refresh)
+                           (t (list 'channels-changed channel-ids))))
+            (when (and snapshot-p
+                       (not (disco-state-guild-channels-loaded-p
+                             disco-channel-directory--guild-id)))
+              (disco-directory-load-guild-async
+               disco-channel-directory--guild-id))))))))
 
 (defun disco-channel-directory--handle-directory-event
     (event &optional surface)
-  "Queue invalidations for one relevant directory lifecycle EVENT."
+  "Queue a snapshot refresh for a relevant directory lifecycle EVENT."
   (let ((surface (or surface (appkit-current-surface))))
     (when (appkit-surface-live-p surface)
       (with-current-buffer (appkit-surface-buffer surface)
@@ -981,11 +921,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                     (and guild-id
                          (equal guild-id disco-channel-directory--guild-id)))
             (disco-channel-directory--queue-surface-update
-             surface
-             :channel-ids
-             (delq nil (list (plist-get event :parent-id)
-                             (plist-get event :channel-id)))
-             :structure t)))))))
+             surface 'guild-snapshot)))))))
 
 (defun disco-channel-directory--handle-preview-update
     (channel-id &optional surface)
@@ -1001,7 +937,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
                       (alist-get 'guild_id channel))))
           (when (equal guild-id disco-channel-directory--guild-id)
             (disco-channel-directory--queue-surface-update
-             surface :channel-ids (list channel-id))))))))
+             surface (list 'channels-changed (list channel-id)))))))))
 
 (defun disco-channel-directory--remove-live-updates ()
   "Remove this buffer's shared event hooks."
@@ -1032,7 +968,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
         (when (and (eq major-mode 'disco-channel-directory-mode)
                    (appkit-surface-live-p (appkit-current-surface)))
           (disco-channel-directory--queue-surface-update
-           (appkit-current-surface) :structure t))))))
+           (appkit-current-surface) 'refresh))))))
 
 (add-hook 'disco-state-reset-hook
           #'disco-channel-directory--handle-state-reset)
@@ -1143,10 +1079,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
   (setq-local disco-channel-directory--header-line-cache "")
   (setq-local disco-channel-directory--rendering nil)
   (setq-local disco-channel-directory--render-pending nil)
-  (setq-local disco-channel-directory--deferred-reconcile-p nil)
-  (setq-local disco-channel-directory--deferred-entry-keys nil)
-  (setq-local disco-channel-directory--deferred-structure-p nil)
-  (setq-local disco-channel-directory--deferred-position-p nil)
+  (setq-local disco-channel-directory--deferred-change nil)
   (setq-local header-line-format
               'disco-channel-directory--header-line-cache)
   (setq-local revert-buffer-function
@@ -1160,8 +1093,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
    :fold-function #'disco-channel-directory--fold-changed)
   (disco-channel-directory--ensure-window-size-hook)
   (add-hook 'window-buffer-change-functions
-            #'disco-channel-directory--window-buffer-change nil t)
-  )
+            #'disco-channel-directory--window-buffer-change nil t))
 
 (defconst disco-channel-directory--surface-type
   (appkit-surface-type-create
@@ -1224,7 +1156,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
         (disco-channel-directory--request-reconcile nil t nil surface)
         (disco-directory-load-guild-async guild-id)
         (appkit-surface-send
-         surface (disco-channel-directory--make-invalidations))))
+         surface 'display)))
     buffer))
 
 ;;;###autoload
@@ -1247,7 +1179,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
          (appkit-directory-surface)
          (disco-channel-directory--entry-key-for-thread-parent parent-id) t)
         (setq disco-channel-directory--pending-focus-channel-id parent-id)
-        (disco-channel-directory--invalidate-and-sync (list parent-id) t)
+        (disco-channel-directory--refresh-and-sync (list parent-id) t)
         (disco-directory-load-parent-threads-async parent-id))
       buffer)))
 

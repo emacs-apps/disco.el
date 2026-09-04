@@ -56,9 +56,8 @@
 (defconst disco--reset-drain-limit 8
   "Maximum normal lifecycle drain passes during one destructive reset.")
 
-
-
-
+(defvar disco--reset-apps nil
+  "Exact applications retired by the current destructive session reset.")
 
 (defun disco--owned-auxiliary-buffer-p ()
   "Return non-nil when the current buffer has explicit Disco ownership."
@@ -86,16 +85,19 @@
     (dolist (buffer (buffer-list))
       (when (and (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (let ((surface (appkit-current-surface))
-                         (raw-surface appkit--current-surface))
+                   (let* ((surface appkit--current-surface)
+                          (owner (if (appkit-surface-p surface)
+                                     (appkit-surface-app surface)
+                                   disco-runtime--surface-app)))
                      (and
                       (apply #'derived-mode-p disco--client-major-modes)
-                      (cond
-                       ((appkit-surface-p surface)
-                        (eq app (appkit-surface-app surface)))
-                       ((appkit-surface-p raw-surface)
-                        (eq app (appkit-surface-app raw-surface)))
-                       (t t)))))
+                      (or (null owner)
+                          (eq app owner)
+                          (memq owner disco--reset-apps)
+                          (and (eq (appkit-app-type owner)
+                                   disco-runtime--app-type)
+                               (eq (appkit-app-identity owner)
+                                   'default))))))
                  (not (memq buffer buffers)))
         (push buffer buffers)))
     (dolist (buffer (delq nil
@@ -112,10 +114,11 @@
         (push buffer buffers)))
     (nreverse buffers)))
 
-
 (defun disco--retire-default-app ()
   "Stop the current default Appkit App without losing a reentrant successor."
   (when-let* ((app disco-runtime--app))
+    (when (bound-and-true-p disco-notifications--reset-in-progress)
+      (cl-pushnew app disco--reset-apps))
     (setq disco-runtime--app nil)
     (appkit-app-close app)))
 
@@ -368,7 +371,8 @@ Surfaces, Disco modes, notification history, composer preview, and root debug
 output.  Cleanup failures are isolated so one broken hook or timer
 cannot leave another old-account projection visible."
   (interactive)
-  (let* ((buffers (disco--collect-client-buffers))
+  (let* ((disco--reset-apps nil)
+         (buffers (disco--collect-client-buffers))
          ;; Keep callbacks unable to publish throughout all reset hooks, not
          ;; only while their own reset function is on the stack.
          (disco-notifications--reset-in-progress t)

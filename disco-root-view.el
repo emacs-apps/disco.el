@@ -28,7 +28,6 @@
 (require 'appkit-ui)
 (require 'appkit-directory)
 (require 'appkit-presentation)
-(require 'appkit-invalidation)
 (require 'appkit-surface)
 (require 'disco-runtime)
 (require 'disco-state)
@@ -159,14 +158,10 @@ Signal a user-facing error when the root controller callback is missing."
    disco-root-view-exit-search-function
    'exit-search))
 
-(defun disco-root-view--queue-live-update (channel-ids &optional structural-p header-p)
-  "Queue a controller update for CHANNEL-IDS.
-When STRUCTURAL-P is non-nil, request a full projection.  When HEADER-P is
-non-nil, also invalidate the root header."
+(defun disco-root-view--queue-live-update (message)
+  "Queue client MESSAGE in the root controller."
   (disco-root-view--call-controller
-   disco-root-view-queue-live-update-function
-   'queue-live-update
-   channel-ids structural-p header-p))
+   disco-root-view-queue-live-update-function 'queue-live-update message))
 
 (defun disco-root-view--transient ()
   "Open the root transient menu through the controller."
@@ -174,7 +169,6 @@ non-nil, also invalidate the root header."
   (disco-root-view--call-controller
    disco-root-view-transient-function
    'transient))
-
 
 (defun disco-root--search-domain-kind (domain)
   "Return kind symbol from root search DOMAIN plist."
@@ -245,7 +239,6 @@ non-nil, also invalidate the root header."
                         "Channel")))
         (_ "Search"))))
 
-
 (defun disco-root--search-empty-tab-state ()
   "Return freshly initialized root search tab state plist."
   (list :items nil
@@ -281,7 +274,6 @@ non-nil, also invalidate the root header."
   (or (alist-get tab disco-root--search-tab-label-alist nil nil #'eq)
       (capitalize (symbol-name tab))))
 
-
 (defun disco-root--search-effective-spec-p (&optional spec)
   "Return non-nil when root search SPEC contains an actual query/filter."
   (let ((it (or spec disco-root--search-query-spec)))
@@ -299,7 +291,6 @@ non-nil, also invalidate the root header."
         (plist-get it :max-id)
         (plist-get it :min-id))))
 
-
 (defun disco-root--search-channel (channel-id)
   "Return best-effort channel object for CHANNEL-ID in search results."
   (or (and channel-id (disco-state-channel channel-id))
@@ -309,7 +300,6 @@ non-nil, also invalidate the root header."
       (and channel-id
            (hash-table-p disco-root--search-channel-table)
            (gethash channel-id disco-root--search-channel-table))))
-
 
 (defun disco-root--line-property (property &optional pos)
   "Return text PROPERTY on current rendered row at POS (or point)."
@@ -334,7 +324,6 @@ non-nil, also invalidate the root header."
 (defun disco-root--line-channel-id (&optional pos)
   "Return channel id for row at POS when row is channel/thread row."
   (disco-root--line-property 'disco-channel-id pos))
-
 
 (defun disco-root--line-unread-count (&optional pos)
   "Return mention badge count for row at POS, defaulting to 0."
@@ -691,7 +680,7 @@ Exclude the current user when its ID is known."
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (when (eq major-mode 'disco-root-mode)
-            (disco-root-view--queue-live-update nil t nil)))))))
+            (disco-root-view--queue-live-update '(:type refresh))))))))
 
 (defun disco-root-view--icon-owner-current-p (cache-key owner)
   "Return non-nil when OWNER still owns CACHE-KEY in this account session."
@@ -751,26 +740,26 @@ Exclude the current user when its ID is known."
           (progn
             (setq process
                   (plz 'get url
-                       :as 'binary
-                       :headers
-                       '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
-                       :then
-                       (lambda (bytes)
-                         (when (disco-root-view--icon-owner-current-p
-                                cache-key owner)
-                           (let ((image
-                                  (ignore-errors
-                                    (create-image
-                                     bytes 'png t
-                                     :width disco-root-guild-icon-size
-                                     :height disco-root-guild-icon-size
-                                     :ascent 'center))))
-                             (disco-root-view--icon-finish
-                              cache-key owner image))))
-                       :else
-                       (lambda (_err)
-                         (disco-root-view--icon-fail
-                          cache-key owner))))
+                    :as 'binary
+                    :headers
+                    '(("Accept" . "image/png,image/*;q=0.8,*/*;q=0.1"))
+                    :then
+                    (lambda (bytes)
+                      (when (disco-root-view--icon-owner-current-p
+                             cache-key owner)
+                        (let ((image
+                               (ignore-errors
+                                 (create-image
+                                  bytes 'png t
+                                  :width disco-root-guild-icon-size
+                                  :height disco-root-guild-icon-size
+                                  :ascent 'center))))
+                          (disco-root-view--icon-finish
+                           cache-key owner image))))
+                    :else
+                    (lambda (_err)
+                      (disco-root-view--icon-fail
+                       cache-key owner))))
             (setq returned-p t))
         (cond
          ((and returned-p
@@ -1120,7 +1109,6 @@ The label stays message-oriented and avoids transport-status placeholders."
     (_
      (disco-root--activity-secondary-label channel))))
 
-
 (defun disco-root--snowflake-epoch-seconds (snowflake)
   "Return unix epoch seconds extracted from Discord SNOWFLAKE, or nil."
   (when (and (stringp snowflake)
@@ -1308,7 +1296,7 @@ omitted because the context delimiters already encode the stable Discord type."
          (preview-parts
           (disco-root--preview-parts preview-text preview-message))
          (time-text (if (memq scope '(thread-post timeline-thread
-						  archived-thread))
+                                      archived-thread))
                         (disco-root--thread-browser-time-label channel scope latest-message)
                       (disco-root--channel-last-activity-time-label channel latest-message))))
     (appkit-presentation-one-line-row-create
@@ -1623,7 +1611,6 @@ current sort mode."
           (push-unique channel))))
     (nreverse result)))
 
-
 (defun disco-root--tree-unread-section-channels (unread-channels)
   "Return home quick-section channels from UNREAD-CHANNELS."
   (let ((limit disco-root-tree-unread-section-limit))
@@ -1676,7 +1663,6 @@ Higher scores sort before lower scores."
   "Return one blank render entry."
   (disco-root-render-entry-create :key key :type 'blank))
 
-
 (defun disco-root--entry-search-section (tab title loaded-count &optional total-count loading)
   "Return one search-section render entry."
   (disco-root-render-entry-create :key (list 'search-section tab)
@@ -1711,7 +1697,6 @@ Higher scores sort before lower scores."
                                   :label label
                                   :action action
                                   :tab tab))
-
 
 (defun disco-root--search-section-label-row (title loaded-count &optional total-count loading)
   "Return label row model for one search section heading."
@@ -1809,7 +1794,6 @@ Higher scores sort before lower scores."
                    (disco-root-render-entry-type entry)))))))
     (when-let* ((key (disco-root-render-entry-key entry)))
       (put-text-property start (point) 'disco-root-entry-key key))))
-
 
 (defun disco-root--guild-by-id (guild-id)
   "Return guild object for GUILD-ID from current state."
@@ -2146,7 +2130,7 @@ Return plist with keys :threads and :errors for this page only."
       (setq disco-root--archived-threads-cache threads)
       (dolist (thread threads)
         (disco-state-upsert-channel thread))
-      (disco-root-view--queue-live-update nil t nil)
+      (disco-root-view--queue-live-update '(:type refresh))
       (disco-root--flush-live-updates)
       (message "disco: loaded %d archived threads" (length threads)))))
 
@@ -2168,7 +2152,7 @@ Return plist with keys :threads and :errors for this page only."
                 (append disco-root--archived-threads-cache page-threads))))
         (dolist (thread page-threads)
           (disco-state-upsert-channel thread))
-        (disco-root-view--queue-live-update nil t nil)
+        (disco-root-view--queue-live-update '(:type refresh))
         (disco-root--flush-live-updates)
         (message "disco: loaded %d more archived threads (total %d)"
                  (length page-threads)
@@ -2355,7 +2339,6 @@ SCOPE is forwarded to extra-info providers."
         (when (button-at (point))
           (push-button (point)))
       (disco-root-open-at-point))))
-
 
 (defun disco-root--tree-section-key (section)
   "Return the stable composite root key for SECTION."
@@ -2721,7 +2704,6 @@ SCOPE is forwarded to extra-info providers."
      surface entries
      :force-keys (disco-root--tree-force-keys entries))))
 
-
 (defun disco-root--search-render-entries ()
   "Return entries for the active temporary root search."
   (let (result)
@@ -2783,7 +2765,6 @@ SCOPE is forwarded to extra-info providers."
   "Return view spec for the active temporary root search."
   (disco-root-render-list-spec-create
    (disco-root--build-search-list-spec)))
-
 
 (provide 'disco-root-view)
 

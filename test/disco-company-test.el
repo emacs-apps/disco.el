@@ -3,6 +3,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'appkit-test-helper)
 (require 'cl-lib)
 (let ((load-prefer-newer t))
   (require 'disco-company))
@@ -129,14 +130,14 @@
           (should (= 1 (length requests))))))))
 
 (ert-deftest disco-company-gateway-and-timers-are-exact-view-owned ()
-  (appkit-register-app-kind 'disco-company-test nil)
-  (let ((app (appkit-app-start 'disco-company-test :id 'completion-owner)))
+  (let ((app (appkit-app-start appkit-test--app-type :identity 'completion-owner)))
     (unwind-protect
         (with-temp-buffer
           (let* ((view
-                  (appkit-attach-view
-                   :app app :id '(room completion-owner)
-                   :mode major-mode :parts nil))
+                  (appkit-open-generated-surface
+                   appkit-test--surface-type
+                   :app app :identity '(room completion-owner)
+                   :buffer (current-buffer)))
                  old-handler
                  old-token)
             (disco-company-setup-room-buffer)
@@ -146,14 +147,15 @@
             (should (appkit-handle-alive-p disco-company--gateway-handle))
             (should (eq view
                         (appkit-handle-owner disco-company--gateway-handle)))
-            (appkit-kill-view view)
+            (appkit-surface-stop view)
             (should-not (memq old-handler disco-gateway-event-hook))
             (should-not disco-company--gateway-handler)
             (should-not disco-company--gateway-handle)
             (let ((replacement
-                   (appkit-attach-view
-                    :app app :id '(room completion-owner)
-                    :mode major-mode :parts nil))
+                   (appkit-open-generated-surface
+                    appkit-test--surface-type
+                    :app app :identity '(room completion-owner)
+                    :buffer (current-buffer)))
                   (key '("g1" . "alice")))
               (disco-company-setup-room-buffer)
               (setq-local disco-company--member-search-requests
@@ -169,7 +171,7 @@
               (funcall old-handler '(:type ready))
               (should (gethash key disco-company--member-search-requests))
               (should disco-company--pending-member-search)
-              (should (eq replacement (appkit-current-view))))))
+              (should (eq replacement (appkit-current-surface))))))
       (appkit-app-close app))))
 
 (ert-deftest disco-company-automatic-member-search-debounces-prefixes ()
