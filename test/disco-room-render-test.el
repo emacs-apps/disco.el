@@ -68,7 +68,7 @@
                       (match-beginning 0) appkit-media-card-context-property)
                      :open-action))
               (should (functionp play-action))
-              (appkit-stop-app old-app)
+              (appkit-app-close old-app)
               (should-not (appkit-app-live-p old-app))
               (setq replacement-app (disco-runtime-app))
               (should (appkit-app-live-p replacement-app))
@@ -79,7 +79,7 @@
               (should (eq old-app played-owner))
               (should-not (eq replacement-app played-owner))))
         (when (appkit-app-live-p replacement-app)
-          (appkit-stop-app replacement-app))))))
+          (appkit-app-close replacement-app))))))
 
 (ert-deftest disco-room-media-visual-callback-only-requests-geometry-sync ()
   (let ((disco-runtime--app nil)

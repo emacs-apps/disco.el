@@ -6,12 +6,12 @@
 (defmacro disco-notifications-test--with-app (&rest body)
   "Evaluate BODY with one isolated live Disco Appkit session."
   (declare (indent 0) (debug t))
-  `(let* ((app (appkit-start-app 'disco :id (make-symbol "notification-test")))
+  `(let* ((app (appkit-app-start 'disco :id (make-symbol "notification-test")))
           (disco-runtime--app app))
      (unwind-protect
          (progn ,@body)
        (when (appkit-app-live-p app)
-         (appkit-stop-app app)))))
+         (appkit-app-close app)))))
 
 (defun disco-notifications-test--message (&optional mention)
   "Return incoming test message, with direct MENTION when non-nil."
@@ -148,7 +148,7 @@
         (disco-notifications-reset-session-state)))))
 
 (ert-deftest disco-notifications-old-app-timer-is-inert-in-new-app ()
-  (let* ((old-app (appkit-start-app 'disco :id (make-symbol "old-account")))
+  (let* ((old-app (appkit-app-start 'disco :id (make-symbol "old-account")))
          (new-app nil)
          (disco-runtime--app old-app)
          (disco-notifications--seen (make-hash-table :test #'equal))
@@ -183,7 +183,7 @@
             (setf (alist-get 'content message) "OLD_ACCOUNT_SECRET")
             (setq owner
                   (disco-notifications--schedule-delayed message)))
-          (appkit-stop-app old-app)
+          (appkit-app-close old-app)
           (should-not disco-notifications--delay-owners)
           (should-not (plist-get owner :handle))
           (should-not (plist-get owner :timer))
@@ -192,7 +192,7 @@
             "OLD_ACCOUNT_SECRET"
             (prin1-to-string disco-notifications--delay-owners)))
           (setq new-app
-                (appkit-start-app 'disco :id (make-symbol "new-account"))
+                (appkit-app-start 'disco :id (make-symbol "new-account"))
                 disco-runtime--app new-app)
           ;; Generation alone is intentionally unchanged: exact application
           ;; identity and liveness must still reject this queued callback.
@@ -201,12 +201,12 @@
           (should (equal cancelled '(old-app-timer)))
           (disco-notifications-reset-session-state))
       (when (appkit-app-live-p old-app)
-        (appkit-stop-app old-app))
+        (appkit-app-close old-app))
       (when (appkit-app-live-p new-app)
-        (appkit-stop-app new-app)))))
+        (appkit-app-close new-app)))))
 
 (ert-deftest disco-notifications-reset-falls-back-after-handle-cancel-failure ()
-  (let* ((app (appkit-start-app 'disco :id (make-symbol "cancel-fallback")))
+  (let* ((app (appkit-app-start 'disco :id (make-symbol "cancel-fallback")))
          (disco-runtime--app app)
          (disco-notifications--seen (make-hash-table :test #'equal))
          (disco-notifications--seen-order nil)
@@ -239,7 +239,7 @@
                  (disco-notifications-test--message t)))
           ;; Appkit's first attempt retires the handle even though the timer
           ;; backend fails.  Reset must use the retained raw timer directly.
-          (appkit-stop-app app)
+          (appkit-app-close app)
           (should (= attempts 1))
           (should-not (plist-get owner :handle))
           (disco-notifications-reset-session-state)
@@ -248,7 +248,7 @@
           (should-not (plist-get owner :handle))
           (should-not (plist-get owner :timer)))
       (when (appkit-app-live-p app)
-        (appkit-stop-app app)))))
+        (appkit-app-close app)))))
 
 (ert-deftest disco-notifications-mode-disable-revokes-owned-timers ()
   (let ((original-mode disco-notifications-mode)
@@ -563,7 +563,7 @@
                   '("inner reused id"))))))))
 
 (ert-deftest disco-notifications-account-switch-preserves-reused-current-id ()
-  (let* ((old-app (appkit-start-app 'disco :id (make-symbol "old-display")))
+  (let* ((old-app (appkit-app-start 'disco :id (make-symbol "old-display")))
          new-app
          (disco-runtime--app old-app)
          (disco-notifications--seen (make-hash-table :test #'equal))
@@ -602,9 +602,9 @@
                      (cl-incf notify-count)
                      (when (= notify-count 1)
                        (disco-notifications-reset-session-state)
-                       (appkit-stop-app old-app)
+                       (appkit-app-close old-app)
                        (setq new-app
-                             (appkit-start-app
+                             (appkit-app-start
                               'disco :id (make-symbol "new-display"))
                              disco-runtime--app new-app)
                        (disco-notifications--show
@@ -626,9 +626,9 @@
                           (ring-elements disco-notifications--history))
                   '("new account inner"))))
       (when (appkit-app-live-p old-app)
-        (appkit-stop-app old-app))
+        (appkit-app-close old-app))
       (when (appkit-app-live-p new-app)
-        (appkit-stop-app new-app)))))
+        (appkit-app-close new-app)))))
 
 (ert-deftest disco-notifications-timeout-revalidates-after-sync-cancel ()
   (let ((disco-notifications--seen (make-hash-table :test #'equal))

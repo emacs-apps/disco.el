@@ -147,7 +147,7 @@
                   '((id . "100") (username . "first")) "10")))
             (should (= 2 (length requests)))))
       (when (appkit-app-p app)
-        (appkit-stop-app app)))))
+        (appkit-app-close app)))))
 
 (ert-deftest disco-user-open-chat-publishes-channel-and-opens-room ()
   (let ((disco-runtime--app nil)
@@ -182,7 +182,7 @@
               (should (equal "300"
                              (alist-get 'id (disco-state-channel "300")))))))
       (when (appkit-app-p app)
-        (appkit-stop-app app)))))
+        (appkit-app-close app)))))
 
 (ert-deftest disco-room-message-author-opens-guild-context-profile ()
   (with-temp-buffer

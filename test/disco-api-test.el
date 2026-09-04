@@ -204,7 +204,7 @@
 (ert-deftest disco-api-owned-request-cancellation-fences-callback ()
   (disco-api-test--with-session-state
     (appkit-register-app-kind 'disco-api-test nil)
-    (let ((app (appkit-start-app 'disco-api-test :id 'owned))
+    (let ((app (appkit-app-start 'disco-api-test :id 'owned))
           request-options
           published)
       (unwind-protect
@@ -229,7 +229,7 @@
                '(:status 200 :body "{}" :headers nil))
               (should-not published)))
         (when (appkit-app-live-p app)
-          (appkit-stop-app app))))))
+          (appkit-app-close app))))))
 
 (ert-deftest disco-api-preload-channel-messages-async-builds-payload ()
   (let (captured)

@@ -20,9 +20,9 @@
      :app app :id id :mode mode :parts '(content))))
 
 (ert-deftest disco-reset-kills-renamed-legacy-and-fixed-account-projections ()
-  (let* ((app (appkit-start-app 'disco :id (make-symbol "privacy-reset")))
+  (let* ((app (appkit-app-start 'disco :id (make-symbol "privacy-reset")))
          (foreign-app
-          (appkit-start-app 'disco :id (make-symbol "foreign-session")))
+          (appkit-app-start 'disco :id (make-symbol "foreign-session")))
          (disco-runtime--app app)
          (disco-state-reset-hook
           (list (lambda ()
@@ -135,7 +135,7 @@
             ;; A detached foreign fingerprint remains foreign even though its
             ;; live/raw view pointer can no longer prove ownership.  The
             ;; indirect clone inherits the same persistent identity.
-            (appkit-stop-app foreign-app)
+            (appkit-app-close foreign-app)
             (should-not (appkit-app-live-p foreign-app))
             (should
              (with-current-buffer foreign-buffer appkit--view-fingerprint))
@@ -151,7 +151,7 @@
                       (lambda ()
                         (unless spawned-buffer
                           (setq spawned-app
-                                (appkit-start-app
+                                (appkit-app-start
                                  'disco :id (make-symbol "kill-hook-app"))
                                 disco-runtime--app spawned-app
                                 spawned-buffer
@@ -264,11 +264,11 @@
                   (kill-buffer-query-functions nil))
               (kill-buffer buffer)))))
       (when (appkit-app-live-p app)
-        (appkit-stop-app app))
+        (appkit-app-close app))
       (when (appkit-app-live-p foreign-app)
-        (appkit-stop-app foreign-app))
+        (appkit-app-close foreign-app))
       (when (appkit-app-live-p spawned-app)
-        (appkit-stop-app spawned-app)))))
+        (appkit-app-close spawned-app)))))
 
 (ert-deftest disco-reset-does-not-own-configurable-debug-name-collision ()
   (let* ((disco-runtime--app nil)
@@ -443,7 +443,7 @@
             (let ((kill-buffer-hook nil))
               (kill-buffer candidate)))))
       (when (appkit-app-live-p app)
-        (appkit-stop-app app)))))
+        (appkit-app-close app)))))
 
 (ert-deftest disco-reset-force-drains-successor-created-before-throw ()
   (let ((disco-runtime--app nil)
@@ -727,7 +727,7 @@
                              (goto-char (point-max))
                              (insert secret)))
                          (setq late-app
-                               (appkit-start-app
+                               (appkit-app-start
                                 'disco :id (make-symbol "late-http-app"))
                                disco-runtime--app late-app)
                          (appkit-register-handle
@@ -798,7 +798,7 @@
             (let ((kill-buffer-hook nil))
               (kill-buffer candidate)))))
       (when (appkit-app-live-p late-app)
-        (appkit-stop-app late-app))
+        (appkit-app-close late-app))
       (when (timerp late-timer)
         (cancel-timer late-timer)))))
 

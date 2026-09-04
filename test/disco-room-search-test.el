@@ -202,7 +202,7 @@
 
 (ert-deftest disco-room-filter-live-delete-invalidates-hidden-edge ()
   (let ((app
-         (appkit-start-app
+         (appkit-app-start
           'disco :id (make-symbol "filter-delete") :shutdown #'ignore)))
     (unwind-protect
         (with-temp-buffer
@@ -233,7 +233,7 @@
           (should-not (appkit-chat-history-loading-p))
           (should-not (appkit-chat-history-window-known-p)))
       (when (appkit-app-live-p app)
-        (appkit-stop-app app)))))
+        (appkit-app-close app)))))
 
 (ert-deftest disco-room-filter-delete-removes-result-and-rejects-load-more ()
   (with-temp-buffer
