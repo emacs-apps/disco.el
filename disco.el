@@ -143,7 +143,8 @@ after a user rename, without treating configurable name collisions as owned."
     ;; Revoke default ownership before Appkit invokes cancellation/shutdown
     ;; callbacks.  If one creates a successor, leave that successor visible to
     ;; the next drain pass instead of overwriting it after the callback.
-    (cl-pushnew (list (appkit-app-kind app) (appkit-app-id app))
+    (cl-pushnew (list (appkit-app-type-name (appkit-app-type app))
+                       (appkit-app-identity app))
                 disco--retired-app-identities :test #'equal)
     (setq disco-runtime--app nil)
     (appkit-app-close app)))
