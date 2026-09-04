@@ -21,7 +21,7 @@
 (require 'appkit-directory)
 (require 'appkit-invalidation)
 (require 'appkit-projection)
-(require 'appkit-view)
+(require 'appkit-presentation)
 (require 'appkit-position)
 (require 'disco-api)
 (require 'disco-avatar)
@@ -2633,7 +2633,7 @@ With FORCE non-nil, reproject even if width has not changed."
         (cond
          ((eq major-mode 'disco-root-archived-threads-mode)
           (when (or needs-reconcile needs-header)
-            (appkit-view-render-list-spec-preserving-position
+            (appkit-presentation-render-list-spec-preserving-position
              (disco-root--archived-threads-list-spec)
              :anchor-property 'disco-channel-id
              :preserve-window-start t

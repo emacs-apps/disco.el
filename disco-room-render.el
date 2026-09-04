@@ -24,7 +24,6 @@
 (require 'appkit-chat-timeline)
 (require 'appkit-name-color)
 (require 'appkit-ui)
-(require 'appkit-view)
 (require 'disco-api)
 (require 'disco-avatar)
 (require 'disco-channel-type)
@@ -127,7 +126,9 @@ process, so a late callback cannot retire or overwrite a replacement request.")
            (integerp fill-column)
            (> fill-column 0)
            fill-column)
-      (appkit-view-responsive-width disco-room-auto-fill-margin-columns)
+      (when-let* ((surface (appkit-current-surface)))
+        (appkit-surface-responsive-width
+         surface disco-room-auto-fill-margin-columns))
       (and (integerp fill-column) (> fill-column 0) fill-column)
       80))
 
@@ -532,6 +533,10 @@ No Appkit invalidation is requested."
       ;; Repeat the destructive clears after cancellation hooks: even an
       ;; instrumented hook which mutates these globals cannot retain old data.
       (disco-room-render--clear-session-cache-memory))))
+
+(defun disco-room--responsive-geometry-changed (surface _width)
+  "Request one geometry redraw after SURFACE's presentation width changes."
+  (disco-room--queue-update surface :part 'geometry))
 
 (defun disco-room--refresh-open-rooms ()
   "Request geometry projection for all open room timelines."

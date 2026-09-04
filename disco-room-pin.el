@@ -13,7 +13,7 @@
 (require 'appkit-surface)
 (require 'appkit-invalidation)
 (require 'appkit-ui)
-(require 'appkit-view)
+(require 'appkit-presentation)
 (require 'disco-api)
 (require 'disco-msg)
 (require 'disco-state)
@@ -386,7 +386,7 @@ When RESET is non-nil, the returned page replaces the cached projection."
                     "unknown-time")
                   (disco-msg-preview-line message)))
          (start (point)))
-    (appkit-view-insert-label-line
+    (appkit-presentation-insert-label-line
      label
      :line-properties (list 'disco-message-id message-id))
     (appkit-ui-add-action
@@ -403,7 +403,7 @@ When RESET is non-nil, the returned page replaces the cached projection."
             (if items "(refreshing pinned messages...)" "(loading pinned messages...)"))
            ((not disco-room-pinned-messages--has-more-p) "(no more pinned messages)")
            (t nil))))
-    (appkit-view-list-spec-create
+    (appkit-presentation-list-spec-create
      :title (format "Pinned Messages: %s"
                     (or disco-room-pinned-messages--channel-name
                         disco-room-pinned-messages--channel-id))
@@ -423,7 +423,7 @@ When RESET is non-nil, the returned page replaces the cached projection."
 (defun disco-room-pinned-messages--render (surface)
   "Render pinned messages in SURFACE's exact host buffer."
   (appkit-with-content-update surface
-    (appkit-view-render-list-spec-preserving-position
+    (appkit-presentation-render-list-spec-preserving-position
      (disco-room-pinned-messages--list-spec)
      :anchor-property 'disco-message-id
      :preserve-window-start t)))

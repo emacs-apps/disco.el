@@ -11,7 +11,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'appkit-directory)
-(require 'appkit-view)
+(require 'appkit-presentation)
 
 (declare-function disco-root--build-search-render-spec
                   "disco-root-view" ())
@@ -83,7 +83,7 @@ FORCE-KEYS names retained directory rows whose rich renderers must run again."
       (pcase (disco-root-render-spec-kind view-spec)
         ('list-spec
          (when-let* ((list-spec (disco-root-render-spec-list-spec view-spec)))
-           (appkit-view-render-list-spec list-spec)))
+           (appkit-presentation-render-list-spec list-spec)))
         ('directory
          (appkit-directory-reconcile
           (or (disco-root-render-spec-directory-surface view-spec)
