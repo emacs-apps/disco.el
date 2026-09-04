@@ -770,7 +770,8 @@
             (disco-user--attach-surface surface))
    :merge (lambda (_left _right) 'full)
    :render (lambda (surface _app-read-view _model _request)
-             (disco-user--render-surface surface))
+             (disco-user--render-surface surface)
+             nil)
    :recover nil
    :unmount (lambda (_surface) (disco-user--detach-surface))))
 

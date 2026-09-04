@@ -467,7 +467,8 @@ When RESET is non-nil, the returned page replaces the cached projection."
    :mount #'ignore
    :merge (lambda (_left right) right)
    :render (lambda (surface _app-read-view _model _request)
-             (disco-room-pinned-messages--render surface))
+             (disco-room-pinned-messages--render surface)
+             nil)
    :recover nil
    :unmount #'ignore))
 

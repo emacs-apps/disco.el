@@ -2556,7 +2556,8 @@ With FORCE non-nil, reproject even if width has not changed."
    :mount #'ignore
    :merge #'disco-root--merge-invalidations
    :render (lambda (surface _app-read-view _model request)
-             (disco-root--render-invalidations surface request))
+             (disco-root--render-invalidations surface request)
+             nil)
    :recover nil
    :unmount (lambda (_surface) (disco-root--detach-live-updates))))
 

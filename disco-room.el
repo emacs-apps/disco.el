@@ -2355,7 +2355,8 @@ its same-mode buffer survives."
    :mount #'ignore
    :merge #'disco-room--merge-render-requests
    :render (lambda (surface _app-read-view _model request)
-             (disco-room--render-request surface request))
+             (disco-room--render-request surface request)
+             nil)
    :recover nil
    :unmount (lambda (_surface) (disco-room--detach-live-updates))))
 
