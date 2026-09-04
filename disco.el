@@ -146,7 +146,7 @@ after a user rename, without treating configurable name collisions as owned."
     (cl-pushnew (list (appkit-app-kind app) (appkit-app-id app))
                 disco--retired-app-identities :test #'equal)
     (setq disco-runtime--app nil)
-    (appkit-stop-app app)))
+    (appkit-app-close app)))
 
 (defun disco--drain-default-apps ()
   "Retire reentrant default applications until stable or bounded."

@@ -2365,7 +2365,7 @@
 
 (ert-deftest disco-room-scroll-observer-callbacks-respect-client-gates ()
   (let ((app
-         (appkit-start-app
+         (appkit-app-start
           'disco :id (make-symbol "scroll-gates") :shutdown #'ignore)))
     (unwind-protect
         (with-temp-buffer
@@ -2408,7 +2408,7 @@
                       (should-not calls))
                   (appkit-chat-history-request-end owner))))))
       (when (appkit-app-live-p app)
-        (appkit-stop-app app)))))
+        (appkit-app-close app)))))
 
 (ert-deftest disco-room-sync-rechecks-scroll-observer-after-projection ()
   (let ((invalidations (appkit-invalidations-create))

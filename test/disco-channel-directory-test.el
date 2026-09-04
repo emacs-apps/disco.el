@@ -116,7 +116,7 @@
              ,@body))
        (when (appkit-app-p disco-runtime--app)
          (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
-           (appkit-stop-app disco-runtime--app))))))
+           (appkit-app-close disco-runtime--app))))))
 
 (ert-deftest disco-channel-directory-projects-ordinary-channel-threads ()
   (disco-channel-directory-test--with-guild
@@ -1300,7 +1300,7 @@
         (when (buffer-live-p displayed)
           (kill-buffer displayed))
         (when (appkit-app-p disco-runtime--app)
-          (appkit-stop-app disco-runtime--app))))))
+          (appkit-app-close disco-runtime--app))))))
 
 (ert-deftest disco-channel-directory-projects-compact-guild-overview ()
   (with-temp-buffer

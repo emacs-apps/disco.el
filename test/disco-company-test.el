@@ -130,7 +130,7 @@
 
 (ert-deftest disco-company-gateway-and-timers-are-exact-view-owned ()
   (appkit-register-app-kind 'disco-company-test nil)
-  (let ((app (appkit-start-app 'disco-company-test :id 'completion-owner)))
+  (let ((app (appkit-app-start 'disco-company-test :id 'completion-owner)))
     (unwind-protect
         (with-temp-buffer
           (let* ((view
@@ -170,7 +170,7 @@
               (should (gethash key disco-company--member-search-requests))
               (should disco-company--pending-member-search)
               (should (eq replacement (appkit-current-view))))))
-      (appkit-stop-app app))))
+      (appkit-app-close app))))
 
 (ert-deftest disco-company-automatic-member-search-debounces-prefixes ()
   (with-temp-buffer

@@ -28,13 +28,13 @@
   "Return disco.el's live default appkit session."
   (unless (appkit-app-live-p disco-runtime--app)
     (setq disco-runtime--app
-          (appkit-start-app 'disco :id 'default)))
+          (appkit-app-start 'disco :id 'default)))
   disco-runtime--app)
 
 (defun disco-runtime-stop ()
   "Stop and forget disco.el's default appkit session."
   (when (appkit-app-p disco-runtime--app)
-    (appkit-stop-app disco-runtime--app))
+    (appkit-app-close disco-runtime--app))
   (setq disco-runtime--app nil))
 
 (provide 'disco-runtime)
