@@ -563,7 +563,7 @@
   (unless disco-user--user-id
     (user-error "disco: this buffer has no user identity"))
   (let* ((surface (or (disco-user--live-current-surface)
-                   (error "Disco: user buffer has no live Appkit Surface")))
+                      (error "Disco: user buffer has no live Appkit Surface")))
          (buffer (current-buffer))
          (user-id disco-user--user-id)
          (guild-id disco-user--guild-id)
@@ -630,7 +630,7 @@
   (when disco-user--message-owner
     (user-error "disco: direct message is already opening"))
   (let* ((surface (or (disco-user--live-current-surface)
-                   (error "Disco: user buffer has no live Appkit Surface")))
+                      (error "Disco: user buffer has no live Appkit Surface")))
          (buffer (current-buffer))
          (user-id disco-user--user-id)
          (guild-id disco-user--guild-id)
@@ -767,6 +767,7 @@
   "Create one Generated Renderer for a user profile."
   (appkit-generated-renderer-create
    :mount (lambda (surface _app-read-view _model)
+            (disco-runtime-retain-surface-owner surface)
             (disco-user--attach-surface surface))
    :merge (lambda (_left _right) 'full)
    :render (lambda (surface _app-read-view _model _request)

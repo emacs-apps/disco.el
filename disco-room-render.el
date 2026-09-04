@@ -16,7 +16,6 @@
 (require 'plz)
 
 (require 'appkit-core)
-(require 'appkit-invalidation)
 (require 'appkit-media)
 (require 'appkit-chat-avatar)
 (require 'appkit-chat-ins)
@@ -536,7 +535,8 @@ No Appkit invalidation is requested."
 
 (defun disco-room--responsive-geometry-changed (surface _width)
   "Request one geometry redraw after SURFACE's presentation width changes."
-  (disco-room--queue-update surface :part 'geometry))
+  (disco-room--queue-update surface 'geometry)
+  )
 
 (defun disco-room--refresh-open-rooms ()
   "Request geometry projection for all open room timelines."
@@ -546,7 +546,8 @@ No Appkit invalidation is requested."
         (with-current-buffer buf
           (when (and (eq major-mode 'disco-room-mode)
                      (appkit-surface-live-p (appkit-current-surface)))
-            (disco-room--queue-update (appkit-current-surface) :part 'geometry)))))))
+            (disco-room--queue-update (appkit-current-surface) 'geometry)
+            ))))))
 
 (defun disco-room--refresh-timeline-layout ()
   "Refresh every projected row after buffer display geometry changes."
@@ -574,12 +575,13 @@ No Appkit invalidation is requested."
               (when (and (eq major-mode 'disco-room-mode)
                          (appkit-surface-live-p (appkit-current-surface)))
                 (let ((view (appkit-current-surface)))
-                  (disco-room--queue-update view :resources resources)
+                  (disco-room--queue-update view (list 'resources-changed resources))
+
                   (when (seq-some
                          (lambda (resource)
                            (member resource resources))
                          (disco-room--composer-one-line-resource-keys))
-                    (disco-room--update-frame)))))))))))
+                    (disco-room--queue-update view 'frame)))))))))))
 
 (defun disco-room--handle-avatar-resources-updated (resources)
   "Synchronize room rows depending on changed avatar RESOURCES."
@@ -640,7 +642,6 @@ No Appkit invalidation is requested."
                             '(line-prefix nil wrap-prefix nil)
                             text)
     text))
-
 
 (add-hook 'disco-media-rerender-hook #'disco-room--handle-media-rerender)
 
@@ -1766,13 +1767,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--ewoc-printer (row)
   "EWOC pretty-printer for one projected room ROW."
-  (let ((view (appkit-current-surface)))
-    (unless (appkit-surface-live-p view)
-      (error "disco: cannot render media actions without an exact live view"))
-    (disco-room--insert-message
-     (appkit-chat-timeline-row-payload row)
-     (or (appkit-chat-timeline-row-context row) '())
-     (appkit-surface-app view))))
+  (disco-room--insert-message (appkit-chat-timeline-row-payload row)
+                              (appkit-chat-timeline-row-context row)
+                              (appkit-current-surface)))
 
 (provide 'disco-room-render)
 

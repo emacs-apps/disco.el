@@ -11,8 +11,11 @@
 
 (require 'subr-x)
 (require 'seq)
+(require 'appkit-effect)
 (require 'appkit-media)
+(require 'appkit-media-effect)
 (require 'appkit-media-image)
+(require 'appkit-surface)
 (require 'appkit-ui)
 (require 'cl-lib)
 (require 'image)
@@ -54,7 +57,6 @@ Set to nil to disable per-render capping."
   "Columns reserved for one-line attachment and Sticker previews."
   :type 'integer
   :group 'disco-media)
-
 
 (defconst disco-media--attachment-flag-is-spoiler (ash 1 3)
   "Attachment flag bit marking spoiler attachments.")
@@ -143,7 +145,6 @@ Values are image objects or the symbol `:missing'.")
   (and (consp owner)
        (disco-media--session-current-p (plist-get owner :generation))
        (memq owner disco-media--attachment-export-owners)))
-
 
 (defun disco-media--run-cleanup-items (items function)
   "Apply FUNCTION to all ITEMS despite failures or a nonlocal transfer."
@@ -313,7 +314,7 @@ Downloaded files and the on-disk preview cache are intentionally preserved."
 (defcustom disco-media-spoiler-turbulence-base-frequency '(0.1 . 0.1)
   "Base-frequency pair passed to spoiler `feTurbulence'."
   :type '(cons (number :tag "X frequency")
-               (number :tag "Y frequency"))
+          (number :tag "Y frequency"))
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
@@ -362,7 +363,7 @@ Downloaded files and the on-disk preview cache are intentionally preserved."
 (defcustom disco-media-audio-waveform-colors '("#17c23a" . "#72d86f")
   "Colors used for audio waveform bars as (PLAYED . UNPLAYED)."
   :type '(cons (string :tag "Played color")
-               (string :tag "Unplayed color"))
+          (string :tag "Unplayed color"))
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
@@ -1017,22 +1018,116 @@ with direct callers; asynchronous entrypoints always provide an exact owner."
       (remhash cache-key disco-media--attachment-preview-owner-table))
     (disco-media--notify-state-updated 'preview cache-key)))
 
+(defconst disco-media--open-effect-key 'disco-media-open
+  "Effect key for the presentation owned by one Disco Surface.")
+
+(defun disco-media--open-cache-key (resource cache-key)
+  "Return stable open-cache identity for RESOURCE and CACHE-KEY."
+  (or cache-key
+      (alist-get 'url resource)
+      (alist-get 'file resource)
+      (appkit-media-resource-name resource)))
+
+(defun disco-media--image-open-cache-base (resource cache-key)
+  "Return image cache base for RESOURCE and CACHE-KEY."
+  (expand-file-name
+   (md5 (format "%s" (disco-media--open-cache-key resource cache-key)))
+   disco-media-preview-cache-directory))
+
+(defun disco-media--file-open-cache-target (resource cache-key)
+  "Return non-image cache target for RESOURCE and CACHE-KEY."
+  (expand-file-name
+   (format "%s-%s"
+           (substring
+            (md5 (format "%s"
+                         (disco-media--open-cache-key resource cache-key)))
+            0 10)
+           (appkit-media-sanitize-filename
+            (or (appkit-media-resource-name resource) "media.bin")))
+   (expand-file-name "open" disco-media-preview-cache-directory)))
+
+(defun disco-media--effect-failed (_input reason)
+  "Return the Surface message for media failure REASON."
+  (list 'disco-media 'failed (format "%s" reason)))
+
+(defun disco-media-file-presentation-effect (file)
+  "Return the Effect that presents local FILE."
+  (appkit-effect-create
+   :key disco-media--open-effect-key
+   :input file
+   :start #'appkit-media-file-presentation-start
+   :success (lambda (_input _result) '(disco-media closed))
+   :failure #'disco-media--effect-failed
+   :cancellation-requirement 'logical))
+
+(defun disco-media-open-effect (resource kind cache-key)
+  "Return the acquisition or presentation Effect for RESOURCE.
+
+KIND is the normalized semantic media kind.  CACHE-KEY identifies reusable
+presentation bytes."
+  (let* ((resource (appkit-media-resource-normalize resource))
+         (target (and (eq kind 'file)
+                      (disco-media--file-open-cache-target resource cache-key)))
+         (file (or (and (appkit-media-file-present-p (alist-get 'file resource))
+                        (alist-get 'file resource))
+                   (and (appkit-media-file-present-p target) target))))
+    (cond
+     ((eq kind 'video)
+      (appkit-effect-create
+       :key disco-media--open-effect-key
+       :input
+       (appkit-media-video-presentation-create
+        resource
+        :label "disco"
+        :cache-key cache-key
+        :cache-directory disco-media-preview-cache-directory)
+       :start #'appkit-media-video-presentation-start
+       :success (lambda (_input _result) '(disco-media closed))
+       :failure #'disco-media--effect-failed
+       :cancellation-requirement 'logical))
+     ((appkit-media-file-present-p file)
+      (disco-media-file-presentation-effect file))
+     (t
+      (appkit-effect-create
+       :key disco-media--open-effect-key
+       :input
+       (if (eq kind 'image)
+           (appkit-media-image-acquisition-create
+            resource
+            (disco-media--image-open-cache-base resource cache-key))
+         (appkit-media-acquisition-create resource target))
+       :start
+       (if (eq kind 'image)
+           #'appkit-media-image-acquisition-start
+         #'appkit-media-acquisition-start)
+       :success
+       (lambda (_input acquired)
+         (list 'disco-media 'acquired acquired))
+       :failure #'disco-media--effect-failed
+       :cancellation-requirement 'transport)))))
+
 (cl-defun disco-media-open-discord-resource
     (resource &optional kind cache-key &key owner)
-  "Adapt and open Discord RESOURCE through the shared media runtime.
+  "Request that OWNER acquire and present canonical RESOURCE.\n\nOWNER is the exact Generated Surface that owns the Effect lifecycle."
+  (let*
+      ((resource (appkit-media-resource-normalize resource))
+       (kind (appkit-media-resource-kind resource kind)))
+    (appkit-surface-send owner
+                         (list 'disco-media 'open resource kind
+                               cache-key))))
 
-OWNER is the exact Appkit app or view that owns external video playback."
-  (appkit-media-open-resource
-   (appkit-media-resource-create
-    :file (alist-get 'file resource)
-    :url (alist-get 'url resource)
-    :name (alist-get 'filename resource)
-    :mime-type (alist-get 'content_type resource))
-   :kind kind
-   :cache-key cache-key
-   :cache-directory disco-media-preview-cache-directory
-   :client-label "disco"
-   :owner owner))
+(defun disco-media-add-open-properties
+    (start end resource kind cache-key owner)
+  "Attach a Surface-owned media action between START and END."
+  (when (< start end)
+    (appkit-media-add-action-properties
+     start end
+     (lambda ()
+       (disco-media-open-discord-resource
+        resource kind cache-key :owner owner))
+     (if (eq kind 'video)
+         "Play video in Emacs"
+       "Open media in Emacs"))))
 
 (defun disco-media--attachment-appkit-resource (attachment &optional file)
   "Return canonical appkit resource for Discord ATTACHMENT and local FILE."
@@ -1630,11 +1725,10 @@ available."
         (error
          (format "%S" err)))))
 
-(defun disco-media-start-attachment-download (attachment &optional open-after on-success)
-  "Start asynchronous default-location download for ATTACHMENT.
+(defun disco-media-start-attachment-download (attachment &optional on-success)
+  "Download ATTACHMENT to its default location.
 
-When OPEN-AFTER is non-nil, open downloaded file in Emacs after completion.
-When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
+When ON-SUCCESS is non-nil, call it with the completed local path."
   (disco-media--ensure-start-allowed)
   (let* ((url (disco-media-attachment-download-url attachment))
          (key (disco-media-attachment-download-key attachment))
@@ -1678,8 +1772,6 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
                      (disco-media--notify-state-updated 'download key)
                      (when (current-p)
                        (message "disco: downloaded attachment -> %s" path))
-                     (when (and open-after (current-p))
-                       (appkit-media-open-file path))
                      (when (and (functionp on-success) (current-p))
                        (funcall on-success path)))
                  (retire-owner)))))
@@ -1797,24 +1889,21 @@ When ON-SUCCESS is non-nil, call it with downloaded PATH after completion."
     (appkit-media-open-file path)))
 
 (defun disco-media-play-attachment-video (attachment &optional owner)
-  "Play ATTACHMENT video, reusing its persistent Appkit cache.
-
-OWNER is the exact Appkit app or view that owns the pending transfer and
-resulting video viewer."
-  (let* ((entry (disco-media-attachment-download-state attachment))
-         (path (plist-get entry :path))
-         (url (disco-media-attachment-download-url attachment))
-         (cache-key
-          (format "disco-attachment:%s"
-                  (disco-media-attachment-download-key attachment))))
-    (cond
-     ((and (stringp path) (file-exists-p path))
-      (appkit-media-play-video-file path "disco" :owner owner))
-     ((appkit-media-url-present-p url)
-      (appkit-media-play-video-url
-       url "disco" :owner owner :cache-key cache-key))
-     (t
-      (user-error "disco: video attachment has no playable source")))))
+  "Request Surface-owned playback for ATTACHMENT video."
+  (let*
+      ((entry (disco-media-attachment-download-state attachment))
+       (path (plist-get entry :path))
+       (url (disco-media-attachment-download-url attachment))
+       (cache-key
+        (format "disco-attachment:%s"
+                (disco-media-attachment-download-key attachment))))
+    (unless
+        (or (appkit-media-file-present-p path)
+            (appkit-media-url-present-p url))
+      (user-error "disco: video attachment has no playable source"))
+    (disco-media-open-discord-resource
+     (disco-media--attachment-appkit-resource attachment path) 'video
+     cache-key :owner owner)))
 
 (defun disco-media--audio-state-entry (key)
   "Return normalized Appkit audio playback state for KEY."
@@ -1989,14 +2078,17 @@ OWNER lifecycle-owns the whole pause/resume session."
            (message "disco: audio will play after download")))
         ((appkit-media-url-present-p url)
          (disco-media--set-attachment-audio-pending-play attachment t)
-         (disco-media-start-attachment-download
-          attachment
-          nil
-          (lambda (_path)
-            (when (disco-media-attachment-audio-pending-play-p attachment)
-              (disco-media-play-attachment-audio attachment owner)))))
+         (disco-media-start-attachment-download attachment
+                                                (lambda (_path)
+                                                  (when
+                                                      (disco-media-attachment-audio-pending-play-p
+                                                       attachment)
+                                                    (disco-media-play-attachment-audio
+                                                     attachment owner))))
+         )
         (t
          (user-error "disco: audio attachment has no playable source")))))))
+
 (defun disco-media-download-attachment (attachment &optional target-path)
   "Download ATTACHMENT to TARGET-PATH.
 
@@ -2070,33 +2162,20 @@ When TARGET-PATH is nil, prompt interactively for destination path."
             (cancel-returned)))))))
 
 (defun disco-media-open-attachment (attachment &optional owner)
-  "Open or play ATTACHMENT according to its media kind.
-
-OWNER lifecycle-owns Appkit audio and video player sessions."
+  "Open ATTACHMENT using the exact Surface OWNER's media lifecycle."
   (let* ((kind (disco-media-attachment-kind attachment))
          (state (disco-media-attachment-download-state attachment))
-         (path (plist-get state :path))
-         (url (disco-media-attachment-download-url attachment)))
+         (path (plist-get state :path)))
     (pcase kind
       ('video (disco-media-play-attachment-video attachment owner))
       ('audio (disco-media-play-attachment-audio attachment owner))
-      ('photo
+      ((or 'photo 'document)
        (disco-media-open-discord-resource
-        `((file . ,(and (appkit-media-file-present-p path) path))
-          (url . ,url)
-          (filename . ,(disco-media-attachment-display-name attachment))
-          (content_type . ,(alist-get 'content_type attachment)))
-        'image
+        (disco-media--attachment-appkit-resource attachment path)
+        (if (eq kind 'photo) 'image 'file)
         (format "attachment-open:%s"
-                (disco-media-attachment-download-key attachment))))
-      ('document
-       (cond
-        ((appkit-media-file-present-p path)
-         (disco-media-open-downloaded-attachment attachment))
-        ((appkit-media-url-present-p url)
-         (disco-media-start-attachment-download attachment t))
-        (t
-         (user-error "disco: attachment has no openable source")))))))
+                (disco-media-attachment-download-key attachment))
+        :owner owner)))))
 
 (defun disco-media-attachment-card-context (attachment &optional owner)
   "Return shared media card context adapted from Discord ATTACHMENT.
@@ -2118,7 +2197,7 @@ OWNER is captured exactly by the card's open/play action."
      :download-action (when (and has-url
                                  (not (memq status '(downloading downloaded))))
                         (lambda ()
-                          (disco-media-start-attachment-download attachment nil)))
+                          (disco-media-start-attachment-download attachment)))
      :cancel-action (when (eq status 'downloading)
                       (lambda ()
                         (disco-media-cancel-attachment-download attachment)))

@@ -4,6 +4,7 @@
 (require 'cl-lib)
 
 (require 'disco-embed)
+(require 'disco-room-test-support)
 
 (ert-deftest disco-embed-stringify-uses-internal-markdown-renderer ()
   (let* ((disco-embed--current-message '((id . "m1")))
@@ -123,129 +124,6 @@
     (should (equal (alist-get 'proxy_url attachment)
                    "https://media.example.invalid/cat.png"))))
 
-(ert-deftest disco-embed-preview-slice-opens-image-through-shared-backend ()
-  (let (open-url open-key)
-    (with-temp-buffer
-      (cl-letf (((symbol-function 'image-size)
-                 (lambda (&rest _args) '(4 . 2)))
-                ((symbol-function 'insert-image)
-                 (lambda (_image fallback &optional _area _slice)
-                   (insert fallback)))
-                ((symbol-function 'appkit-media-add-open-image-properties)
-                 (lambda (_start _end resource &rest options)
-                   (setq open-url (alist-get 'url resource)
-                         open-key (plist-get options :cache-key)))))
-        (disco-embed--insert-preview-image-slice
-         :image 0 "https://cdn.example.invalid/cat.png"
-         "[image]" "embed-open-image:cat")))
-    (should (equal open-url "https://cdn.example.invalid/cat.png"))
-    (should (equal open-key "embed-open-image:cat"))))
-
-(ert-deftest disco-embed-direct-image-title-and-open-stay-in-emacs ()
-  (let* ((url "https://cdn.example.invalid/cat.png")
-         (msg '((id . "m1")))
-         (embed `((type . "image") (url . ,url) (title . "cat")))
-         title-resource
-         opened-resource)
-    (with-temp-buffer
-      (let ((disco-embed-show-image-previews nil)
-            (disco-embed-show-urls nil))
-        (cl-letf (((symbol-function 'appkit-media-add-open-image-properties)
-                   (lambda (_start _end resource &rest _options)
-                     (setq title-resource resource)))
-                  ((symbol-function 'appkit-media-add-open-url-properties)
-                   (lambda (&rest _arguments)
-                     (ert-fail "direct image must not use browser properties")))
-                  ((symbol-function 'disco-media-open-discord-resource)
-                   (lambda (resource kind &optional _cache-key)
-                     (should (eq kind 'image))
-                     (setq opened-resource resource)))
-                  ((symbol-function 'browse-url)
-                   (lambda (&rest _arguments)
-                     (ert-fail "direct image action must not use a browser"))))
-          (disco-embed-insert-card msg embed 1)
-          (should (equal url (alist-get 'url title-resource)))
-          (should-not (string-match-p (regexp-quote "[Media]")
-                                      (buffer-string)))
-          (goto-char (point-min))
-          (search-forward "[Open]")
-          (let ((button (button-at (match-beginning 0))))
-            (should button)
-            (button-activate button))
-          (should (equal url (alist-get 'url opened-resource))))))))
-
-(ert-deftest disco-embed-insert-card-threads-exact-video-owner ()
-  (let ((owner (list 'exact-disco-app))
-        captured-owners)
-    (with-temp-buffer
-      (let ((disco-embed-show-urls t))
-        (cl-letf (((symbol-function 'disco-embed--add-url-properties)
-                   (lambda (_start _end _url _kind
-                            &optional received-owner _cache-key)
-                     (push received-owner captured-owners)))
-                  ((symbol-function 'disco-embed--insert-preview-row)
-                   (lambda (&rest arguments)
-                     (push (car (last arguments)) captured-owners)))
-                  ((symbol-function 'disco-embed--insert-action-row)
-                   (lambda (&rest arguments)
-                     (push (car (last arguments)) captured-owners))))
-          (disco-embed-insert-card
-           '((id . "m-video"))
-           '((type . "video")
-             (title . "clip")
-             (url . "https://example.invalid/watch")
-             (video . ((url . "https://example.invalid/clip.mp4"))))
-           1 owner))))
-    (should (>= (length captured-owners) 3))
-    (should (seq-every-p (lambda (captured) (eq owner captured))
-                         captured-owners))))
-
-(ert-deftest disco-embed-video-properties-and-actions-capture-exact-owner ()
-  (let ((owner (list 'exact-disco-app))
-        property-owner
-        property-cache-key
-        main-action-owner
-        main-cache-key
-        play-action-owner
-        play-cache-key
-        play-action)
-    (with-temp-buffer
-      (insert "video")
-      (cl-letf (((symbol-function 'appkit-media-add-play-video-properties)
-                 (lambda (_start _end _url _label &rest options)
-                   (setq property-owner (plist-get options :owner)
-                         property-cache-key
-                         (plist-get options :cache-key))))
-                ((symbol-function 'appkit-media-play-video-url)
-                 (lambda (_url _label &rest options)
-                   (if play-action
-                       (setq play-action-owner (plist-get options :owner)
-                             play-cache-key (plist-get options :cache-key))
-                     (setq main-action-owner (plist-get options :owner)
-                           main-cache-key (plist-get options :cache-key)))))
-                ((symbol-function 'disco-embed--insert-action-button)
-                 (lambda (label callback _help)
-                   (when (equal label "[Play]")
-                     (setq play-action callback))
-                   (insert label))))
-        (disco-embed--add-url-properties
-         (point-min) (point-max) "https://example.invalid/clip.mp4"
-         'video owner "embed-cache")
-        (funcall (car (disco-embed--url-action
-                       "https://example.invalid/main.mp4"
-                       'video owner "embed-cache")))
-        (disco-embed--insert-action-row
-         nil 'page nil "https://example.invalid/extra.mp4"
-         nil nil nil nil "" "embed-cache" owner)
-        (should (functionp play-action))
-        (funcall play-action)))
-    (should (eq owner property-owner))
-    (should (equal property-cache-key "embed-cache"))
-    (should (eq owner main-action-owner))
-    (should (equal main-cache-key "embed-cache"))
-    (should (eq owner play-action-owner))
-    (should (equal play-cache-key "embed-cache"))))
-
 (ert-deftest disco-embed-message-preview-cache-keys-cover-media-and-author-icon ()
   (let* ((msg
           '((id . "m1")
@@ -261,6 +139,76 @@
                       keys))
     (should (seq-some (lambda (key) (string-match-p "embed-author-icon:m1:1" key))
                       keys))))
+
+(ert-deftest disco-embed-image-actions-present-only-after-owned-acquisition ()
+  (let ((file (make-temp-file "disco-embed-open-" nil ".txt"))
+        (disco-embed-show-author-icons nil)
+        (disco-embed-show-image-previews t)
+        (disco-embed-show-urls nil)
+        resolve requested stale-action)
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "image presentation fixture"))
+          (cl-letf (((symbol-function 'appkit-media-inline-image-rendering-available-p)
+                     (lambda () t))
+                    ((symbol-function 'disco-media-attachment-preview-image)
+                     (lambda (&rest _) :preview))
+                    ((symbol-function 'appkit-media-insert-image-slices)
+                     (lambda (_image action &rest _)
+                       (appkit-ui-insert-action-button "[Preview]" action)))
+                    ((symbol-function 'appkit-media-image-acquisition-start)
+                     (lambda (_context input _observe success _reject)
+                       (push (alist-get 'url (appkit-media-image-acquisition-resource input)) requested)
+                       (setq resolve success)
+                       (appkit-cancellation-create :kind 'transport :cancel #'ignore)))
+                    ((symbol-function 'browse-url)
+                     (lambda (&rest _) (error "Image action escaped to browser"))))
+            (disco-room-test-with-surface "embed-actions"
+              (let ((surface (appkit-current-surface)))
+                (dolist (label '("Image title" "[Open]" "[Media]" "[Icon]" "[Preview]"))
+                  (with-current-buffer (appkit-surface-buffer surface)
+                    (let ((inhibit-read-only t))
+                      (goto-char (point-min))
+                      (let ((start (point)))
+                        (disco-embed-insert-card
+                         '((id . "embed-message"))
+                         '((type . "image") (title . "Image title")
+                           (url . "https://proxy.invalid/media.png")
+                           (image . ((url . "https://cdn.invalid/media.png")
+                                     (proxy_url . "https://proxy.invalid/media.png")))
+                           (author . ((name . "Author")
+                                      (icon_url . "https://cdn.invalid/icon.png")
+                                      (proxy_icon_url . "https://proxy.invalid/icon.png"))))
+                         1 surface)
+                        (let ((end (point)))
+                          (goto-char start)
+                          (search-forward label end)
+                          (let* ((position (- (point) (length label)))
+                                 (button (button-at position)))
+                            (if button
+                                (let ((action (button-get button 'action)))
+                                  (setq stale-action (lambda () (funcall action button)))
+                                  (button-activate button))
+                              (setq stale-action (appkit-ui-action-at position))
+                              (appkit-ui-activate-at position)))))))
+                  (should-not (get-file-buffer file))
+                  (funcall resolve file)
+                  (should-not (get-file-buffer file))
+                  (disco-room-test-drain surface)
+                  (let ((viewer (get-file-buffer file)))
+                    (should (equal (with-current-buffer viewer (buffer-string))
+                                   "image presentation fixture"))
+                    (kill-buffer viewer)))
+                (should (equal (nreverse requested)
+                               '("https://proxy.invalid/media.png"
+                                 "https://proxy.invalid/media.png"
+                                 "https://cdn.invalid/media.png"
+                                 "https://cdn.invalid/icon.png"
+                                 "https://cdn.invalid/media.png")))
+                (appkit-surface-stop surface)
+                (should-error (funcall stale-action))))))
+      (when-let* ((viewer (get-file-buffer file))) (kill-buffer viewer))
+      (delete-file file))))
 
 (provide 'disco-embed-test)
 

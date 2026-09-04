@@ -17,7 +17,7 @@
 (require 'plz)
 (require 'appkit-core)
 (require 'appkit-surface)
-(require 'appkit-invalidation)
+(require 'appkit-projection)
 (require 'appkit-media)
 (require 'appkit-chat-history)
 (require 'appkit-chatbuf)
@@ -83,6 +83,8 @@ This is a search boundary, not the remote/latest protocol frontier.")
 (defvar-local disco-room--optimistic-read-ack-seq 0)
 (defvar-local disco-room--pending-optimistic-read-ack nil)
 (defvar-local disco-room--scroll-observer nil)
+(defvar-local disco-room--media-status nil
+  "Media presentation status derived from the committed Surface model.")
 
 (defconst disco-room--message-flag-has-thread (ash 1 5)
   "Bit mask indicating message has an associated starter thread.")
@@ -261,7 +263,8 @@ This is a search boundary, not the remote/latest protocol frontier.")
                  (appkit-surface-live-p view))
         (setq disco-room--typing-expire-timer nil)
         (when (disco-room--typing-prune-expired)
-          (disco-room--queue-update view :parts '(frame)))
+          (disco-room--queue-update view 'frame)
+          )
         (disco-room--typing-reschedule-expire-timer)))))
 
 (defun disco-room--typing-reschedule-expire-timer ()
@@ -447,7 +450,6 @@ A nil or stopped Surface never degrades this guard to channel identity alone."
       (lambda (_window position _end)
         (disco-room--maybe-auto-load-newer position))))))
 
-
 (defun disco-room--post-command ()
   "Maintain Disco-specific row behavior after each command."
   (unless (appkit-chatbuf-rendering-p)
@@ -461,7 +463,8 @@ A nil or stopped Surface never degrades this guard to channel identity alone."
           (setq disco-room--revealed-spoiler-message-id nil)
           (when-let* ((view (appkit-current-surface)))
             (when (appkit-surface-live-p view)
-              (disco-room--queue-update view :entries (list previous)))))))))
+              (disco-room--queue-update view (list 'rows-changed (list previous)))
+              )))))))
 
 (defun disco-room--read-state-snapshot-fields (state)
   "Return writable read-state fields copied from STATE."
@@ -577,19 +580,22 @@ caller is already inside, or will request, an Appkit projection transaction."
                  (when (disco-room--optimistic-read-ack-clear optimistic-seq)
                    (disco-state-apply-message-ack channel-id target-id 0)
                    (disco-state-apply-channel-ack-response channel-id response)
-                   (disco-room--queue-update view :parts '(timeline))))))
+                   (disco-room--queue-update view 'timeline)
+                   ))))
            :on-error
            (lambda (err)
              (when (disco-room--callback-active-p room-buffer channel-id view)
                (with-current-buffer room-buffer
                  (when (disco-room--optimistic-read-ack-rollback optimistic-seq)
-                   (disco-room--queue-update view :parts '(timeline)))
+                   (disco-room--queue-update view 'timeline)
+                   )
                  (message "disco: read-state ack failed for %s: %s"
                           channel-id
                           (disco-room--async-error-message err)))))))
       (disco-state-apply-message-ack channel-id nil 0))
     (unless defer-sync-p
-      (disco-room--queue-update view :parts '(timeline))
+      (disco-room--queue-update view 'timeline)
+
       ;; This state transition is also used as an explicit local action in
       ;; tests/commands.  Consume its invalidation through Appkit, never by
       ;; calling the timeline projector directly.
@@ -927,66 +933,67 @@ newest-first render contract.  Local pending rows join attached latest windows
     (setq owner (appkit-chat-history-request-start view 'around))
     (appkit-chat-history-older-loaded-set nil)
     (appkit-chat-history-newer-stalled-clear)
-    (disco-room--queue-update view :parts '(frame))
+    (disco-room--queue-update view 'frame)
+
     (appkit-chat-history-request-bind-handle
      owner
      (disco-api-channel-messages-around-async
-     channel-id
-     target-id
-     :limit limit
-     :owner view
-     :on-success
-     (lambda (messages)
-       (when (disco-room--callback-active-p room-buffer channel-id view)
-         (with-current-buffer room-buffer
-           (when (appkit-chat-history-request-end owner)
-             (let* ((raw-page (disco-room--normalize-history-page messages))
-                    (merged
-                     (disco-state-merge-message-page
-                      channel-id raw-page request-revision))
-                    (page
-                     (disco-room--history-page-retained-in-cache
-                      raw-page merged)))
-               (if (disco-room--message-list-contains-id-p page target-id)
-                   (let* ((bounds (disco-room--history-page-bounds page))
-                          (oldest (car bounds))
-                          (newest (cdr bounds))
-                          (canonical-oldest
-                           (reverse
-                            (disco-room--normalize-history-page merged)))
-                          (canonical-newest
-                           (disco-room--message-id
-                            (car (disco-room--normalize-history-page merged))))
-                          (frontier disco-room--remote-latest-message-id)
-                          (at-latest
-                           (and frontier
-                                (equal frontier newest)
-                                (equal canonical-newest newest)))
-                          (stale-frontier
-                           (and frontier
-                                (not at-latest)
-                                (disco-room--message-id-after-p
-                                 canonical-newest frontier
-                                 canonical-oldest))))
-                     (when stale-frontier
-                       (setq disco-room--remote-latest-message-id nil))
-                     (appkit-chat-history-window-set
-                      oldest (unless at-latest newest))
-                     (appkit-chat-history-older-loaded-set nil)
-                     (disco-room--request-render view))
-                 (setq disco-room--pending-jump-message-id nil)
-                 (disco-room--request-render view)
-                 (message "disco: message %s not found in around fetch"
-                          target-id)))))))
-     :on-error
-     (lambda (err)
-       (when (disco-room--callback-active-p room-buffer channel-id view)
-         (with-current-buffer room-buffer
-           (when (appkit-chat-history-request-end owner)
-             (setq disco-room--pending-jump-message-id nil)
-             (disco-room--request-render view)
-             (message "disco: jump fetch failed: %s"
-                      (disco-room--async-error-message err))))))))))
+      channel-id
+      target-id
+      :limit limit
+      :owner view
+      :on-success
+      (lambda (messages)
+        (when (disco-room--callback-active-p room-buffer channel-id view)
+          (with-current-buffer room-buffer
+            (when (appkit-chat-history-request-end owner)
+              (let* ((raw-page (disco-room--normalize-history-page messages))
+                     (merged
+                      (disco-state-merge-message-page
+                       channel-id raw-page request-revision))
+                     (page
+                      (disco-room--history-page-retained-in-cache
+                       raw-page merged)))
+                (if (disco-room--message-list-contains-id-p page target-id)
+                    (let* ((bounds (disco-room--history-page-bounds page))
+                           (oldest (car bounds))
+                           (newest (cdr bounds))
+                           (canonical-oldest
+                            (reverse
+                             (disco-room--normalize-history-page merged)))
+                           (canonical-newest
+                            (disco-room--message-id
+                             (car (disco-room--normalize-history-page merged))))
+                           (frontier disco-room--remote-latest-message-id)
+                           (at-latest
+                            (and frontier
+                                 (equal frontier newest)
+                                 (equal canonical-newest newest)))
+                           (stale-frontier
+                            (and frontier
+                                 (not at-latest)
+                                 (disco-room--message-id-after-p
+                                  canonical-newest frontier
+                                  canonical-oldest))))
+                      (when stale-frontier
+                        (setq disco-room--remote-latest-message-id nil))
+                      (appkit-chat-history-window-set
+                       oldest (unless at-latest newest))
+                      (appkit-chat-history-older-loaded-set nil)
+                      (disco-room--request-render view))
+                  (setq disco-room--pending-jump-message-id nil)
+                  (disco-room--request-render view)
+                  (message "disco: message %s not found in around fetch"
+                           target-id)))))))
+      :on-error
+      (lambda (err)
+        (when (disco-room--callback-active-p room-buffer channel-id view)
+          (with-current-buffer room-buffer
+            (when (appkit-chat-history-request-end owner)
+              (setq disco-room--pending-jump-message-id nil)
+              (disco-room--request-render view)
+              (message "disco: jump fetch failed: %s"
+                       (disco-room--async-error-message err))))))))))
 
 (defun disco-room--jump-to-visible-message (message-id)
   "Jump to visible MESSAGE-ID in current room buffer and recenter.
@@ -1022,7 +1029,8 @@ Return non-nil when jump succeeds without fetching older history."
          disco-room--pending-jump-message-id)
         (progn
           (setq disco-room--pending-jump-message-id nil)
-          (disco-room--queue-update surface :position t))
+          (disco-room--queue-update surface 'position)
+          )
       (unless (eq (appkit-chat-history-loading) 'around)
         (disco-room--fetch-around-pending-jump)))))
 
@@ -1206,9 +1214,10 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
    (unless (disco-room--msg-filter-active-p)
      (concat
       (appkit-chat-history-delimiter-string
-       (max 1 (disco-room--line-fill-column))
-       :loading-text "loading…")
+       (max 1 (disco-room--line-fill-column)) :loading-text "loading…")
       "\n"))
+   (when disco-room--media-status
+     (concat (propertize disco-room--media-status 'face 'warning) "\n"))
    (disco-room--input-footer-text)))
 
 (defun disco-room--ensure-timeline (&optional channel draft)
@@ -1236,107 +1245,71 @@ optimistic row node while its nonce key becomes the server message id."
   (when (and (appkit-surface-live-p view)
              (listp message)
              (alist-get 'id message))
-    (disco-room--queue-update
-     view :event
-     (list :type 'message-create
-           :channel-id (disco-msg-normalize-id channel-id)
-           :message (copy-tree message)
-           :self-p t))
+    (disco-room--queue-update view
+                              (list 'gateway-event
+                                    (list :type 'message-create
+                                          :channel-id
+                                          (disco-msg-normalize-id
+                                           channel-id)
+                                          :message (copy-tree message)
+                                          :self-p t)))
+
     t))
 
 (cl-defstruct (disco-room--render-request
                (:constructor disco-room--render-request-create)
                (:copier nil))
-  invalidations
+  change
   events)
 
-(cl-defun disco-room--make-invalidations
-    (&key structure parts entries resources position)
-  "Create one owned room invalidation set."
-  (let ((state (appkit-invalidations-create)))
-    (setf (appkit-invalidations-structure-p state) (and structure t)
-          (appkit-invalidations-parts state) (delete-dups (delq nil parts))
-          (appkit-invalidations-entry-keys state)
-          (delete-dups (delq nil (copy-sequence entries)))
-          (appkit-invalidations-resource-keys state)
-          (delete-dups (delq nil (copy-sequence resources)))
-          (appkit-invalidations-position-p state) (and position t))
-    state))
-
-(cl-defun disco-room--queue-update
-    (surface &key structure part parts entry entries resource resources
-             position event)
-  "Queue one bounded room render request on SURFACE."
+(defun disco-room--queue-update (surface message)
+  "Queue a room presentation MESSAGE on its exact SURFACE."
   (when (appkit-surface-live-p surface)
-    (appkit-surface-post
-     surface
-     (disco-room--render-request-create
-      :invalidations
-      (disco-room--make-invalidations
-       :structure structure
-       :parts (if part (cons part parts) parts)
-       :entries (if entry (cons entry entries) entries)
-       :resources (if resource (cons resource resources) resources)
-       :position position)
-      :events (and event (list event))))))
+    (appkit-surface-post surface message)))
 
 (defun disco-room--flush-updates (&optional surface)
   "Synchronously commit queued room work on SURFACE."
   (when-let* ((surface (or surface (appkit-current-surface)))
               ((appkit-surface-live-p surface)))
-    (appkit-surface-send
-     surface
-     (disco-room--render-request-create
-      :invalidations (disco-room--make-invalidations)))))
+    (appkit-surface-send surface 'synchronize)))
 
 (defun disco-room--merge-render-requests (left right)
-  "Merge room requests LEFT and RIGHT without losing event order."
-  (let ((invalidations (appkit-invalidations-create)))
-    (appkit-invalidations-merge
-     invalidations (disco-room--render-request-invalidations left))
-    (appkit-invalidations-merge
-     invalidations (disco-room--render-request-invalidations right))
-    (disco-room--render-request-create
-     :invalidations invalidations
-     :events (append (disco-room--render-request-events left)
-                     (disco-room--render-request-events right)))))
+  "Merge projection changes without reordering committed gateway events."
+  (disco-room--render-request-create
+   :change (appkit-projection-change-merge
+            (disco-room--render-request-change left)
+            (disco-room--render-request-change right))
+   :events (append (disco-room--render-request-events left)
+                   (disco-room--render-request-events right))))
 
 (defun disco-room--request-render (surface)
   "Request one coalesced full room projection for live SURFACE."
-  (when (appkit-surface-live-p surface)
-    (disco-room--queue-update
-     surface :structure t :parts '(frame timeline composer))))
+  (disco-room--queue-update surface 'refresh))
 
 (defun disco-room--render-request (_surface request)
-  "Apply one coalesced room render REQUEST in the current host."
-  (let* ((invalidations (disco-room--render-request-invalidations request))
-         (events (disco-room--render-request-events request))
-         (parts (appkit-invalidations-parts invalidations))
-         (diff
-          (appkit-projection-diff-derive
-           invalidations
-           :force-keys
-           (and (or (memq 'geometry parts)
-                    (memq 'all
-                          (appkit-invalidations-resource-keys invalidations)))
-                (appkit-chat-timeline-live-p)
-                (appkit-chat-timeline-keys))
-           :reconcile-parts '(timeline))))
-    (dolist (event events)
+  "Apply REQUEST's projection changes and committed gateway events."
+  (let* ((change (disco-room--render-request-change request))
+         (keys (appkit-projection-change-keys change))
+         (resources (appkit-projection-change-resources change))
+         (geometry (appkit-projection-change-geometry-p change)))
+    (dolist (event (disco-room--render-request-events request))
       (disco-room--apply-gateway-event event))
     (cond
-     ((or (appkit-invalidations-structure-p invalidations)
-          parts
-          (appkit-invalidations-position-p invalidations))
+     ((or (appkit-projection-change-full-p change) geometry
+          (appkit-projection-change-position change))
       (disco-room-render)
-      (when (memq 'geometry parts)
+      (when geometry
         (disco-room--refresh-timeline-layout))
       (disco-room--resolve-pending-jump))
-     ((appkit-projection-diff-reconcile-p diff)
-      (disco-room--sync-timeline
-       :force-keys (appkit-projection-diff-force-keys diff)
-       :changed-resources
-       (appkit-projection-diff-changed-dependencies diff))))
+     (t
+      (when (or keys resources)
+        (disco-room--sync-timeline
+         :force-keys (if (memq 'all resources)
+                         (appkit-chat-timeline-keys)
+                       keys)
+         :changed-resources resources))
+      (when (appkit-projection-change-frame-p change)
+        (disco-room--update-frame))))
     (when (appkit-scroll-observer-p disco-room--scroll-observer)
       (appkit-scroll-observer-check disco-room--scroll-observer))))
 
@@ -1374,7 +1347,16 @@ optimistic row node while its nonce key becomes the server message id."
    (disco-room--header-text channel)
    (disco-room--footer-text draft)
    :bind-input-function #'disco-room--bind-input-region-from-footer
-   :composer-visible-p (disco-room--composer-visible-p channel)))
+   :composer-visible-p (disco-room--composer-visible-p channel))
+  ;; A committed recovery changes canonical input without mutating the live
+  ;; composer in its transport callback.  Frame updates preserve that region,
+  ;; so project the restored source explicitly after the commit.
+  (when (and draft (appkit-chatbuf-input-start-position)
+             (not (equal-including-properties
+                   draft (appkit-chatbuf-input-string))))
+    (appkit-chatbuf-with-generated-update
+      (appkit-chatbuf-input-replace draft)
+      (disco-room--apply-input-text-properties))))
 
 (defun disco-room--first-unread-message-id (ordered-messages)
   "Return first unread message id in ORDERED-MESSAGES, or nil."
@@ -1404,7 +1386,8 @@ optimistic row node while its nonce key becomes the server message id."
          (insert-unread (and disco-room-show-unread-divider
                              (stringp message-id)
                              (equal message-id first-unread-id))))
-    (list :compact (and compact t)
+    (list :highlight-query (disco-room--active-highlight-query)
+          :compact (and compact t)
           :insert-date insert-date
           :insert-unread (and insert-unread t))))
 
@@ -1647,45 +1630,46 @@ optimistic row node while its nonce key becomes the server message id."
            (request-limit (max 1 disco-message-fetch-limit))
            (frontier-at-start disco-room--remote-latest-message-id)
            (owner (appkit-chat-history-request-start view 'latest)))
-      (disco-room--queue-update view :parts '(frame))
+      (disco-room--queue-update view 'frame)
+
       (appkit-chat-history-request-bind-handle
-     owner
-     (disco-api-channel-messages-async
-       channel-id
-       :limit request-limit
-       :owner view
-       :on-success
-       (lambda (messages)
-         (when (disco-room--callback-active-p room-buffer channel-id view)
-           (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-end owner)
-               (let* ((raw-page (disco-room--normalize-history-page messages))
-                      (merged
-                       (disco-state-merge-message-page
-                        channel-id raw-page request-revision))
-                      (page
-                       (disco-room--history-page-retained-in-cache
-                        raw-page merged))
-                      (result
-                       (disco-room--establish-latest-history-window
-                        page
-                        frontier-at-start
-                        (length raw-page)
-                        request-limit)))
-                 (unless (eq result 'conflicted)
-                   (disco-room--mark-read nil t))
-                 (disco-room--request-render view)
-                 (if (eq result 'conflicted)
-                     (message "disco: history changed concurrently; refresh again")
-                   (message "disco: loaded %d messages" (length page))))))))
-       :on-error
-       (lambda (err)
-         (when (disco-room--callback-active-p room-buffer channel-id view)
-           (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-end owner)
-               (disco-room--request-render view)
-               (message "disco: room refresh failed: %s"
-                        (disco-room--async-error-message err)))))))))))
+       owner
+       (disco-api-channel-messages-async
+        channel-id
+        :limit request-limit
+        :owner view
+        :on-success
+        (lambda (messages)
+          (when (disco-room--callback-active-p room-buffer channel-id view)
+            (with-current-buffer room-buffer
+              (when (appkit-chat-history-request-end owner)
+                (let* ((raw-page (disco-room--normalize-history-page messages))
+                       (merged
+                        (disco-state-merge-message-page
+                         channel-id raw-page request-revision))
+                       (page
+                        (disco-room--history-page-retained-in-cache
+                         raw-page merged))
+                       (result
+                        (disco-room--establish-latest-history-window
+                         page
+                         frontier-at-start
+                         (length raw-page)
+                         request-limit)))
+                  (unless (eq result 'conflicted)
+                    (disco-room--mark-read nil t))
+                  (disco-room--request-render view)
+                  (if (eq result 'conflicted)
+                      (message "disco: history changed concurrently; refresh again")
+                    (message "disco: loaded %d messages" (length page))))))))
+        :on-error
+        (lambda (err)
+          (when (disco-room--callback-active-p room-buffer channel-id view)
+            (with-current-buffer room-buffer
+              (when (appkit-chat-history-request-end owner)
+                (disco-room--request-render view)
+                (message "disco: room refresh failed: %s"
+                         (disco-room--async-error-message err)))))))))))
 
 (defun disco-room--close-for-deleted-channel (reason)
   "Close current room because its backing channel is no longer valid.
@@ -1786,7 +1770,8 @@ REASON is shown in the minibuffer."
              (handler
               (lambda (event)
                 (when (appkit-surface-live-p surface)
-                  (disco-room--queue-update surface :event event))))
+                  (disco-room--queue-update surface (list 'gateway-event event))
+                  )))
              (hook-installed-p nil)
              (watch-installed-p nil)
              (cleanup-active-p t)
@@ -1864,57 +1849,58 @@ When QUIET is non-nil, suppress progress messages."
                         "disco: no oldest message cursor; refresh first")))
            (request-limit (max 1 disco-message-fetch-limit))
            (owner (appkit-chat-history-request-start view 'older)))
-      (disco-room--queue-update view :parts '(frame))
+      (disco-room--queue-update view 'frame)
+
       (appkit-chat-history-request-bind-handle
-     owner
-     (disco-api-channel-messages-async
-       channel-id
-       :before before
-       :limit request-limit
-       :owner view
-       :on-success
-       (lambda (older)
-         (when (disco-room--callback-active-p room-buffer channel-id view)
-           (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-end owner)
-               (let* ((raw-page (disco-room--normalize-history-page older))
-                      (merged
-                       (disco-state-merge-message-page
-                        channel-id raw-page request-revision))
-                      (page
-                       (disco-room--history-page-retained-in-cache
-                        raw-page merged))
-                      (oldest (car (disco-room--history-page-bounds page)))
-                      (canonical-oldest
-                       (reverse (disco-room--normalize-history-page merged)))
-                      (complete (< (length raw-page) request-limit))
-                      (progressed
-                       (and oldest
-                            (disco-room--message-id-after-p
-                             before oldest canonical-oldest))))
-                 (when progressed
-                   (appkit-chat-history-window-set
-                    oldest (appkit-chat-history-window-last-key)))
-                 (when complete
-                   (appkit-chat-history-older-loaded-set t))
-                 (disco-room--request-render view)
-                 (unless quiet
-                   (cond
-                    (progressed
-                     (message "disco: loaded %d older messages"
-                              (length page)))
-                    (complete
-                     (message "disco: reached beginning of history"))
-                    (t
-                     (message "disco: older history changed concurrently; retry"))))))))
-         :on-error
-         (lambda (err)
-           (when (disco-room--callback-active-p room-buffer channel-id view)
-             (with-current-buffer room-buffer
-               (when (appkit-chat-history-request-end owner)
-                 (disco-room--request-render view)
-                 (message "disco: older history load failed: %s"
-                          (disco-room--async-error-message err)))))))))))))
+       owner
+       (disco-api-channel-messages-async
+        channel-id
+        :before before
+        :limit request-limit
+        :owner view
+        :on-success
+        (lambda (older)
+          (when (disco-room--callback-active-p room-buffer channel-id view)
+            (with-current-buffer room-buffer
+              (when (appkit-chat-history-request-end owner)
+                (let* ((raw-page (disco-room--normalize-history-page older))
+                       (merged
+                        (disco-state-merge-message-page
+                         channel-id raw-page request-revision))
+                       (page
+                        (disco-room--history-page-retained-in-cache
+                         raw-page merged))
+                       (oldest (car (disco-room--history-page-bounds page)))
+                       (canonical-oldest
+                        (reverse (disco-room--normalize-history-page merged)))
+                       (complete (< (length raw-page) request-limit))
+                       (progressed
+                        (and oldest
+                             (disco-room--message-id-after-p
+                              before oldest canonical-oldest))))
+                  (when progressed
+                    (appkit-chat-history-window-set
+                     oldest (appkit-chat-history-window-last-key)))
+                  (when complete
+                    (appkit-chat-history-older-loaded-set t))
+                  (disco-room--request-render view)
+                  (unless quiet
+                    (cond
+                     (progressed
+                      (message "disco: loaded %d older messages"
+                               (length page)))
+                     (complete
+                      (message "disco: reached beginning of history"))
+                     (t
+                      (message "disco: older history changed concurrently; retry"))))))))
+          :on-error
+          (lambda (err)
+            (when (disco-room--callback-active-p room-buffer channel-id view)
+              (with-current-buffer room-buffer
+                (when (appkit-chat-history-request-end owner)
+                  (disco-room--request-render view)
+                  (message "disco: older history load failed: %s"
+                           (disco-room--async-error-message err)))))))))))))
 
 (defun disco-room-load-newer-messages (&optional quiet)
   "Extend a partial around-message window toward the live frontier.
@@ -1940,75 +1926,76 @@ When QUIET is non-nil, suppress progress messages."
            (request-revision (disco-state-message-revision channel-id))
            (request-limit (max 1 disco-message-fetch-limit))
            (owner (appkit-chat-history-request-start view 'newer)))
-      (disco-room--queue-update view :parts '(frame))
+      (disco-room--queue-update view 'frame)
+
       (appkit-chat-history-request-bind-handle
-     owner
-     (disco-api-channel-messages-async
-       channel-id
-       :after cursor
-       :limit request-limit
-       :owner view
-       :on-success
-       (lambda (newer)
-         (when (disco-room--callback-active-p room-buffer channel-id view)
-           (with-current-buffer room-buffer
-             (when (appkit-chat-history-request-end owner)
-               (let* ((raw-page (disco-room--normalize-history-page newer))
-                      (merged
-                       (disco-state-merge-message-page
-                        channel-id raw-page request-revision))
-                      (page
-                       (disco-room--history-page-retained-in-cache
-                        raw-page merged))
-                      (bounds (disco-room--history-page-bounds page))
-                      (newest (cdr bounds))
-                      (edge (or newest cursor))
-                      (canonical-oldest
-                       (reverse (disco-room--normalize-history-page merged)))
-                      (progressed
-                       (and newest
-                            (disco-room--message-id-after-p
-                             newest cursor canonical-oldest)))
-                      (frontier disco-room--remote-latest-message-id)
-                      (edge-after-frontier
-                       (and frontier edge
-                            (disco-state-snowflake< frontier edge)))
-                      (short-page (< (length raw-page) request-limit))
-                      (finished
-                       (or (equal edge frontier)
-                           (and short-page
-                                (or (null frontier)
-                                    edge-after-frontier)))))
-                 (cond
-                  (finished
-                   (setq disco-room--remote-latest-message-id edge)
-                   (appkit-chat-history-window-set
-                    (appkit-chat-history-window-first-key) nil))
-                  (progressed
-                   (when edge-after-frontier
-                     (setq disco-room--remote-latest-message-id nil))
-                   (appkit-chat-history-window-set
-                    (appkit-chat-history-window-first-key) newest))
-                  (t
-                   (appkit-chat-history-newer-stalled-set cursor)))
-                 (disco-room--request-render view)
-                 (unless quiet
-                   (cond
-                    (finished
-                     (message "disco: newer history caught up"))
-                    (progressed
-                     (message "disco: loaded %d newer messages"
-                              (length page)))
-                    (t
-                     (message "disco: newer history made no progress"))))))))
-         :on-error
-         (lambda (err)
-           (when (disco-room--callback-active-p room-buffer channel-id view)
-             (with-current-buffer room-buffer
-               (when (appkit-chat-history-request-end owner)
-                 (disco-room--request-render view)
-                 (message "disco: newer history load failed: %s"
-                          (disco-room--async-error-message err)))))))))))))
+       owner
+       (disco-api-channel-messages-async
+        channel-id
+        :after cursor
+        :limit request-limit
+        :owner view
+        :on-success
+        (lambda (newer)
+          (when (disco-room--callback-active-p room-buffer channel-id view)
+            (with-current-buffer room-buffer
+              (when (appkit-chat-history-request-end owner)
+                (let* ((raw-page (disco-room--normalize-history-page newer))
+                       (merged
+                        (disco-state-merge-message-page
+                         channel-id raw-page request-revision))
+                       (page
+                        (disco-room--history-page-retained-in-cache
+                         raw-page merged))
+                       (bounds (disco-room--history-page-bounds page))
+                       (newest (cdr bounds))
+                       (edge (or newest cursor))
+                       (canonical-oldest
+                        (reverse (disco-room--normalize-history-page merged)))
+                       (progressed
+                        (and newest
+                             (disco-room--message-id-after-p
+                              newest cursor canonical-oldest)))
+                       (frontier disco-room--remote-latest-message-id)
+                       (edge-after-frontier
+                        (and frontier edge
+                             (disco-state-snowflake< frontier edge)))
+                       (short-page (< (length raw-page) request-limit))
+                       (finished
+                        (or (equal edge frontier)
+                            (and short-page
+                                 (or (null frontier)
+                                     edge-after-frontier)))))
+                  (cond
+                   (finished
+                    (setq disco-room--remote-latest-message-id edge)
+                    (appkit-chat-history-window-set
+                     (appkit-chat-history-window-first-key) nil))
+                   (progressed
+                    (when edge-after-frontier
+                      (setq disco-room--remote-latest-message-id nil))
+                    (appkit-chat-history-window-set
+                     (appkit-chat-history-window-first-key) newest))
+                   (t
+                    (appkit-chat-history-newer-stalled-set cursor)))
+                  (disco-room--request-render view)
+                  (unless quiet
+                    (cond
+                     (finished
+                      (message "disco: newer history caught up"))
+                     (progressed
+                      (message "disco: loaded %d newer messages"
+                               (length page)))
+                     (t
+                      (message "disco: newer history made no progress"))))))))
+          :on-error
+          (lambda (err)
+            (when (disco-room--callback-active-p room-buffer channel-id view)
+              (with-current-buffer room-buffer
+                (when (appkit-chat-history-request-end owner)
+                  (disco-room--request-render view)
+                  (message "disco: newer history load failed: %s"
+                           (disco-room--async-error-message err)))))))))))))
 
 (defun disco-room--lottie-sticker-at-point ()
   "Return the native Lottie Sticker projected at point, or nil."
@@ -2330,35 +2317,106 @@ its same-mode buffer survives."
   (when (disco-current-token)
     (disco-sticker-ensure-ready disco-room--guild-id)))
 
+(defun disco-room--media-render-request ()
+  "Return a projection frame update for committed media status."
+  (disco-room--render-request-create
+   :change (appkit-projection-change-create :frame-p t)))
+
+(defun disco-room--media-status-text (model)
+  "Return presentation status text from committed room MODEL."
+  (pcase (plist-get model :media-phase)
+    ('opening "Opening media…") ('playing "Playing media…")
+    ('error
+     (format "Media failed: %s" (plist-get model :media-message)))
+    (_ nil)))
+
 (defun disco-room--surface-init (_context input)
   "Initialize a room Surface from INPUT."
   (let ((channel-id (plist-get input :channel-id))
         (channel-name (plist-get input :channel-name)))
     (disco-room--reset-view-local-state channel-id channel-name)
     (appkit-next
-     :model channel-id
-     :render
-     (disco-room--render-request-create
-      :invalidations
-      (disco-room--make-invalidations
-       :structure t :parts '(frame timeline composer))))))
+     :model (list :channel-id channel-id
+                  :media-phase 'idle
+                  :media-message nil)
+     :render (disco-room--render-request-create
+              :change (appkit-projection-change-create :full-p t :frame-p t)))))
 
 (defun disco-room--surface-update (_context model message)
-  "Request room presentation described by MESSAGE."
-  (if (disco-room--render-request-p message)
-      (appkit-next :model model :render message)
-    (appkit-next-reject 'invalid-room-render-request)))
+  "Advance the room Surface MODEL for MESSAGE."
+  (pcase message
+    ('synchronize (appkit-next :model model :render appkit-render-none))
+    ((or 'refresh 'timeline 'frame 'geometry 'position
+         `(rows-changed ,_) `(resources-changed ,_) `(gateway-event ,_))
+     (appkit-next
+      :model model
+      :render
+      (disco-room--render-request-create
+       :change
+       (pcase message
+         ((or 'refresh 'timeline)
+          (appkit-projection-change-create :full-p t :frame-p t))
+         ('frame (appkit-projection-change-create :frame-p t))
+         ('geometry (appkit-projection-change-create :geometry-p t))
+         ('position (appkit-projection-change-create :position 'preserve))
+         (`(rows-changed ,keys)
+          (appkit-projection-change-create :keys keys))
+         (`(resources-changed ,resources)
+          (appkit-projection-change-create :resources resources))
+         (`(gateway-event ,event)
+          (let ((kind (plist-get event :type)))
+            (appkit-projection-change-create
+             :frame-p (eq kind 'typing-start)
+             :keys (when (memq kind '(message-reaction-add
+                                      message-reaction-remove
+                                      message-reaction-remove-all
+                                      message-reaction-remove-emoji
+                                      message-poll-vote-add
+                                      message-poll-vote-remove))
+                     (list (plist-get event :message-id)))))))
+       :events (pcase message
+                 (`(gateway-event ,event) (list event))))))
+    (`(disco-media open ,resource ,kind ,cache-key)
+     (let ((next (copy-sequence model)))
+       (setf (plist-get next :media-phase)
+             (if (eq kind 'video) 'playing 'opening)
+             (plist-get next :media-message) nil)
+       (appkit-next :model next :render
+                    (disco-room--media-render-request) :commands
+                    (list
+                     (appkit-command-start-effect
+                      (disco-media-open-effect resource kind cache-key))))))
+    (`(disco-media acquired ,file)
+     (appkit-next :model model :render appkit-render-none :commands
+                  (list
+                   (appkit-command-start-effect
+                    (disco-media-file-presentation-effect file)))))
+    ('(disco-media closed)
+     (let ((next (copy-sequence model)))
+       (setf (plist-get next :media-phase) 'idle
+             (plist-get next :media-message) nil)
+       (appkit-next :model next :render
+                    (disco-room--media-render-request))))
+    (`(disco-media failed ,reason)
+     (let ((next (copy-sequence model)))
+       (setf (plist-get next :media-phase) 'error
+             (plist-get next :media-message) reason)
+       (appkit-next :model next :render
+                    (disco-room--media-render-request))))
+    (_ (appkit-next-reject 'invalid-room-message))))
 
 (defun disco-room--surface-renderer (_surface)
   "Create one Generated Renderer for a room."
   (appkit-generated-renderer-create
-   :mount #'ignore
+   :mount #'disco-runtime-retain-surface-owner
    :merge #'disco-room--merge-render-requests
-   :render (lambda (surface _app-read-view _model request)
-             (disco-room--render-request surface request)
+   :render (lambda (surface _app-read-view model request)
+             (let ((disco-room--media-status (disco-room--media-status-text model)))
+               (disco-room--render-request surface request))
              nil)
    :recover nil
-   :unmount (lambda (_surface) (disco-room--detach-live-updates))))
+   :unmount (lambda (_surface)
+              (disco-room--detach-live-updates))))
 
 (define-derived-mode disco-room-mode appkit-chatbuf-mode "Disco-Room"
   "Major mode for disco.el room buffers."
@@ -2412,7 +2470,8 @@ its same-mode buffer survives."
       (appkit-surface-enable-responsive-geometry
        surface #'disco-room--responsive-geometry-changed)
       (appkit-surface-refresh-responsive-geometry surface)
-      (disco-room--queue-update surface :parts '(geometry))
+      (disco-room--queue-update surface 'geometry)
+
       (disco-room--flush-updates surface))
     buffer))
 

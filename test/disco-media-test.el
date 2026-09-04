@@ -4,6 +4,10 @@
 
 (require 'appkit-media)
 (require 'disco-media)
+(require 'disco-room)
+(require 'disco-room-test-support
+         (expand-file-name "disco-room-test-support"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 
 (defvar disco-media-download-directory)
 
@@ -246,8 +250,8 @@
       (should (eq :decorated
                   (disco-media--decorate-preview-image
                    '(image :type png :file "/tmp/demo.png"
-			   :height (2 . ch)
-			   :appkit-media-nslices 2)
+                     :height (2 . ch)
+                     :appkit-media-nslices 2)
                    :video-p nil)))
       (should (plist-get captured-props :height))
       (should (equal 2 (plist-get captured-props :appkit-media-nslices)))
@@ -383,7 +387,7 @@
                (lambda (path)
                  (and downloaded (equal path "/tmp/voice.ogg"))))
               ((symbol-function 'disco-media-start-attachment-download)
-               (lambda (_attachment _open-after on-success)
+               (lambda (_attachment on-success)
                  (setq downloaded t)
                  (funcall on-success "/tmp/voice.ogg")))
               ((symbol-function 'disco-media--start-appkit-audio-player)
@@ -395,54 +399,74 @@
          (url . "https://example.invalid/voice.ogg")))
       (should (equal "/tmp/voice.ogg" started-source)))))
 
-(ert-deftest disco-media-video-playback-forwards-exact-app-owner ()
-  (let ((owner (list 'exact-disco-app))
-        (video-file (make-temp-file "disco-media-owner" nil ".mp4"))
-        local-owner
-        remote-owner
-        remote-cache-key)
-    (unwind-protect
-        (progn
-          (cl-letf (((symbol-function 'disco-media-attachment-download-state)
-                     (lambda (_attachment)
-                       `(:status downloaded :path ,video-file)))
-                    ((symbol-function 'appkit-media-play-video-file)
-                     (lambda (_path _label &rest options)
-                       (setq local-owner (plist-get options :owner)))))
-            (disco-media-play-attachment-video
-             '((filename . "local.mp4")) owner))
-          (cl-letf (((symbol-function 'disco-media-attachment-download-state)
-                     (lambda (_attachment)
-                       '(:status not-downloaded :path nil)))
-                    ((symbol-function 'appkit-media-play-video-url)
-                     (lambda (_url _label &rest options)
-                       (setq remote-owner (plist-get options :owner)
-                             remote-cache-key
-                             (plist-get options :cache-key)))))
-            (disco-media-play-attachment-video
-             '((id . "remote-id")
-               (filename . "remote.mp4")
-               (url . "https://example.invalid/remote.mp4"))
-             owner))
-          (should (eq owner local-owner))
-          (should (eq owner remote-owner))
-          (should
-           (equal remote-cache-key "disco-attachment:remote-id")))
-      (ignore-errors (delete-file video-file)))))
+(ert-deftest disco-media-acquisition-settlement-respects-surface-lifetime ()
+  (let (callbacks cancelled opened)
+    (cl-letf (((symbol-function 'appkit-media-image-acquisition-start)
+               (lambda (_context _input _observe resolve reject)
+                 (let ((id (length callbacks)))
+                   (push (list resolve reject) callbacks)
+                   (appkit-cancellation-create
+                    :kind 'transport
+                    :cancel (lambda () (push id cancelled))))))
+              ((symbol-function 'appkit-media-open-file)
+               (lambda (file) (push file opened))))
+      (disco-room-test-with-surface "media-lifetime"
+        (let ((surface (appkit-current-surface))
+              (resource '((url . "https://example.invalid/image.png"))))
+          (disco-media-open-discord-resource resource 'image nil :owner surface)
+          (let ((old (caar callbacks)))
+            (disco-media-open-discord-resource resource 'image nil :owner surface)
+            (should (equal cancelled '(0)))
+            (funcall old "/tmp/stale-image")
+            (disco-room-test-drain surface)
+            (should-not opened))
+          (funcall (caar callbacks) "/tmp/current-image")
+          (should-not opened)
+          (disco-room-test-drain surface)
+          (should (equal opened '("/tmp/current-image")))
+          (disco-media-open-discord-resource resource 'image nil :owner surface)
+          (funcall (cadar callbacks) "acquisition failed")
+          (disco-room-test-drain surface)
+          (should (eq (plist-get (appkit-surface-model surface) :media-phase) 'error))
+          (should (string-match-p "acquisition failed" (buffer-string)))
+          (disco-media-open-discord-resource resource 'image nil :owner surface)
+          (let ((late (caar callbacks)))
+            (appkit-surface-stop surface)
+            (should (memq 3 cancelled))
+            (funcall late "/tmp/after-stop")
+            (should (equal opened '("/tmp/current-image")))))))))
 
-(ert-deftest disco-media-resource-adapter-forwards-video-owner ()
-  (let ((owner (list 'exact-disco-app))
-        forwarded-owner
-        forwarded-kind)
-    (cl-letf (((symbol-function 'appkit-media-open-resource)
-               (lambda (_resource &rest options)
-                 (setq forwarded-owner (plist-get options :owner)
-                       forwarded-kind (plist-get options :kind)))))
-      (disco-media-open-discord-resource
-       '((url . "https://example.invalid/video.mp4"))
-       'video nil :owner owner))
-    (should (eq owner forwarded-owner))
-    (should (eq 'video forwarded-kind))))
+(ert-deftest disco-media-video-viewer-closes-with-its-surface ()
+  (let (viewers sessions closed)
+    (cl-letf (((symbol-function 'appkit-media-video-session-create)
+               (lambda (&rest _)
+                 (let ((session (make-symbol "video-session")))
+                   (push session sessions)
+                   session)))
+              ((symbol-function 'appkit-media-present-video-session)
+               (lambda (&rest _)
+                 (let ((viewer (generate-new-buffer " *disco-video-test*")))
+                   (push viewer viewers)
+                   viewer)))
+              ((symbol-function 'appkit-media-video-session-live-p)
+               (lambda (session) (and session (not (memq session closed)))))
+              ((symbol-function 'appkit-media-video-session-close)
+               (lambda (session) (push session closed))))
+      (unwind-protect
+          (disco-room-test-with-surface "media-video"
+            (let ((surface (appkit-current-surface))
+                  (resource '((url . "https://example.invalid/video.mp4"))))
+              (disco-media-open-discord-resource resource 'video nil :owner surface)
+              (should (buffer-live-p (car viewers)))
+              (kill-buffer (car viewers))
+              (disco-room-test-drain surface)
+              (should (eq (plist-get (appkit-surface-model surface) :media-phase) 'idle))
+              (disco-media-open-discord-resource resource 'video nil :owner surface)
+              (appkit-surface-stop surface)
+              (should-not (buffer-live-p (car viewers)))
+              (should (memq (car sessions) closed))))
+        (dolist (viewer viewers)
+          (when (buffer-live-p viewer) (kill-buffer viewer)))))))
 
 (ert-deftest disco-media-open-photo-attachment-uses-original-not-proxy-url ()
   "The CDN proxy remains preview-only when opening a Discord image."
@@ -616,7 +640,7 @@
         (disco-media--attachment-preview-owner-table (make-hash-table :test #'equal))
         (disco-media--attachment-download-state-table (make-hash-table :test #'equal))
         (disco-media--attachment-download-owner-table (make-hash-table :test #'equal))
-        preview-success download-success (rerenders 0) opened succeeded)
+        preview-success download-success (rerenders 0) succeeded)
     (let ((disco-media-rerender-hook
            (list (lambda (&rest _arguments) (cl-incf rerenders)))))
       (cl-letf (((symbol-function 'appkit-media-cache-image-resource-async)
@@ -630,21 +654,18 @@
                 ((symbol-function 'appkit-media-cancel-transfer) #'ignore)
                 ((symbol-function 'appkit-media-cancel-video-preview) #'ignore)
                 ((symbol-function 'appkit-media-clear-video-decoration-cache) #'ignore)
-                ((symbol-function 'appkit-media-open-file)
-                 (lambda (_path) (setq opened t)))
                 ((symbol-function 'message) #'ignore))
         (disco-media--start-attachment-preview-fetch
          "old" "https://old.invalid/image" "/tmp/old")
         (disco-media-start-attachment-download
          '((id . "old") (filename . "old.bin")
            (url . "https://old.invalid/file"))
-         t (lambda (_path) (setq succeeded t)))
+         (lambda (_path) (setq succeeded t)))
         (setq rerenders 0)
         (disco-media-reset-session-state)
         (funcall preview-success "/tmp/nonexistent-old-image")
         (funcall download-success "/tmp/nonexistent-old-download")
         (should (= 0 rerenders))
-        (should-not opened)
         (should-not succeeded)
         (should (= 0 (hash-table-count disco-media--attachment-preview-image-cache)))
         (should (= 0 (hash-table-count disco-media--attachment-download-state-table)))))))
@@ -697,6 +718,7 @@
           (disco-media-play-attachment-audio attachment owner)
           (should (eq session toggled)))
       (when (file-exists-p file) (delete-file file)))))
+
 (ert-deftest disco-media-save-as-transfers-are-reset-owned-and-late-callbacks-stale ()
   (let ((disco-media--attachment-export-owners nil)
         (disco-media--attachment-download-state-table (make-hash-table :test #'equal))

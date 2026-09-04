@@ -19,7 +19,6 @@
 (require 'time-date)
 (require 'appkit-core)
 (require 'appkit-directory)
-(require 'appkit-invalidation)
 (require 'appkit-projection)
 (require 'appkit-presentation)
 (require 'appkit-position)
@@ -114,7 +113,6 @@ Supported values: `all', `unread', and `dms'.")
 (defvar-local disco-root--search-active-p nil
   "Non-nil while root displays the temporary search projection.")
 
-
 (defvar-local disco-root--rendering nil
   "Non-nil while a root render transaction is rebuilding the buffer.")
 
@@ -126,7 +124,6 @@ Supported values: `all', `unread', and `dms'.")
 
 (defvar-local disco-root--fill-column nil
   "Effective root render width used for the latest pass.")
-
 
 (defconst disco-root--activity-icon-slot-width 4
   "Reserved icon slot width (columns) in activity rows.")
@@ -200,7 +197,6 @@ directory surface, so it survives application sessions.")
 
 (defvar-local disco-root--search-thread-table nil
   "Hash table thread-id -> thread object from the active search session.")
-
 
 (defcustom disco-root-search-tab-limit 10
   "Default number of search results to request per root search tab."
@@ -292,7 +288,6 @@ Same semantics as `telega-chat-button-width':
   "Separator between server, category, and channel in activity rows."
   :type 'string
   :group 'disco)
-
 
 (defcustom disco-root-activity-time-format-alist
   '((today . "%H:%M")
@@ -463,7 +458,7 @@ process, so late callbacks cannot affect a replacement account session.")
     (user-error "disco: exit search before changing the unread lens"))
   (let ((expanded (not (disco-root--section-expanded-p 'unread))))
     (disco-root--set-section-expanded 'unread expanded)
-    (disco-root--queue-live-update nil t t)
+    (disco-root--queue-live-update '(:type refresh))
     (disco-root--flush-live-updates)
     (message "disco: home unread section %s"
              (if expanded "expanded" "collapsed"))))
@@ -1836,7 +1831,6 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
             (downcase (disco-root--search-tab-label tab))
             suffix)))
 
-
 (defun disco-root--search-store-channels (channels)
   "Merge CHANNELS into current root search channel cache."
   (unless (hash-table-p disco-root--search-channel-table)
@@ -1965,7 +1959,7 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   "Request a coalesced projection sync while search is visible."
   (when (and (eq major-mode 'disco-root-mode)
              disco-root--search-active-p)
-    (disco-root--queue-live-update nil t nil)))
+    (disco-root--queue-live-update '(:type refresh))))
 
 (defun disco-root--search-filter-messages (messages)
   "Apply client-side root search filters to MESSAGES list."
@@ -2136,10 +2130,9 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   (setq-local disco-root--search-active-p nil
               disco-root--search-in-flight nil
               disco-root--search-generation (1+ disco-root--search-generation))
-  (disco-root--queue-live-update nil t t)
+  (disco-root--queue-live-update '(:type refresh))
   (disco-root--flush-live-updates)
   (message "disco: search closed"))
-
 
 (defun disco-root-search-refresh ()
   "Rerun the active temporary root search."
@@ -2396,7 +2389,7 @@ When FORCE is non-nil, reflow even if WIDTH matches current value."
                  (not (eq width disco-root--fill-column))))
     (setq disco-root--fill-column width)
     (when (appkit-surface-live-p (appkit-current-surface))
-      (disco-root--queue-live-update nil nil nil t))
+      (disco-root--queue-live-update '(:type geometry)))
     t))
 
 (defun disco-root-buffer-auto-fill (&optional force)
@@ -2468,7 +2461,7 @@ With FORCE non-nil, reproject even if width has not changed."
   "Toggle root SECTION expansion and synchronize the projection."
   (disco-root--set-section-expanded
    section (not (disco-root--section-expanded-p section)))
-  (disco-root--queue-live-update nil t nil)
+  (disco-root--queue-live-update '(:type refresh))
   (disco-root--flush-live-updates))
 
 (defun disco-root--toggle-node-at-point ()
@@ -2476,7 +2469,6 @@ With FORCE non-nil, reproject even if width has not changed."
   (when-let* ((section (disco-root--line-section)))
     (disco-root--toggle-section section)
     t))
-
 
 (defun disco-root-toggle-section-at-point ()
   "Toggle the top-level root section at point."
@@ -2505,34 +2497,11 @@ With FORCE non-nil, reproject even if width has not changed."
   (memq major-mode '(disco-root-mode
                      disco-root-archived-threads-mode)))
 
-(cl-defun disco-root--make-invalidations
-    (&key structure parts entries resources position)
-  "Create one owned root invalidation request."
-  (let ((state (appkit-invalidations-create)))
-    (setf (appkit-invalidations-structure-p state) (and structure t)
-          (appkit-invalidations-parts state) (delete-dups (delq nil parts))
-          (appkit-invalidations-entry-keys state)
-          (delete-dups
-           (delq nil
-                 (cond ((null entries) nil)
-                       ((listp entries) (copy-sequence entries))
-                       (t (list entries)))))
-          (appkit-invalidations-resource-keys state)
-          (delete-dups (delq nil (copy-sequence resources)))
-          (appkit-invalidations-position-p state) (and position t))
-    state))
-
-(defun disco-root--merge-invalidations (left right)
-  "Return an owned invalidation request containing LEFT and RIGHT."
-  (let ((merged (appkit-invalidations-create)))
-    (appkit-invalidations-merge merged left)
-    (appkit-invalidations-merge merged right)))
-
 (defun disco-root--flush-live-updates ()
   "Synchronously commit every queued root render request."
   (when-let* ((surface (appkit-current-surface))
               ((appkit-surface-live-p surface)))
-    (appkit-surface-send surface (disco-root--make-invalidations))))
+    (appkit-surface-send surface '(:type synchronize))))
 
 (defun disco-root--surface-init (_context input)
   "Initialize a root Surface from INPUT."
@@ -2541,22 +2510,50 @@ With FORCE non-nil, reproject even if width has not changed."
   (disco-root--reset-session-controller-state)
   (appkit-next
    :model nil
-   :render (disco-root--make-invalidations
-            :structure t :parts '(header))))
+   :render (appkit-projection-change-create
+            :full-p t :frame-p t :position 'preserve)))
 
 (defun disco-root--surface-update (_context model message)
-  "Request root presentation described by invalidation MESSAGE."
-  (if (appkit-invalidations-p message)
-      (appkit-next :model model :render message)
-    (appkit-next-reject 'invalid-root-render-request)))
+  "Translate a root client MESSAGE into a projection change."
+  (pcase (plist-get message :type)
+    ('synchronize (appkit-next :model model :render appkit-render-none))
+    ('refresh
+     (appkit-next
+      :model model
+      :render (appkit-projection-change-create
+               :full-p t :frame-p t :position 'preserve)))
+    ('geometry
+     (appkit-next
+      :model model
+      :render (appkit-projection-change-create
+               :geometry-p t :position 'preserve)))
+    ('header
+     (appkit-next :model model
+                  :render (appkit-projection-change-create :frame-p t)))
+    ('channels-changed
+     (appkit-next
+      :model model
+      :render (appkit-projection-change-create
+               :keys (plist-get message :channel-ids) :position 'preserve)))
+    ('gateway-event
+     (let* ((event (plist-get message :event))
+            (event-type (plist-get event :type)))
+       (appkit-next
+        :model model
+        :render (appkit-projection-change-create
+                 :full-p (disco-root--live-event-structural-p event-type)
+                 :keys (disco-gateway-event-channel-ids event)
+                 :frame-p (disco-root--live-event-header-p event-type)
+                 :position 'preserve))))
+    (_ (appkit-next-reject 'unsupported-root-message))))
 
 (defun disco-root--surface-renderer (_surface)
   "Create the Generated Renderer shared by root-style Surfaces."
   (appkit-generated-renderer-create
-   :mount #'ignore
-   :merge #'disco-root--merge-invalidations
+   :mount #'disco-runtime-retain-surface-owner
+   :merge #'appkit-projection-change-merge
    :render (lambda (surface _app-read-view _model request)
-             (disco-root--render-invalidations surface request)
+             (disco-root--render-change surface request)
              nil)
    :recover nil
    :unmount (lambda (_surface) (disco-root--detach-live-updates))))
@@ -2594,39 +2591,22 @@ With FORCE non-nil, reproject even if width has not changed."
           disco-root-view--archived-surface-type))
        :app app :identity identity :buffer (current-buffer))))))
 
-(defun disco-root--queue-live-update
-    (channel-ids &optional structural-p header-p geometry-p)
-  "Queue one bounded root render request for changed CHANNEL-IDS."
-  (let ((surface (appkit-current-surface))
-        (invalidations
-         (disco-root--make-invalidations
-          :entries channel-ids
-          :structure structural-p
-          :parts (delq nil (list (and header-p 'header)
-                                 (and geometry-p 'geometry)))
-          :position geometry-p)))
-    (disco-root--debug-log
-     "queue-live-update ids=%s structural=%s header=%s geometry=%s"
-     channel-ids (and structural-p t) (and header-p t) (and geometry-p t))
-    (when (and (appkit-surface-live-p surface)
-               (appkit-invalidations-any-p invalidations))
-      (appkit-surface-post surface invalidations))))
+(defun disco-root--queue-live-update (message)
+  "Queue one client MESSAGE for the current root Surface."
+  (when-let* ((surface (appkit-current-surface))
+              ((appkit-surface-live-p surface)))
+    (appkit-surface-post surface message)))
 
-(defun disco-root--render-invalidations (_surface invalidations)
-  "Render root content selected by INVALIDATIONS in the current host."
-  (let* ((parts (appkit-invalidations-parts invalidations))
-         (resources (appkit-invalidations-resource-keys invalidations))
-         (needs-header (memq 'header parts))
-         (needs-geometry (memq 'geometry parts))
-         (all-resources-p (memq 'all resources))
-         (needs-structural
-          (or (appkit-invalidations-structure-p invalidations)
-              (memq 'content parts)))
-         (diff (appkit-projection-diff-derive
-                invalidations :reconcile-parts '(content)))
-         (dirty-channel-ids (appkit-projection-diff-force-keys diff))
-         (needs-reconcile (appkit-projection-diff-reconcile-p diff))
-         (force-all-rows-p (or needs-geometry all-resources-p))
+(defun disco-root--render-change (_surface change)
+  "Render root content selected by projection CHANGE in the current host."
+  (let* ((resources (appkit-projection-change-resources change))
+         (needs-header (appkit-projection-change-frame-p change))
+         (needs-geometry (appkit-projection-change-geometry-p change))
+         (needs-structural (appkit-projection-change-full-p change))
+         (dirty-channel-ids (appkit-projection-change-keys change))
+         (needs-reconcile
+          (or needs-structural dirty-channel-ids resources needs-geometry))
+         (force-all-rows-p (or needs-structural needs-geometry resources))
          (old-modified-p (buffer-modified-p))
          (buffer-undo-list t)
          (inhibit-read-only t))
@@ -2641,7 +2621,7 @@ With FORCE non-nil, reproject even if width has not changed."
              :after-restore #'disco-root--update-window-points)))
          ((eq major-mode 'disco-root-mode)
           (disco-root--debug-log
-           "render-invalidations projection=%s view=%s dirty=%d structural=%s header=%s geometry=%s"
+           "render-change projection=%s view=%s dirty=%d structural=%s header=%s geometry=%s"
            (if disco-root--search-active-p 'search 'root)
            disco-root--view-mode (length dirty-channel-ids)
            (and needs-structural t) (and needs-header t)
@@ -2666,26 +2646,18 @@ With FORCE non-nil, reproject even if width has not changed."
     (when (disco-root--live-event-p event-type)
       (when (eq event-type 'ready)
         (setq disco-root--refresh-in-flight nil))
-      (let ((channel-ids (disco-gateway-event-channel-ids event))
-            (structural (disco-root--live-event-structural-p event-type))
-            (header (disco-root--live-event-header-p event-type)))
-        (disco-root--debug-log
-         "gateway-event %s ids=%s structural=%s header=%s"
-         event-type
-         channel-ids
-         (and structural t)
-         (and header t))
-        (disco-root--queue-live-update channel-ids structural header)))))
+      (disco-root--queue-live-update
+       (list :type 'gateway-event :event event)))))
 
 (defun disco-root--handle-directory-event (event)
   "Project one directory lifecycle EVENT into the root buffer."
   (pcase (plist-get event :type)
     ('index-loading
      (setq disco-root--refresh-in-flight t)
-     (disco-root--queue-live-update nil nil t))
+     (disco-root--queue-live-update '(:type header)))
     ('index-loaded
      (setq disco-root--refresh-in-flight nil)
-     (disco-root--queue-live-update nil t t)
+     (disco-root--queue-live-update '(:type refresh))
      (when-let* ((errors (plist-get event :errors)))
        (message "disco: directory index errors: %s"
                 (mapconcat
@@ -2694,17 +2666,17 @@ With FORCE non-nil, reproject even if width has not changed."
                            (disco-root--async-error-message (cdr entry))))
                  errors "; "))))
     ('guild-loaded
-     (disco-root--queue-live-update nil t nil))
+     (disco-root--queue-live-update '(:type refresh)))
     ('guild-error
      ;; The projector owns the inline failure state.  Reconcile before
      ;; reporting the error so an expanded guild cannot remain stuck on its
      ;; loading row.
-     (disco-root--queue-live-update nil t nil)
+     (disco-root--queue-live-update '(:type refresh))
      (message "disco: failed to load guild %s channels: %s"
               (plist-get event :guild-id)
               (disco-root--async-error-message (plist-get event :error))))
     ('guild-enriched
-     (disco-root--queue-live-update nil t nil))
+     (disco-root--queue-live-update '(:type refresh)))
     ('guild-enrichment-error
      (message "disco: failed to load guild %s active threads: %s"
               (plist-get event :guild-id)
@@ -2715,16 +2687,13 @@ With FORCE non-nil, reproject even if width has not changed."
      ;; Parent-thread callbacks only publish state already owned by
      ;; `disco-directory'.  Reproject that state; never start or retry a load
      ;; from this callback.
-     (disco-root--queue-live-update
-      (delq nil
-            (list (plist-get event :parent-id)
-                  (plist-get event :channel-id)))
-      t nil))))
+     (disco-root--queue-live-update '(:type refresh)))))
 
 (defun disco-root--handle-preview-update (channel-id)
   "Refresh root row for hydrated preview CHANNEL-ID."
   (when channel-id
-    (disco-root--queue-live-update (list channel-id) nil nil)))
+    (disco-root--queue-live-update
+     (list :type 'channels-changed :channel-ids (list channel-id)))))
 
 (defun disco-root--avatar-resource-channel-ids (resources)
   "Return private channel IDs whose displayed avatar is in RESOURCES."
@@ -2744,7 +2713,8 @@ With FORCE non-nil, reproject even if width has not changed."
   "Refresh every visible root occurrence affected by avatar RESOURCES."
   (when-let* ((channel-ids
                (disco-root--avatar-resource-channel-ids resources)))
-    (disco-root--queue-live-update channel-ids nil nil)))
+    (disco-root--queue-live-update
+     (list :type 'channels-changed :channel-ids channel-ids))))
 
 (defun disco-root--one-line-resource-channel-ids (resources)
   "Return channel IDs whose one-line previews depend on RESOURCES."
@@ -2775,10 +2745,11 @@ With FORCE non-nil, reproject even if width has not changed."
   (when resources
     (if (and (eq major-mode 'disco-root-mode)
              disco-root--search-active-p)
-        (disco-root--queue-live-update nil t nil)
+        (disco-root--queue-live-update '(:type refresh))
       (when-let* ((channel-ids
                    (disco-root--one-line-resource-channel-ids resources)))
-        (disco-root--queue-live-update channel-ids nil nil)))))
+        (disco-root--queue-live-update
+         (list :type 'channels-changed :channel-ids channel-ids))))))
 
 (defun disco-root--handle-media-rerender (kind key)
   "Refresh root one-line previews after media KIND and KEY change."
@@ -2788,7 +2759,7 @@ With FORCE non-nil, reproject even if width has not changed."
        (disco-root--handle-one-line-resources-updated
         (list (list :preview key)))))
     ('visual
-     (disco-root--queue-live-update nil t nil))))
+     (disco-root--queue-live-update '(:type refresh)))))
 
 (defun disco-root--attach-live-updates ()
   "Attach the current root Surface to global update streams."
@@ -2869,7 +2840,7 @@ With FORCE non-nil, reproject even if width has not changed."
       (with-current-buffer buffer
         (when (and (eq major-mode 'disco-root-mode)
                    (appkit-surface-live-p (appkit-current-surface)))
-          (disco-root--queue-live-update nil t t))))))
+          (disco-root--queue-live-update '(:type refresh)))))))
 
 (add-hook 'disco-state-reset-hook #'disco-root--handle-state-reset)
 
@@ -2877,7 +2848,7 @@ With FORCE non-nil, reproject even if width has not changed."
   "Toggle root channel sort mode between activity and name."
   (interactive)
   (setq disco-root--sort-mode (if (eq disco-root--sort-mode 'activity) 'name 'activity))
-  (disco-root--queue-live-update nil t nil)
+  (disco-root--queue-live-update '(:type refresh))
   (disco-root--flush-live-updates)
   (message "disco: root sort mode -> %s" disco-root--sort-mode))
 
@@ -2889,10 +2860,9 @@ With FORCE non-nil, reproject even if width has not changed."
      ('all 'unread)
      ('unread 'dms)
      (_ 'all)))
-  (disco-root--queue-live-update nil t t)
+  (disco-root--queue-live-update '(:type refresh))
   (disco-root--flush-live-updates)
   (message "disco: root view mode -> %s" disco-root--view-mode))
-
 
 (defun disco-root--feature-badge-summary ()
   "Return compact summary string for read-state feature badge counters."
@@ -3096,7 +3066,7 @@ With FORCE non-nil, reproject even if width has not changed."
               disco-root--tree-force-all-rows-p nil)
         (when disco-root--render-pending
           (setq disco-root--render-pending nil)
-          (disco-root--queue-live-update nil t nil))))))
+          (disco-root--queue-live-update '(:type refresh)))))))
 
 (defun disco-root--gateway-sync-guild-ids ()
   "Return guild IDs prioritized for gateway context requests."

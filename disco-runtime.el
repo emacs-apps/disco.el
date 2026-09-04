@@ -11,6 +11,7 @@
 
 (require 'appkit-app)
 (require 'appkit-command)
+(require 'appkit-surface)
 
 (declare-function disco-gateway-stop "disco-gateway")
 
@@ -45,6 +46,13 @@
           (appkit-app-start
            disco-runtime--app-type :identity 'default)))
   disco-runtime--app)
+
+(defvar-local disco-runtime--surface-app nil
+  "App owning this host's generated account data, including after detach.")
+
+(defun disco-runtime-retain-surface-owner (surface &rest _arguments)
+  "Retain SURFACE's App identity in its host and future indirect clones."
+  (setq-local disco-runtime--surface-app (appkit-surface-app surface)))
 
 (defun disco-runtime-stop ()
   "Stop and forget disco.el's default appkit session."
