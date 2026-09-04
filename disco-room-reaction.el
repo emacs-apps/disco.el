@@ -21,7 +21,7 @@
 
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-buffer-p "disco-room" (buffer channel-id view))
-(declare-function disco-room--ensure-view "disco-room" ())
+(declare-function disco-room--ensure-surface "disco-room" ())
 (declare-function disco-room--event-self-p "disco-room" (event))
 (declare-function disco-room--message-at-point "disco-room" ())
 (declare-function disco-room--message-by-id "disco-room" (message-id))
@@ -400,7 +400,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (emoji-text emoji))
     (let ((op-token
            (disco-room--reaction-op-begin target-id emoji-text t)))
@@ -421,7 +421,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
                    msg emoji-text t t)))
                (disco-room--reaction-op-finish
                 target-id emoji-text op-token)
-               (appkit-request-sync view :entry target-id)
+               (disco-room--queue-update view :entry target-id)
                (message "disco: reaction added (%s)" emoji-text)))))
        :on-error
        (lambda (err)
@@ -474,7 +474,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (emoji-text emoji))
     (let ((op-token
            (disco-room--reaction-op-begin target-id emoji-text nil)))
@@ -495,7 +495,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
                    msg emoji-text nil t)))
                (disco-room--reaction-op-finish
                 target-id emoji-text op-token)
-               (appkit-request-sync view :entry target-id)
+               (disco-room--queue-update view :entry target-id)
                (message "disco: reaction removed (%s)" emoji-text)))))
        :on-error
        (lambda (err)

@@ -15,9 +15,8 @@
 (require 'seq)
 (require 'subr-x)
 (require 'appkit-core)
+(require 'appkit-surface)
 (require 'appkit-chat-avatar)
-(require 'appkit-invalidation)
-(require 'appkit-transaction)
 (require 'appkit-position)
 (require 'appkit-ui)
 (require 'appkit-view)
@@ -34,8 +33,8 @@
 (declare-function disco-channel-directory-open
                   "disco-channel-directory" (guild-id))
 
-(defun disco-user--view-id (user-id guild-id)
-  "Return the Appkit view identity for USER-ID in GUILD-ID context."
+(defun disco-user--surface-id (user-id guild-id)
+  "Return the Generated Surface identity for USER-ID in GUILD-ID."
   (list 'user-profile user-id guild-id))
 
 (defun disco-user--buffer-name (user-id guild-id)
@@ -516,49 +515,42 @@
    :anchor-property 'disco-user-profile-key
    :preserve-window-start t))
 
-(defun disco-user--view-current-p (view)
-  "Return non-nil when VIEW owns its exact user-profile context."
-  (and (appkit-view-live-p view)
-       (with-current-buffer (appkit-view-buffer view)
+(defun disco-user--surface-current-p (surface)
+  "Return non-nil when SURFACE owns this user-profile context."
+  (and (appkit-surface-live-p surface)
+       (with-current-buffer (appkit-surface-buffer surface)
          (and (derived-mode-p 'disco-user-mode)
-              (eq view (appkit-current-view))
+              (eq surface (appkit-current-surface))
               disco-user--user-id
-              (equal (appkit-view-id view)
-                     (disco-user--view-id
+              (equal (appkit-surface-identity surface)
+                     (disco-user--surface-id
                       disco-user--user-id disco-user--guild-id))))))
 
-(defun disco-user--live-current-view ()
-  "Return the live Appkit user view attached to this buffer, or nil."
-  (let ((view (appkit-current-view)))
-    (and (disco-user--view-current-p view) view)))
+(defun disco-user--live-current-surface ()
+  "Return the live Generated Surface attached to this user buffer."
+  (let ((surface (appkit-current-surface)))
+    (and (disco-user--surface-current-p surface) surface)))
 
-(cl-defun disco-user--request-sync (&optional view &key resource)
-  "Request one coalesced profile sync for live VIEW.
+(cl-defun disco-user--request-sync (&optional surface &key resource)
+  "Queue one coalesced render for live SURFACE."
+  (ignore resource)
+  (when-let* ((surface (or surface (disco-user--live-current-surface))))
+    (appkit-surface-post surface 'render)))
 
-RESOURCE identifies a presentation-only avatar dependency update."
-  (when-let* ((view (or view (disco-user--live-current-view))))
-    (if resource
-        (appkit-request-sync
-         view :entry (disco-user--profile-key) :resource resource)
-      (appkit-request-sync view :structure t :part 'profile))))
+(defun disco-user--sync-now (surface)
+  "Synchronously commit queued profile renders for SURFACE."
+  (when (disco-user--surface-current-p surface)
+    (appkit-surface-send surface 'flush)))
 
-(defun disco-user--sync-now (view)
-  "Consume pending invalidations for live user-profile VIEW."
-  (when (disco-user--view-current-p view)
-    (appkit-sync-invalidations view)))
-
-(defun disco-user--sync-invalidations (view invalidations _events)
-  "Render user profile VIEW from coalesced INVALIDATIONS."
-  (when (and (appkit-invalidations-affect-p invalidations '(profile))
-             (disco-user--view-current-p view))
-    (appkit-with-content-update view
-      (disco-user-render))))
+(defun disco-user--render-surface (_surface)
+  "Render the current user profile in its exact Surface host."
+  (disco-user-render))
 
 (defun disco-user--request-current-p
-    (view buffer user-id guild-id owner)
-  "Return non-nil when OWNER still loads USER-ID in GUILD-ID for VIEW."
-  (and (disco-user--view-current-p view)
-       (eq (appkit-view-buffer view) buffer)
+    (surface buffer user-id guild-id owner)
+  "Return non-nil when OWNER still loads USER-ID for SURFACE."
+  (and (disco-user--surface-current-p surface)
+       (eq (appkit-surface-buffer surface) buffer)
        (buffer-live-p buffer)
        (with-current-buffer buffer
          (and (equal disco-user--user-id user-id)
@@ -570,8 +562,8 @@ RESOURCE identifies a presentation-only avatar dependency update."
   (interactive)
   (unless disco-user--user-id
     (user-error "disco: this buffer has no user identity"))
-  (let* ((view (or (disco-user--live-current-view)
-                   (error "Disco: user buffer has no live Appkit view")))
+  (let* ((surface (or (disco-user--live-current-surface)
+                   (error "Disco: user buffer has no live Appkit Surface")))
          (buffer (current-buffer))
          (user-id disco-user--user-id)
          (guild-id disco-user--guild-id)
@@ -579,7 +571,7 @@ RESOURCE identifies a presentation-only avatar dependency update."
     (setq disco-user--loading t
           disco-user--error nil
           disco-user--request-owner owner)
-    (disco-user--request-sync view)
+    (disco-user--request-sync surface)
     (condition-case error-data
         (disco-api-user-profile-async
          user-id
@@ -587,17 +579,17 @@ RESOURCE identifies a presentation-only avatar dependency update."
          :on-success
          (lambda (profile)
            (when (disco-user--request-current-p
-                  view buffer user-id guild-id owner)
+                  surface buffer user-id guild-id owner)
              (with-current-buffer buffer
                (setq disco-user--profile profile
                      disco-user--loading nil
                      disco-user--error nil
                      disco-user--request-owner nil)
-               (disco-user--request-sync view))))
+               (disco-user--request-sync surface))))
          :on-error
          (lambda (error-info)
            (when (disco-user--request-current-p
-                  view buffer user-id guild-id owner)
+                  surface buffer user-id guild-id owner)
              (with-current-buffer buffer
                (setq disco-user--loading nil
                      disco-user--error
@@ -605,23 +597,23 @@ RESOURCE identifies a presentation-only avatar dependency update."
                              (or (plist-get error-info :message)
                                  "unknown error"))
                      disco-user--request-owner nil)
-               (disco-user--request-sync view)))))
+               (disco-user--request-sync surface)))))
       (error
        (when (disco-user--request-current-p
-              view buffer user-id guild-id owner)
+              surface buffer user-id guild-id owner)
          (setq disco-user--loading nil
                disco-user--error
                (format "Unable to load profile: %s"
                        (error-message-string error-data))
                disco-user--request-owner nil)
-         (disco-user--request-sync view))))
-    (disco-user--sync-now view)))
+         (disco-user--request-sync surface))))
+    (disco-user--sync-now surface)))
 
 (defun disco-user--message-current-p
-    (view buffer user-id guild-id owner)
-  "Return non-nil when OWNER still opens USER-ID's DM from VIEW."
-  (and (disco-user--view-current-p view)
-       (eq (appkit-view-buffer view) buffer)
+    (surface buffer user-id guild-id owner)
+  "Return non-nil when OWNER still opens USER-ID's DM for SURFACE."
+  (and (disco-user--surface-current-p surface)
+       (eq (appkit-surface-buffer surface) buffer)
        (buffer-live-p buffer)
        (with-current-buffer buffer
          (and (equal disco-user--user-id user-id)
@@ -637,8 +629,8 @@ RESOURCE identifies a presentation-only avatar dependency update."
     (user-error "disco: cannot open a direct message with yourself"))
   (when disco-user--message-owner
     (user-error "disco: direct message is already opening"))
-  (let* ((view (or (disco-user--live-current-view)
-                   (error "Disco: user buffer has no live Appkit view")))
+  (let* ((surface (or (disco-user--live-current-surface)
+                   (error "Disco: user buffer has no live Appkit Surface")))
          (buffer (current-buffer))
          (user-id disco-user--user-id)
          (guild-id disco-user--guild-id)
@@ -646,18 +638,18 @@ RESOURCE identifies a presentation-only avatar dependency update."
          (owner (list 'open-private-channel user-id guild-id)))
     (setq disco-user--message-owner owner
           disco-user--message-error nil)
-    (disco-user--request-sync view)
+    (disco-user--request-sync surface)
     (condition-case error-data
         (disco-api-create-private-channel-async
          user-id
          :on-success
          (lambda (channel)
            (when (disco-user--message-current-p
-                  view buffer user-id guild-id owner)
+                  surface buffer user-id guild-id owner)
              (with-current-buffer buffer
                (setq disco-user--message-owner nil
                      disco-user--message-error nil)
-               (disco-user--request-sync view))
+               (disco-user--request-sync surface))
              (disco-state-upsert-channel channel)
              (if-let* ((channel-id
                         (disco-user--normalize-id (alist-get 'id channel))))
@@ -666,23 +658,23 @@ RESOURCE identifies a presentation-only avatar dependency update."
          :on-error
          (lambda (error-info)
            (when (disco-user--message-current-p
-                  view buffer user-id guild-id owner)
+                  surface buffer user-id guild-id owner)
              (with-current-buffer buffer
                (setq disco-user--message-owner nil
                      disco-user--message-error
                      (format "Unable to open direct message: %s"
                              (or (plist-get error-info :message)
                                  "unknown error")))
-               (disco-user--request-sync view)))))
+               (disco-user--request-sync surface)))))
       (error
        (when (disco-user--message-current-p
-              view buffer user-id guild-id owner)
+              surface buffer user-id guild-id owner)
          (setq disco-user--message-owner nil
                disco-user--message-error
                (format "Unable to open direct message: %s"
                        (error-message-string error-data)))
-         (disco-user--request-sync view))))
-    (disco-user--sync-now view)))
+         (disco-user--request-sync surface))))
+    (disco-user--sync-now surface)))
 
 (defun disco-user-copy-id ()
   "Copy the current profile's Discord user ID."
@@ -697,8 +689,8 @@ RESOURCE identifies a presentation-only avatar dependency update."
   (interactive)
   (forward-button -1))
 
-(defun disco-user--clear-view-data ()
-  "Clear account-scoped data and request ownership from this user view."
+(defun disco-user--clear-surface-data ()
+  "Clear profile data and request ownership from this Surface host."
   (setq disco-user--user-id nil
         disco-user--guild-id nil
         disco-user--profile nil
@@ -709,46 +701,36 @@ RESOURCE identifies a presentation-only avatar dependency update."
         disco-user--message-owner nil
         disco-user--message-error nil))
 
-(defun disco-user--release-view-work (view buffer)
-  "Release BUFFER state while it remains owned by user-profile VIEW."
-  (when (and (buffer-live-p buffer)
-             (with-current-buffer buffer
-               (eq view (appkit-current-view))))
-    (with-current-buffer buffer
-      (setq disco-user--avatar-hook-function nil)
-      (disco-user--clear-view-data))))
+(defun disco-user--detach-surface ()
+  "Remove avatar observation and clear this user Surface host."
+  (when disco-user--avatar-hook-function
+    (remove-hook 'disco-avatar-resources-updated-hook
+                 disco-user--avatar-hook-function)
+    (setq disco-user--avatar-hook-function nil))
+  (disco-user--clear-surface-data))
 
-(defun disco-user--handle-avatar-updates (view resources)
-  "Request a targeted VIEW update when RESOURCES include its avatar."
-  (when (and (disco-user--view-current-p view) (listp resources))
-    (with-current-buffer (appkit-view-buffer view)
+(defun disco-user--handle-avatar-updates (surface resources)
+  "Request a render when RESOURCES include SURFACE's avatar."
+  (when (and (disco-user--surface-current-p surface) (listp resources))
+    (with-current-buffer (appkit-surface-buffer surface)
       (when-let* ((user (disco-user--user))
                   (resource (disco-avatar-resource-key user))
                   ((member resource resources)))
-        (disco-user--request-sync view :resource resource)))))
+        (disco-user--request-sync surface :resource resource)))))
 
-(defun disco-user--setup-view (view)
-  "Register account-scoped lifecycle work for user-profile VIEW."
-  (let ((buffer (appkit-view-buffer view)))
-    (with-current-buffer buffer
-      (disco-user--clear-view-data))
-    (appkit-register-handle
-     view 'function
-     (apply-partially #'disco-user--release-view-work view buffer))
-    (let ((hook (apply-partially #'disco-user--handle-avatar-updates view)))
-      (with-current-buffer buffer
-        (setq disco-user--avatar-hook-function hook))
-      (appkit-register-handle
-       view 'hook
-       (list 'disco-avatar-resources-updated-hook hook nil buffer))
-      (add-hook 'disco-avatar-resources-updated-hook hook))))
+(defun disco-user--attach-surface (surface)
+  "Attach avatar resource observation to SURFACE's lifecycle."
+  (let ((hook (apply-partially
+               #'disco-user--handle-avatar-updates surface)))
+    (setq-local disco-user--avatar-hook-function hook)
+    (add-hook 'disco-avatar-resources-updated-hook hook)))
 
 (defun disco-user--bind-context (user-id guild-id seed-user)
-  "Bind this dedicated view to USER-ID in GUILD-ID with SEED-USER."
+  "Bind this Surface host to USER-ID, GUILD-ID, and SEED-USER."
   (when (and disco-user--user-id
              (not (and (equal disco-user--user-id user-id)
                        (equal disco-user--guild-id guild-id))))
-    (error "Disco: user view identity does not match its buffer context"))
+    (error "Disco: user Surface identity does not match its context"))
   (setq disco-user--user-id user-id
         disco-user--guild-id guild-id)
   (when seed-user
@@ -763,6 +745,35 @@ RESOURCE identifies a presentation-only avatar dependency update."
   "<backtab>" #'disco-user-button-backward
   "q" #'quit-window)
 
+(defun disco-user--surface-init (_context input)
+  "Initialize a user profile Surface from INPUT."
+  (disco-user--clear-surface-data)
+  (disco-user--bind-context
+   (plist-get input :user-id)
+   (plist-get input :guild-id)
+   (plist-get input :seed-user))
+  (appkit-next
+   :model (list (plist-get input :user-id) (plist-get input :guild-id))
+   :render 'full))
+
+(defun disco-user--surface-update (_context model message)
+  "Return the render disposition requested by MESSAGE."
+  (pcase message
+    ('render (appkit-next :model model :render 'full))
+    ('flush (appkit-next :model model :render appkit-render-none))
+    (_ (appkit-next-reject 'invalid-user-surface-message))))
+
+(defun disco-user--surface-renderer (_surface)
+  "Create one Generated Renderer for a user profile."
+  (appkit-generated-renderer-create
+   :mount (lambda (surface _app-read-view _model)
+            (disco-user--attach-surface surface))
+   :merge (lambda (_left _right) 'full)
+   :render (lambda (surface _app-read-view _model _request)
+             (disco-user--render-surface surface))
+   :recover nil
+   :unmount (lambda (_surface) (disco-user--detach-surface))))
+
 (define-derived-mode disco-user-mode special-mode "Disco-User"
   "Major mode for a Discord user profile."
   (setq-local truncate-lines nil)
@@ -771,39 +782,51 @@ RESOURCE identifies a presentation-only avatar dependency update."
   (buffer-disable-undo)
   (setq-local buffer-undo-list t))
 
+(defconst disco-user--surface-type
+  (appkit-surface-type-create
+   :name 'disco-user-profile
+   :mode #'disco-user-mode
+   :init #'disco-user--surface-init
+   :update #'disco-user--surface-update
+   :renderer-factory #'disco-user--surface-renderer)
+  "Generated Surface type for Discord user profiles.")
+
 ;;;###autoload
 (defun disco-user-open (user-or-id &optional guild-id)
-  "Open USER-OR-ID's profile, optionally in GUILD-ID context.
-
-USER-OR-ID may be a partial Discord user alist or a decimal user ID."
-  (interactive (list (read-string "Discord user ID: ") nil))
+  "Open USER-OR-ID's Generated profile Surface in GUILD-ID context."
+  (interactive (list (read-string "Discord user ID: " ) nil))
   (let* ((seed-user (and (listp user-or-id) user-or-id))
-         (user-id (disco-user--normalize-id
-                   (if seed-user (alist-get 'id seed-user) user-or-id)))
+         (user-id
+          (disco-user--normalize-id
+           (if seed-user (alist-get 'id seed-user) user-or-id)))
          (guild-id (and guild-id (disco-user--normalize-id guild-id))))
     (unless user-id
       (user-error "disco: user profile requires a decimal Discord user ID"))
     (let* ((app (disco-runtime-app))
-           (view-id (disco-user--view-id user-id guild-id))
-           (view
-            (appkit-open-view
-             :app app
-             :id view-id
-             :mode 'disco-user-mode
-             :buffer-name (disco-user--buffer-name user-id guild-id)
-             :state (list user-id guild-id)
-             :sync-function #'disco-user--sync-invalidations
-             :parts '(profile)
-             :setup #'disco-user--setup-view
-             :select t))
-           (buffer (appkit-view-buffer view)))
-      (with-current-buffer buffer
-        (disco-user--bind-context user-id guild-id seed-user)
-        (if (and (null disco-user--profile)
-                 (not disco-user--loading))
-            (disco-user-refresh)
-          (disco-user--request-sync view)
-          (disco-user--sync-now view)))
+           (identity (disco-user--surface-id user-id guild-id))
+           (existing (appkit-app-surface app identity))
+           (surface
+            (cond
+             ((appkit-surface-live-p existing)
+              (pop-to-buffer (appkit-surface-buffer existing))
+              existing)
+             (existing
+              (error "Disco: user profile is unavailable: %S"
+                     (appkit-surface-status existing)))
+             (t
+              (appkit-open-generated-surface
+               disco-user--surface-type
+               :app app :identity identity
+               :input (list :user-id user-id :guild-id guild-id
+                            :seed-user seed-user)
+               :buffer-name (disco-user--buffer-name user-id guild-id)
+               :select t))))
+           (buffer (appkit-surface-buffer surface)))
+      (when (and (not existing)
+                 (with-current-buffer buffer
+                   (and (null disco-user--profile)
+                        (not disco-user--loading))))
+        (with-current-buffer buffer (disco-user-refresh)))
       buffer)))
 
 (provide 'disco-user)

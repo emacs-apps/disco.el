@@ -29,6 +29,7 @@
 (require 'appkit-directory)
 (require 'appkit-view)
 (require 'appkit-invalidation)
+(require 'appkit-surface)
 (require 'disco-runtime)
 (require 'disco-state)
 (require 'disco-root-render)
@@ -78,8 +79,11 @@
 (declare-function disco-root--section-expanded-p "disco-root" (section))
 (declare-function disco-root--set-section-expanded
                   "disco-root" (section expanded))
-(declare-function disco-root--sync-invalidations
-                  "disco-root" (view invalidations events))
+(declare-function disco-root--surface-init "disco-root" (context input))
+(declare-function disco-root--surface-update
+                  "disco-root" (context model message))
+(declare-function disco-root--surface-renderer "disco-root" (surface))
+(declare-function disco-root--flush-live-updates "disco-root" ())
 (declare-function disco-root--toggle-node-at-point "disco-root" ())
 (declare-function disco-root-render "disco-root" ())
 (declare-function disco-channel-directory-open "disco-channel-directory" (guild-id))
@@ -2143,7 +2147,7 @@ Return plist with keys :threads and :errors for this page only."
       (dolist (thread threads)
         (disco-state-upsert-channel thread))
       (disco-root-view--queue-live-update nil t nil)
-      (appkit-sync-invalidations (appkit-current-view))
+      (disco-root--flush-live-updates)
       (message "disco: loaded %d archived threads" (length threads)))))
 
 (defun disco-root-archived-threads-load-more ()
@@ -2165,7 +2169,7 @@ Return plist with keys :threads and :errors for this page only."
         (dolist (thread page-threads)
           (disco-state-upsert-channel thread))
         (disco-root-view--queue-live-update nil t nil)
-        (appkit-sync-invalidations (appkit-current-view))
+        (disco-root--flush-live-updates)
         (message "disco: loaded %d more archived threads (total %d)"
                  (length page-threads)
                  (length disco-root--archived-threads-cache))))))
@@ -2187,36 +2191,45 @@ Return plist with keys :threads and :errors for this page only."
   (setq buffer-read-only t)
   (setq truncate-lines t))
 
-(defun disco-root-list-archived-threads (&optional parent-channel-id)
-  "Open archived thread list for PARENT-CHANNEL-ID.
+(defconst disco-root-view--archived-surface-type
+  (appkit-surface-type-create
+   :name 'disco-root-archived-threads
+   :mode #'disco-root-archived-threads-mode
+   :init #'disco-root--surface-init
+   :update #'disco-root--surface-update
+   :renderer-factory #'disco-root--surface-renderer)
+  "Generated Surface type for one archived-thread listing.")
 
-When PARENT-CHANNEL-ID is nil, prompt for a parent channel."
+(defun disco-root-list-archived-threads (&optional parent-channel-id)
+  "Open archived threads for PARENT-CHANNEL-ID as a Generated Surface."
   (interactive)
   (let* ((parent-channel
           (or (and parent-channel-id (disco-state-channel parent-channel-id))
               (disco-root--read-thread-parent-channel)))
          (parent-id (alist-get 'id parent-channel))
          (app (disco-runtime-app))
-         (view-id (list 'root 'archived-threads parent-id))
-         (existing (appkit-view-for-id app view-id))
-         (view
-          (appkit-open-view
-           :app app
-           :id view-id
-           :mode 'disco-root-archived-threads-mode
-           :buffer-name (disco-root--archived-buffer-name parent-channel)
-           :state parent-channel
-           :sync-function #'disco-root--sync-invalidations
-           :parts '(content header geometry)
-           :setup
-           (lambda (_view)
-             (setq-local disco-root--archived-parent-channel parent-channel)
-             (disco-root-view--attach-live-updates))
-           :select t))
-         (buffer (appkit-view-buffer view)))
+         (identity (list 'root 'archived-threads parent-id))
+         (existing (appkit-app-surface app identity))
+         (surface
+          (cond
+           ((appkit-surface-live-p existing)
+            (pop-to-buffer (appkit-surface-buffer existing))
+            existing)
+           (existing
+            (error "Disco: archived Surface is unavailable: %S"
+                   (appkit-surface-status existing)))
+           (t
+            (appkit-open-generated-surface
+             disco-root-view--archived-surface-type
+             :app app :identity identity
+             :input (list :archived-parent parent-channel)
+             :buffer-name (disco-root--archived-buffer-name parent-channel)
+             :select t))))
+         (buffer (appkit-surface-buffer surface)))
     (with-current-buffer buffer
       (setq-local disco-root--archived-parent-channel parent-channel)
       (unless existing
+        (disco-root-view--attach-live-updates)
         (disco-root-archived-threads-refresh)))
     buffer))
 

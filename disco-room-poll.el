@@ -24,7 +24,7 @@
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-buffer-p "disco-room" (buffer channel-id view))
 (declare-function disco-room--channel-object "disco-room" ())
-(declare-function disco-room--ensure-view "disco-room" ())
+(declare-function disco-room--ensure-surface "disco-room" ())
 (declare-function disco-room--event-self-p "disco-room" (event))
 (declare-function disco-room--message-at-point "disco-room" ())
 (declare-function disco-room--message-author-id "disco-room-render" (message))
@@ -646,7 +646,7 @@ CONTENT is optional extra text sent alongside the poll."
                  (allow_multiselect . ,(if allow-multiselect t :false))))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          request-revision
          (required-permissions
           (append (disco-room--required-send-permissions)
@@ -659,7 +659,7 @@ CONTENT is optional extra text sent alongside the poll."
     (setq request-revision
           (disco-state-message-revision channel-id))
     (setq disco-room--send-in-flight t)
-    (appkit-request-sync view :part 'frame)
+    (disco-room--queue-update view :part 'frame)
     (disco-api-create-message-async
      channel-id
      :content content
@@ -697,7 +697,7 @@ CONTENT is optional extra text sent alongside the poll."
   (let* ((msg (disco-room--poll-message-required message-id))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (target-id (alist-get 'id msg))
          (normalized (disco-msg-poll-normalize-answer-id-list selected-answer-ids)))
     (disco-room--ensure-action-available
@@ -728,7 +728,7 @@ CONTENT is optional extra text sent alongside the poll."
                (when (disco-room--poll-draft-matches-p target-id normalized)
                  (disco-room--poll-clear-draft-selection target-id))
                (disco-room--poll-vote-op-finish target-id op-token)
-               (appkit-request-sync view :entry target-id)
+               (disco-room--queue-update view :entry target-id)
                (message "disco: poll vote updated")))))
        :on-error
        (lambda (err)
@@ -838,7 +838,7 @@ send votes to Discord."
          (target-id (alist-get 'id msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          request-revision)
     (disco-room--ensure-action-available
      (disco-room--poll-expire-unavailable-reason msg)

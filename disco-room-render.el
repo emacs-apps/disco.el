@@ -53,7 +53,7 @@
 (declare-function disco-room--channel-message-by-id
                   "disco-room" (channel-id message-id))
 (declare-function disco-room--channel-object "disco-room" ())
-(declare-function disco-room--ensure-view "disco-room" ())
+(declare-function disco-room--ensure-surface "disco-room" ())
 (declare-function disco-room--message-by-id "disco-room" (message-id))
 (declare-function disco-room--message-at-point "disco-room" ())
 (declare-function disco-room--message-flags "disco-room" (message))
@@ -540,8 +540,8 @@ No Appkit invalidation is requested."
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (and (eq major-mode 'disco-room-mode)
-                     (appkit-view-live-p (appkit-current-view)))
-            (appkit-request-sync (appkit-current-view) :part 'geometry)))))))
+                     (appkit-surface-live-p (appkit-current-surface)))
+            (disco-room--queue-update (appkit-current-surface) :part 'geometry)))))))
 
 (defun disco-room--refresh-timeline-layout ()
   "Refresh every projected row after buffer display geometry changes."
@@ -567,9 +567,9 @@ No Appkit invalidation is requested."
           (when (buffer-live-p buf)
             (with-current-buffer buf
               (when (and (eq major-mode 'disco-room-mode)
-                         (appkit-view-live-p (appkit-current-view)))
-                (let ((view (appkit-current-view)))
-                  (appkit-request-sync view :resources resources)
+                         (appkit-surface-live-p (appkit-current-surface)))
+                (let ((view (appkit-current-surface)))
+                  (disco-room--queue-update view :resources resources)
                   (when (seq-some
                          (lambda (resource)
                            (member resource resources))
@@ -882,9 +882,9 @@ OWNER is the exact Appkit app captured by video playback actions."
 
 An exact card context property wins before this function is called; this is
 only the message-level fallback used by the shared media transient protocol."
-  (when-let* ((view (appkit-current-view))
-              (_ (appkit-view-live-p view))
-              (owner (appkit-view-app view))
+  (when-let* ((view (appkit-current-surface))
+              (_ (appkit-surface-live-p view))
+              (owner (appkit-surface-app view))
               (message (ignore-errors (disco-room--message-at-point)))
               (attachment (car (disco-room--message-effective-attachments message))))
     (disco-media-attachment-card-context attachment owner)))
@@ -1761,13 +1761,13 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defun disco-room--ewoc-printer (row)
   "EWOC pretty-printer for one projected room ROW."
-  (let ((view (appkit-current-view)))
-    (unless (appkit-view-live-p view)
+  (let ((view (appkit-current-surface)))
+    (unless (appkit-surface-live-p view)
       (error "disco: cannot render media actions without an exact live view"))
     (disco-room--insert-message
      (appkit-chat-timeline-row-payload row)
      (or (appkit-chat-timeline-row-context row) '())
-     (appkit-view-app view))))
+     (appkit-surface-app view))))
 
 (provide 'disco-room-render)
 

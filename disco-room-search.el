@@ -86,7 +86,7 @@
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-object "disco-room")
 (declare-function disco-room--display-messages "disco-room")
-(declare-function disco-room--ensure-view "disco-room")
+(declare-function disco-room--ensure-surface "disco-room")
 (declare-function disco-room--message-at-point "disco-room")
 (declare-function disco-room--message-author "disco-room-render" (msg))
 (declare-function disco-room--message-author-id "disco-room-render" (msg))
@@ -406,8 +406,8 @@ ACTION is optional text describing the attempted search action."
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)
               (= disco-room--filter-generation generation)
-              (eq view (appkit-current-view))
-              (appkit-view-live-p view)))))
+              (eq view (appkit-current-surface))
+              (appkit-surface-live-p view)))))
 
 (defun disco-room-search--inplace-search-callback-active-p
     (room-buffer channel-id generation view)
@@ -417,8 +417,8 @@ ACTION is optional text describing the attempted search action."
          (and (eq major-mode 'disco-room-mode)
               (equal disco-room--channel-id channel-id)
               (= disco-room--inplace-search-generation generation)
-              (eq view (appkit-current-view))
-              (appkit-view-live-p view)))))
+              (eq view (appkit-current-surface))
+              (appkit-surface-live-p view)))))
 
 (defun disco-room-search--run-filter (filter &optional append)
   "Run room message FILTER asynchronously.
@@ -426,7 +426,7 @@ ACTION is optional text describing the attempted search action."
 When APPEND is non-nil, load the next page of matching messages."
   (let* ((room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (generation (1+ disco-room--filter-generation))
          (existing (if append
                        (or (plist-get disco-room--msg-filter :items) '())
@@ -549,11 +549,11 @@ With BY-SENDER-P, also prompt for a sender and restrict matches to that user."
     ;; Reconcile away the filter projection before deciding visibility.  A
     ;; canonical cache hit may belong to an unrelated island outside the exact
     ;; AppKit window, so MESSAGE-ID always goes through normal jump resolution.
-    (let ((view (disco-room--ensure-view)))
+    (let ((view (disco-room--ensure-surface)))
       (disco-room--request-render view)
       ;; Jump visibility is projection-dependent, so consume the explicit
       ;; command's invalidation through the one room sync boundary.
-      (appkit-sync-invalidations view))
+      (disco-room--flush-updates view))
     (cond
      (message-id
       (disco-room-jump-to-message message-id))
@@ -596,7 +596,7 @@ non-nil, overrides the message id at point as the search boundary."
     (user-error "disco: can't search inplace while message filter is applied"))
   (let* ((title (disco-room-search--title filter))
          (old-query (disco-room--active-highlight-query))
-         (view (disco-room--ensure-view))
+         (view (disco-room--ensure-surface))
          (generation (1+ disco-room--inplace-search-generation)))
     ;; Every new intent invalidates its predecessor before local/unsupported
     ;; branches are selected, so a late remote callback cannot win afterward.

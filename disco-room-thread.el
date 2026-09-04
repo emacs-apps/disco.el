@@ -20,7 +20,7 @@
 (require 'disco-room-compose)
 
 (declare-function disco-room--channel-object "disco-room" ())
-(declare-function disco-room--ensure-view "disco-room" ())
+(declare-function disco-room--ensure-surface "disco-room" ())
 (declare-function disco-room--latest-message-id "disco-room" ())
 (declare-function disco-room--message-at-point "disco-room" ())
 (declare-function disco-room--message-flags "disco-room" (message))
@@ -50,7 +50,7 @@
 (defun disco-room-thread--commit-update (updated)
   "Commit complete UPDATED state and request the controller projection."
   (disco-room--resolve-thread-update updated)
-  (disco-room--request-render (disco-room--ensure-view)))
+  (disco-room--request-render (disco-room--ensure-surface)))
 
 (defun disco-room-thread--channel-permission-reason (channel permissions)
   "Return missing-permission reason for PERMISSIONS in CHANNEL, or nil."

@@ -1376,12 +1376,12 @@ transport error."
      :on-error on-error)))
 
 (cl-defun disco-api-channel-pins-async
-    (channel-id &key before limit on-success on-error)
+    (channel-id &key before limit owner on-success on-error)
   "Fetch pinned messages in CHANNEL-ID asynchronously.
 
 BEFORE is the final Message Pin's ISO8601 `pinned_at' timestamp from the
-preceding response.  LIMIT defaults to Discord's maximum page size of 50.
-ON-SUCCESS receives the paginated response object; ON-ERROR receives the
+preceding response.  LIMIT defaults to Discord's maximum page size of 50.  OWNER controls logical
+request cancellation.  ON-SUCCESS receives the paginated response object; ON-ERROR receives the
 transport error."
   (let ((query `(("limit" . ,(number-to-string (or limit 50))))))
     (when before
@@ -1391,6 +1391,7 @@ transport error."
      "GET"
      (format "/channels/%s/messages/pins" channel-id)
      :query query
+     :owner owner
      :on-success on-success
      :on-error on-error)))
 

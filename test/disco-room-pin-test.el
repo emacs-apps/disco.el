@@ -27,6 +27,8 @@
             (should (buffer-live-p buffer))
             (should (equal "pins" (caar requests)))
             (should-not (plist-get (cdar requests) :before))
+            (should (appkit-surface-p
+                     (plist-get (cdar requests) :owner)))
             (funcall
              (plist-get (cdar requests) :on-success)
              '((items . (((pinned_at . "2026-08-16T02:00:00.000000+00:00")
@@ -57,7 +59,7 @@
                              (mapcar #'disco-room-pinned-messages--entry-message-id
                                      disco-room-pinned-messages--items)))
               (should-not disco-room-pinned-messages--has-more-p)
-              (appkit-sync-invalidations (appkit-current-view))
+              (appkit-surface-send (appkit-current-surface) 'render)
               (should (string-match-p "second" (buffer-string)))))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))

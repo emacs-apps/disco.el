@@ -46,6 +46,7 @@
   '(disco-channel-directory-mode
     disco-msg-inspect-mode
     disco-room-mode
+    disco-room-pinned-messages-mode
     disco-root-archived-threads-mode
     disco-root-channel-inspect-mode
     disco-user-mode
@@ -55,16 +56,9 @@
 (defconst disco--reset-drain-limit 8
   "Maximum normal lifecycle drain passes during one destructive reset.")
 
-(defvar disco--retired-app-identities nil
-  "Appkit (KIND ID) pairs retired by the current destructive reset.")
 
-(defun disco--retired-view-fingerprint-p (fingerprint)
-  "Return non-nil when FINGERPRINT belongs to an app retired by this reset."
-  (and (consp fingerprint)
-       (consp (cdr fingerprint))
-       (let ((identity (list (car fingerprint) (cadr fingerprint))))
-         (or (equal identity '(disco default))
-             (member identity disco--retired-app-identities)))))
+
+
 
 (defun disco--owned-auxiliary-buffer-p ()
   "Return non-nil when the current buffer has explicit Disco ownership."
@@ -74,52 +68,33 @@
       disco-room--preview-buffer-owner-p))
 
 (defun disco--collect-client-buffers ()
-  "Return live buffers owned by the current Disco client session.
-
-The Appkit registry finds renamed views by ownership, while the explicit
-major-mode list also finds truly legacy Disco buffers without a live Appkit
-owner.  Explicit buffer-local ownership finds auxiliary projections even
-after a user rename, without treating configurable name collisions as owned."
+  "Return live buffers owned by the current Disco client session."
   (let ((app disco-runtime--app)
         buffers)
     (when (appkit-app-p app)
       (maphash
-       (lambda (_id view)
-         (when-let* ((buffer (and (appkit-view-p view)
-                                  (eq app (appkit-view-app view))
-                                  (appkit-view-buffer view))))
-           (when (and (appkit-view-live-p view)
-                      (buffer-live-p buffer)
+       (lambda (_identity surface)
+         (when-let* ((buffer (and (appkit-surface-p surface)
+                                  (eq app (appkit-surface-app surface))
+                                  (appkit-surface-buffer surface))))
+           (when (and (buffer-live-p buffer)
                       (with-current-buffer buffer
-                        (eq (appkit-current-view) view))
+                        (eq (appkit-current-surface) surface))
                       (not (memq buffer buffers)))
              (push buffer buffers))))
-       (appkit-app-view-registry app)))
+       (appkit-app-surfaces app)))
     (dolist (buffer (buffer-list))
       (when (and (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (let ((view (appkit-current-view))
-                         ;; Indirect buffers inherit the raw buffer-local view,
-                         ;; while the reciprocal public accessor correctly
-                         ;; rejects them because they are not the view buffer.
-                         (raw-view appkit--current-view)
-                         (fingerprint appkit--view-fingerprint))
+                   (let ((surface (appkit-current-surface))
+                         (raw-surface appkit--current-surface))
                      (and
                       (apply #'derived-mode-p disco--client-major-modes)
-                      ;; A live foreign Appkit view is never a legacy buffer,
-                      ;; including when inherited by an indirect clone.
                       (cond
-                       ((appkit-view-live-p view)
-                        (eq app (appkit-view-app view)))
-                       ((appkit-view-live-p raw-view)
-                        (eq app (appkit-view-app raw-view)))
-                       ;; Appkit keeps this identity after detachment.  Only a
-                       ;; fingerprint whose app was retired by this exact reset
-                       ;; is ours; an unknown detached Disco view is foreign.
-                       (fingerprint
-                        (disco--retired-view-fingerprint-p fingerprint))
-                       ;; No live owner and no persistent identity means this
-                       ;; is a genuinely legacy Disco projection.
+                       ((appkit-surface-p surface)
+                        (eq app (appkit-surface-app surface)))
+                       ((appkit-surface-p raw-surface)
+                        (eq app (appkit-surface-app raw-surface)))
                        (t t)))))
                  (not (memq buffer buffers)))
         (push buffer buffers)))
@@ -137,15 +112,10 @@ after a user rename, without treating configurable name collisions as owned."
         (push buffer buffers)))
     (nreverse buffers)))
 
+
 (defun disco--retire-default-app ()
-  "Stop the current default Appkit app without losing a reentrant successor."
+  "Stop the current default Appkit App without losing a reentrant successor."
   (when-let* ((app disco-runtime--app))
-    ;; Revoke default ownership before Appkit invokes cancellation/shutdown
-    ;; callbacks.  If one creates a successor, leave that successor visible to
-    ;; the next drain pass instead of overwriting it after the callback.
-    (cl-pushnew (list (appkit-app-type-name (appkit-app-type app))
-                       (appkit-app-identity app))
-                disco--retired-app-identities :test #'equal)
     (setq disco-runtime--app nil)
     (appkit-app-close app)))
 
@@ -183,7 +153,7 @@ after a user rename, without treating configurable name collisions as owned."
 (defun disco--kill-client-buffer (buffer)
   "Kill account-scoped Disco BUFFER without allowing a query to retain it.
 
-Normal kill hooks run first so legacy buffer-owned work is cancelled.  If a
+Normal kill hooks run first so buffer-owned work is cancelled.  If a
 broken hook signals, force the already-selected Disco buffer closed so old
 account data is not left visible."
   (when (buffer-live-p buffer)
@@ -393,13 +363,12 @@ If neither session token nor `DISCO_TOKEN' is available, prompt once."
   "Destructively clear the in-memory Disco account session.
 
 Transport and Appkit ownership are stopped before account stores are reset.
-Every account-scoped projection is then closed, including renamed Appkit
-views, legacy Disco modes, notification history, composer preview, and root
-debug output.  Cleanup failures are isolated so one broken hook or timer
+Every account-scoped projection is then closed, including renamed Generated
+Surfaces, Disco modes, notification history, composer preview, and root debug
+output.  Cleanup failures are isolated so one broken hook or timer
 cannot leave another old-account projection visible."
   (interactive)
-  (let* ((disco--retired-app-identities nil)
-         (buffers (disco--collect-client-buffers))
+  (let* ((buffers (disco--collect-client-buffers))
          ;; Keep callbacks unable to publish throughout all reset hooks, not
          ;; only while their own reset function is on the stack.
          (disco-notifications--reset-in-progress t)
