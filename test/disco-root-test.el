@@ -561,7 +561,7 @@
     (let (rendered)
       (cl-letf (((symbol-function 'disco-root--archived-threads-list-spec)
                  (lambda () 'spec))
-                ((symbol-function 'appkit-view-render-list-spec-preserving-position)
+                ((symbol-function 'appkit-presentation-render-list-spec-preserving-position)
                  (lambda (_spec &rest _args) (setq rendered t))))
         (disco-root--render-invalidations
          nil (disco-root-test--invalidations :entries '("t1")))
@@ -1356,9 +1356,9 @@
                 ((symbol-function 'disco-root--archived-any-source-has-more-p)
                  (lambda () t)))
         (let* ((spec (disco-root--archived-threads-list-spec))
-               (first-channel (car (appkit-view-list-spec-items spec))))
+               (first-channel (car (appkit-presentation-list-spec-items spec))))
           (should (eq 'disco-root--insert-archived-thread-entry
-                      (appkit-view-list-spec-item-inserter spec)))
+                      (appkit-presentation-list-spec-item-inserter spec)))
           (should (equal "t1" (alist-get 'id first-channel))))))))
 
 (ert-deftest disco-root-archived-thread-view-is-stable-and-refreshes-once ()
@@ -2174,16 +2174,16 @@
               (disco-root--channel-one-line-row
                `((id . "channel") (type . ,type) (name . ,name)))))
         (should
-         (equal open (appkit-view-one-line-row-context-open row)))
+         (equal open (appkit-presentation-one-line-row-context-open row)))
         (should
-         (equal close (appkit-view-one-line-row-context-close row)))
-        (should (equal name (appkit-view-one-line-row-context row)))
+         (equal close (appkit-presentation-one-line-row-context-close row)))
+        (should (equal name (appkit-presentation-one-line-row-context row)))
         (should
-         (equal "@7" (appkit-view-one-line-row-context-trail row)))
+         (equal "@7" (appkit-presentation-one-line-row-context-trail row)))
         (should
          (eq
           'disco-root-unread-badge
-          (appkit-view-one-line-row-context-trail-face row)))))))
+          (appkit-presentation-one-line-row-context-trail-face row)))))))
 
 (ert-deftest disco-root-guild-row-aligns-unread-inside-double-brackets ()
   (with-temp-buffer
@@ -2513,7 +2513,7 @@
         (cl-letf (((symbol-function 'disco-preview-request-channel)
                    (lambda (_channel) (setq queued t))))
           (let* ((row (disco-root--channel-one-line-row thread 'thread-post))
-                 (preview (appkit-view-one-line-row-preview row)))
+                 (preview (appkit-presentation-one-line-row-preview row)))
             (should
              (equal "starter preview"
                     (appkit-ui-one-line-preview-text preview)))
@@ -2555,7 +2555,7 @@
             (should (eq 'timeline-thread scope))
             (should
              (equal ""
-                    (appkit-ui-one-line-preview-text (appkit-view-one-line-row-preview (disco-root--channel-one-line-row channel scope)))))))
+                    (appkit-ui-one-line-preview-text (appkit-presentation-one-line-row-preview (disco-root--channel-one-line-row channel scope)))))))
         (disco-state-upsert-message
          "th1"
          '((id . "latest")
@@ -2570,7 +2570,7 @@
             (should
              (equal "latest preview"
                     (appkit-ui-one-line-preview-text
-                     (appkit-view-one-line-row-preview
+                     (appkit-presentation-one-line-row-preview
                       (disco-root--channel-one-line-row
                        channel scope))))))))
     (disco-state-reset)))

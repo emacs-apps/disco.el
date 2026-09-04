@@ -6,7 +6,7 @@
 
 ;; Root-specific projection state, row models, inserters, and builders.  This
 ;; keeps `disco-root.el' focused on controller, live-update, and buffer
-;; lifecycle logic while `appkit-view.el' provides reusable UI primitives.
+;; lifecycle logic while `appkit-presentation.el' provides reusable UI primitives.
 
 ;;; Code:
 
@@ -27,7 +27,7 @@
 (require 'disco-thread)
 (require 'appkit-ui)
 (require 'appkit-directory)
-(require 'appkit-view)
+(require 'appkit-presentation)
 (require 'appkit-invalidation)
 (require 'appkit-surface)
 (require 'disco-runtime)
@@ -1311,7 +1311,7 @@ omitted because the context delimiters already encode the stable Discord type."
 						  archived-thread))
                         (disco-root--thread-browser-time-label channel scope latest-message)
                       (disco-root--channel-last-activity-time-label channel latest-message))))
-    (appkit-view-one-line-row-create
+    (appkit-presentation-one-line-row-create
      :icon-inserter (disco-root--activity-icon-inserter channel scope)
      :context (disco-root--activity-context-label channel scope)
      :context-open (car brackets)
@@ -1342,7 +1342,7 @@ omitted because the context delimiters already encode the stable Discord type."
 
 WIDTH overrides the root buffer's responsive fill column."
   (let ((row (disco-root--channel-one-line-row channel scope)))
-    (appkit-view-insert-one-line-row
+    (appkit-presentation-insert-one-line-row
      row
      :indent indent
      :width
@@ -1351,7 +1351,7 @@ WIDTH overrides the root buffer's responsive fill column."
               disco-root--fill-column
               (disco-root--compute-fill-column)))
      :icon-slot-width
-     (if (appkit-view-one-line-row-icon-inserter row)
+     (if (appkit-presentation-one-line-row-icon-inserter row)
          (max 2
               (ceiling
                (* disco-root--activity-icon-slot-width
@@ -1398,7 +1398,7 @@ WIDTH overrides the root buffer's responsive fill column."
               "(message)"))
          (preview-parts
           (disco-root--preview-parts preview-text message)))
-    (appkit-view-one-line-row-create
+    (appkit-presentation-one-line-row-create
      :icon-inserter
      (and channel (disco-root--activity-icon-inserter channel))
      :context
@@ -1436,13 +1436,13 @@ WIDTH overrides the root buffer's responsive fill column."
   "Insert one root search result MESSAGE row with INDENT for TAB."
   (let ((row (disco-root--search-message-one-line-row message tab))
         (start (point)))
-    (appkit-view-insert-one-line-row
+    (appkit-presentation-insert-one-line-row
      row
      :indent indent
      :width (max 60 (or disco-root--fill-column
                         (disco-root--compute-fill-column)))
      :icon-slot-width
-     (if (appkit-view-one-line-row-icon-inserter row)
+     (if (appkit-presentation-one-line-row-icon-inserter row)
          (max 2
               (ceiling
                (* disco-root--activity-icon-slot-width
@@ -1452,7 +1452,7 @@ WIDTH overrides the root buffer's responsive fill column."
      :time-slot-width disco-root-activity-time-column-width)
     (appkit-ui-make-action-row
      start (point) message #'disco-root--open-search-message
-     :help-echo (appkit-view-one-line-row-help-echo row))))
+     :help-echo (appkit-presentation-one-line-row-help-echo row))))
 
 (defun disco-root--channel-label (channel &optional scope)
   "Return display label for CHANNEL.
@@ -1722,21 +1722,21 @@ Higher scores sort before lower scores."
                   (format " (%d loaded, loading...)" loaded-count))
                  (t
                   (format " (%d)" loaded-count)))))
-    (appkit-view-label-row-create
+    (appkit-presentation-label-row-create
      :label (format "%s%s" (or title "Results") suffix)
      :face 'font-lock-keyword-face
      :line-properties (list 'disco-root-row-type 'search-section))))
 
 (defun disco-root--search-note-label-row (text &optional face)
   "Return label row model for one search note TEXT."
-  (appkit-view-label-row-create
+  (appkit-presentation-label-row-create
    :label (or text "")
    :face (or face 'shadow)
    :line-properties (list 'disco-root-row-type 'search-note)))
 
 (defun disco-root--search-action-label-row (label action tab)
   "Return label row model for one search action LABEL, ACTION, and TAB."
-  (appkit-view-label-row-create
+  (appkit-presentation-label-row-create
    :label (or label "Action")
    :prefix "  ["
    :suffix "]"
@@ -1764,11 +1764,11 @@ Higher scores sort before lower scores."
                (disco-root-render-entry-action entry)
                (disco-root-render-entry-tab entry)))
          (start (point)))
-    (appkit-view-insert-label-row row)
+    (appkit-presentation-insert-label-row row)
     (appkit-ui-make-action-row
      start (point) entry #'disco-root--activate-search-action
-     :help-echo (appkit-view-label-row-help-echo row)
-     :mouse-face (appkit-view-label-row-mouse-face row))))
+     :help-echo (appkit-presentation-label-row-help-echo row)
+     :mouse-face (appkit-presentation-label-row-mouse-face row))))
 
 (defun disco-root--render-entry-label-row (entry)
   "Return label row model for one search ENTRY, or nil."
@@ -1795,7 +1795,7 @@ Higher scores sort before lower scores."
        (disco-root--insert-search-action-line entry))
       (_
        (if-let* ((row (disco-root--render-entry-label-row entry)))
-           (appkit-view-insert-label-row row)
+           (appkit-presentation-insert-label-row row)
          (pcase (disco-root-render-entry-type entry)
            ('search-message
             (disco-root--insert-search-message-line
@@ -2002,7 +2002,7 @@ Return plist with keys :threads and :errors for this page only."
   (let* ((parent-channel disco-root--archived-parent-channel)
          (threads (or disco-root--archived-threads-cache '()))
          (errors (or disco-root--archived-last-errors '())))
-    (appkit-view-list-spec-create
+    (appkit-presentation-list-spec-create
      :title (format "Archived Threads: %s"
                     (disco-root--channel-label parent-channel 'archived-parent))
      :summary (format "Loaded: %d   Sources: %s"
@@ -2593,8 +2593,8 @@ SCOPE is forwarded to extra-info providers."
             (or (plist-get properties 'disco-root-guild-unread-count)
                 0))
            (brackets (disco-title-brackets 'guild)))
-      (appkit-view-insert-one-line-row
-       (appkit-view-one-line-row-create
+      (appkit-presentation-insert-one-line-row
+       (appkit-presentation-one-line-row-create
         :icon-inserter
         (lambda () (disco-root--insert-guild-icon guild))
         :context
@@ -2769,7 +2769,7 @@ SCOPE is forwarded to extra-info providers."
 (defun disco-root--build-search-list-spec ()
   "Return list spec for the active temporary root search."
   (let ((content (plist-get disco-root--search-query-spec :content)))
-    (appkit-view-list-spec-create
+    (appkit-presentation-list-spec-create
      :title (format "Search%s in %s"
                     (if (and (stringp content)
                              (not (string-empty-p content)))

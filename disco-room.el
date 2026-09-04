@@ -34,7 +34,6 @@
 (require 'disco-emoji-image)
 (require 'disco-sticker)
 (require 'disco-embed)
-(require 'appkit-view)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-gateway)
@@ -1363,6 +1362,8 @@ optimistic row node while its nonce key becomes the server message id."
                           :channel-name disco-room--channel-name)
              :buffer (current-buffer))))))
     (when (appkit-surface-live-p surface)
+      (appkit-surface-enable-responsive-geometry
+       surface #'disco-room--responsive-geometry-changed)
       (disco-room--install-scroll-observer surface))
     surface))
 
@@ -2407,6 +2408,9 @@ its same-mode buffer survives."
         (disco-room--install-scroll-observer surface)
         (disco-room--attach-live-updates)
         (disco-room-refresh))
+      (appkit-surface-enable-responsive-geometry
+       surface #'disco-room--responsive-geometry-changed)
+      (appkit-surface-refresh-responsive-geometry surface)
       (disco-room--queue-update surface :parts '(geometry))
       (disco-room--flush-updates surface))
     buffer))

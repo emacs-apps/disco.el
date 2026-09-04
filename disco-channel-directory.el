@@ -19,7 +19,7 @@
 (require 'appkit-invalidation)
 (require 'appkit-surface)
 (require 'appkit-projection)
-(require 'appkit-view)
+(require 'appkit-presentation)
 (require 'disco-api)
 (require 'disco-channel-type)
 (require 'disco-customize)
@@ -342,7 +342,7 @@
                    (delq nil
                          (mapcar
                           (lambda (window)
-                            (appkit-view-window-fill-column
+                            (appkit-geometry-window-width
                              window
                              disco-channel-directory-margin-columns))
                           (get-buffer-window-list
@@ -1083,7 +1083,7 @@ FORCE-ENTRY-KEYS is the native Appkit invalidation representation."
              (with-current-buffer buffer
                (when (eq major-mode 'disco-channel-directory-mode)
                  (let ((width
-                        (appkit-view-window-fill-column
+                        (appkit-geometry-window-width
                          window disco-channel-directory-margin-columns)))
                    (when width
                      (puthash buffer

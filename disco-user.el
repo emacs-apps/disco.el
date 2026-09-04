@@ -19,7 +19,7 @@
 (require 'appkit-chat-avatar)
 (require 'appkit-position)
 (require 'appkit-ui)
-(require 'appkit-view)
+(require 'appkit-presentation)
 (require 'disco-api)
 (require 'disco-avatar)
 (require 'disco-channel-type)
@@ -204,7 +204,7 @@
   "Insert HEADING and Markdown TEXT when TEXT is present."
   (when-let* ((text (disco-user--present-string text)))
     (insert "\n")
-    (appkit-view-insert-heading-line heading :face 'bold)
+    (appkit-presentation-insert-heading-line heading :face 'bold)
     (insert (disco-markdown-render text :context 'user-profile) "\n")))
 
 (defun disco-user--snowflake-date (user-id)
@@ -272,14 +272,14 @@
             (insert (propertize (format " · %s" nick) 'face 'shadow)))
           (when count-label
             (let* ((width
-                    (or (appkit-view-window-fill-column nil 2)
+                    (or (appkit-geometry-window-width nil 2)
                         fill-column
                         80))
                    (target
                     (- width (string-width count-label)
                        (string-width (cadr brackets)))))
-              (if (> target (appkit-view-current-column))
-                  (appkit-view-move-to-column target)
+              (if (> target (appkit-geometry-current-column))
+                  (appkit-geometry-insert-alignment-space target)
                 (insert " "))
               (insert (propertize count-label 'face 'shadow))))
           (insert (cadr brackets) "\n"))))))
@@ -420,7 +420,7 @@
        (erase-buffer)
        (setq-local header-line-format '(:eval (disco-user--header-line)))
        (if (and disco-user--loading (null user))
-           (appkit-view-insert-note-line "Loading user profile…")
+           (appkit-presentation-insert-note-line "Loading user profile…")
          (let* ((prefixes (disco-user--avatar-prefixes))
                 (header-prefix (plist-get prefixes :header))
                 (status-prefix (plist-get prefixes :first-body))
@@ -436,13 +436,13 @@
            (insert "\n"))
          (disco-user--insert-action-buttons)
          (when disco-user--loading
-           (appkit-view-insert-note-line
+           (appkit-presentation-insert-note-line
             "Loading full user profile…" :face 'shadow))
          (when disco-user--error
-           (appkit-view-insert-note-line disco-user--error :face 'error))
+           (appkit-presentation-insert-note-line disco-user--error :face 'error))
          (when disco-user--message-error
-           (appkit-view-insert-note-line disco-user--message-error :face 'error))
-         (appkit-view-insert-note-line
+           (appkit-presentation-insert-note-line disco-user--message-error :face 'error))
+         (appkit-presentation-insert-note-line
           "g refresh · m message · Y copy ID · q quit" :face 'shadow)
          (insert "\n")
          (disco-user--insert-field "User ID" disco-user--user-id)
@@ -456,7 +456,7 @@
                       (alist-get 'guild_member_profile disco-user--profile))))
            (when (or disco-user--guild-id member member-profile)
              (insert "\n")
-             (appkit-view-insert-heading-line
+             (appkit-presentation-insert-heading-line
               "Server profile"
               :face 'bold)
              (disco-user--insert-field
@@ -484,7 +484,7 @@
                      (and user (alist-get 'bio user)))))
            (when (or user-profile global-bio)
              (insert "\n")
-             (appkit-view-insert-heading-line "User profile" :face 'bold)
+             (appkit-presentation-insert-heading-line "User profile" :face 'bold)
              (disco-user--insert-field
               "Pronouns" (and user-profile
                               (alist-get 'pronouns user-profile)))
@@ -497,7 +497,7 @@
          (when (eq t (and (listp disco-user--profile)
                           (alist-get 'private disco-user--profile)))
            (insert "\n")
-           (appkit-view-insert-note-line
+           (appkit-presentation-insert-note-line
             "This user has a private extended profile." :face 'shadow))
          (when-let* ((application
                       (and (listp disco-user--profile)
