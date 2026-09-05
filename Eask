@@ -4,7 +4,7 @@
          "0.1.0"
          "Discord client")
 
-(website-url "https://github.com/0WD0/disco.el")
+(website-url "https://github.com/emacs-im/disco.el")
 (keywords "comm")
 
 (package-file "disco.el")

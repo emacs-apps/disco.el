@@ -2,10 +2,10 @@
 
 ;; Copyright (C) 2026 0WD0
 
-;; Author: 0WD0 <wd.1105848296@gmail.com>
-;; Maintainer: 0WD0 <wd.1105848296@gmail.com>
+;; Author: 0WD0 <me@0wd0.com>
+;; Maintainer: 0WD0 <me@0wd0.com>
 ;; Keywords: comm
-;; URL: https://github.com/0WD0/disco.el
+;; URL: https://github.com/emacs-im/disco.el
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "31.1") (plz "0.8") (websocket "1.16") (transient "0.5.0") (appkit "0.3.0"))
 
