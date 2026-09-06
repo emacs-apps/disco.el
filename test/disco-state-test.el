@@ -200,7 +200,7 @@
    nil)
   (should (= 3 (disco-state-channel-unread-count "dm")))
   (should (equal "100" (alist-get 'last_message_id
-                                    (disco-state-channel "dm"))))
+                                  (disco-state-channel "dm"))))
   (should (null (disco-state-channel-last-read-message-id "dm"))))
 
 (ert-deftest disco-state-apply-message-create-increments-unread-guild-mention ()
@@ -219,7 +219,7 @@
    nil)
   (should (= 1 (disco-state-channel-unread-count "guild")))
   (should (equal "101" (alist-get 'last_message_id
-                                    (disco-state-channel "guild")))))
+                                  (disco-state-channel "guild")))))
 
 (ert-deftest disco-state-apply-message-create-private-muted-requires-mention ()
   (disco-state-reset)
@@ -295,7 +295,7 @@
    t)
   (should (= 5 (disco-state-channel-unread-count "chan")))
   (should (equal "104" (alist-get 'last_message_id
-                                    (disco-state-channel "chan"))))
+                                  (disco-state-channel "chan"))))
   (should (null (disco-state-channel-last-read-message-id "chan"))))
 
 (ert-deftest disco-state-apply-message-create-does-not-regress-channel-last-message-id ()
@@ -314,7 +314,7 @@
    "u1"
    nil)
   (should (equal "200" (alist-get 'last_message_id
-                                    (disco-state-channel "chan")))))
+                                  (disco-state-channel "chan")))))
 
 (ert-deftest disco-state-apply-thread-create-acks-own-thread-in-thread-only-parent ()
   (disco-state-reset)

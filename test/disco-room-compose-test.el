@@ -18,8 +18,7 @@
 (ert-deftest disco-room-attachment-send-error-callback-restores-controller-only ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          callback
-          )
+          callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "attachment-send-boundary"
@@ -49,7 +48,6 @@
                       (should disco-room--send-in-flight)
 
                       (cl-letf (
-
                                 ((symbol-function 'message) #'ignore))
                         (funcall callback '(:message "upload failed"))
                         (disco-room-test-drain (appkit-current-surface))
@@ -78,8 +76,7 @@
 (ert-deftest disco-room-edit-success-callback-restores-controller-only ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          callback
-          )
+          callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "edit-callback-boundary"
@@ -105,7 +102,6 @@
                   (should disco-room--send-in-flight)
 
                   (cl-letf (
-
                             ((symbol-function 'message) #'ignore))
                     (funcall callback
                              '((id . "m1")
@@ -122,9 +118,7 @@
                                    (alist-get
                                     'content
                                     (car (disco-state-messages
-                                          "edit-callback-boundary")))))
-
-                    ))))
+                                          "edit-callback-boundary")))))))))
           (disco-runtime-stop))))))
 
 (ert-deftest disco-room-draft-history-search-loads-match ()
@@ -1387,8 +1381,8 @@
                   (let ((pending-node
                          (appkit-chat-timeline-node nonce)))
                     (should pending-node)
-                  ;; Some transports expose only the created identity here;
-                  ;; the exact optimistic occurrence remains renderable.
+                    ;; Some transports expose only the created identity here;
+                    ;; the exact optimistic occurrence remains renderable.
                     (funcall callback
                              '((id . "200") (channel_id . "chat")))
                     (disco-room-test-drain view)

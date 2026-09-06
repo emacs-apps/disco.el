@@ -11,7 +11,7 @@
   (disco-state-set-guilds '(((id . "guild") (name . "Guild"))))
   (disco-state-put-channels
    "guild" '(((id . "forum") (guild_id . "guild") (type . 15)
-               (permissions . "1024")))))
+              (permissions . "1024")))))
 
 (defun disco-directory-test--seed-visible-text-parent ()
   "Reset directory state and install one accessible text parent."
@@ -20,7 +20,7 @@
   (disco-state-set-guilds '(((id . "guild") (name . "Guild"))))
   (disco-state-put-channels
    "guild" '(((id . "chat") (guild_id . "guild") (type . 0)
-               (permissions . "1024")))))
+              (permissions . "1024")))))
 
 (ert-deftest disco-directory-index-refresh-does-not-hydrate-guilds ()
   (disco-state-reset)
@@ -243,7 +243,7 @@
                     (plist-get args :on-success)
                     (if cursor
                         '((threads . (((id . "100")
-                                      (parent_id . "forum") (type . 11))))
+                                       (parent_id . "forum") (type . 11))))
                           (first_messages
                            . (((id . "starter-old")
                                (channel_id . "100")
@@ -251,7 +251,7 @@
                           (has_more . :false)
                           (total_results . 1))
                       '((threads . (((id . "200")
-                                    (parent_id . "forum") (type . 11))))
+                                     (parent_id . "forum") (type . 11))))
                         (first_messages
                          . (((id . "starter-new")
                              (channel_id . "200")

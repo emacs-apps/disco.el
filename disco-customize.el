@@ -76,7 +76,8 @@ delimiters by display width."
 
 (defcustom disco-notifications-delay 0.5
   "Seconds to delay a notification before rechecking room visibility."
-  :type 'number :group 'disco-notifications)
+  :type 'number
+  :group 'disco-notifications)
 
 (defcustom disco-notifications-timeout 4.0
   "Seconds before closing the current desktop notification.
@@ -87,23 +88,28 @@ Nil leaves notification lifetime to the desktop server."
 
 (defcustom disco-notifications-max-message-age 60
   "Maximum incoming message age in seconds eligible for notification."
-  :type 'integer :group 'disco-notifications)
+  :type 'integer
+  :group 'disco-notifications)
 
 (defcustom disco-notifications-body-limit 160
   "Maximum notification body width in characters."
-  :type 'integer :group 'disco-notifications)
+  :type 'integer
+  :group 'disco-notifications)
 
 (defcustom disco-notifications-show-preview t
   "When non-nil, include a compact message preview."
-  :type 'boolean :group 'disco-notifications)
+  :type 'boolean
+  :group 'disco-notifications)
 
 (defcustom disco-notifications-history-ring-size 30
   "Number of recent desktop notifications retained."
-  :type 'integer :group 'disco-notifications)
+  :type 'integer
+  :group 'disco-notifications)
 
 (defcustom disco-notifications-extra-args nil
   "Additional keyword arguments passed to `notifications-notify'."
-  :type '(repeat sexp) :group 'disco-notifications)
+  :type '(repeat sexp)
+  :group 'disco-notifications)
 
 ;;; Room buffers
 
@@ -118,7 +124,7 @@ candidate shown after `C-c C-a'; COMMAND must be interactive.  Users and
 extensions may append Discord attachment kinds without replacing the
 dispatcher."
   :type '(alist :key-type (string :tag "Attachment name")
-                :value-type (list function))
+          :value-type (list function))
   :group 'disco)
 
 ;;;; Controller

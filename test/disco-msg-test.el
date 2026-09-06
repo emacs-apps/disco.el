@@ -55,10 +55,10 @@
                              ((answer_id . 2)
                               (poll_media . ((text . "Sushi"))))))
                  (results . ((answer_counts . (((id . 1)
-                                               (count . 2)
-                                               (me_voted . t))
-                                              ((id . "2")
-                                               (count . 1))))))))
+                                                (count . 2)
+                                                (me_voted . t))
+                                               ((id . "2")
+                                                (count . 1))))))))
          (first-answer (car (alist-get 'answers poll))))
     (should (equal "Lunch?" (disco-msg-poll-question-text poll)))
     (should (= 1 (disco-msg-poll-answer-id first-answer)))
@@ -236,8 +236,6 @@
             (should (string-match-p "hello world" (buffer-string)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
-
-
 
 (provide 'disco-msg-test)
 

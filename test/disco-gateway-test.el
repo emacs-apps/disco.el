@@ -556,7 +556,7 @@
          (parent_id . "forum")))
       (should (equal '((:apply ((id . "th1")
                                 (parent_id . "forum"))
-                               "u1")
+                        "u1")
                        (:upsert thread-create
                                 ((id . "th1")
                                  (parent_id . "forum"))))
@@ -663,7 +663,7 @@
       (should (equal '(:type guild-members-chunk
                        :guild-id "g1"
                        :members (((user (id . "u1")
-                                         (username . "alice"))))
+                                        (username . "alice"))))
                        :presences (((user (id . "u1"))))
                        :chunk-index 0
                        :chunk-count 1
@@ -1122,7 +1122,7 @@
   (disco-gateway--ingest-ready-guilds
    '(((id . "g1")
       (members . [((nick . "Ready")
-                    (user (id . "u1") (username . "alice")))])
+                   (user (id . "u1") (username . "alice")))])
       (presences . [((user (id . "u1")) (status . "online"))]))))
   (should (equal "Ready"
                  (alist-get 'nick
@@ -1134,7 +1134,7 @@
     (disco-gateway--dispatch-guild-create
      '((id . "g2")
        (members . [((nick . "Create")
-                     (user (id . "u2") (username . "bob")))]))))
+                    (user (id . "u2") (username . "bob")))]))))
   (should (equal "Create"
                  (alist-get 'nick
                             (disco-state-guild-member "g2" "u2")))))

@@ -95,8 +95,8 @@
 (defun disco-api--start-owned-request (owner generation)
   "Create a logical request for Appkit OWNER in API GENERATION."
   (let ((request
-         (disco-api--owned-request-create
-          :generation generation :active-p t)))
+          (disco-api--owned-request-create
+           :generation generation :active-p t)))
     (push request disco-api--owned-requests)
     (condition-case error-data
         (progn
@@ -840,7 +840,6 @@ requests.  BODY-TYPE is forwarded to the transport layer."
    (format "/users/@me/settings-proto/%s" type)
    :on-success on-success
    :on-error on-error))
-
 
 (defun disco-api-guild-channels (guild-id)
   "Fetch channels in GUILD-ID."

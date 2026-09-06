@@ -67,7 +67,7 @@
                         ((symbol-function 'message) #'ignore))
                 (disco-room-submit-poll-vote "p1")
                 (funcall success-callback nil)
-              ;; This is a newer unsent draft and must survive the old echo.
+                ;; This is a newer unsent draft and must survive the old echo.
                 (disco-room--poll-set-draft-selection "p1" '(2))
                 (disco-room--apply-live-poll-vote-event
                  '(:type message-poll-vote-add
@@ -84,8 +84,7 @@
 (ert-deftest disco-room-poll-self-echo-before-rest-completion-is-authoritative ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          success-callback
-          )
+          success-callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "poll-echo-first"
@@ -113,8 +112,7 @@
               (let ((poll (disco-msg-poll (disco-room--message-by-id "p1"))))
                 (should (= 1 (disco-msg-poll-answer-count poll 1)))
                 (should (equal '(1) (disco-msg-poll-voted-answer-ids poll)))
-                (should-not (disco-room--poll-draft-selection-present-p "p1"))
-                ))
+                (should-not (disco-room--poll-draft-selection-present-p "p1"))))
           (disco-runtime-stop))))))
 
 (ert-deftest disco-room-queued-poll-echo-keeps-frozen-self-identity ()
@@ -126,7 +124,7 @@
         (unwind-protect
             (disco-room-test-with-surface "poll-queued-self"
               (disco-room-test-setup-channel "poll-queued-self")
-            ;; This is the state after the matching REST success.
+              ;; This is the state after the matching REST success.
               (disco-state-put-messages
                "poll-queued-self"
                (list
@@ -160,8 +158,7 @@
 (ert-deftest disco-room-stale-poll-rest-success-cannot-overwrite-newer-op ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          callbacks
-          )
+          callbacks)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "poll-generation"
@@ -181,8 +178,8 @@
                 (disco-room-submit-poll-vote "p1")
                 (disco-room--poll-set-draft-selection "p1" '(2))
                 (disco-room-submit-poll-vote "p1")
-              ;; New completion wins, then a newly staged draft must survive
-              ;; the old completion as well.
+                ;; New completion wins, then a newly staged draft must survive
+                ;; the old completion as well.
                 (funcall (nth 1 callbacks) nil)
                 (disco-room--poll-set-draft-selection "p1" '(1 2))
                 (funcall (nth 0 callbacks) nil))
@@ -191,8 +188,7 @@
                 (should (= 0 (disco-msg-poll-answer-count poll 1)))
                 (should (= 1 (disco-msg-poll-answer-count poll 2)))
                 (should (equal '(1 2)
-                               (disco-room--poll-draft-selection "p1")))
-                ))
+                               (disco-room--poll-draft-selection "p1")))))
           (disco-runtime-stop))))))
 
 (ert-deftest disco-room-send-poll-errors-while-replying ()

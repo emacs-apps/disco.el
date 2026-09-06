@@ -939,8 +939,8 @@ When TOKEN is omitted, return `:empty-object'."
 
 ALLOWED-MENTIONS is normalized using `disco-api--normalize-allowed-mentions'."
   (let ((payload `((content . ,(disco-api--validate-message-content-length
-                                 content
-                                 "content")))))
+                                content
+                                "content")))))
     (when allowed-mentions
       (let ((normalized (disco-api--normalize-allowed-mentions allowed-mentions)))
         (when normalized

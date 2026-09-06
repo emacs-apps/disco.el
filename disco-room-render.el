@@ -535,8 +535,7 @@ No Appkit invalidation is requested."
 
 (defun disco-room--responsive-geometry-changed (surface _width)
   "Request one geometry redraw after SURFACE's presentation width changes."
-  (disco-room--queue-update surface 'geometry)
-  )
+  (disco-room--queue-update surface 'geometry))
 
 (defun disco-room--refresh-open-rooms ()
   "Request geometry projection for all open room timelines."
@@ -546,8 +545,7 @@ No Appkit invalidation is requested."
         (with-current-buffer buf
           (when (and (eq major-mode 'disco-room-mode)
                      (appkit-surface-live-p (appkit-current-surface)))
-            (disco-room--queue-update (appkit-current-surface) 'geometry)
-            ))))))
+            (disco-room--queue-update (appkit-current-surface) 'geometry)))))))
 
 (defun disco-room--refresh-timeline-layout ()
   "Refresh every projected row after buffer display geometry changes."

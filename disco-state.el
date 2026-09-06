@@ -139,7 +139,6 @@ stored here as access evidence.")
 (defvar disco-state--conversation-summaries-by-channel (make-hash-table :test #'equal)
   "Hash table channel-id -> list of conversation summary objects.")
 
-
 (defconst disco-state-discord-epoch-seconds 1420070400
   "Discord epoch as UNIX seconds (2015-01-01 00:00:00 UTC).")
 
@@ -657,9 +656,9 @@ whether every channel carries authoritative computed permissions."
   (let* ((old-channels (copy-sequence
                         (or (gethash guild-id disco-state--channels-by-guild) '())))
          (new-ids (delq nil (mapcar (lambda (channel)
-                                     (disco-state--normalize-id
-                                      (alist-get 'id channel)))
-                                   channels)))
+                                      (disco-state--normalize-id
+                                       (alist-get 'id channel)))
+                                    channels)))
          (preserved-threads
           (seq-filter
            (lambda (channel)

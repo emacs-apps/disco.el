@@ -644,7 +644,7 @@ non-nil, overrides the message id at point as the search boundary."
                                                        cursor-id)))
                                          messages)))
                    (if-let* ((message-id (and (listp match)
-                                             (alist-get 'id match))))
+                                              (alist-get 'id match))))
                        (progn
                          (message "")
                          (disco-room--queue-jump message-id view)

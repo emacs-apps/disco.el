@@ -508,7 +508,7 @@
               (should (= 21 (avatar-slice-height)))
               (setq line-height 35)
               (run-hooks 'text-scale-mode-hook)
-            ;; Geometry notification is queued; the Surface pass owns redraw.
+              ;; Geometry notification is queued; the Surface pass owns redraw.
               (should (= 21 (avatar-slice-height)))
               (disco-room--flush-updates)
               (should (eq node (appkit-chat-timeline-node "m1")))
@@ -547,8 +547,8 @@
                 ((symbol-function 'delete-process)
                  (lambda (process)
                    (setq canceled process)
-                 ;; Cancellation can run sentinels synchronously.  Both the
-                 ;; old callback and an attempted successor must stay inert.
+                   ;; Cancellation can run sentinels synchronously.  Both the
+                   ;; old callback and an attempted successor must stay inert.
                    (funcall then-callback "OLD_ACCOUNT_SECRET-bytes")
                    (disco-room--start-forward-guild-icon-fetch
                     "reentrant-icon" "new-guild"
@@ -580,7 +580,7 @@
           (should (= 0 (hash-table-count table))))
         (should-not disco-room-draft-history-search-history)
         (should-not disco-room-search-inplace-history)
-      ;; A response already queued by plz remains harmless after reset too.
+        ;; A response already queued by plz remains harmless after reset too.
         (funcall then-callback "OLD_ACCOUNT_SECRET-late-bytes")
         (funcall else-callback '(:message "OLD_ACCOUNT_SECRET-late-error"))
         (should (= 0 sync-count))

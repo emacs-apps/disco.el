@@ -127,8 +127,7 @@
 (ert-deftest disco-room-filter-search-activates-msg-filter ()
   (disco-room-test-with-runtime
     (disco-room-test-with-surface "chan"
-      (let ((disco-room--channel-id "chan")
-            )
+      (let ((disco-room--channel-id "chan"))
         (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
                    (lambda (&rest args)
                      (funcall (plist-get args :on-success)
@@ -338,7 +337,7 @@
               '(:active t
                 :query "needle"
                 :items (((id . "200") (channel_id . "chan")))))
-      ;; Mirror Gateway ordering: canonical deletion happens before delivery.
+        ;; Mirror Gateway ordering: canonical deletion happens before delivery.
         (disco-state-put-messages
          "chan"
          '(((id . "200") (channel_id . "chan"))
@@ -452,8 +451,7 @@
 (ert-deftest disco-room-filter-callback-only-requests-appkit-sync ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          callback
-          )
+          callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "filter-boundary"

@@ -2084,8 +2084,7 @@ OWNER lifecycle-owns the whole pause/resume session."
                                                       (disco-media-attachment-audio-pending-play-p
                                                        attachment)
                                                     (disco-media-play-attachment-audio
-                                                     attachment owner))))
-         )
+                                                     attachment owner)))))
         (t
          (user-error "disco: audio attachment has no playable source")))))))
 

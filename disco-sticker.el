@@ -59,7 +59,6 @@ fallback without affecting room rendering or sending."
   :type 'number
   :group 'disco)
 
-
 (defvar disco-sticker-resources-updated-hook nil
   "Hook run with coalesced opaque sticker resource keys after images change.")
 
@@ -93,7 +92,6 @@ fallback without affecting room rendering or sending."
 
 (defvar disco-sticker--history nil
   "Minibuffer history for visual Discord sticker readers.")
-
 
 (defun disco-sticker--normalize-id (value)
   "Return VALUE as a decimal Discord snowflake string, or nil."
@@ -272,16 +270,16 @@ no applicable catalog could be loaded."
             first-error)
         (cl-labels
             ((finish
-              (success value)
-              (unless success
-                (setq first-error (or first-error value)))
-              (setq remaining (1- remaining))
-              (when (zerop remaining)
-                (if (or (disco-state-standard-sticker-packs-loaded-p)
-                        (and guild-id
-                             (disco-state-guild-stickers-loaded-p guild-id)))
-                    (when on-success (funcall on-success))
-                  (when on-error (funcall on-error first-error))))))
+               (success value)
+               (unless success
+                 (setq first-error (or first-error value)))
+               (setq remaining (1- remaining))
+               (when (zerop remaining)
+                 (if (or (disco-state-standard-sticker-packs-loaded-p)
+                         (and guild-id
+                              (disco-state-guild-stickers-loaded-p guild-id)))
+                     (when on-success (funcall on-success))
+                   (when on-error (funcall on-error first-error))))))
           (dolist (key keys)
             (disco-sticker--request-catalog
              key
@@ -294,13 +292,13 @@ no applicable catalog could be loaded."
     (and (disco-state-standard-sticker-packs-loaded-p)
          (or (null guild-id)
              (disco-state-guild-stickers-loaded-p guild-id)))))
+
 (defun disco-sticker-catalog-available-p (&optional guild-id)
   "Return non-nil when at least one applicable Sticker catalog is loaded."
   (let ((guild-id (disco-sticker--normalize-id guild-id)))
     (or (disco-state-standard-sticker-packs-loaded-p)
         (and guild-id
              (disco-state-guild-stickers-loaded-p guild-id)))))
-
 
 (defun disco-sticker-ready-p (&optional guild-id)
   "Return non-nil when the picker has an authoritative catalog to show.
@@ -318,13 +316,13 @@ Settings failure degrades ranking only; catalog failure invokes ON-ERROR."
         catalog-error)
     (cl-labels
         ((finish
-          (&optional error)
-          (setq catalog-error (or catalog-error error)
-                remaining (1- remaining))
-          (when (zerop remaining)
-            (if catalog-error
-                (when on-error (funcall on-error catalog-error))
-              (when on-success (funcall on-success))))))
+           (&optional error)
+           (setq catalog-error (or catalog-error error)
+                 remaining (1- remaining))
+           (when (zerop remaining)
+             (if catalog-error
+                 (when on-error (funcall on-error catalog-error))
+               (when on-success (funcall on-success))))))
       (disco-sticker-ensure-catalogs
        guild-id
        :on-success (lambda () (finish))
@@ -645,11 +643,11 @@ Settings failure degrades ranking only; catalog failure invokes ON-ERROR."
                       :handle nil
                       :process nil
                       :frame-files nil)))
-      (when-let* ((handle (plist-get previous :handle)))
-        (ignore-errors (appkit-media-cancel-transfer handle)))
-      (when-let* ((process (plist-get previous :process)))
-        (when (process-live-p process)
-          (delete-process process)))
+    (when-let* ((handle (plist-get previous :handle)))
+      (ignore-errors (appkit-media-cancel-transfer handle)))
+    (when-let* ((process (plist-get previous :process)))
+      (when (process-live-p process)
+        (delete-process process)))
     (puthash variant owner disco-sticker--players)
     (if (file-readable-p source)
         (disco-sticker--start-lottie-player variant owner source)
@@ -819,8 +817,8 @@ multi-line sticker size.  MAX-WIDTH bounds completion previews and defaults to
         candidates)
     (dolist (sticker (and guild-id (disco-state-guild-stickers guild-id)))
       (when-let* ((candidate
-                  (disco-sticker--candidate
-                   sticker "This Server" guild-id guild-name)))
+                   (disco-sticker--candidate
+                    sticker "This Server" guild-id guild-name)))
         (push candidate candidates)))
     (dolist (pack (disco-state-standard-sticker-packs))
       (let* ((raw-name (and (listp pack) (alist-get 'name pack)))
@@ -835,8 +833,8 @@ multi-line sticker size.  MAX-WIDTH bounds completion previews and defaults to
                  (disco-sticker--normalize-list-sequence
                   (and (listp pack) (alist-get 'stickers pack))))
           (when-let* ((candidate
-                      (disco-sticker--candidate
-                       sticker group nil nil pack-name)))
+                       (disco-sticker--candidate
+                        sticker group nil nil pack-name)))
             (push candidate candidates)))))
     (nreverse candidates)))
 
@@ -939,7 +937,6 @@ sections."
     (mapcar #'disco-sticker--appkit-candidate
             (disco-sticker--unique-labels candidates))))
 
-
 (defun disco-sticker-read (&optional guild-id ranked-only)
   "Read one sticker for GUILD-ID.
 
@@ -961,7 +958,6 @@ sections."
       (unless (and (listp sticker) (disco-sticker-id sticker))
         (error "disco: sticker candidate has no exact identity"))
       (copy-tree sticker))))
-
 
 (defun disco-sticker--cancel-timer (timer)
   "Cancel TIMER while isolating ordinary cancellation failures."

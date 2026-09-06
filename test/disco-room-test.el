@@ -85,8 +85,8 @@
                 (puthash '("message-old" (name . "wave"))
                          '(:token 6 :addp t)
                          disco-room--reaction-ops))
-            ;; SETUP is not run for a still-live view, so reopening preserves
-            ;; controller, composer, and history ownership.
+              ;; SETUP is not run for a still-live view, so reopening preserves
+              ;; controller, composer, and history ownership.
               (disco-room-open channel-id channel-name)
               (should (= 1 refreshes))
               (with-current-buffer buffer
@@ -98,8 +98,8 @@
                 (should disco-room--send-in-flight))
               (appkit-surface-stop old-view)
               (should-not (appkit-surface-live-p old-view))
-            ;; The same major-mode buffer survives, but the new Appkit view gets
-            ;; fresh ownership instead of inheriting the dead predecessor.
+              ;; The same major-mode buffer survives, but the new Appkit view gets
+              ;; fresh ownership instead of inheriting the dead predecessor.
               (disco-room-open channel-id channel-name)
               (should (= 2 refreshes))
               (with-current-buffer buffer
@@ -131,8 +131,7 @@
                   (should (= 0 (hash-table-count disco-room--reaction-ops)))
                   (should (= 0 disco-room--optimistic-read-ack-seq))
                   (should-not disco-room--pending-optimistic-read-ack)
-                  (should (= 0 disco-room--pins-ack-seq))
-                  )))
+                  (should (= 0 disco-room--pins-ack-seq)))))
           (when (buffer-live-p buffer)
             (kill-buffer buffer))
           (disco-runtime-stop))))))
@@ -161,8 +160,8 @@
               (should (buffer-live-p target-buffer))
               (with-current-buffer target-buffer
                 (rename-buffer renamed-name t))
-            ;; Reopening the Appkit identity returns the actual reused buffer,
-            ;; independent of its display name.
+              ;; Reopening the Appkit identity returns the actual reused buffer,
+              ;; independent of its display name.
               (should (eq target-buffer
                           (disco-room-open "jump-target" "target")))
               (with-temp-buffer
@@ -171,8 +170,7 @@
                 (cl-letf (((symbol-function 'disco-room--queue-jump)
                            (lambda (message-id view)
                              (setq queued
-                                   (list (current-buffer) message-id view))))
-                          )
+                                   (list (current-buffer) message-id view)))))
                   (disco-room-jump-to-message "message-42" "jump-target")))
               (should (eq target-buffer (nth 0 queued)))
               (should (equal "message-42" (nth 1 queued)))
@@ -204,8 +202,8 @@
                 (appkit-surface-stop old-view)
                 (let ((replacement (disco-room--ensure-surface)))
                   (should-not (eq old-view replacement))
-                ;; Buffer, channel, generation, and history owner still look
-                ;; compatible; originating view identity is the decisive guard.
+                  ;; Buffer, channel, generation, and history owner still look
+                  ;; compatible; originating view identity is the decisive guard.
                   (funcall success-callback
                            '(((id . "200")
                               (channel_id . "callback-view")
@@ -217,15 +215,12 @@
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
           (watch-count 0)
-          (unwatch-count 0)
-          )
+          (unwatch-count 0))
       (cl-letf (((symbol-function 'disco-gateway-watch-channel)
                  (lambda (_channel-id) (cl-incf watch-count)))
                 ((symbol-function 'disco-gateway-unwatch-channel)
                  (lambda (_channel-id) (cl-incf unwatch-count)))
-                ((symbol-function 'disco-gateway-stop) #'ignore)
-
-                )
+                ((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "gateway-owner"
               (disco-room-test-setup-channel "gateway-owner")
@@ -255,8 +250,7 @@
 (ert-deftest disco-room-async-refresh-callback-only-requests-appkit-sync ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          callback
-          )
+          callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "refresh-boundary"
@@ -286,8 +280,7 @@
 
 (ert-deftest disco-room-typing-callbacks-never-project-directly ()
   (disco-room-test-with-runtime
-    (let ((disco-runtime--app nil)
-          )
+    (let ((disco-runtime--app nil))
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "typing-boundary"
@@ -300,16 +293,14 @@
                                :updated-at (- (float-time) 2))
                          disco-room--typing-users)
                 (cl-letf (
-
                           ((symbol-function 'disco-room--typing-reschedule-expire-timer)
-                           #'ignore)
-                          )
+                           #'ignore))
                   (disco-room--typing-expire-timer-callback
                    (current-buffer) view)
                   (should-not (gethash "expired" disco-room--typing-users))
 
-                ;; Track/stop run while a gateway event is already being
-                ;; consumed by Appkit sync, so they remain controller-only.
+                  ;; Track/stop run while a gateway event is already being
+                  ;; consumed by Appkit sync, so they remain controller-only.
                   (should (disco-room--typing-track-user
                            "active" nil (float-time)))
                   (should (gethash "active" disco-room--typing-users))
@@ -319,8 +310,7 @@
 
 (ert-deftest disco-room-post-command-spoiler-hide-only-requests-entry-sync ()
   (disco-room-test-with-runtime
-    (let ((disco-runtime--app nil)
-          )
+    (let ((disco-runtime--app nil))
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "post-command-boundary"
@@ -330,13 +320,9 @@
                 (cl-letf (((symbol-function 'disco-room--maybe-auto-load-newer)
                            #'ignore)
                           ((symbol-function 'disco-room--maybe-auto-load-older)
-                           #'ignore)
-
-                          )
+                           #'ignore))
                   (disco-room--post-command)
-                  (should-not disco-room--revealed-spoiler-message-id)
-
-                  )))
+                  (should-not disco-room--revealed-spoiler-message-id))))
           (disco-runtime-stop))))))
 
 (ert-deftest disco-room-reaction-reader-uses-shared-visual-catalog ()
@@ -460,8 +446,7 @@
 (ert-deftest disco-room-reaction-callback-only-requests-entry-sync ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          callback
-          )
+          callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "reaction-boundary"
@@ -480,7 +465,6 @@
                   (disco-room-add-reaction "wave" "m1"))
                 (should (functionp callback))
                 (cl-letf (
-
                           ((symbol-function 'message) #'ignore))
                   (funcall callback nil)
                   (disco-room-test-drain (appkit-current-surface))
@@ -517,8 +501,8 @@
                         ((symbol-function 'message) #'ignore))
                 (disco-room-add-reaction "oldname:42" "m1")
                 (funcall success-callback nil)
-              ;; Gateway may report a renamed custom emoji.  Its id owns the
-              ;; operation and the self echo must not increment count twice.
+                ;; Gateway may report a renamed custom emoji.  Its id owns the
+                ;; operation and the self echo must not increment count twice.
                 (disco-room--apply-live-reaction-event
                  '(:type message-reaction-add
                    :message-id "m1"
@@ -533,8 +517,7 @@
 (ert-deftest disco-room-reaction-self-echo-before-rest-completion-is-authoritative ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          success-callback
-          )
+          success-callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "reaction-echo-first"
@@ -561,14 +544,13 @@
                    :message-id "m1"
                    :user-id "self"
                    :emoji ((name . "wave"))))
-              ;; The echo retired the request owner.  Its later REST success
-              ;; cannot mutate or schedule presentation again.
+                ;; The echo retired the request owner.  Its later REST success
+                ;; cannot mutate or schedule presentation again.
                 (funcall success-callback nil))
               (let* ((message (disco-room--message-by-id "m1"))
                      (reaction (car (disco-msg-reactions message))))
                 (should (= 1 (disco-msg-reaction-count reaction)))
-                (should (disco-msg-reaction-selected-p reaction))
-                ))
+                (should (disco-msg-reaction-selected-p reaction))))
           (disco-runtime-stop))))))
 
 (ert-deftest disco-room-queued-reaction-echo-keeps-frozen-self-identity ()
@@ -580,7 +562,7 @@
         (unwind-protect
             (disco-room-test-with-surface "reaction-queued-self"
               (disco-room-test-setup-channel "reaction-queued-self")
-            ;; This is the state after the matching REST success.
+              ;; This is the state after the matching REST success.
               (disco-state-put-messages
                "reaction-queued-self"
                '(((id . "m1")
@@ -601,8 +583,8 @@
                      (emoji . ((name . "wave"))))))
                 (should (eq t (plist-get emitted :self-p)))
                 (disco-room--queue-update view (list 'gateway-event emitted))
-              ;; Disconnect clears the session identity before Appkit consumes
-              ;; the already queued echo.
+                ;; Disconnect clears the session identity before Appkit consumes
+                ;; the already queued echo.
                 (setq disco-gateway--current-user-id nil)
                 (disco-room-test-drain view)
                 (should-not
@@ -654,8 +636,8 @@
                (car (disco-msg-reactions (disco-room--message-by-id "m1")))))
           (should (= 1 (disco-msg-reaction-count reaction)))
           (should (disco-msg-reaction-selected-p reaction)))
-      ;; Even an out-of-order/duplicate other-user remove cannot erase the
-      ;; aggregate vote implied by our own selected state.
+        ;; Even an out-of-order/duplicate other-user remove cannot erase the
+        ;; aggregate vote implied by our own selected state.
         (disco-room--queue-update surface (list 'gateway-event
                                                 '(:type message-reaction-remove
                                                   :channel-id "reaction-other"
@@ -673,8 +655,7 @@
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
           add-success
-          remove-success
-          )
+          remove-success)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "reaction-generation"
@@ -700,8 +681,7 @@
                 (funcall remove-success nil)
                 (funcall add-success nil))
               (should-not
-               (disco-msg-reactions (disco-room--message-by-id "m1")))
-              )
+               (disco-msg-reactions (disco-room--message-by-id "m1"))))
           (disco-runtime-stop))))))
 
 (ert-deftest disco-room-contextual-bindings-follow-point-location ()
@@ -803,8 +783,8 @@
           (content . "first"))))
       (disco-room-test-establish-latest-window)
       (disco-room-render)
-    ;; Room headers may precede the first message; navigation starts from the
-    ;; first actual message property span, not blindly from `point-min'.
+      ;; Room headers may precede the first message; navigation starts from the
+      ;; first actual message property span, not blindly from `point-min'.
       (let* ((starts (disco-msg--message-start-positions))
              (first-id (get-text-property (nth 0 starts) 'disco-message-id))
              (second-id (get-text-property (nth 1 starts) 'disco-message-id)))
@@ -945,8 +925,8 @@
        '((id . "chan")
          (type . 0)
          (last_pin_timestamp . "2026-03-04T01:30:00Z")))
-    ;; 02:00 +01:00 is 01:00Z, so the channel pin at 01:30Z is newer even
-    ;; though its timestamp is lexically smaller.
+      ;; 02:00 +01:00 is 01:00Z, so the channel pin at 01:30Z is newer even
+      ;; though its timestamp is lexically smaller.
       (disco-state-apply-channel-pins-ack
        "chan" "2026-03-04T02:00:00+01:00")
       (setq-local disco-room--channel-id "chan")
@@ -1496,8 +1476,7 @@
       (disco-state-apply-message-ack "chat" "m1" 1)
       (disco-room-test-establish-latest-window)
       (disco-room-render)
-      (let (error-callback
-            )
+      (let (error-callback)
         (cl-letf (((symbol-function 'disco-api-ack-message-async)
                    (lambda (&rest args)
                      (setq error-callback (plist-get args :on-error))))
@@ -1507,12 +1486,11 @@
         (should-not (plist-get (appkit-chat-timeline-context "m2")
                                :insert-unread))
         (cl-letf (
-
                   ((symbol-function 'message) #'ignore))
           (funcall error-callback '(:message "boom"))
 
-        ;; Controller state is rolled back immediately, while the old
-        ;; optimistic projection remains until Appkit consumes the .
+          ;; Controller state is rolled back immediately, while the old
+          ;; optimistic projection remains until Appkit consumes the .
           (should-not disco-room--pending-optimistic-read-ack)
           (should (equal "m1"
                          (disco-state-channel-last-read-message-id "chat")))
@@ -1572,7 +1550,7 @@
                   ((symbol-function 'message)
                    (lambda (&rest _args) nil)))
           (disco-room--fetch-around-pending-jump)
-        ;; The transport callback updates state and only queues presentation.
+          ;; The transport callback updates state and only queues presentation.
           (should-not rendered)
           (should-not jumped)
           (should (equal "20" disco-room--pending-jump-message-id))
@@ -1716,7 +1694,7 @@
       (appkit-chat-history-window-set "100" "300")
       (cl-letf (((symbol-function 'disco-api-channel-messages-async)
                  (lambda (_channel-id &rest args)
-                 ;; Deliberately oldest-first: room normalization owns order.
+                   ;; Deliberately oldest-first: room normalization owns order.
                    (funcall (plist-get args :on-success)
                             '(((id . "1000") (channel_id . "chan"))
                               ((id . "1100") (channel_id . "chan"))))))
@@ -1777,8 +1755,8 @@
                      ((id . "200") (channel_id . "chan"))))))
       (should (equal "300" (appkit-chat-history-window-first-key)))
       (should-not (appkit-chat-history-window-last-key))
-    ;; Raw transport count was full even though revision filtering retained
-    ;; only two rows, so it does not prove the beginning of history.
+      ;; Raw transport count was full even though revision filtering retained
+      ;; only two rows, so it does not prove the beginning of history.
       (should-not (appkit-chat-history-older-loaded-p))
       (should (equal "400" disco-room--remote-latest-message-id)))))
 
@@ -2290,8 +2268,7 @@
 (ert-deftest disco-room-pin-message-commits-current-success-only ()
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
-          callback
-          )
+          callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "pin-success"
@@ -2321,8 +2298,7 @@
   (disco-room-test-with-runtime
     (let ((disco-runtime--app nil)
           pin-callback
-          unpin-callback
-          )
+          unpin-callback)
       (cl-letf (((symbol-function 'disco-gateway-stop) #'ignore))
         (unwind-protect
             (disco-room-test-with-surface "pin-race"

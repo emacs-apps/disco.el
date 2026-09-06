@@ -121,7 +121,6 @@ Discord uses this flag on the limited channel objects included by the
      :direct-message t))
   "Declarative map of Discord channel type to capability plist.")
 
-
 (defun disco-title--bracket-selector-match-p (selector kind subject)
   "Return non-nil when SELECTOR matches presentation KIND and SUBJECT."
   (cond

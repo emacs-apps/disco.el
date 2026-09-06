@@ -76,9 +76,6 @@ return a string or nil.")
 (defvar-local disco-msg--inspect-guild-id nil
   "Guild id shown by the current msg inspect buffer.")
 
-
-
-
 (defun disco-msg--message-start-positions ()
   "Return visible message start positions in the current buffer."
   (let ((pos (point-min))

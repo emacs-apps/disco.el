@@ -19,9 +19,9 @@
            (disco-client-mode-line--counts)))
       (should (equal '(4 . 5) disco-client-mode-line--cached-counts))
       (should (equal " 4" (substring-no-properties
-                            (disco-client-mode-line-unread))))
+                           (disco-client-mode-line-unread))))
       (should (equal " @5" (substring-no-properties
-                             (disco-client-mode-line-mentions)))))))
+                            (disco-client-mode-line-mentions)))))))
 
 (ert-deftest disco-client-mode-line-counts-only-viewable-channels ()
   (cl-letf (((symbol-function 'disco-state-channels)

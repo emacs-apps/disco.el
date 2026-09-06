@@ -376,8 +376,8 @@ overwriting the user's stored fold preference."
         (mode (disco-channel-open-mode channel)))
     (cond
      ((eq mode 'thread-directory)
-       (format "Expand active posts under channel %s in its guild directory"
-               channel-id))
+      (format "Expand active posts under channel %s in its guild directory"
+              channel-id))
      ((eq mode 'inspect) (format "Inspect channel %s" channel-id))
      (mode (format "Open channel %s" channel-id)))))
 

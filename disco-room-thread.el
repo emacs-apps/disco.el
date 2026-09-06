@@ -403,7 +403,7 @@
   (unless (disco-room--channel-object)
     (user-error "disco: unknown thread in state"))
   (disco-room-thread--commit-update (disco-api-update-thread (alist-get 'id (disco-room--channel-object))
-                            :rate-limit-per-user seconds))
+                                                             :rate-limit-per-user seconds))
   (message "disco: thread slowmode -> %ss" seconds))
 
 (defun disco-room-thread-set-auto-archive-duration (minutes)
@@ -426,7 +426,7 @@
   (unless (disco-room--channel-object)
     (user-error "disco: unknown thread in state"))
   (disco-room-thread--commit-update (disco-api-update-thread (alist-get 'id (disco-room--channel-object))
-                            :auto-archive-duration minutes))
+                                                             :auto-archive-duration minutes))
   (message "disco: auto archive -> %s minutes" minutes))
 
 (defun disco-room-thread-set-muted (muted)
@@ -490,12 +490,12 @@
     (unless has-change
       (user-error "disco: no thread setting changes provided"))
     (disco-room-thread--commit-update (disco-api-update-thread
-     (alist-get 'id (disco-room--channel-object))
-     :name name
-     :auto-archive-duration auto-archive-duration
-     :rate-limit-per-user rate-limit-per-user
-     :archived archived
-     :locked locked))
+                                       (alist-get 'id (disco-room--channel-object))
+                                       :name name
+                                       :auto-archive-duration auto-archive-duration
+                                       :rate-limit-per-user rate-limit-per-user
+                                       :archived archived
+                                       :locked locked))
     (message "disco: updated thread settings")))
 
 (defun disco-room-thread-open-parent-archived ()

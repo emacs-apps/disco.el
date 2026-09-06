@@ -263,8 +263,7 @@ This is a search boundary, not the remote/latest protocol frontier.")
                  (appkit-surface-live-p view))
         (setq disco-room--typing-expire-timer nil)
         (when (disco-room--typing-prune-expired)
-          (disco-room--queue-update view 'frame)
-          )
+          (disco-room--queue-update view 'frame))
         (disco-room--typing-reschedule-expire-timer)))))
 
 (defun disco-room--typing-reschedule-expire-timer ()
@@ -463,8 +462,7 @@ A nil or stopped Surface never degrades this guard to channel identity alone."
           (setq disco-room--revealed-spoiler-message-id nil)
           (when-let* ((view (appkit-current-surface)))
             (when (appkit-surface-live-p view)
-              (disco-room--queue-update view (list 'rows-changed (list previous)))
-              )))))))
+              (disco-room--queue-update view (list 'rows-changed (list previous))))))))))
 
 (defun disco-room--read-state-snapshot-fields (state)
   "Return writable read-state fields copied from STATE."
@@ -580,15 +578,13 @@ caller is already inside, or will request, an Appkit projection transaction."
                  (when (disco-room--optimistic-read-ack-clear optimistic-seq)
                    (disco-state-apply-message-ack channel-id target-id 0)
                    (disco-state-apply-channel-ack-response channel-id response)
-                   (disco-room--queue-update view 'timeline)
-                   ))))
+                   (disco-room--queue-update view 'timeline)))))
            :on-error
            (lambda (err)
              (when (disco-room--callback-active-p room-buffer channel-id view)
                (with-current-buffer room-buffer
                  (when (disco-room--optimistic-read-ack-rollback optimistic-seq)
-                   (disco-room--queue-update view 'timeline)
-                   )
+                   (disco-room--queue-update view 'timeline))
                  (message "disco: read-state ack failed for %s: %s"
                           channel-id
                           (disco-room--async-error-message err)))))))
@@ -1029,8 +1025,7 @@ Return non-nil when jump succeeds without fetching older history."
          disco-room--pending-jump-message-id)
         (progn
           (setq disco-room--pending-jump-message-id nil)
-          (disco-room--queue-update surface 'position)
-          )
+          (disco-room--queue-update surface 'position))
       (unless (eq (appkit-chat-history-loading) 'around)
         (disco-room--fetch-around-pending-jump)))))
 
@@ -1770,8 +1765,7 @@ REASON is shown in the minibuffer."
              (handler
               (lambda (event)
                 (when (appkit-surface-live-p surface)
-                  (disco-room--queue-update surface (list 'gateway-event event))
-                  )))
+                  (disco-room--queue-update surface (list 'gateway-event event)))))
              (hook-installed-p nil)
              (watch-installed-p nil)
              (cleanup-active-p t)

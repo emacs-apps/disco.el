@@ -106,7 +106,6 @@ completion row height stays stable across CAPF/Corfu and company popups."
   :type 'integer
   :group 'disco)
 
-
 (defvar disco-company--top-emoji-requests
   (make-hash-table :test #'equal)
   "Guild IDs with a top-emoji request currently in flight.")
@@ -710,15 +709,15 @@ PROPS is appended as additional plist metadata."
      (lambda (user-id entry)
        (let* ((display-name (or (and (listp entry) (plist-get entry :display-name))
                                 (format "user-%s" (disco-company--completion-short-id user-id))))
-               (base-label (format "@%s" display-name)))
-          (puthash base-label
-                   (1+ (gethash base-label label-counts 0))
-                   label-counts)
-          (push (list :user-id user-id
-                      :entry entry
-                      :display-name display-name
-                      :base-label base-label)
-                records)))
+              (base-label (format "@%s" display-name)))
+         (puthash base-label
+                  (1+ (gethash base-label label-counts 0))
+                  label-counts)
+         (push (list :user-id user-id
+                     :entry entry
+                     :display-name display-name
+                     :base-label base-label)
+               records)))
      user-map)
     (setq records
           (sort records
@@ -991,8 +990,8 @@ semantics.  Reaction readers may explicitly supply every eligible guild."
     (when external-p
       (dolist (guild (disco-state-guilds))
         (when-let* ((guild-id
-                    (disco-company--normalize-id
-                     (and (listp guild) (alist-get 'id guild)))))
+                     (disco-company--normalize-id
+                      (and (listp guild) (alist-get 'id guild)))))
           (unless (member guild-id ids)
             (setq ids (append ids (list guild-id)))))))
     ids))
@@ -1239,7 +1238,6 @@ candidate's opaque value."
   "Forget account-scoped asynchronous completion request ownership."
   (clrhash disco-company--top-emoji-requests))
 
-
 (defun disco-company--reaction-friendly-name-key (value)
   "Return comparable Discord-friendly emoji name key for VALUE."
   (when (stringp value)
@@ -1313,8 +1311,8 @@ candidate's opaque value."
         new)
     (dolist (item (plist-get entry :items))
       (when-let* ((emoji-id
-                  (disco-company--normalize-id
-                   (and (listp item) (alist-get 'emoji_id item)))))
+                   (disco-company--normalize-id
+                    (and (listp item) (alist-get 'emoji_id item)))))
         (push emoji-id identifiers)))
     (setq identifiers (nreverse identifiers))
     (dolist (candidate current-candidates)
@@ -1408,8 +1406,6 @@ candidate's opaque value."
               :animated animated)
              out))))
       (nreverse out))))
-
-
 
 (defun disco-company-reaction-candidates (&optional message own-only)
   "Return the grouped Discord reaction catalog for MESSAGE.

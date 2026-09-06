@@ -566,87 +566,87 @@ nonlocal transfer, remaining items still run while that transfer unwinds."
                    app generation display-op)
               (setq disco-notifications--active-display-op display-op)
               (let ((args
-                   (append
-                    (list :app-name "disco.el"
-                          :title title
-                          :body body
-                          :urgency urgency
-                          :timeout -1
-                          :actions '("default" "Open")
-                          :on-action
-                          (lambda (&rest _)
-                            (when (disco-notifications--display-current-p
+                     (append
+                      (list :app-name "disco.el"
+                            :title title
+                            :body body
+                            :urgency urgency
+                            :timeout -1
+                            :actions '("default" "Open")
+                            :on-action
+                            (lambda (&rest _)
+                              (when (disco-notifications--display-current-p
+                                     app generation display-op)
+                                (disco-notifications-open-message
+                                 channel-id message-id))))
+                      extra-args)))
+                (catch 'stale-display
+                  (unless (disco-notifications--display-current-p
+                           app generation display-op)
+                    (throw 'stale-display nil))
+                  (when disco-notifications--last-id
+                    (let ((old-id disco-notifications--last-id)
+                          (old-display-op
+                           disco-notifications--last-display-op))
+                      (dolist (owner (copy-sequence
+                                      disco-notifications--timeout-owners))
+                        (when (equal old-id (plist-get owner :id))
+                          (setq disco-notifications--timeout-owners
+                                (delq owner
+                                      disco-notifications--timeout-owners))
+                          (disco-notifications--cancel-owner-timer owner)
+                          (unless (disco-notifications--display-current-p
                                    app generation display-op)
-                              (disco-notifications-open-message
-                               channel-id message-id))))
-                    extra-args)))
-              (catch 'stale-display
-                (unless (disco-notifications--display-current-p
-                         app generation display-op)
-                  (throw 'stale-display nil))
-                (when disco-notifications--last-id
-                  (let ((old-id disco-notifications--last-id)
-                        (old-display-op
-                         disco-notifications--last-display-op))
-                    (dolist (owner (copy-sequence
-                                    disco-notifications--timeout-owners))
-                      (when (equal old-id (plist-get owner :id))
-                        (setq disco-notifications--timeout-owners
-                              (delq owner
-                                    disco-notifications--timeout-owners))
-                        (disco-notifications--cancel-owner-timer owner)
-                        (unless (disco-notifications--display-current-p
-                                 app generation display-op)
-                          (throw 'stale-display nil))))
-                    (disco-notifications--close old-id old-display-op)
-                    ;; Closing the old desktop notification may synchronously
-                    ;; reset the session or begin a nested display operation.
-                    (unless (disco-notifications--display-current-p
-                             app generation display-op)
-                      (throw 'stale-display nil))))
-                ;; Validate after old-close/cancellation callbacks and before
-                ;; backend, history, or authoritative global state is touched.
-                (unless (disco-notifications--display-current-p
-                         app generation display-op)
-                  (throw 'stale-display nil))
-                (let (returned-id notified-p)
-                  (condition-case err
-                      (setq returned-id (apply #'notifications-notify args)
-                            notified-p t)
-                    (error
-                     (message "disco: desktop notification failed: %s"
-                              (error-message-string err)))
-                    (quit
-                     (message
-                      "disco: desktop notification was interrupted")))
-                  (when notified-p
-                    (let (published-p)
-                      ;; Once the backend returned an id, every exit before
-                      ;; publication must retire it (unless a newer exact op
-                      ;; has already claimed the same backend identifier).
-                      (unwind-protect
-                          (progn
-                            (unless
-                                (disco-notifications--display-current-p
-                                 app generation display-op)
-                              (throw 'stale-display nil))
-                            (ring-insert
-                             (disco-notifications--history-ring)
-                             (copy-tree message))
-                            (unless
-                                (disco-notifications--display-current-p
-                                 app generation display-op)
-                              (throw 'stale-display nil))
-                            (setq disco-notifications--last-id returned-id
-                                  disco-notifications--last-display-op
-                                  (and returned-id display-op)
-                                  published-p t)
-                            (when (and disco-notifications-timeout returned-id)
-                              (disco-notifications--schedule-timeout
-                               returned-id app generation display-op)))
-                        (unless published-p
-                          (disco-notifications--close-returned-id
-                           returned-id display-op)))))))))))))))
+                            (throw 'stale-display nil))))
+                      (disco-notifications--close old-id old-display-op)
+                      ;; Closing the old desktop notification may synchronously
+                      ;; reset the session or begin a nested display operation.
+                      (unless (disco-notifications--display-current-p
+                               app generation display-op)
+                        (throw 'stale-display nil))))
+                  ;; Validate after old-close/cancellation callbacks and before
+                  ;; backend, history, or authoritative global state is touched.
+                  (unless (disco-notifications--display-current-p
+                           app generation display-op)
+                    (throw 'stale-display nil))
+                  (let (returned-id notified-p)
+                    (condition-case err
+                        (setq returned-id (apply #'notifications-notify args)
+                              notified-p t)
+                      (error
+                       (message "disco: desktop notification failed: %s"
+                                (error-message-string err)))
+                      (quit
+                       (message
+                        "disco: desktop notification was interrupted")))
+                    (when notified-p
+                      (let (published-p)
+                        ;; Once the backend returned an id, every exit before
+                        ;; publication must retire it (unless a newer exact op
+                        ;; has already claimed the same backend identifier).
+                        (unwind-protect
+                            (progn
+                              (unless
+                                  (disco-notifications--display-current-p
+                                   app generation display-op)
+                                (throw 'stale-display nil))
+                              (ring-insert
+                               (disco-notifications--history-ring)
+                               (copy-tree message))
+                              (unless
+                                  (disco-notifications--display-current-p
+                                   app generation display-op)
+                                (throw 'stale-display nil))
+                              (setq disco-notifications--last-id returned-id
+                                    disco-notifications--last-display-op
+                                    (and returned-id display-op)
+                                    published-p t)
+                              (when (and disco-notifications-timeout returned-id)
+                                (disco-notifications--schedule-timeout
+                                 returned-id app generation display-op)))
+                          (unless published-p
+                            (disco-notifications--close-returned-id
+                             returned-id display-op)))))))))))))))
 
 (defun disco-notifications--deliver-delayed (owner message)
   "Deliver MESSAGE only while delayed OWNER belongs to this account."
@@ -708,7 +708,8 @@ nonlocal transfer, remaining items still run while that transfer unwinds."
 ;;;###autoload
 (define-minor-mode disco-notifications-mode
   "Toggle visibility-aware Discord desktop notifications."
-  :global t :group 'disco-notifications
+  :global t
+  :group 'disco-notifications
   (if disco-notifications-mode
       (progn
         (add-hook 'disco-gateway-event-hook

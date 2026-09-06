@@ -12,13 +12,13 @@
       (setq value (ash value -7)))
     (push value bytes)
     (apply #'unibyte-string (nreverse bytes))))
+
 (defun disco-settings-test--fixed64 (value)
   "Encode unsigned fixed64 VALUE as little-endian bytes."
   (let (bytes)
     (dotimes (index 8)
       (push (logand #xff (ash value (- (* index 8)))) bytes))
     (apply #'unibyte-string (nreverse bytes))))
-
 
 (defun disco-settings-test--field (number wire-type value)
   "Encode protobuf field NUMBER with WIRE-TYPE and VALUE."

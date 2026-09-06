@@ -1956,8 +1956,7 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
       (setf (disco-room--send-operation-cleared-revision operation)
             (disco-room--clear-composer-operation-slot))
       (setq disco-room--send-in-flight t)
-      (disco-room--queue-update view 'frame)
-      ))
+      (disco-room--queue-update view 'frame)))
   operation)
 
 (defun disco-room--abort-send-operation (operation)

@@ -155,7 +155,7 @@
                  (blocked-until (disco-preview--blocked-until guild-id)))
              (cond
               (request
-               nil)
+                nil)
               ((and (numberp blocked-until) (> blocked-until now))
                (setq deadline (min (or deadline most-positive-fixnum)
                                    blocked-until)))

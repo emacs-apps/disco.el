@@ -28,7 +28,6 @@
 (defvar disco-settings--load-owner nil
   "Exact in-flight settings request owner and completion listeners.")
 
-
 (defun disco-settings--read-varint (bytes position limit)
   "Read one protobuf varint from BYTES at POSITION before LIMIT.
 Return (VALUE . NEXT-POSITION), or signal an error for malformed input."
@@ -212,6 +211,7 @@ Each field retains its number, wire type, decoded value, and exact raw bytes."
               (setf (alist-get key entries nil nil #'equal)
                     (disco-settings--frecency-item value-bytes)))))))
     (copy-tree entries)))
+
 (defun disco-settings--fixed64-frecency-map (field-number)
   "Return fixed64-keyed frecency map from top-level FIELD-NUMBER."
   (let ((message
@@ -280,7 +280,7 @@ Each field retains its number, wire type, decoded value, and exact raw bytes."
 (defun disco-settings-data-version ()
   "Return current settings data version, or nil when absent."
   (when-let* ((versions
-              (disco-settings--message-field disco-settings--fields 1)))
+               (disco-settings--message-field disco-settings--fields 1)))
     (disco-settings--varint-field
      (disco-settings--parse-fields versions) 3)))
 

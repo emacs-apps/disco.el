@@ -17,7 +17,6 @@
 (require 'disco-msg)
 (require 'appkit-ui)
 
-
 (cl-defun disco-ins-insert-reference-line
     (body &key prefix face action help-echo properties)
   "Insert one prefixed reference line with optional whole-line ACTION.
@@ -95,7 +94,6 @@ span as (START . END), or nil when SUMMARY is empty."
           (when url-face
             (add-text-properties url-start (point) (list 'face url-face)))))
       (cons start (point)))))
-
 
 (cl-defun disco-ins-insert-attachment-caption-line (caption &key prefix face
                                                             (label "caption: "))

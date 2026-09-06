@@ -571,6 +571,7 @@ non-whitespace rules for `__underline__'."
                  (and (> begin 0) (aref source (1- begin)))))
            (not (disco-markdown--word-character-p
                  (and (< end (length source)) (aref source end)))))))
+
 (defun disco-markdown--protect-escaped-provider-tokens (source sentinels)
   "Protect escaped provider tokens in SOURCE with their literal wire form."
   (let ((position 0) replacements)
@@ -1418,79 +1419,79 @@ coordinates do not address TEXT."
   (let ((line-start-p t) active result)
     (cl-labels
         ((emit
-          (text)
-          (unless (string-empty-p text)
-            (push text result)))
+           (text)
+           (unless (string-empty-p text)
+             (push text result)))
          (desired-styles
-          (node)
-          (let* ((text-node-p (appkit-markup-text-p node))
-                 (text (and text-node-p (appkit-markup-text-text node)))
-                 (styles
-                  (if text-node-p
-                      (appkit-markup-text-styles node)
-                    (appkit-markup-object-styles node)))
-                 desired)
-            (dolist (style styles)
-              (if-let* ((delimiter
-                         (disco-markdown--printer-style-delimiter style)))
-                  (if (and (eq style 'code)
-                           (or (not text-node-p)
-                               (string-match-p
-                                (regexp-quote delimiter) text)))
-                      (push (appkit-markup-loss style path) (car losses))
-                    (push style desired))
-                (push (appkit-markup-loss style path) (car losses))))
-            (setq desired (nreverse desired))
-            ;; Keep already-open delimiters outermost when a run adds styles.
-            ;; This avoids closing and reopening underline merely because the
-            ;; normalized style order places a newly added bold first.
-            (append
-             (seq-filter (lambda (style) (memq style desired)) active)
-             (seq-remove (lambda (style) (memq style active)) desired))))
+           (node)
+           (let* ((text-node-p (appkit-markup-text-p node))
+                  (text (and text-node-p (appkit-markup-text-text node)))
+                  (styles
+                   (if text-node-p
+                       (appkit-markup-text-styles node)
+                     (appkit-markup-object-styles node)))
+                  desired)
+             (dolist (style styles)
+               (if-let* ((delimiter
+                          (disco-markdown--printer-style-delimiter style)))
+                   (if (and (eq style 'code)
+                            (or (not text-node-p)
+                                (string-match-p
+                                 (regexp-quote delimiter) text)))
+                       (push (appkit-markup-loss style path) (car losses))
+                     (push style desired))
+                 (push (appkit-markup-loss style path) (car losses))))
+             (setq desired (nreverse desired))
+             ;; Keep already-open delimiters outermost when a run adds styles.
+             ;; This avoids closing and reopening underline merely because the
+             ;; normalized style order places a newly added bold first.
+             (append
+              (seq-filter (lambda (style) (memq style desired)) active)
+              (seq-remove (lambda (style) (memq style active)) desired))))
          (transition
-          (desired)
-          (let ((common 0) (left active) (right desired))
-            (while (and left right (eq (car left) (car right)))
-              (setq common (1+ common)
-                    left (cdr left)
-                    right (cdr right)))
-            (dolist (style (reverse (nthcdr common active)))
-              (emit (disco-markdown--printer-style-delimiter style)))
-            (dolist (style (nthcdr common desired))
-              (emit (disco-markdown--printer-style-delimiter style)))
-            (setq active desired)))
+           (desired)
+           (let ((common 0) (left active) (right desired))
+             (while (and left right (eq (car left) (car right)))
+               (setq common (1+ common)
+                     left (cdr left)
+                     right (cdr right)))
+             (dolist (style (reverse (nthcdr common active)))
+               (emit (disco-markdown--printer-style-delimiter style)))
+             (dolist (style (nthcdr common desired))
+               (emit (disco-markdown--printer-style-delimiter style)))
+             (setq active desired)))
          (fallback
-          (node)
-          (disco-markdown--printer-inlines
-           (appkit-markup-object-fallback node)
-           (append path '(fallback)) losses))
+           (node)
+           (disco-markdown--printer-inlines
+            (appkit-markup-object-fallback node)
+            (append path '(fallback)) losses))
          (special
-          (node)
-          (cond
-           ((appkit-markup-link-p node)
-            (format
-             "[%s](%s)"
-             (disco-markdown--printer-inlines
-              (appkit-markup-link-children node)
-              (append path '(label)) losses)
-             (disco-markdown--printer-escape-url
-              (appkit-markup-link-url node))))
-           ((appkit-markup-object-p node)
-            (let* ((value (appkit-markup-object-value node))
-                   (kind (and (disco-markdown-object-p value)
-                              (disco-markdown-object-kind value))))
-              (pcase kind
-                ('spoiler (concat "||" (fallback node) "||"))
-                ('subtitle (concat "-# " (fallback node)))
-                ((or 'user 'role 'channel 'command 'emoji 'standard-emoji
-                     'timestamp 'navigation 'everyone 'literal
-                     'suppressed-link 'email 'phone)
-                 (or (disco-markdown-object-raw value) (fallback node)))
-                (_
-                 (push (appkit-markup-loss 'object path) (car losses))
-                 (fallback node)))))
-           ((appkit-markup-line-break-p node) "  \n")
-           (t ""))))
+           (node)
+           (cond
+            ((appkit-markup-link-p node)
+             (format
+              "[%s](%s)"
+              (disco-markdown--printer-inlines
+               (appkit-markup-link-children node)
+               (append path '(label)) losses)
+              (disco-markdown--printer-escape-url
+               (appkit-markup-link-url node))))
+            ((appkit-markup-object-p node)
+             (let* ((value (appkit-markup-object-value node))
+                    (kind (and (disco-markdown-object-p value)
+                               (disco-markdown-object-kind value))))
+               (pcase kind
+                 ('spoiler (concat "||" (fallback node) "||"))
+                 ('subtitle (concat "-# " (fallback node)))
+                 ((or 'user 'role 'channel 'command 'emoji 'standard-emoji
+                      'timestamp 'navigation 'everyone 'literal
+                      'suppressed-link 'email 'phone)
+                  (or (disco-markdown-object-raw value) (fallback node)))
+                 (_
+                  (push (appkit-markup-loss 'object path) (car losses))
+                  (fallback node)))))
+            ((appkit-markup-line-break-p node) "  \n")
+            (t ""))))
       (dolist (node children)
         (if (or (appkit-markup-text-p node)
                 (appkit-markup-object-p node))
@@ -1622,16 +1623,16 @@ coordinates do not address TEXT."
              (push (block current) chunks)
              (setq current nil)))
          (prefix-width
-          (text styles)
-          (let ((low 1) (high (length text)) (best 0))
-            (while (<= low high)
-              (let* ((middle (/ (+ low high) 2))
-                     (node (appkit-markup-text
-                            (substring text 0 middle) styles)))
-                (if (fits (append current (list node)))
-                    (setq best middle low (1+ middle))
-                  (setq high (1- middle)))))
-            best)))
+           (text styles)
+           (let ((low 1) (high (length text)) (best 0))
+             (while (<= low high)
+               (let* ((middle (/ (+ low high) 2))
+                      (node (appkit-markup-text
+                             (substring text 0 middle) styles)))
+                 (if (fits (append current (list node)))
+                     (setq best middle low (1+ middle))
+                   (setq high (1- middle)))))
+             best)))
       (dolist (node children)
         (if (fits (append current (list node)))
             (setq current (append current (list node)))

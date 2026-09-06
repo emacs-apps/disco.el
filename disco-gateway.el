@@ -1617,9 +1617,9 @@ response entries are upserted and emitted."
 (defun disco-gateway--channel-unread-channel-ids (updates)
   "Extract channel IDs from channel unread UPDATES list."
   (disco-gateway--normalize-id-list (mapcar (lambda (it)
-            (and (listp it)
-                 (alist-get 'id it)))
-          (or updates '()))))
+                                              (and (listp it)
+                                                   (alist-get 'id it)))
+                                            (or updates '()))))
 
 (defun disco-gateway--dispatch-passive-update-v1 (payload)
   "Handle PASSIVE_UPDATE_V1 dispatch PAYLOAD."
@@ -1631,7 +1631,7 @@ response entries are upserted and emitted."
           (disco-state-apply-passive-voice-state-snapshot guild-id voice-states))
          (channel-ids
           (disco-gateway--normalize-id-list (append (disco-gateway--channel-unread-channel-ids channels)
-                  voice-channel-ids))))
+                                                    voice-channel-ids))))
     (disco-state-apply-channel-unread-updates channels)
     (disco-gateway--emit
      (list :type 'passive-update-v1
@@ -1655,7 +1655,7 @@ response entries are upserted and emitted."
            removed-voice-states))
          (channel-ids
           (disco-gateway--normalize-id-list (append (disco-gateway--channel-unread-channel-ids updated-channels)
-                  voice-channel-ids))))
+                                                    voice-channel-ids))))
     (disco-state-apply-channel-unread-updates updated-channels)
     (disco-gateway--emit
      (list :type 'passive-update-v2
