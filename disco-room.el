@@ -1198,8 +1198,8 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
     (add-text-properties
      0 (length text)
      '(read-only t
-       front-sticky (read-only)
-       rear-nonsticky (read-only))
+                 front-sticky (read-only)
+                 rear-nonsticky (read-only))
      text)
     text))
 
@@ -2416,9 +2416,6 @@ its same-mode buffer survives."
   "Major mode for disco.el room buffers."
   ;; Avoid visible seams between vertically sliced inline images.
   (setq-local line-spacing 0)
-  ;; Strip visual-only line prefixes from copied text.
-  (setq-local filter-buffer-substring-function
-              #'disco-room--buffer-substring-filter)
   (disco-room--reset-view-local-state)
   (setq-local appkit-chatbuf-input-sync-function
               #'disco-room--sync-draft-from-buffer)

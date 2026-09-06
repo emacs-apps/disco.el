@@ -629,18 +629,6 @@ No Appkit invalidation is requested."
     (disco-media-clear-preview-memory-cache)
     (disco-sticker-clear-image-memory)))
 
-(defun disco-room--buffer-substring-filter (beg end delete)
-  "Copy region BEG..END while stripping display-only prefix properties."
-  (let ((text (buffer-substring beg end)))
-    (when delete
-      (save-excursion
-        (goto-char beg)
-        (delete-region beg end)))
-    (remove-text-properties 0 (length text)
-                            '(line-prefix nil wrap-prefix nil)
-                            text)
-    text))
-
 (add-hook 'disco-media-rerender-hook #'disco-room--handle-media-rerender)
 
 ;;; Avatar presentation
@@ -1578,7 +1566,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defconst disco-room--semantic-system-message-types
   '(6 7 8 9 10 11 12 14 15 16 17 18 21 22 24 25 26 27 28 29 30 31
-    32 36 37 38 39 44 46)
+      32 36 37 38 39 44 46)
   "Message types whose body is synthesized rather than rendered as Markdown.")
 
 (defun disco-room--semantic-message-document (msg)
