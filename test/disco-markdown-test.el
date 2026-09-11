@@ -288,7 +288,7 @@ Return a plist carrying :document, :objects, :printed, and :wire."
   (let* ((rendered (disco-markdown-render "> quote\n\n- one\n- two"))
          (plain (substring-no-properties rendered))
          (one (string-match "one" plain)))
-    (should (equal "quote\none\ntwo" plain))
+    (should (equal "quote\n\none\ntwo" plain))
     (should (stringp (get-text-property 0 'line-prefix rendered)))
     (should (string-match-p "•"
                             (get-text-property one 'line-prefix rendered)))))
