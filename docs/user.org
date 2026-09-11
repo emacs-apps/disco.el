@@ -176,13 +176,14 @@ editable.
 
 | Key | Action |
 |-----+--------|
-| ~RET~ | send with the persistent source format; return to the composer from the timeline |
-| ~C-c RET~ | send explicitly; ~C-u~ selects Org and ~C-u C-u~ selects plain for this send |
+| ~RET~ | send with the active source format; return to the composer from the timeline |
+| ~C-c RET~ | force-send with the active source format; in Emacs state, universal prefixes select Org or plain |
+| ~C-c e~ | choose a source format for this send without changing the active format |
 | ~C-c C-c~ | cancel an active message filter |
 | ~C-c C-k~ / ~ESC ESC~ / ~C-M-c~ | cancel reply or edit context |
 | ~C-c '~ | edit the draft in another buffer |
 | ~M-p~ / ~M-n~ / ~M-r~ | draft history |
-| ~M-RET~ | semantic preview; universal prefixes select the same per-command source formats |
+| ~M-RET~ | semantic preview; in Emacs state, universal prefixes select the same per-command source formats |
 | ~M-g s~ / ~M-g n~ / ~M-g p~ | keyboard search |
 | ~C-c C-o~ | room input options |
 | ~C-c M-v~ | clear avatar cache and refetch |
@@ -205,6 +206,11 @@ extensions such as ~||spoiler||~ and ~__underline__~.  Customize
 ~disco-room-compose-codecs~ or use ~C-c f~ to change it.  Users enter the
 selected source syntax directly; the composer does not rewrite point or region
 with preset formatting delimiters.
+
+~C-c e~ prompts for a source format for one send without changing the active
+format.  This is the Evil-friendly alternative to universal prefixes.  In Evil
+insert state, ~C-u~ retains its normal Evil editing command, so use ~C-c e~
+for a one-shot Org or plain send.
 
 One universal prefix selects the second configured codec for one preview/send;
 two select the third.  The default order is Discord Markdown, Org, plain.

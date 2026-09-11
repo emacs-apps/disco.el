@@ -2362,6 +2362,27 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
        (disco-room--abort-send-operation operation)
        (signal (car err) (cdr err))))))
 
+;;;; Codec-specific send entry points
+
+(defun disco-room-send-message-with-codec (codec)
+  "Send the current draft once using CODEC without changing active codec."
+  (interactive
+   (progn
+     (unless appkit-markup-compose-codecs
+       (user-error "disco: room composer has no configured source codecs"))
+     (list
+      (intern
+       (completing-read
+        "Send with codec: "
+        (mapcar #'symbol-name appkit-markup-compose-codecs)
+        nil t nil nil
+        (and appkit-markup-compose-active-codec
+             (symbol-name appkit-markup-compose-active-codec)))))))
+  (unless (memq codec appkit-markup-compose-codecs)
+    (user-error "disco: codec is not configured: %s" codec))
+  (let ((appkit-markup-compose-active-codec codec))
+    (disco-room-send-message)))
+
 ;;;; Interactive entry
 
 (defun disco-room-send-message (&optional prefix)

@@ -171,6 +171,44 @@
         (should-not sent)
         (should (equal "@ali" (appkit-chatbuf-input-string)))))))
 
+(ert-deftest disco-room-return-sends-active-codec-without-prefix ()
+  (disco-room-test-with-runtime
+    (with-temp-buffer
+      (disco-room-mode)
+      (appkit-chatbuf-install-prompt "> ")
+      (insert "draft")
+      (let (received)
+        (cl-letf (((symbol-function 'disco-room--input-option-send-on-return)
+                   (lambda () t))
+                  ((symbol-function 'disco-room-send-message)
+                   (lambda (&optional prefix)
+                     (setq received prefix))))
+          (disco-room-return-dwim))
+        (should-not received)))))
+
+(ert-deftest disco-room-send-with-codec-is-one-shot-and-evil-friendly ()
+  (with-temp-buffer
+    (disco-room-mode)
+    (setq-local appkit-markup-compose-codecs
+                '(discord-markdown org plain)
+                appkit-markup-compose-active-codec
+                'discord-markdown)
+    (let ((active appkit-markup-compose-active-codec)
+          received)
+      (cl-letf (((symbol-function 'disco-room-send-message)
+                 (lambda (&optional prefix)
+                   (setq received
+                         (list prefix
+                               appkit-markup-compose-active-codec)))))
+        (disco-room-send-message-with-codec 'org))
+      (should (equal '(nil org) received))
+      (should (eq active appkit-markup-compose-active-codec)))))
+
+(ert-deftest disco-room-send-with-codec-has-room-keybinding ()
+  (should
+   (eq (lookup-key disco-room-mode-map (kbd "C-c e"))
+       #'disco-room-send-message-with-codec)))
+
 (ert-deftest disco-room-return-outside-composer-never-sends-draft ()
   (disco-room-test-with-runtime
     (with-temp-buffer

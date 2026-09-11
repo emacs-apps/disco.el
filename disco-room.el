@@ -2212,7 +2212,7 @@ _MSG is ignored because the transient resolves availability from point."
   "C-c C-p e" #'disco-room-expire-poll
   "C-c M-p" #'disco-room-list-pinned-messages
   "C-c C-P" #'disco-room-ack-channel-pins
-  "C-c RET" #'disco-room-send-message
+  "C-c e" #'disco-room-send-message-with-codec
   "C-c C-a" #'disco-room-attach
   "C-c C-f" #'disco-room-attach-file
   "C-c C-i" #'disco-room-send-sticker
