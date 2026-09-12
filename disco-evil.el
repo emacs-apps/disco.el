@@ -8,82 +8,8 @@
 
 ;;; Code:
 
-(defvar disco-room-mode-map)
-
 (require 'appkit-evil)
-(require 'disco-customize)
-
-(declare-function disco-channel-directory-clear-filter
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-next-channel
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-next-unread
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-open-archived-at-point
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-open-at-point
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-open-root
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-previous-channel
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-refresh
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-set-filter
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-tab-dwim
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-toggle-at-point
-                  "disco-channel-directory" ())
-(declare-function disco-channel-directory-toggle-unread-only
-                  "disco-channel-directory" ())
-(declare-function disco-msg-add-reaction "disco-msg" ())
-(declare-function disco-msg-copy-dwim "disco-msg" ())
-(declare-function disco-msg-copy-text "disco-msg" (message &optional no-properties))
-(declare-function disco-msg-redisplay "disco-msg" (message))
-(declare-function disco-msg-toggle-pin "disco-msg" (message))
-(declare-function disco-room-filter-search "disco-room-search" (&optional query by-sender-p))
-(declare-function disco-room-filter-cancel "disco-room-search" ())
-(declare-function disco-room-attach "disco-room-compose" (attach-type))
-(declare-function disco-room-attach-file "disco-room-compose" (path &optional description spoiler))
-(declare-function disco-msg-copy-link "disco-msg" ())
-(declare-function disco-msg-delete "disco-msg" ())
-(declare-function disco-msg-describe-message "disco-msg" ())
-(declare-function disco-msg-edit "disco-msg" ())
-(declare-function disco-msg-forward "disco-msg" ())
-(declare-function disco-msg-inspect-refresh "disco-msg" ())
-(declare-function disco-msg-next "disco-msg" (&optional n))
-(declare-function disco-msg-open-thread "disco-msg" ())
-(declare-function disco-msg-operate "disco-msg" ())
-(declare-function disco-msg-previous "disco-msg" (&optional n))
-(declare-function disco-msg-remove-reaction "disco-msg" ())
-(declare-function disco-msg-reply "disco-msg" ())
-(declare-function disco-msg-toggle-reaction "disco-msg" ())
-(declare-function disco-user-button-backward "disco-user" ())
-(declare-function disco-user-copy-id "disco-user" ())
-(declare-function disco-user-open-chat "disco-user" ())
-(declare-function disco-user-refresh "disco-user" ())
-(declare-function disco-room-refresh "disco-room" ())
-(declare-function disco-room-transient "disco-room" ())
-(declare-function disco-root-archived-threads-load-more "disco-root-view" ())
-(declare-function disco-root-archived-threads-refresh "disco-root-view" ())
-(declare-function disco-root-button-backward "disco-root" ())
-(declare-function disco-root-button-forward "disco-root" ())
-(declare-function disco-root-channel-inspect-refresh "disco-root-view" ())
-(declare-function disco-root-cycle-view-mode "disco-root" ())
-(declare-function disco-root-list-archived-threads "disco-root" ())
-(declare-function disco-root-next-unread "disco-root" ())
-(declare-function disco-root-open-at-point "disco-root" ())
-(declare-function disco-root-refresh "disco-root" (&optional full))
-(declare-function disco-root-sync-gateway-context "disco-root" (&optional quiet))
-(declare-function disco-root-tab-dwim "disco-root" ())
-(declare-function disco-root-toggle-section-at-point "disco-root" ())
-(declare-function disco-root-toggle-sort-mode "disco-root" ())
-(declare-function disco-root-toggle-unread-lens "disco-root" ())
-(declare-function disco-root-transient "disco-root" ())
-(declare-function disco-root-search "disco-root" (query domain))
-(declare-function disco-root-search-transient "disco-root" ())
-(declare-function disco-root-view--transient "disco-root-view" ())
+(require 'disco)
 
 (declare-function turn-off-evil-snipe-mode "evil-snipe" ())
 (declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())

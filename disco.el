@@ -40,7 +40,6 @@
 (require 'disco-root)
 (require 'disco-modes)
 (require 'disco-notifications)
-(require 'disco-evil)
 
 (defconst disco--client-major-modes
   '(disco-channel-directory-mode
@@ -452,5 +451,8 @@ cannot leave another old-account projection visible."
   (disco-gateway-describe-status))
 
 (provide 'disco)
+
+(with-eval-after-load 'evil
+  (require 'disco-evil nil t))
 
 ;;; disco.el ends here
