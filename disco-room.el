@@ -111,9 +111,6 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "i" #'disco-msg-describe-message
   "L" #'disco-msg-redisplay
   "!" #'disco-msg-add-reaction
-  "+" #'disco-msg-toggle-reaction
-  "-" #'disco-msg-remove-reaction
-  "T" #'disco-msg-open-thread
   "?" #'disco-room-transient)
 
 (defvar-keymap disco-room-message-prefix-map
@@ -131,10 +128,7 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "P" #'disco-msg-toggle-pin
   "i" #'disco-msg-describe-message
   "L" #'disco-msg-redisplay
-  "!" #'disco-msg-add-reaction
-  "+" #'disco-msg-toggle-reaction
-  "-" #'disco-msg-remove-reaction
-  "T" #'disco-msg-open-thread)
+  "!" #'disco-msg-add-reaction)
 
 (define-minor-mode disco-room-timeline-mode
   "Buffer-local navigation bindings active outside the room draft."
@@ -2074,10 +2068,6 @@ When QUIET is non-nil, suppress progress messages."
                (disco-room--pin-message-unavailable-reason
                 (disco-room-menu--message-at-point))))
     ("!" "Add reaction" disco-msg-add-reaction
-     :if-not disco-room--reaction-unavailable-reason)
-    ("+" "Toggle reaction" disco-msg-toggle-reaction
-     :if-not disco-room--reaction-unavailable-reason)
-    ("-" "Remove reaction" disco-msg-remove-reaction
      :if-not disco-room--reaction-unavailable-reason)
     ("T" "Open thread" disco-msg-open-thread
      :if-not disco-room-thread--open-from-message-unavailable-reason)]

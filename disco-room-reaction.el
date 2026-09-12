@@ -34,12 +34,25 @@
 (defun disco-room-reaction-insert (message prefix)
   "Insert MESSAGE reaction chips using timeline PREFIX."
   (when disco-room-show-reactions
-    (disco-ins-insert-reaction-line
-     (disco-msg-reactions message)
-     :prefix prefix
-     :selected-face 'disco-room-reaction-selected
-     :unselected-face 'disco-room-reaction
-     :line-face 'disco-room-message-meta)))
+    (let ((message-id (alist-get 'id message)))
+      (disco-ins-insert-reaction-line
+       (disco-msg-reactions message)
+       :prefix prefix
+       :selected-face 'disco-room-reaction-selected
+       :unselected-face 'disco-room-reaction
+       :line-face 'disco-room-message-meta
+       :action-function
+       (lambda (reaction)
+         (disco-room-toggle-reaction
+          (disco-room--event-emoji->input
+           (or (alist-get 'emoji reaction)
+               (alist-get 'emoji_name reaction)))
+          message-id))
+       :help-echo-function
+       (lambda (reaction)
+         (if (disco-msg-reaction-selected-p reaction)
+             "Remove your reaction"
+           "Add your reaction"))))))
 
 (defvar-local disco-room--reaction-op-seq 0
   "Monotonic owner token for reaction requests in this room view.")
@@ -544,7 +557,8 @@ versions or rooms without a catalog retain the unrestricted text fallback."
    "toggle reactions")
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (msg (or (disco-room--message-by-id target-id)
-                  (disco-room--message-at-point)
+                  (and (null message-id)
+                       (disco-room--message-at-point))
                   (user-error "disco: message not found in room state"))))
     (if (disco-room--message-has-own-reaction-p msg emoji)
         (disco-room-remove-reaction emoji target-id)

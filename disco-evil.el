@@ -130,6 +130,7 @@ When nil, leave Evil's initial-state selection untouched."
     (:map disco-room-mode-map
      :nm
      "?" #'disco-room-transient
+     "g r" #'disco-room-refresh
      "S" #'disco-room-filter-search
      "_" #'disco-room-filter-cancel
      "Z a" #'disco-room-attach
@@ -149,11 +150,9 @@ When nil, leave Evil's initial-state selection untouched."
      "Z l" #'disco-msg-copy-link
      "Z L" #'disco-msg-redisplay
      "P" #'disco-msg-toggle-pin
-     "g r" #'disco-msg-open-thread
+     "g r" #'disco-room-refresh
      "g ?" #'disco-msg-describe-message
      "!" #'disco-msg-add-reaction
-     "+" #'disco-msg-toggle-reaction
-     "-" #'disco-msg-remove-reaction
      :m
      "c" #'undefined
      "e" #'undefined
