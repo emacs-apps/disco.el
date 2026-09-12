@@ -3,8 +3,8 @@
 ;;; Commentary:
 
 ;; Disco's ordinary maps remain the Emacs-state interface.  This optional
-;; integration keeps native Evil motions and defines only deliberate
-;; application actions.  It does not depend on evil-collection.
+;; integration follows Telega's modal message actions and keeps native motions
+;; outside those deliberate application bindings.  It does not depend on evil-collection.
 
 ;;; Code:
 
@@ -37,6 +37,13 @@
                   "disco-channel-directory" ())
 (declare-function disco-msg-add-reaction "disco-msg" ())
 (declare-function disco-msg-copy-dwim "disco-msg" ())
+(declare-function disco-msg-copy-text "disco-msg" (message &optional no-properties))
+(declare-function disco-msg-redisplay "disco-msg" (message))
+(declare-function disco-msg-toggle-pin "disco-msg" (message))
+(declare-function disco-room-filter-search "disco-room-search" (&optional query by-sender-p))
+(declare-function disco-room-filter-cancel "disco-room-search" ())
+(declare-function disco-room-attach "disco-room-compose" (attach-type))
+(declare-function disco-room-attach-file "disco-room-compose" (path &optional description spoiler))
 (declare-function disco-msg-copy-link "disco-msg" ())
 (declare-function disco-msg-delete "disco-msg" ())
 (declare-function disco-msg-describe-message "disco-msg" ())
@@ -78,6 +85,9 @@
 (declare-function disco-root-search "disco-root" (query domain))
 (declare-function disco-root-search-transient "disco-root" ())
 (declare-function disco-root-view--transient "disco-root-view" ())
+
+(declare-function turn-off-evil-snipe-mode "evil-snipe" ())
+(declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
 
 (defgroup disco-evil nil
   "Optional native Evil integration for disco.el."
@@ -139,21 +149,22 @@ When nil, leave Evil's initial-state selection untouched."
      "g G" #'disco-root-sync-gateway-context
      "g s" #'disco-root-search
      "g S" #'disco-root-search-transient
-     "g \\" #'disco-root-toggle-sort-mode
-     "g v" #'disco-root-cycle-view-mode
+     "S" #'disco-root-toggle-sort-mode
+     "g V" #'disco-root-cycle-view-mode
      "U" #'disco-root-toggle-unread-lens
      "g A" #'disco-root-list-archived-threads
      "g t" #'disco-root-toggle-section-at-point
      "TAB" #'disco-root-tab-dwim
      "<backtab>" #'disco-root-button-backward
-     "?" #'disco-root-transient)
+     "g a" #'disco-root-transient
+     "g ?" #'disco-root-transient)
     (:map disco-channel-directory-mode-map
      :nm
      "RET" #'disco-channel-directory-open-at-point
      "<return>" #'disco-channel-directory-open-at-point
      "g r" #'disco-channel-directory-refresh
-     "g s" #'disco-channel-directory-set-filter
-     "g S" #'disco-channel-directory-clear-filter
+     "s" #'disco-channel-directory-set-filter
+     "_" #'disco-channel-directory-clear-filter
      "g b" #'disco-channel-directory-open-root
      "U" #'disco-channel-directory-toggle-unread-only
      "g t" #'disco-channel-directory-toggle-at-point
@@ -182,47 +193,55 @@ When nil, leave Evil's initial-state selection untouched."
     (:map disco-user-mode-map
      :nm
      "g r" #'disco-user-refresh
-     "g m" #'disco-user-open-chat
+     "m" #'disco-user-open-chat
      "Y" #'disco-user-copy-id
      "TAB" #'forward-button
      "<backtab>" #'disco-user-button-backward)))
 
 (defun disco-evil--define-room-keys ()
-  "Install room-wide and timeline-only modal bindings."
-  ;; Timeline mode is inactive in the composer.  Lowercase Evil operators and
-  ;; motions remain native except for `i', which enters that composer.
+  "Install Telega-style room and message bindings outside the composer."
+  ;; The timeline map leaves the composer and Emacs-state maps untouched.
+  ;; Message actions deliberately replace normal-state editing commands.
   (appkit-evil-map
     (:map disco-room-mode-map
      :nm
+     "g a" #'disco-room-transient
+     "g ?" #'disco-room-transient
      "g r" #'disco-room-refresh
+     "S" #'disco-room-filter-search
+     "_" #'disco-room-filter-cancel
+     "Z a" #'disco-room-attach
+     "Z f" #'disco-room-attach-file
      "g s" #'disco-room-inplace-search
      "g n" #'disco-room-search-next
-     "g p" #'disco-room-search-prev)
+     "g p" #'disco-room-search-prev
+     :i
+     "RET" #'newline
+     "<return>" #'newline)
     (:map disco-room-timeline-mode-map
      :nm
      "q" #'quit-window
-     "R" #'disco-msg-reply
-     "g F" #'disco-msg-forward
-     "i" #'appkit-evil-chatbuf-enter-input
-     "E" #'disco-msg-edit
-     "Y" #'disco-msg-copy-dwim
-     "g y" #'disco-msg-copy-link
+     "r" #'disco-msg-reply
+     "R" #'disco-msg-forward
+     "i" #'disco-msg-edit
+     "D" #'disco-msg-delete
+     "d d" #'disco-msg-delete
+     "Z y" #'disco-msg-copy-text
+     "Z l" #'disco-msg-copy-link
+     "Z L" #'disco-msg-redisplay
+     "P" #'disco-msg-toggle-pin
+     "g r" #'disco-msg-open-thread
+     "g ?" #'disco-msg-describe-message
      "!" #'disco-msg-add-reaction
      "+" #'disco-msg-toggle-reaction
      "-" #'disco-msg-remove-reaction
-     "T" #'disco-msg-open-thread
-     "?" #'disco-room-transient
-     :n
-     "D" #'disco-msg-delete
      :m
      "c" #'undefined
-     "d" #'undefined
      "e" #'undefined
      "f" #'undefined
      "o" #'undefined
-     "r" #'undefined
      "t" #'undefined
-     "P" #'undefined
+     "T" #'undefined
      "L" #'undefined)))
 
 (defun disco-evil--refresh-live-buffers ()
@@ -242,6 +261,12 @@ Safe to call multiple times."
 
 (with-eval-after-load 'evil
   (disco-evil-setup))
+
+(with-eval-after-load 'evil-snipe
+  (dolist (mode disco-evil--application-modes)
+    (let ((hook (intern (format "%s-hook" mode))))
+      (add-hook hook #'turn-off-evil-snipe-mode)
+      (add-hook hook #'turn-off-evil-snipe-override-mode))))
 
 (provide 'disco-evil)
 
