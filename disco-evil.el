@@ -202,7 +202,7 @@ When nil, leave Evil's initial-state selection untouched."
      :nm
      "q" #'quit-window
      "R" #'disco-msg-reply
-     "g f" #'disco-msg-forward
+     "g F" #'disco-msg-forward
      "i" #'appkit-evil-chatbuf-enter-input
      "E" #'disco-msg-edit
      "Y" #'disco-msg-copy-dwim

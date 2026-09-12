@@ -40,7 +40,7 @@ it, or customize ~disco-evil-initial-state~.
 | root | ~RET~ open; ~g r~ refresh; ~g s~ / ~g S~ search; ~g v~ view; ~g t~ fold; ~g A~ archives |
 | guild directory | ~RET~ open; ~g r~ refresh; ~g s~ / ~g S~ filter; ~g t~ fold; ~g A~ archives |
 | room | ~g r~ refresh, ~g s~ search, ~g n~ / ~g p~ continue search |
-| room timeline | ~i~ composer, ~R~ reply, ~g f~ forward, ~E~ edit, ~D~ delete, ~Y~ copy, ~g y~ copy link |
+| room timeline | ~i~ composer, ~R~ reply, ~g F~ forward, ~E~ edit, ~D~ delete, ~Y~ copy, ~g y~ copy link |
 | room timeline | ~g j~ / ~g k~ move, ~!~ / ~+~ / ~-~ react, ~T~ thread, ~?~ menu |
 
 Timeline bindings are active only when point is outside the composer.  ~i~

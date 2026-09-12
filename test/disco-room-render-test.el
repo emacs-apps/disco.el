@@ -64,6 +64,28 @@
               (should-error (funcall action))
               (should-not started))))))))
 
+(ert-deftest disco-room-thread-announcement-opens-referenced-channel ()
+  (disco-room-test-with-runtime
+    (disco-room-test-with-surface "parent"
+      (let ((message '((id . "notice") (type . 18)
+                       (author . ((username . "Alice")))
+                       (content . "Discussion")
+                       (message_reference . ((channel_id . "thread")))))
+            opened)
+        (cl-letf (((symbol-function 'disco-room-open)
+                   (lambda (id name) (setq opened (list id name)))))
+          (let ((inhibit-read-only t))
+            (disco-room--insert-system-divider-message message nil))
+          (goto-char (point-min))
+          (search-forward "Discussion")
+          (beginning-of-line)
+          (appkit-ui-activate)
+          (should (equal opened '("thread" "Discussion")))
+          (setq opened nil)
+          (search-forward "Discussion")
+          (appkit-ui-activate)
+          (should (equal opened '("thread" "Discussion"))))))))
+
 (ert-deftest disco-room-pinned-system-message-links-to-captured-channel ()
   (disco-room-test-with-runtime
     (disco-room-test-with-surface "pins"

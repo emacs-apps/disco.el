@@ -218,6 +218,15 @@ avatar image is prepended when available."
           (when (search-forward author (line-end-position) t)
             (add-face-text-property (match-beginning 0) (match-end 0)
                                     author-face nil))))
+      (when (= (disco-msg-type msg) 18)
+        (when-let* ((thread-id (disco-msg-reference-channel-id msg)))
+          (let ((thread-name (or (alist-get 'name (disco-state-channel thread-id))
+                                 (alist-get 'content msg)
+                                 thread-id)))
+            (appkit-ui-add-action
+             (car span) (cdr span)
+             (lambda () (disco-room-open thread-id thread-name))
+             :help-echo "Open thread"))))
       (when (= (disco-msg-type msg) 6)
         (let ((channel-id disco-room--channel-id))
           (save-excursion
