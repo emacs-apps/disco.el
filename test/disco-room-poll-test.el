@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'disco-room)
+(require 'disco-transient)
 (require 'disco-room-test-support
          (expand-file-name
           "disco-room-test-support"

@@ -2,16 +2,16 @@
 
 ;;; Commentary:
 
-;; Poll-local state, rendering, actions, and the nested poll transient.  The
-;; room controller remains responsible for room lifecycle, Gateway dispatch,
-;; and projection transactions.
+;; Poll-local state, rendering, and actions.  The room controller remains
+;; responsible for room lifecycle, Gateway dispatch, and projection
+;; transactions; disco-transient owns the nested poll menu.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(require 'transient)
+(autoload 'disco-room-poll-transient "disco-transient" nil t)
 (require 'appkit-ui)
 (require 'disco-api)
 (require 'disco-customize)
@@ -31,7 +31,6 @@
 (declare-function disco-room--message-by-id "disco-room" (message-id))
 (declare-function disco-room--request-render "disco-room" (view))
 (declare-function disco-room--update-message-locally "disco-room" (message-id function))
-(declare-function disco-room-menu--message-at-point "disco-room" ())
 (declare-function disco-room-refresh "disco-room" ())
 (declare-function disco-room-render "disco-room" ())
 (declare-function disco-api--validate-message-content-length
@@ -60,13 +59,6 @@
   (disco-room--poll-clear-draft-selection message-id)
   (when (hash-table-p disco-room--poll-vote-ops)
     (remhash message-id disco-room--poll-vote-ops)))
-
-(defun disco-room-poll-actionable-at-point-p ()
-  "Return non-nil when point is on a poll with an available action."
-  (let ((message (disco-room-menu--message-at-point)))
-    (and (disco-msg-poll message)
-         (or (not (disco-room--poll-vote-unavailable-reason message))
-             (not (disco-room--poll-expire-unavailable-reason message))))))
 
 (defun disco-room--poll-unavailable-reason ()
   "Return reason send-poll action is unavailable, or nil."
@@ -881,24 +873,6 @@ send votes to Discord."
          (when (disco-room--channel-buffer-p room-buffer channel-id view)
            (message "disco: end poll failed: %s"
                     (disco-room--async-error-message err))))))))
-
-(transient-define-prefix disco-room-poll-transient ()
-  "Transient for the poll at point."
-  :refresh-suffixes t
-  [["Vote"
-    :if-not disco-room--poll-vote-unavailable-reason
-    ("t" "Toggle answer" disco-room-toggle-poll-answer :transient t)
-    ("s" "Submit staged vote" disco-room-submit-poll-vote
-     :if-not disco-room--poll-submit-unavailable-reason)]
-   ["Manage"
-    ("c" "Remove my vote" disco-room-clear-poll-votes
-     :if-not disco-room--poll-clear-unavailable-reason)
-    ("x" "End poll" disco-room-expire-poll
-     :if-not disco-room--poll-expire-unavailable-reason)]]
-  (interactive)
-  (unless (disco-msg-poll (disco-room-menu--message-at-point))
-    (user-error "disco: point is not on a poll"))
-  (transient-setup 'disco-room-poll-transient))
 
 (provide 'disco-room-poll)
 

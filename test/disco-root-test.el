@@ -1566,28 +1566,6 @@
       '(:kind channel :id "c1" :guild-id "g1" :label "general"))
      :type 'error)))
 
-(ert-deftest disco-root-search-transient-boundary-use-org-read-date ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (setq-local disco-root--search-query-spec nil)
-    (let (prompts)
-      (cl-letf (((symbol-function 'org-read-date)
-                 (lambda (&optional _with-time to-time _from-string prompt &rest _args)
-                   (push prompt prompts)
-                   (should to-time)
-                   (pcase prompt
-                     ("Before (message id or time): " (encode-time 0 0 0 7 3 2026))
-                     ("After (message id or time): " (encode-time 0 0 0 8 3 2026)))))
-                ((symbol-function 'disco-root--search-transient-buffer)
-                 (lambda () (current-buffer))))
-        (let ((before (disco-root--search-transient-before-value "Before (message id or time): " nil nil))
-              (after (disco-root--search-transient-after-value "After (message id or time): " nil nil)))
-          (should (stringp before))
-          (should (stringp after))
-          (should (equal '("After (message id or time): "
-                           "Before (message id or time): ")
-                         prompts)))))))
-
 (ert-deftest disco-root-search-query-capf-completes-filter-values ()
   (with-temp-buffer
     (insert "has:vi")
@@ -1699,13 +1677,6 @@
                  (ert-fail "gateway callback reopened completion UI"))))
       (disco-root--handle-gateway-event
        '(:type guild-members-chunk :guild-id "g1" :members nil)))))
-
-(ert-deftest disco-root-search-transient-format-channel-ids-shows-fixed-by-domain ()
-  (with-temp-buffer
-    (disco-root-mode)
-    (setq-local disco-root--search-domain '(:kind channel :id "c1" :guild-id "g1" :label "general"))
-    (should (equal "fixed by domain"
-                   (disco-root--search-transient-format-channel-ids nil)))))
 
 (ert-deftest disco-root-search-render-entries-preserve-actions-and-section-metadata ()
   (with-temp-buffer

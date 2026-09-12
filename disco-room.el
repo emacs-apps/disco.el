@@ -11,7 +11,8 @@
 (require 'subr-x)
 (require 'time-date)
 (require 'seq)
-(require 'transient)
+(autoload 'disco-transient-msg-operate "disco-transient" nil t)
+(autoload 'disco-room-transient "disco-transient" nil t)
 (require 'cl-lib)
 (require 'ewoc)
 (require 'plz)
@@ -113,22 +114,7 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "!" #'disco-msg-add-reaction
   "?" #'disco-room-transient)
 
-(defvar-keymap disco-room-message-prefix-map
-  :doc "Prefix map for message actions at point in `disco-room-mode'."
-  "c" #'disco-msg-copy-dwim
-  "l" #'disco-msg-copy-link
-  "n" #'disco-msg-next
-  "p" #'disco-msg-previous
-  "o" #'disco-msg-operate
-  "t" #'disco-msg-copy-text
-  "r" #'disco-msg-reply
-  "f" #'disco-msg-forward
-  "e" #'disco-msg-edit
-  "d" #'disco-msg-delete
-  "P" #'disco-msg-toggle-pin
-  "i" #'disco-msg-describe-message
-  "L" #'disco-msg-redisplay
-  "!" #'disco-msg-add-reaction)
+
 
 (define-minor-mode disco-room-timeline-mode
   "Buffer-local navigation bindings active outside the room draft."
@@ -2043,132 +2029,11 @@ When QUIET is non-nil, suppress progress messages."
 
 ;;; Commands and keymaps
 
-(transient-define-prefix disco-room-message-transient ()
-  "Transient for msg-centric room actions at point."
-  [["Message"
-    ("c" "Copy dwim" disco-msg-copy-dwim)
-    ("l" "Copy link" disco-msg-copy-link)
-    ("t" "Copy text" disco-msg-copy-text)
-    ("i" "Describe" disco-msg-describe-message)
-    ("L" "Redisplay" disco-msg-redisplay)
-    ("r" "Reply" disco-msg-reply
-     :if-not disco-room--reply-unavailable-reason)
-    ("f" "Forward" disco-msg-forward
-     :if-not disco-room--forward-unavailable-reason)
-    ("e" "Edit" disco-msg-edit
-     :if-not (lambda ()
-               (disco-room--edit-start-unavailable-reason
-                (disco-room-menu--message-at-point))))
-    ("d" "Delete" disco-msg-delete
-     :if-not (lambda ()
-               (disco-room--delete-message-unavailable-reason
-                (disco-room-menu--message-at-point))))
-    ("P" "Pin / unpin" disco-msg-toggle-pin
-     :if-not (lambda ()
-               (disco-room--pin-message-unavailable-reason
-                (disco-room-menu--message-at-point))))
-    ("!" "Add reaction" disco-msg-add-reaction
-     :if-not disco-room--reaction-unavailable-reason)
-    ("T" "Open thread" disco-msg-open-thread
-     :if-not disco-room-thread--open-from-message-unavailable-reason)]
-   ["Poll"
-    ("p" "Poll actions…" disco-room-poll-transient
-     :if disco-room-poll-actionable-at-point-p)]
-   ["Media"
-    ("o" "Open / play" appkit-media-card-open
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'open)))
-    ("D" "Download / retry" appkit-media-card-download
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'download)))
-    ("C" "Cancel download" appkit-media-card-cancel-download
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'cancel)))
-    ("s" "Save as" appkit-media-card-save-as
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'save-as)))
-    ("y" "Copy media URL" appkit-media-card-copy-url
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'copy-url)))]])
-
 (defun disco-room--operate-msg (_msg)
   "Open the message transient for the current room.
 
 _MSG is ignored because the transient resolves availability from point."
-  (call-interactively #'disco-room-message-transient))
-
-(defun disco-room-menu--message-at-point ()
-  "Return message at point, suppressing user errors for menu checks."
-  (ignore-errors (disco-room--message-at-point)))
-
-(transient-define-prefix disco-room-transient ()
-  "Room command menu for disco.el."
-  [["Timeline"
-    ("g" "Refresh room" disco-room-refresh)
-    ("o" "Message actions..." disco-room-message-transient
-     :if disco-room-menu--message-at-point)
-    ("c" "Send message" disco-room-send-message
-     :if-not disco-room--send-message-unavailable-reason)
-    ("f" "Attach file" disco-room-attach-file
-     :if-not disco-room--attach-unavailable-reason)
-    ("D" "Remove attachment" disco-room-remove-attachment-token-at-point
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("x" "Clear attachments" disco-room-clear-attachments
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("v" "List attachments" disco-room-list-attachments
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("V" "Edit attachment desc" disco-room-edit-attachment-description
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("S" "Toggle attachment spoiler" disco-room-toggle-attachment-spoiler
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("O" "Reorder attachments" disco-room-reorder-attachments
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 2)))
-    ("k" "Cancel reply/edit" disco-room-cancel-reply
-     :if disco-room--composer-aux-active-p)
-    ("p" "Send poll" disco-room-send-poll
-     :if-not disco-room--poll-unavailable-reason)
-    ("i" "Send Sticker" disco-room-send-sticker
-     :if-not disco-room--sticker-unavailable-reason)
-    ("B" "Browse pinned msgs" disco-room-list-pinned-messages)
-    ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
-   ["Thread"
-    ("m" "Create from message" disco-room-thread-create-from-message
-     :if-not disco-room-thread--create-from-message-unavailable-reason)
-    ("n" "Create detached" disco-room-thread-create
-     :if-not (lambda ()
-               (disco-room-thread--create-unavailable-reason :any)))
-    ("R" "Rename thread" disco-room-thread-rename
-     :if-not disco-room-thread--update-unavailable-reason)
-    ("L" "Toggle locked" disco-room-thread-toggle-locked
-     :if-not disco-room-thread--update-unavailable-reason)
-    ("S" "Set slowmode" disco-room-thread-set-slowmode
-     :if-not disco-room-thread--update-unavailable-reason)
-    ("U" "Set auto-archive" disco-room-thread-set-auto-archive-duration
-     :if-not disco-room-thread--update-unavailable-reason)
-    ("E" "Edit thread settings" disco-room-thread-edit-settings
-     :if-not disco-room-thread--update-unavailable-reason)
-    ("M" "Set muted" disco-room-thread-set-muted
-     :if-not disco-room-thread--mute-unavailable-reason)
-    ("j" "Join thread" disco-room-thread-join
-     :if-not disco-room-thread--join-unavailable-reason)
-    ("l" "Leave thread" disco-room-thread-leave
-     :if-not disco-room-thread--leave-unavailable-reason)
-    ("a" "Toggle archived" disco-room-thread-toggle-archived
-     :if-not disco-room-thread--toggle-archived-unavailable-reason)
-    ("A" "Parent archived threads..." disco-room-thread-open-parent-archived
-     :if (lambda ()
-           (alist-get 'parent_id (disco-room--channel-object))))]
-   ["Inspect"
-    ("/" "Structured search..." disco-room-search-channel)
-    ("f" "Filter search" disco-room-filter-search)
-    ("F" "Cancel filter" disco-room-filter-cancel)
-    ("v" "Refetch avatars" disco-avatar-refetch)
-    ("H" "HTTP queue" disco-http-describe-queue)
-    ("R" "Rate limits" disco-api-describe-rate-limits)
-    ("G" "Gateway status" disco-gateway-describe-status)]
-   ["Window"
-    ("q" "Quit window" quit-window)]])
+  (call-interactively #'disco-transient-msg-operate))
 
 (defvar-keymap disco-room-mode-map
   :doc "Keymap for `disco-room-mode'."
@@ -2177,7 +2042,6 @@ _MSG is ignored because the transient resolves availability from point."
   "<tab>" #'disco-room-complete-mention
   "C-M-i" #'disco-room-complete-mention
   "C-c g" #'disco-room-refresh
-  "C-c m" disco-room-message-prefix-map
   "C-c f" #'appkit-markup-compose-set-active-codec
   "RET" #'disco-room-return-dwim
   "M-RET" #'disco-room-input-preview

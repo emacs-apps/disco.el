@@ -11,7 +11,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(require 'transient)
+(autoload 'disco-room-input-options-transient "disco-transient" nil t)
 
 (require 'appkit-core)
 (require 'appkit-media)
@@ -1637,15 +1637,6 @@ When REPLYING-P is non-nil and reply-mention is enabled, include
     (kill-local-variable var))
   (disco-room--set-input-options-state (disco-room--current-input-options-state))
   (message "disco: room input options reset to global defaults"))
-
-(transient-define-prefix disco-room-input-options-transient ()
-  "Transient for telega-like room input options."
-  [["Input Options"
-    ("RET" "Toggle RET send/editor" disco-room-toggle-send-on-return)
-    ("l" "Cycle long-message action" disco-room-cycle-long-message-action)
-    ("m" "Cycle allowed mentions" disco-room-cycle-allowed-mentions)
-    ("r" "Toggle reply mention" disco-room-toggle-reply-mention-replied-user)
-    ("0" "Reset room-local options" disco-room-reset-input-options)]])
 
 (defun disco-room-attach-file (path &optional description spoiler)
   "Queue attachment PATH for next room send.

@@ -32,7 +32,11 @@
 | ~disco-channel-directory.el~ | per-guild browser and async Guild Profile overview |
 | ~disco-room.el~ | room render and send |
 | ~disco-company.el~ | composer completion |
+| ~disco-transient.el~ | root/search, room, message operation, poll, and input-option menus |
 
+Controllers autoload menus from ~disco-transient.el~.  Message ~o~ routes
+through ~disco-msg-operate~ to ~disco-transient-msg-operate~; business
+operations remain in their original components.
 
 * Design notes
 

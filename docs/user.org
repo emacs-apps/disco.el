@@ -286,7 +286,7 @@ remove your selection or add it when unselected.  The message's suggested
 reaction remains the picker's ~RET~ default.  When no catalog is available,
 add accepts an unrestricted reaction string.
 
-~C-c m~ exposes the same message family from anywhere in the room.
+~o~ opens the message operation menu at point.
 Open a message's thread with ~T~ in its message action transient.  Evil ~g r~
 refreshes the room, including when point is in the composer.
 
