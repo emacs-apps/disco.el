@@ -28,31 +28,9 @@ Notifications are delayed and visibility-aware.
 
 ** Evil
 
-When Evil is installed, Disco loads native integration automatically.  The
-ordinary mode maps remain the Emacs-state interface.  Modal message actions
-follow evil-collection's Telega bindings, deliberately replacing editing keys
-on the timeline.  Set ~disco-evil-enable-integration~ to nil to disable the
-integration, or customize ~disco-evil-initial-state~.
-
-| Surface | Normal / motion keys |
-|---------+----------------------|
-| all read-only views | ~q~ / ~ZZ~ close; ~ZQ~ uses ~evil-quit~ |
-| root | ~RET~ open; ~g r~ refresh; ~g s~ / ~g S~ search; ~S~ sort; ~g V~ view; ~g a~ / ~g ?~ menu |
-| guild directory | ~RET~ open; ~g r~ refresh; ~s~ filter; ~_~ clear filter; ~g t~ fold; ~g A~ archives |
-| room | ~S~ filter search; ~_~ cancel filter; ~Z a~ attach; ~Z f~ attach file; ~g a~ menu |
-| room | ~g s~ inplace search; ~g n~ / ~g p~ continue search; ~C-c g~ refresh |
-| room timeline | ~r~ reply; ~R~ forward; ~i~ edit; ~D~ / ~d d~ delete; ~P~ toggle pin |
-| room timeline | ~Z y~ copy text; ~Z l~ copy link; ~Z L~ redisplay; ~g r~ thread; ~g ?~ message details |
-| room timeline | ~!~ / ~+~ / ~-~ react |
-| user profile | ~m~ open chat |
-
-Message bindings are active only outside the composer.  To write a new
-message, use ~G~ to reach the draft, then ~i~ to enter insert state.
-Insert-state ~RET~ inserts a newline; normal-state ~RET~ uses the room's
-send-on-return setting.  ~RET~ on a thread announcement opens that thread.
-~g f~ retains your existing lookup binding.  Evil Snipe is disabled in
-Disco's read-only application buffers so its local overrides cannot shadow
-these bindings.
+Optional Evil bindings are defined in ~disco-evil.el~.  Set
+~disco-evil-enable-integration~ to nil to disable them, or customize
+~disco-evil-initial-state~.  Emacs-state bindings remain unchanged.
 
 * Root
 
