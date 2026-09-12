@@ -40,19 +40,17 @@ When nil, leave Evil's initial-state selection untouched."
     disco-user-mode
     disco-room-mode
     disco-room-pinned-messages-mode
-    disco-root-archived-threads-mode
     disco-root-channel-inspect-mode
-    disco-root-mode)
-  "Major modes participating in Disco's Evil integration.")
+    disco-root-list-mode)
+  "Mode families participating in Disco's Evil integration.")
 
 (defconst disco-evil--readonly-maps
   '(disco-channel-directory-mode-map
     disco-msg-inspect-mode-map
     disco-user-mode-map
     disco-room-pinned-messages-mode-map
-    disco-root-archived-threads-mode-map
     disco-root-channel-inspect-mode-map
-    disco-root-mode-map)
+    disco-root-list-mode-map)
   "Read-only Disco keymaps with standard modal quit semantics.")
 
 (defun disco-evil--set-initial-states ()
@@ -66,10 +64,12 @@ When nil, leave Evil's initial-state selection untouched."
     (appkit-evil-define-readonly-keys map))
 
   (appkit-evil-map
-    (:map disco-root-mode-map
+    (:map disco-root-list-mode-map
      :nm
      "RET" #'disco-root-open-at-point
-     "<return>" #'disco-root-open-at-point
+     "<return>" #'disco-root-open-at-point)
+    (:map disco-root-mode-map
+     :nm
      "g r" #'disco-root-refresh
      "g G" #'disco-root-sync-gateway-context
      "g s" #'disco-root-search
@@ -97,8 +97,6 @@ When nil, leave Evil's initial-state selection untouched."
      "<backtab>" #'disco-channel-directory-previous-channel)
     (:map disco-root-archived-threads-mode-map
      :nm
-     "RET" #'disco-root-open-at-point
-     "<return>" #'disco-root-open-at-point
      "g r" #'disco-root-archived-threads-refresh
      "g +" #'disco-root-archived-threads-load-more
      "?" #'disco-root-view--transient)

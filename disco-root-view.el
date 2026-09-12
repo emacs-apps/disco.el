@@ -2158,22 +2158,29 @@ Return plist with keys :threads and :errors for this page only."
                  (length page-threads)
                  (length disco-root--archived-threads-cache))))))
 
-(defvar-keymap disco-root-archived-threads-mode-map
-  :doc "Keymap for `disco-root-archived-threads-mode'."
-  "g" #'disco-root-archived-threads-refresh
-  "m" #'disco-root-archived-threads-load-more
-  "n" #'disco-root-button-forward
-  "p" #'disco-root-button-backward
+(defvar-keymap disco-root-list-mode-map
+  :doc "Shared channel-row bindings for root and archived-thread listings."
+  :parent special-mode-map
   "RET" #'disco-root-open-at-point
   "<return>" #'disco-root-open-at-point
   "<mouse-1>" #'disco-root-mouse-open-at-point
-  "?" #'disco-root-view--transient
+  "n" #'disco-root-button-forward
+  "p" #'disco-root-button-backward
   "q" #'quit-window)
 
-(define-derived-mode disco-root-archived-threads-mode special-mode "Disco-Archived"
-  "Major mode for archived thread listing buffers."
-  (setq buffer-read-only t)
-  (setq truncate-lines t))
+(define-derived-mode disco-root-list-mode special-mode "Disco-List"
+  "Base mode for read-only Disco root and archived-thread channel rows."
+  (setq-local truncate-lines t))
+
+(defvar-keymap disco-root-archived-threads-mode-map
+  :doc "Keymap for `disco-root-archived-threads-mode'."
+  :parent disco-root-list-mode-map
+  "g" #'disco-root-archived-threads-refresh
+  "m" #'disco-root-archived-threads-load-more
+  "?" #'disco-root-view--transient)
+
+(define-derived-mode disco-root-archived-threads-mode disco-root-list-mode "Disco-Archived"
+  "Major mode for archived thread listing buffers.")
 
 (defconst disco-root-view--archived-surface-type
   (appkit-surface-type-create

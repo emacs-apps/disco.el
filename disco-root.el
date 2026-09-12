@@ -2652,6 +2652,7 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
 
 (defvar-keymap disco-root-mode-map
   :doc "Keymap for `disco-root-mode'."
+  :parent disco-root-list-mode-map
   "g" #'disco-root-refresh
   "G" #'disco-root-sync-gateway-context
   "A" #'disco-root-list-archived-threads
@@ -2660,16 +2661,10 @@ With prefix argument FULL, explicitly refresh every guild channel snapshot."
   "U" #'disco-root-toggle-unread-lens
   "s" #'disco-root-search
   "S" #'disco-root-search-transient
-  "RET" #'disco-root-open-at-point
-  "<return>" #'disco-root-open-at-point
-  "<mouse-1>" #'disco-root-mouse-open-at-point
-  "n" #'disco-root-button-forward
-  "p" #'disco-root-button-backward
   "TAB" #'disco-root-tab-dwim
   "<backtab>" #'disco-root-button-backward
   "u" #'disco-root-next-unread
-  "?" #'disco-root-transient
-  "q" #'quit-window)
+  "?" #'disco-root-transient)
 
 (defun disco-root--reset-session-controller-state ()
   "Reset root state owned by the current application session.
@@ -2707,10 +2702,8 @@ Temporary search results and projection indexes do not."
   (setq-local disco-root--tree-fold-state (make-hash-table :test #'equal))
   (disco-root--reset-session-controller-state))
 
-(define-derived-mode disco-root-mode special-mode "Disco-Root"
+(define-derived-mode disco-root-mode disco-root-list-mode "Disco-Root"
   "Major mode for disco.el root buffer."
-  (setq buffer-read-only t)
-  (setq truncate-lines t)
   (setq-local header-line-format '(:eval (disco-root--header-line)))
   (setq-local switch-to-buffer-preserve-window-point nil)
   (setq-local disco-root--debug-log-enabled disco-root-debug-log-enabled)
