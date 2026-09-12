@@ -8,6 +8,8 @@
 
 ;;; Code:
 
+(defvar disco-room-mode-map)
+
 (require 'appkit-evil)
 (require 'disco-customize)
 
@@ -61,10 +63,7 @@
 (declare-function disco-user-copy-id "disco-user" ())
 (declare-function disco-user-open-chat "disco-user" ())
 (declare-function disco-user-refresh "disco-user" ())
-(declare-function disco-room-inplace-search "disco-room-search" ())
 (declare-function disco-room-refresh "disco-room" ())
-(declare-function disco-room-search-next "disco-room-search" (&optional n))
-(declare-function disco-room-search-prev "disco-room-search" (&optional n))
 (declare-function disco-room-transient "disco-room" ())
 (declare-function disco-root-archived-threads-load-more "disco-root-view" ())
 (declare-function disco-root-archived-threads-refresh "disco-root-view" ())
@@ -156,14 +155,13 @@ When nil, leave Evil's initial-state selection untouched."
      "g t" #'disco-root-toggle-section-at-point
      "TAB" #'disco-root-tab-dwim
      "<backtab>" #'disco-root-button-backward
-     "g a" #'disco-root-transient
-     "g ?" #'disco-root-transient)
+     "?" #'disco-root-transient)
     (:map disco-channel-directory-mode-map
      :nm
      "RET" #'disco-channel-directory-open-at-point
      "<return>" #'disco-channel-directory-open-at-point
      "g r" #'disco-channel-directory-refresh
-     "s" #'disco-channel-directory-set-filter
+     "S" #'disco-channel-directory-set-filter
      "_" #'disco-channel-directory-clear-filter
      "g b" #'disco-channel-directory-open-root
      "U" #'disco-channel-directory-toggle-unread-only
@@ -205,16 +203,11 @@ When nil, leave Evil's initial-state selection untouched."
   (appkit-evil-map
     (:map disco-room-mode-map
      :nm
-     "g a" #'disco-room-transient
-     "g ?" #'disco-room-transient
-     "g r" #'disco-room-refresh
+     "?" #'disco-room-transient
      "S" #'disco-room-filter-search
      "_" #'disco-room-filter-cancel
      "Z a" #'disco-room-attach
      "Z f" #'disco-room-attach-file
-     "g s" #'disco-room-inplace-search
-     "g n" #'disco-room-search-next
-     "g p" #'disco-room-search-prev
      :i
      "RET" #'newline
      "<return>" #'newline)
@@ -267,6 +260,11 @@ Safe to call multiple times."
     (let ((hook (intern (format "%s-hook" mode))))
       (add-hook hook #'turn-off-evil-snipe-mode)
       (add-hook hook #'turn-off-evil-snipe-override-mode))))
+
+(with-eval-after-load 'disco-room
+  (when disco-evil-enable-integration
+    (appkit-evil-define-keys '(normal motion) 'disco-room-mode-map
+      "g A" (lookup-key disco-room-mode-map (kbd "M-g")))))
 
 (provide 'disco-evil)
 
