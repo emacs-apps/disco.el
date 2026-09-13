@@ -11,8 +11,6 @@
 (require 'subr-x)
 (require 'time-date)
 (require 'seq)
-(declare-function disco-transient-msg-operate "disco-transient" nil)
-(declare-function disco-room-transient "disco-transient" nil)
 (require 'cl-lib)
 (require 'ewoc)
 (require 'plz)
@@ -49,6 +47,10 @@
 (require 'disco-room-pin)
 (require 'disco-room-render)
 (require 'disco-runtime)
+
+(declare-function disco-transient-msg-operate "disco-transient" ())
+(declare-function disco-room-transient "disco-transient" ())
+(declare-function disco-room-input-options-transient "disco-transient" ())
 
 (declare-function disco-api--validate-message-content-length "disco-api-normalize"
                   (content field-name))

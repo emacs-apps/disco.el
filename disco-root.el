@@ -12,8 +12,6 @@
 
 (require 'cl-lib)
 (require 'pp)
-(declare-function disco-root-transient "disco-transient" nil)
-(declare-function disco-root-search-transient "disco-transient" nil)
 (require 'seq)
 (require 'subr-x)
 (require 'time-date)
@@ -41,6 +39,9 @@
 (require 'disco-root-view)
 (require 'disco-channel-directory)
 (require 'disco-runtime)
+
+(declare-function disco-root-transient "disco-transient" ())
+(declare-function disco-root-search-transient "disco-transient" ())
 
 (declare-function disco-root-view--reset-icon-cache-state
                   "disco-root-view" ())

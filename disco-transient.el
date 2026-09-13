@@ -595,11 +595,11 @@
     ("n" "Create detached" disco-room-thread-create
      :if-not (lambda ()
                (disco-room-thread--create-unavailable-reason :any)))
-    ("R" "Rename thread" disco-room-thread-rename
+    ("r" "Rename thread" disco-room-thread-rename
      :if-not disco-room-thread--update-unavailable-reason)
     ("L" "Toggle locked" disco-room-thread-toggle-locked
      :if-not disco-room-thread--update-unavailable-reason)
-    ("S" "Set slowmode" disco-room-thread-set-slowmode
+    ("s" "Set slowmode" disco-room-thread-set-slowmode
      :if-not disco-room-thread--update-unavailable-reason)
     ("U" "Set auto-archive" disco-room-thread-set-auto-archive-duration
      :if-not disco-room-thread--update-unavailable-reason)
@@ -617,10 +617,10 @@
      :if (lambda ()
            (alist-get 'parent_id (disco-room--channel-object))))]
    ["Inspect"
-    ("/" "Structured search..." disco-room-search-channel)
-    ("f" "Filter search" disco-room-filter-search)
+    ("M-/" "Structured search..." disco-room-search-channel)
+    ("/" "Filter search" disco-room-filter-search)
     ("F" "Cancel filter" disco-room-filter-cancel)
-    ("v" "Refetch avatars" disco-avatar-refetch)
+    ("M-v" "Refetch avatars" disco-avatar-refetch)
     ("H" "HTTP queue" disco-http-describe-queue)
     ("R" "Rate limits" disco-api-describe-rate-limits)
     ("G" "Gateway status" disco-gateway-describe-status)]

@@ -11,7 +11,6 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(declare-function disco-room-input-options-transient "disco-transient" nil)
 
 (require 'appkit-core)
 (require 'appkit-media)
