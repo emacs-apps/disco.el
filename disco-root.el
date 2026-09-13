@@ -12,8 +12,8 @@
 
 (require 'cl-lib)
 (require 'pp)
-(autoload 'disco-root-transient "disco-transient" nil t)
-(autoload 'disco-root-search-transient "disco-transient" nil t)
+(declare-function disco-root-transient "disco-transient" nil)
+(declare-function disco-root-search-transient "disco-transient" nil)
 (require 'seq)
 (require 'subr-x)
 (require 'time-date)

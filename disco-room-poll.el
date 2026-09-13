@@ -11,7 +11,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(autoload 'disco-room-poll-transient "disco-transient" nil t)
+(declare-function disco-room-poll-transient "disco-transient" nil)
 (require 'appkit-ui)
 (require 'disco-api)
 (require 'disco-customize)

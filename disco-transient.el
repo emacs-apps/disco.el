@@ -4,9 +4,8 @@
 
 ;;; Commentary:
 
-;; Root, search, room, message, poll, and input-option menus.  Controllers
-;; autoload these entry points; their business operations stay in their
-;; original components.
+;; Root, search, room, message, poll, and input-option menus.  The application
+;; entry point loads these menus alongside their business components.
 
 ;;; Code:
 
@@ -18,7 +17,7 @@
 (require 'disco-root)
 
 (autoload 'org-read-date "org" nil nil)
-(autoload 'disco-reset-session-state "disco" nil t)
+(declare-function disco-reset-session-state "disco" ())
 
 (defun disco-root--search-transient-buffer ()
   "Return root buffer currently edited by the search transient."
@@ -430,7 +429,7 @@
   :getter (lambda () (disco-root--search-transient-spec-getter :sort-order))
   :setter (lambda (value) (disco-root--search-transient-spec-setter :sort-order value)))
 
-;;;###autoload
+;;;###autoload(autoload 'disco-root-search-transient "disco" nil t)
 (transient-define-prefix disco-root-search-transient ()
   "Structured root search editor for disco.el."
   [["Scope"
@@ -482,7 +481,7 @@
   (message "disco: archive thread fetch limit set to %d"
            disco-thread-archive-fetch-limit))
 
-;;;###autoload
+;;;###autoload(autoload 'disco-root-transient "disco" nil t)
 (transient-define-prefix disco-root-transient ()
   "Root command menu for disco.el."
   [["Refresh"
@@ -509,7 +508,7 @@
   "Return message at point, suppressing user errors for menu checks."
   (ignore-errors (disco-room--message-at-point)))
 
-;;;###autoload
+;;;###autoload(autoload 'disco-transient-msg-operate "disco" nil t)
 (transient-define-prefix disco-transient-msg-operate ()
   "Transient for msg-centric room actions at point."
   [["Message"
@@ -553,7 +552,7 @@
     ("y" "Copy media URL" appkit-media-card-copy-url
      :if-not (lambda () (appkit-media-card-action-inapt-reason 'copy-url)))]])
 
-;;;###autoload
+;;;###autoload(autoload 'disco-room-transient "disco" nil t)
 (transient-define-prefix disco-room-transient ()
   "Room command menu for disco.el."
   [["Timeline"
@@ -628,7 +627,7 @@
    ["Window"
     ("q" "Quit window" quit-window)]])
 
-;;;###autoload
+;;;###autoload(autoload 'disco-room-input-options-transient "disco" nil t)
 (transient-define-prefix disco-room-input-options-transient ()
   "Transient for telega-like room input options."
   [["Input Options"
@@ -645,7 +644,7 @@
          (or (not (disco-room--poll-vote-unavailable-reason message))
              (not (disco-room--poll-expire-unavailable-reason message))))))
 
-;;;###autoload
+;;;###autoload(autoload 'disco-room-poll-transient "disco" nil t)
 (transient-define-prefix disco-room-poll-transient ()
   "Transient for the poll at point."
   :refresh-suffixes t

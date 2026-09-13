@@ -450,6 +450,8 @@ cannot leave another old-account projection visible."
   (interactive)
   (disco-gateway-describe-status))
 
+(require 'disco-transient)
+
 (provide 'disco)
 
 (with-eval-after-load 'evil
