@@ -44,7 +44,8 @@
   (unless (appkit-app-live-p disco-runtime--app)
     (setq disco-runtime--app
           (appkit-app-start
-           disco-runtime--app-type :identity 'default)))
+           disco-runtime--app-type
+           :identity 'default)))
   disco-runtime--app)
 
 (defvar-local disco-runtime--surface-app nil

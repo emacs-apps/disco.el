@@ -327,7 +327,7 @@ Grouping applies when sender stays the same and timestamps are within
 
 This mirrors telega auto-fill behavior and helps avoid edge clipping."
   :type '(choice (const :tag "No additional margin" nil)
-          (integer :tag "Additional margin columns"))
+                 (integer :tag "Additional margin columns"))
   :group 'disco)
 
 (defcustom disco-room-show-attachment-urls nil
@@ -564,7 +564,7 @@ Supported values:
 - nil: no transport compression
 - zlib-stream: compressed binary frames with shared zlib context"
   :type '(choice (const :tag "Disabled" nil)
-          (const :tag "zlib-stream" zlib-stream))
+                 (const :tag "zlib-stream" zlib-stream))
   :group 'disco)
 
 (defcustom disco-gateway-zlib-max-buffer-bytes (* 64 1024 1024)

@@ -187,7 +187,9 @@
          (image (and user
                      (disco-avatar-rounded-image user pixel-size))))
     (appkit-chat-avatar-prefixes
-     image fallback :pixel-size pixel-size :resize t)))
+     image fallback
+     :pixel-size pixel-size
+     :resize t)))
 
 (defun disco-user--insert-field (label value &optional face)
   "Insert profile LABEL and VALUE when VALUE is present."
@@ -437,13 +439,15 @@
          (disco-user--insert-action-buttons)
          (when disco-user--loading
            (appkit-presentation-insert-note-line
-            "Loading full user profile…" :face 'shadow))
+            "Loading full user profile…"
+            :face 'shadow))
          (when disco-user--error
            (appkit-presentation-insert-note-line disco-user--error :face 'error))
          (when disco-user--message-error
            (appkit-presentation-insert-note-line disco-user--message-error :face 'error))
          (appkit-presentation-insert-note-line
-          "g refresh · m message · Y copy ID · q quit" :face 'shadow)
+          "g refresh · m message · Y copy ID · q quit"
+          :face 'shadow)
          (insert "\n")
          (disco-user--insert-field "User ID" disco-user--user-id)
          (disco-user--insert-field
@@ -498,7 +502,8 @@
                           (alist-get 'private disco-user--profile)))
            (insert "\n")
            (appkit-presentation-insert-note-line
-            "This user has a private extended profile." :face 'shadow))
+            "This user has a private extended profile."
+            :face 'shadow))
          (when-let* ((application
                       (and (listp disco-user--profile)
                            (alist-get 'application disco-user--profile)))
@@ -818,7 +823,8 @@
              (t
               (appkit-open-generated-surface
                disco-user--surface-type
-               :app app :identity identity
+               :app app
+               :identity identity
                :input (list :user-id user-id :guild-id guild-id
                             :seed-user seed-user)
                :buffer-name (disco-user--buffer-name user-id guild-id)

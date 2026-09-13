@@ -312,9 +312,15 @@ be shown yet.  OWNER is captured by an external video playback action."
             :button-face action-face
             :toggle-action spoiler-toggle-action)
          (disco-ins-insert-attachment-preview-block
-          attachment :prefix prefix-state :face meta-face :kind kind :required nil)
+          attachment
+          :prefix prefix-state
+          :face meta-face
+          :kind kind
+          :required nil)
          (disco-ins-insert-attachment-caption-line
-          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+          (alist-get 'description attachment)
+          :prefix prefix-state
+          :face meta-face)
          (when show-url
            (disco-ins-insert-attachment-url-line
             (disco-media-attachment-download-url attachment)
@@ -360,9 +366,15 @@ be shown yet.  OWNER is captured by an external video playback action."
             :button-face action-face
             :toggle-action spoiler-toggle-action)
          (disco-ins-insert-attachment-preview-block
-          attachment :prefix prefix-state :face meta-face :kind 'photo :required t)
+          attachment
+          :prefix prefix-state
+          :face meta-face
+          :kind 'photo
+          :required t)
          (disco-ins-insert-attachment-caption-line
-          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+          (alist-get 'description attachment)
+          :prefix prefix-state
+          :face meta-face)
          (when show-url
            (disco-ins-insert-attachment-url-line
             (disco-media-attachment-download-url attachment)
@@ -410,10 +422,16 @@ OWNER is the exact Appkit app or view captured by every play action."
             :button-face action-face
             :toggle-action spoiler-toggle-action)
          (disco-ins-insert-attachment-preview-block
-          attachment :prefix prefix-state :face meta-face :kind 'video :required t
+          attachment
+          :prefix prefix-state
+          :face meta-face
+          :kind 'video
+          :required t
           :owner owner)
          (disco-ins-insert-attachment-caption-line
-          (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+          (alist-get 'description attachment)
+          :prefix prefix-state
+          :face meta-face)
          (when show-url
            (disco-ins-insert-attachment-url-line
             (disco-media-attachment-download-url attachment)
@@ -551,9 +569,13 @@ OWNER is the exact Appkit app or view captured by every play action."
           (when meta-face
             (appkit-ui-append-face playback-start (point) meta-face)))
         (disco-ins-insert-attachment-transfer-line
-         attachment :prefix prefix-state :face meta-face)
+         attachment
+         :prefix prefix-state
+         :face meta-face)
         (disco-ins-insert-attachment-caption-line
-         (alist-get 'description attachment) :prefix prefix-state :face meta-face)
+         (alist-get 'description attachment)
+         :prefix prefix-state
+         :face meta-face)
         (when show-url
           (disco-ins-insert-attachment-url-line
            (disco-media-attachment-download-url attachment)

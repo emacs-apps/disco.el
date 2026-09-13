@@ -328,7 +328,7 @@ The default fits the longest built-in date format plus its status symbol."
 (defcustom disco-root-auto-fill-margin-columns 1
   "Additional margin columns reserved when computing root fill width."
   :type '(choice (const :tag "No extra margin" nil)
-          integer)
+                 integer)
   :group 'disco)
 
 (defcustom disco-root-debug-log-enabled nil
@@ -2027,7 +2027,9 @@ With FORCE non-nil, reproject even if width has not changed."
   (appkit-next
    :model nil
    :render (appkit-projection-change-create
-            :full-p t :frame-p t :position 'preserve)))
+            :full-p t
+            :frame-p t
+            :position 'preserve)))
 
 (defun disco-root--surface-update (_context model message)
   "Translate a root client MESSAGE into a projection change."
@@ -2037,20 +2039,25 @@ With FORCE non-nil, reproject even if width has not changed."
      (appkit-next
       :model model
       :render (appkit-projection-change-create
-               :full-p t :frame-p t :position 'preserve)))
+               :full-p t
+               :frame-p t
+               :position 'preserve)))
     ('geometry
      (appkit-next
       :model model
       :render (appkit-projection-change-create
-               :geometry-p t :position 'preserve)))
+               :geometry-p t
+               :position 'preserve)))
     ('header
-     (appkit-next :model model
-                  :render (appkit-projection-change-create :frame-p t)))
+     (appkit-next
+      :model model
+      :render (appkit-projection-change-create :frame-p t)))
     ('channels-changed
      (appkit-next
       :model model
       :render (appkit-projection-change-create
-               :keys (plist-get message :channel-ids) :position 'preserve)))
+               :keys (plist-get message :channel-ids)
+               :position 'preserve)))
     ('gateway-event
      (let* ((event (plist-get message :event))
             (event-type (plist-get event :type)))
@@ -2105,7 +2112,9 @@ With FORCE non-nil, reproject even if width has not changed."
          ('disco-root-mode disco-root--surface-type)
          ('disco-root-archived-threads-mode
           disco-root-view--archived-surface-type))
-       :app app :identity identity :buffer (current-buffer))))))
+       :app app
+       :identity identity
+       :buffer (current-buffer))))))
 
 (defun disco-root--queue-live-update (message)
   "Queue one client MESSAGE for the current root Surface."
@@ -2744,8 +2753,10 @@ Temporary search results and projection indexes do not."
            (t
             (appkit-open-generated-surface
              disco-root--surface-type
-             :app app :identity identity
-             :buffer-name disco-root-buffer-name :select t))))
+             :app app
+             :identity identity
+             :buffer-name disco-root-buffer-name
+             :select t))))
          (buffer (appkit-surface-buffer surface)))
     (with-current-buffer buffer
       (setq-local buffer-undo-list t)

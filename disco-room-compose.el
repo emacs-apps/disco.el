@@ -1661,7 +1661,9 @@ the attachment as a spoiler."
     (user-error "disco: file is not readable: %s" path))
   (let ((attachment
          (disco-room--make-attachment-input-object
-          path :description description :spoiler spoiler)))
+          path
+          :description description
+          :spoiler spoiler)))
     (if (appkit-chatbuf-input-start-position)
         (progn
           (unless (appkit-chatbuf-point-in-input-p)

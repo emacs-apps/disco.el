@@ -23,7 +23,7 @@
 
 When nil, show all unread rows without truncation."
   :type '(choice (const :tag "No limit" nil)
-          (integer :tag "Limit"))
+                 (integer :tag "Limit"))
   :group 'disco)
 
 (defcustom disco-root-tree-default-expanded-sections '(unread private guilds)

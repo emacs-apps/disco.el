@@ -184,7 +184,9 @@
              :surface surface
              :namespace '(root guild g1)
              :section-key '(root-guild g1)
-             :group-indent 4 :channel-indent 6 :thread-indent 8))
+             :group-indent 4
+             :channel-indent 6
+             :thread-indent 8))
            (standalone-key
             (disco-guild-directory-group-key standalone "cat"))
            (root-key (disco-guild-directory-group-key root "cat")))
@@ -226,7 +228,9 @@
              :surface (appkit-directory-surface)
              :namespace '(root guild g1)
              :section-key '(root-guild g1)
-             :group-indent 4 :channel-indent 6 :thread-indent 8))
+             :group-indent 4
+             :channel-indent 6
+             :thread-indent 8))
            (entries (disco-guild-directory-project-loaded context))
            (category
             (seq-find
@@ -727,7 +731,10 @@
         (disco-channel-directory--activate-item
          nil
          (appkit-directory-entry-create
-          :key kind :role 'item :section-key 'section :item-p t
+          :key kind
+          :role 'item
+          :section-key 'section
+          :item-p t
           :payload parent
           :properties
           (list disco-guild-directory-row-kind-property kind
@@ -741,7 +748,10 @@
             (type . 11)))
          (entry
           (appkit-directory-entry-create
-           :key 'post :role 'item :section-key 'section :item-p t
+           :key 'post
+           :role 'item
+           :section-key 'section
+           :item-p t
            :payload thread
            :properties
            (list disco-guild-directory-row-kind-property 'channel

@@ -17,7 +17,9 @@
                        else-callback (plist-get args :else))
                  'fake-process)))
       (disco-http-request-async
-       :method "GET" :url "https://old.invalid" :timeout 1
+       :method "GET"
+       :url "https://old.invalid"
+       :timeout 1
        :on-success (lambda (_) (push 'success published))
        :on-error (lambda (_) (push 'error published)))
       (should (= 1 (length disco-http--direct-request-owners)))
@@ -41,7 +43,9 @@
                  (disco-http-reset-queue-state)
                  'stale-returned-process)))
       (disco-http-request-async
-       :method "GET" :url "https://old.invalid" :timeout 1
+       :method "GET"
+       :url "https://old.invalid"
+       :timeout 1
        :on-success (lambda (_) (setq published t))
        :on-error (lambda (_) (setq published t)))
       (should (= 3 disco-http--generation))
@@ -61,7 +65,9 @@
                  (setq observed-queue disco-http--plz-queue)
                  (condition-case err
                      (disco-http-request-async
-                      :method "GET" :url "https://new.invalid" :timeout 1)
+                      :method "GET"
+                      :url "https://new.invalid"
+                      :timeout 1)
                    (error (setq reentrant-error err)))
                  queue)))
       (disco-http-reset-queue-state)
@@ -78,10 +84,14 @@
                (lambda (&rest _) (setq called t))))
       (should-error
        (disco-http-request
-        :method "GET" :url "https://old.invalid" :timeout 1))
+        :method "GET"
+        :url "https://old.invalid"
+        :timeout 1))
       (should-error
        (disco-http-request-async
-        :method "GET" :url "https://old.invalid" :timeout 1))
+        :method "GET"
+        :url "https://old.invalid"
+        :timeout 1))
       (should-not called))))
 
 (provide 'disco-http-test)

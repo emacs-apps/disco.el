@@ -994,8 +994,7 @@ OWNER is captured exactly by external video playback properties."
                        slice-start
                        (point)
                        (appkit-media-resource-create
-                        :url
-                        play-video-url)
+                        :url play-video-url)
                        'video
                        video-cache-key
                        owner)))
@@ -1068,8 +1067,8 @@ in-Emacs media behavior."
      (list
       (lambda ()
         (disco-media-open-discord-resource
-         (appkit-media-resource-create :url url) 'image nil :owner
-         owner))
+         (appkit-media-resource-create :url url) 'image nil
+         :owner owner))
       "Open embed image in Emacs"))
     (_ (list (lambda () (browse-url url t)) "Open embed URL"))))
 
@@ -1102,7 +1101,8 @@ in-Emacs media behavior."
              (lambda ()
                (disco-media-open-discord-resource
                 (appkit-media-resource-create :url video-url) 'video
-                video-cache-key :owner owner))
+                video-cache-key
+                :owner owner))
              "Play embed video")
        actions))
     (when

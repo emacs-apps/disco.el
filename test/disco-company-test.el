@@ -136,7 +136,8 @@
           (let* ((view
                   (appkit-open-generated-surface
                    appkit-test--surface-type
-                   :app app :identity '(room completion-owner)
+                   :app app
+                   :identity '(room completion-owner)
                    :buffer (current-buffer)))
                  old-handler
                  old-token)
@@ -154,7 +155,8 @@
             (let ((replacement
                    (appkit-open-generated-surface
                     appkit-test--surface-type
-                    :app app :identity '(room completion-owner)
+                    :app app
+                    :identity '(room completion-owner)
                     :buffer (current-buffer)))
                   (key '("g1" . "alice")))
               (disco-company-setup-room-buffer)

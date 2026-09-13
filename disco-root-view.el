@@ -1665,38 +1665,42 @@ Higher scores sort before lower scores."
 
 (defun disco-root--entry-search-section (tab title loaded-count &optional total-count loading)
   "Return one search-section render entry."
-  (disco-root-render-entry-create :key (list 'search-section tab)
-                                  :type 'search-section
-                                  :tab tab
-                                  :title title
-                                  :loaded-count loaded-count
-                                  :total-count total-count
-                                  :loading loading))
+  (disco-root-render-entry-create
+   :key (list 'search-section tab)
+   :type 'search-section
+   :tab tab
+   :title title
+   :loaded-count loaded-count
+   :total-count total-count
+   :loading loading))
 
 (defun disco-root--entry-search-message (message indent &optional tab)
   "Return one search-message render entry."
-  (disco-root-render-entry-create :key (list 'search-message tab
-                                             (alist-get 'id message))
-                                  :type 'search-message
-                                  :message message
-                                  :indent (or indent 2)
-                                  :tab tab))
+  (disco-root-render-entry-create
+   :key (list 'search-message tab
+              (alist-get 'id message))
+   :type 'search-message
+   :message message
+   :indent (or indent 2)
+   :tab tab))
 
 (defun disco-root--entry-search-note (text &optional face tab)
   "Return one search-note render entry for TAB."
-  (disco-root-render-entry-create :key (list 'search-note tab)
-                                  :type 'search-note
-                                  :text text
-                                  :face face
-                                  :tab tab))
+  (disco-root-render-entry-create
+   :key (list 'search-note tab)
+   :type 'search-note
+   :text text
+   :face face
+   :tab tab))
 
 (defun disco-root--entry-search-action (label action tab)
   "Return one search-action render entry."
-  (disco-root-render-entry-create :key (list 'search-action tab action)
-                                  :type 'search-action
-                                  :label label
-                                  :action action
-                                  :tab tab))
+  (disco-root-render-entry-create
+   :key (list 'search-action tab action)
+   :type 'search-action
+   :label label
+   :action action
+   :tab tab))
 
 (defun disco-root--search-section-label-row (title loaded-count &optional total-count loading)
   "Return label row model for one search section heading."
@@ -2212,7 +2216,8 @@ Return plist with keys :threads and :errors for this page only."
            (t
             (appkit-open-generated-surface
              disco-root-view--archived-surface-type
-             :app app :identity identity
+             :app app
+             :identity identity
              :input (list :archived-parent parent-channel)
              :buffer-name (disco-root--archived-buffer-name parent-channel)
              :select t))))

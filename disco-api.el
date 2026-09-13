@@ -96,7 +96,8 @@
   "Create a logical request for Appkit OWNER in API GENERATION."
   (let ((request
           (disco-api--owned-request-create
-           :generation generation :active-p t)))
+           :generation generation
+           :active-p t)))
     (push request disco-api--owned-requests)
     (condition-case error-data
         (progn

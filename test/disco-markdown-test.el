@@ -168,7 +168,8 @@ Return a plist carrying :document, :objects, :printed, and :wire."
          (document
           (disco-markdown-document
            "__under **bold**__ and ||**secret** <@1>||"
-           :message message :spoiler-message-id "m1"))
+           :message message
+           :spoiler-message-id "m1"))
          (inlines (car (disco-markdown-test--document-inlines document)))
          (under (car inlines))
          (objects (disco-markdown-test--document-objects document))
@@ -266,7 +267,8 @@ Return a plist carrying :document, :objects, :printed, and :wire."
 (ert-deftest disco-markdown-native-spoiler-keeps-underlying-copy-text ()
   (let* ((rendered
           (disco-markdown-render
-           "Look || secret ||" :spoiler-message-id "m1"))
+           "Look || secret ||"
+           :spoiler-message-id "m1"))
          (position (string-match "secret" rendered)))
     (should (equal "Look  secret " (substring-no-properties rendered)))
     (should (equal "█" (get-text-property position 'display rendered)))

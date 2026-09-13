@@ -508,7 +508,8 @@ When RESET is non-nil, the returned page replaces the cached projection."
              (t
               (appkit-open-generated-surface
                disco-room-pinned-messages--surface-type
-               :app app :identity identity
+               :app app
+               :identity identity
                :input (list :channel-id channel-id :channel-name channel-name)
                :buffer-name
                (disco-room-pinned-messages--buffer-name channel-id channel-name)

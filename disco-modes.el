@@ -92,15 +92,19 @@ visible channels and therefore remains visible for muted channels."
 (defun disco-client-mode-line-icon ()
   "Return clickable Discord label for the mode line."
   (appkit-mode-line-indicator
-   "Discord" :face 'mode-line-emphasis
-   :command #'disco-client-mode-line-open-root :help-echo "Open disco"))
+   "Discord"
+   :face 'mode-line-emphasis
+   :command #'disco-client-mode-line-open-root
+   :help-echo "Open disco"))
 
 (defun disco-client-mode-line-unread ()
   "Return indicator for locally known unmuted unread Discord messages."
   (let ((count (car disco-client-mode-line--cached-counts)))
     (unless (zerop count)
       (appkit-mode-line-indicator
-       (number-to-string count) :prefix " " :face 'disco-mode-line-unread
+       (number-to-string count)
+       :prefix " "
+       :face 'disco-mode-line-unread
        :command #'disco-client-mode-line-open-unread
        :help-echo "Open unread Discord channels (count is locally known messages)"))))
 
@@ -109,7 +113,9 @@ visible channels and therefore remains visible for muted channels."
   (let ((count (cdr disco-client-mode-line--cached-counts)))
     (unless (zerop count)
       (appkit-mode-line-indicator
-       (format "@%d" count) :prefix " " :face 'disco-mode-line-mention
+       (format "@%d" count)
+       :prefix " "
+       :face 'disco-mode-line-mention
        :command #'disco-client-mode-line-open-mentions
        :help-echo "Open Discord channels with unread mentions"))))
 

@@ -247,7 +247,9 @@
        :render #'ignore
        :recover nil
        :unmount #'ignore)))
-   :app app :identity identity :buffer buffer))
+   :app app
+   :identity identity
+   :buffer buffer))
 
 (ert-deftest disco-reset-kills-renamed-legacy-and-fixed-account-projections ()
   (disco-reset-test--with-isolated-session
@@ -379,7 +381,8 @@
                           (unless spawned-buffer
                             (setq spawned-app
                                   (appkit-app-start
-                                   appkit-test--app-type :identity (make-symbol "kill-hook-app"))
+                                   appkit-test--app-type
+                                   :identity (make-symbol "kill-hook-app"))
                                   disco-runtime--app spawned-app
                                   spawned-buffer
                                   (disco-reset-test--make-mode-buffer
@@ -960,7 +963,8 @@
                                (insert secret)))
                            (setq late-app
                                  (appkit-app-start
-                                  appkit-test--app-type :identity (make-symbol "late-http-app"))
+                                  appkit-test--app-type
+                                  :identity (make-symbol "late-http-app"))
                                  disco-runtime--app late-app)
                            (appkit-register-handle
                             late-app 'function

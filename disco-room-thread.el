@@ -440,7 +440,8 @@
    (disco-room-thread--mute-unavailable-reason) "set thread mute state")
   (disco-room-thread--ensure-current-thread)
   (disco-api-update-thread-member-settings
-   (alist-get 'id (disco-room--channel-object)) :muted muted)
+   (alist-get 'id (disco-room--channel-object))
+   :muted muted)
   (message "disco: thread notifications %s" (if muted "muted" "unmuted")))
 
 (defun disco-room-thread-edit-settings ()

@@ -651,7 +651,8 @@
                          (appkit-app-close old-app)
                          (setq new-app
                                (appkit-app-start
-                                appkit-test--app-type :identity (make-symbol "new-display"))
+                                appkit-test--app-type
+                                :identity (make-symbol "new-display"))
                                disco-runtime--app new-app)
                          (disco-notifications--show
                           inner new-app disco-notifications--generation))

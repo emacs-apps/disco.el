@@ -797,7 +797,8 @@ Return (NODES REST CLOSED-P)."
                     (push
                      (appkit-markup-object
                       (disco-markdown-object--create
-                       :kind 'spoiler :raw nil)
+                       :kind 'spoiler
+                       :raw nil)
                       children)
                      result)))))
              (t
@@ -883,8 +884,13 @@ Return (NODES REST CLOSED-P)."
       (setq kind 'literal display (format "%s" token))))
     (appkit-markup-object
      (disco-markdown-object--create
-      :kind kind :raw raw :id id :name name :style style
-      :animated animated :url url)
+      :kind kind
+      :raw raw
+      :id id
+      :name name
+      :style style
+      :animated animated
+      :url url)
      (or fallback (list (appkit-markup-text display)))
      styles)))
 
@@ -1117,7 +1123,9 @@ coordinates do not address TEXT."
   "Return the semantic Appkit Document adapted from Discord Markdown TEXT."
   (appkit-markup-parse-result-document
    (disco-markdown-parse
-    text :context context :message message
+    text
+    :context context
+    :message message
     :spoiler-message-id spoiler-message-id)))
 
 (defun disco-markdown--link-action (url)
@@ -1258,7 +1266,8 @@ coordinates do not address TEXT."
                             (and (disco-markdown-object-p value)
                                  (disco-markdown--provider-action value))))
                  (appkit-ui-add-action
-                  start (point) (car action) :help-echo (cdr action)))))))))
+                  start (point) (car action)
+                  :help-echo (cdr action)))))))))
     inserter))
 
 (defun disco-markdown--native-face-p (face expected)
@@ -1333,7 +1342,9 @@ coordinates do not address TEXT."
   "Adapt Discord Markdown TEXT and insert its semantic Document natively."
   (disco-markdown-insert-document
    (disco-markdown-document
-    text :context context :message message
+    text
+    :context context
+    :message message
     :spoiler-message-id spoiler-message-id)
    :context context
    :spoiler-message-id spoiler-message-id
@@ -1348,7 +1359,9 @@ coordinates do not address TEXT."
   "Return native-rendered Discord Markdown TEXT as a propertized string."
   (with-temp-buffer
     (disco-markdown-insert
-     text :context context :message message
+     text
+     :context context
+     :message message
      :spoiler-message-id spoiler-message-id
      :reveal-spoilers reveal-spoilers
      :final-newline-p nil)
@@ -1360,7 +1373,9 @@ coordinates do not address TEXT."
   (ignore reveal-spoilers)
   (appkit-markup-plain-text
    (disco-markdown-document
-    text :context (or context 'copy-export) :message message
+    text
+    :context (or context 'copy-export)
+    :message message
     :spoiler-message-id spoiler-message-id)))
 
 (defun disco-markdown--printer-escape (text)
@@ -1725,7 +1740,8 @@ coordinates do not address TEXT."
             (unless (disco-markdown--chunk-blocks-fit-p
                      (list
                       (appkit-markup-list
-                       style current :start current-start))
+                       style current
+                       :start current-start))
                      limit)
               (signal 'appkit-markup-codec-error
                       '(discord-list-item-too-long)))))

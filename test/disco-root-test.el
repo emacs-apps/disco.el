@@ -905,8 +905,11 @@
         (disco-root--tree-activate-item
          nil
          (appkit-directory-entry-create
-          :key kind :role 'item :section-key '(root guild "g1")
-          :item-p t :payload parent
+          :key kind
+          :role 'item
+          :section-key '(root guild "g1")
+          :item-p t
+          :payload parent
           :properties
           (list disco-guild-directory-row-kind-property kind
                 disco-guild-directory-thread-parent-id-property "forum"))))
@@ -984,20 +987,23 @@
                  (list
                   (appkit-directory-entry-create
                    :key '(root unread channel "c1")
-                   :role 'item :section-key '(root section unread)
+                   :role 'item
+                   :section-key '(root section unread)
                    :payload channel
                    :properties
                    (list disco-root-directory-row-kind-property
                          'unread-channel))
                   (appkit-directory-entry-create
                    :key '(root dm channel "c1")
-                   :role 'item :section-key '(root section dm)
+                   :role 'item
+                   :section-key '(root section dm)
                    :payload channel
                    :properties
                    (list disco-root-directory-row-kind-property 'dm-channel))
                   (appkit-directory-entry-create
                    :key '(shared channel "c1")
-                   :role 'item :section-key '(root guild "g1")
+                   :role 'item
+                   :section-key '(root guild "g1")
                    :payload channel
                    :properties
                    (list disco-guild-directory-row-kind-property 'channel))))
@@ -1496,7 +1502,8 @@
        surface
        (list
         (appkit-directory-entry-create
-         :key '(root spacer) :role 'spacer)
+         :key '(root spacer)
+         :role 'spacer)
         (appkit-directory-entry-create
          :key '(root dm channel "c1")
          :role 'item

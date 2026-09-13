@@ -116,8 +116,6 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "!" #'disco-msg-add-reaction
   "?" #'disco-room-transient)
 
-
-
 (define-minor-mode disco-room-timeline-mode
   "Buffer-local navigation bindings active outside the room draft."
   :init-value nil
@@ -1180,8 +1178,8 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
     (add-text-properties
      0 (length text)
      '(read-only t
-                 front-sticky (read-only)
-                 rear-nonsticky (read-only))
+       front-sticky (read-only)
+       rear-nonsticky (read-only))
      text)
     text))
 
@@ -1191,7 +1189,8 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
    (unless (disco-room--msg-filter-active-p)
      (concat
       (appkit-chat-history-delimiter-string
-       (max 1 (disco-room--line-fill-column)) :loading-text "loading…")
+       (max 1 (disco-room--line-fill-column))
+       :loading-text "loading…")
       "\n"))
    (when disco-room--media-status
      (concat (propertize disco-room--media-status 'face 'warning) "\n"))
@@ -1307,7 +1306,8 @@ optimistic row node while its nonce key becomes the server message id."
            (t
             (appkit-open-generated-surface
              disco-room--surface-type
-             :app app :identity identity
+             :app app
+             :identity identity
              :input (list :channel-id disco-room--channel-id
                           :channel-name disco-room--channel-name)
              :buffer (current-buffer))))))
@@ -2231,28 +2231,38 @@ its same-mode buffer survives."
        (setf (plist-get next :media-phase)
              (if (eq kind 'video) 'playing 'opening)
              (plist-get next :media-message) nil)
-       (appkit-next :model next :render
-                    (disco-room--media-render-request) :commands
-                    (list
-                     (appkit-command-start-effect
-                      (disco-media-open-effect resource kind cache-key))))))
+       (appkit-next
+        :model next
+        :render
+        (disco-room--media-render-request)
+        :commands
+        (list
+         (appkit-command-start-effect
+          (disco-media-open-effect resource kind cache-key))))))
     (`(disco-media acquired ,file)
-     (appkit-next :model model :render appkit-render-none :commands
-                  (list
-                   (appkit-command-start-effect
-                    (disco-media-file-presentation-effect file)))))
+     (appkit-next
+      :model model
+      :render appkit-render-none
+      :commands
+      (list
+       (appkit-command-start-effect
+        (disco-media-file-presentation-effect file)))))
     ('(disco-media closed)
      (let ((next (copy-sequence model)))
        (setf (plist-get next :media-phase) 'idle
              (plist-get next :media-message) nil)
-       (appkit-next :model next :render
-                    (disco-room--media-render-request))))
+       (appkit-next
+        :model next
+        :render
+        (disco-room--media-render-request))))
     (`(disco-media failed ,reason)
      (let ((next (copy-sequence model)))
        (setf (plist-get next :media-phase) 'error
              (plist-get next :media-message) reason)
-       (appkit-next :model next :render
-                    (disco-room--media-render-request))))
+       (appkit-next
+        :model next
+        :render
+        (disco-room--media-render-request))))
     (_ (appkit-next-reject 'invalid-room-message))))
 
 (defun disco-room--surface-renderer (_surface)
@@ -2304,7 +2314,8 @@ its same-mode buffer survives."
            (t
             (appkit-open-generated-surface
              disco-room--surface-type
-             :app app :identity identity
+             :app app
+             :identity identity
              :input (list :channel-id channel-id :channel-name channel-name)
              :buffer-name (disco-room--buffer-name channel-name channel-id)
              :select t))))

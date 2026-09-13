@@ -314,7 +314,7 @@ Downloaded files and the on-disk preview cache are intentionally preserved."
 (defcustom disco-media-spoiler-turbulence-base-frequency '(0.1 . 0.1)
   "Base-frequency pair passed to spoiler `feTurbulence'."
   :type '(cons (number :tag "X frequency")
-          (number :tag "Y frequency"))
+               (number :tag "Y frequency"))
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
@@ -363,7 +363,7 @@ Downloaded files and the on-disk preview cache are intentionally preserved."
 (defcustom disco-media-audio-waveform-colors '("#17c23a" . "#72d86f")
   "Colors used for audio waveform bars as (PLAYED . UNPLAYED)."
   :type '(cons (string :tag "Played color")
-          (string :tag "Unplayed color"))
+               (string :tag "Unplayed color"))
   :set #'disco-media--visual-custom-set
   :group 'disco-media)
 
@@ -1124,7 +1124,8 @@ presentation bytes."
      start end
      (lambda ()
        (disco-media-open-discord-resource
-        resource kind cache-key :owner owner))
+        resource kind cache-key
+        :owner owner))
      (if (eq kind 'video)
          "Play video in Emacs"
        "Open media in Emacs"))))
@@ -1903,7 +1904,8 @@ When ON-SUCCESS is non-nil, call it with the completed local path."
       (user-error "disco: video attachment has no playable source"))
     (disco-media-open-discord-resource
      (disco-media--attachment-appkit-resource attachment path) 'video
-     cache-key :owner owner)))
+     cache-key
+     :owner owner)))
 
 (defun disco-media--audio-state-entry (key)
   "Return normalized Appkit audio playback state for KEY."
@@ -2067,7 +2069,8 @@ OWNER lifecycle-owns the whole pause/resume session."
        (cond
         ((and (stringp path) (file-regular-p path))
          (disco-media--start-appkit-audio-player
-          attachment path :owner owner))
+          attachment path
+          :owner owner))
         ((eq status 'downloading)
          (if (disco-media-attachment-audio-pending-play-p attachment)
              (progn

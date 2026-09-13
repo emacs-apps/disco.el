@@ -97,11 +97,15 @@
       (should
        (eq 'async
            (disco-api-pin-message-async
-            "channel" "message" :on-success #'identity :on-error #'ignore)))
+            "channel" "message"
+            :on-success #'identity
+            :on-error #'ignore)))
       (should
        (eq 'async
            (disco-api-unpin-message-async
-            "channel" "message" :on-success #'identity :on-error #'ignore)))
+            "channel" "message"
+            :on-success #'identity
+            :on-error #'ignore)))
       (should
        (equal
         '(("DELETE" "/channels/channel/messages/pins/message" nil nil nil)
@@ -317,7 +321,8 @@
          :type 'user-error)
         (should-error
          (disco-api--request-async
-          "GET" "/barrier" :unauthenticated t)
+          "GET" "/barrier"
+          :unauthenticated t)
          :type 'user-error)
         (should-not transport-called)))))
 
@@ -475,7 +480,8 @@
                  (lambda (&rest _args)
                    (cl-incf transport-calls))))
         (disco-api--request-async
-         "GET" "/wait" :unauthenticated t)
+         "GET" "/wait"
+         :unauthenticated t)
         (should (= scheduled-delay 10.0))
         (should (= (length disco-api--retry-owners) 1))
         (should (= transport-calls 0))
@@ -623,7 +629,8 @@
                  (lambda (&rest _args)
                    (setq transport-called t))))
         (disco-api--request-async
-         "GET" "/constructor" :unauthenticated t)
+         "GET" "/constructor"
+         :unauthenticated t)
         (should constructor-entered)
         (should-not transport-called)
         (should (= disco-api--generation 8))
@@ -720,7 +727,8 @@
       (should
        (eq 'request
            (disco-api-remove-own-reaction-async
-            "c1" "m1" "dance:42" :reaction-type 'burst)))
+            "c1" "m1" "dance:42"
+            :reaction-type 'burst)))
       (should (equal "DELETE" (nth 0 captured)))
       (should
        (string-suffix-p
@@ -767,19 +775,26 @@
       (should
        (eq 'request
            (disco-api-user-settings-proto-async
-            2 :on-success #'ignore :on-error #'message)))
+            2
+            :on-success #'ignore
+            :on-error #'message)))
       (should
        (eq 'request
            (disco-api-guild-top-emojis-async
-            "123" :on-success #'identity :on-error #'ignore)))
+            "123"
+            :on-success #'identity
+            :on-error #'ignore)))
       (should
        (eq 'request
            (disco-api-guild-stickers-async
-            "123" :on-success #'ignore :on-error #'message)))
+            "123"
+            :on-success #'ignore
+            :on-error #'message)))
       (should
        (eq 'request
            (disco-api-standard-sticker-packs-async
-            :on-success #'identity :on-error #'ignore)))
+            :on-success #'identity
+            :on-error #'ignore)))
       (setq calls (nreverse calls))
       (should
        (equal
@@ -853,7 +868,9 @@
       (should
        (eq 'request
            (disco-api-guild-profile-async
-            "99" :on-success #'identity :on-error #'ignore)))
+            "99"
+            :on-success #'identity
+            :on-error #'ignore)))
       (should
        (equal
         '(("GET" "/guilds/99/profile"
@@ -870,7 +887,9 @@
       (should
        (eq 'request
            (disco-api-create-private-channel-async
-            "42" :on-success #'identity :on-error #'ignore)))
+            "42"
+            :on-success #'identity
+            :on-error #'ignore)))
       (should
        (equal
         '("POST" "/users/@me/channels"

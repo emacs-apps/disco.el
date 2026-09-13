@@ -823,7 +823,8 @@ Returns empty string when no avatar is available."
            :pixel-size pixel-size
            :resize (null svg-avatar)))
       (appkit-chat-avatar-prefixes
-       nil fallback :pixel-size base-size))))
+       nil fallback
+       :pixel-size base-size))))
 
 (cl-defun disco-room--insert-attachment-card
     (attachment &key message-id spoiler-hidden owner)
@@ -1575,7 +1576,7 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
 
 (defconst disco-room--semantic-system-message-types
   '(6 7 8 9 10 11 12 14 15 16 17 18 21 22 24 25 26 27 28 29 30 31
-      32 36 37 38 39 44 46)
+    32 36 37 38 39 44 46)
   "Message types whose body is synthesized rather than rendered as Markdown.")
 
 (defun disco-room--semantic-message-document (msg)
@@ -1680,7 +1681,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
               (unless (string-empty-p content)
                 (if semantic-document
                     (disco-room--insert-semantic-message-content
-                     semantic-document msg :final-newline-p nil)
+                     semantic-document msg
+                     :final-newline-p nil)
                   (insert content)))
               (setq time-span
                     (disco-room--insert-right-aligned-text
@@ -1732,7 +1734,8 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
           (unless (string-empty-p content)
             (if semantic-document
                 (disco-room--insert-semantic-message-content
-                 semantic-document msg :prefix section-prefix-state)
+                 semantic-document msg
+                 :prefix section-prefix-state)
               (appkit-ui-insert-prefixed-lines
                section-prefix-state content)))))
       (let ((appkit-ui-card-indent-prefix-state section-prefix-state)

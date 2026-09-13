@@ -170,7 +170,8 @@
      (t
       (appkit-open-generated-surface
        disco-channel-directory--surface-type
-       :app app :identity identity
+       :app app
+       :identity identity
        :input disco-channel-directory--guild-id
        :buffer (current-buffer))))))
 
@@ -399,7 +400,8 @@
 (defun disco-channel-directory--apply-entries (entries force-entry-keys)
   "Reconcile Appkit directory ENTRIES, redrawing FORCE-ENTRY-KEYS."
   (appkit-directory-reconcile
-   (appkit-directory-surface) entries :force-keys force-entry-keys))
+   (appkit-directory-surface) entries
+   :force-keys force-entry-keys))
 
 (defun disco-channel-directory--header-line ()
   "Compute header-line text for the current guild directory."
@@ -506,27 +508,40 @@ FORCE-ENTRY-KEYS contains stable projection keys to redraw."
   "Translate directory client MESSAGE into a projection change."
   (pcase message
     ('refresh
-     (appkit-next :model model :render
-                  (appkit-projection-change-create :full-p t :frame-p t)))
+     (appkit-next
+      :model model
+      :render
+      (appkit-projection-change-create :full-p t :frame-p t)))
     ('geometry
-     (appkit-next :model model :render
-                  (appkit-projection-change-create
-                   :geometry-p t :position 'preserve)))
+     (appkit-next
+      :model model
+      :render
+      (appkit-projection-change-create
+       :geometry-p t
+       :position 'preserve)))
     ('frame
-     (appkit-next :model model :render
-                  (appkit-projection-change-create :frame-p t)))
+     (appkit-next
+      :model model
+      :render
+      (appkit-projection-change-create :frame-p t)))
     ('display
-     (appkit-next :model model :render
-                  (appkit-projection-change-create)))
+     (appkit-next
+      :model model
+      :render
+      (appkit-projection-change-create)))
     ('guild-snapshot
-     (appkit-next :model model :render
-                  (appkit-projection-change-create
-                   :full-p t :frame-p t
-                   :resources
-                   (list (disco-channel-directory--guild-snapshot-resource-key)))))
+     (appkit-next
+      :model model
+      :render
+      (appkit-projection-change-create
+       :full-p t
+       :frame-p t
+       :resources
+       (list (disco-channel-directory--guild-snapshot-resource-key)))))
     (`(channels-changed ,channel-ids)
      (appkit-next
-      :model model :render
+      :model model
+      :render
       (appkit-projection-change-create
        :keys (delete-dups
               (mapcar #'disco-channel-directory--entry-key-for-channel
@@ -836,7 +851,8 @@ FORCE-ENTRY-KEYS contains stable projection keys to redraw."
     (unless (disco-channel-directory--guild)
       (user-error "Disco: this guild is no longer available"))
     (disco-directory-load-guild-async
-     disco-channel-directory--guild-id :force t)
+     disco-channel-directory--guild-id
+     :force t)
     (when-let* ((surface (appkit-current-surface)))
       (disco-channel-directory--request-profile surface t))
     (message "Disco: refreshing %s channels…"
@@ -1143,7 +1159,9 @@ FORCE-ENTRY-KEYS contains stable projection keys to redraw."
            (t
             (appkit-open-generated-surface
              disco-channel-directory--surface-type
-             :app app :identity identity :input guild-id
+             :app app
+             :identity identity
+             :input guild-id
              :buffer-name (disco-channel-directory--buffer-name guild-id)
              :select t))))
          (buffer (appkit-surface-buffer surface)))
