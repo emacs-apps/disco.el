@@ -516,7 +516,6 @@
     ("l" "Copy link" disco-msg-copy-link)
     ("Y" "Copy text" disco-msg-copy-text)
     ("t" "Translate" disco-room-translate-message)
-    ("v" "Translate visible" disco-room-translate-visible)
     ("i" "Describe" disco-msg-describe-message)
     ("L" "Redisplay" disco-msg-redisplay)
     ("r" "Reply" disco-msg-reply
@@ -559,6 +558,7 @@
   "Room command menu for disco.el."
   [["Timeline"
     ("g" "Refresh room" disco-room-refresh)
+    ("t" "Translate visible" disco-room-translate-visible)
     ("o" "Message actions..." disco-transient-msg-operate
      :if disco-room-menu--message-at-point)
     ("c" "Send message" disco-room-send-message

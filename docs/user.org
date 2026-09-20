@@ -184,7 +184,8 @@ closes if its channel or guild is deleted.
 On a timeline message, press ~o~ to open the message menu.  Its ~t~ action
 is DWIM: translate all messages intersecting the active region, or just the
 current message when no region is active.  ~T~ opens the current message's
-thread, ~v~ translates the current window's visible messages, and ~Y~ copies text.
+thread, and ~Y~ copies text.  Visible-message translation belongs to the room
+menu: ~C-c ? t~ translates the current window's visible messages.
 
 Disco does not bind timeline ~t~ / ~T~ or ~g t~ for these actions, preserving
 native Evil/evil-snipe motions.  Visual ~o~ still exchanges selection endpoints;
