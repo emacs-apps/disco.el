@@ -327,9 +327,15 @@ If ownership cannot be determined, return UNKNOWN-VALUE."
       (when (disco-room--composer-edit-active-p)
         "cancel the active edit before starting a reply")))
 
+(defun disco-room--sending-p ()
+  "Return non-nil while a composer send or forward batch owns the send slot."
+  (or disco-room--send-in-flight (disco-room-operation-forwarding-p)))
+
 (defun disco-room--forward-unavailable-reason ()
   "Return reason forward action is unavailable, or nil."
-  (or (disco-room--room-send-restriction-reason)
+  (or (when (disco-room--sending-p) "send already in progress")
+      (when (disco-room-operation-current) "another message batch is in progress")
+      (disco-room--room-send-restriction-reason)
       (when-let* ((aux (disco-room--composer-aux-context-name)))
         (format "cancel %s before forwarding" aux))))
 
@@ -1345,9 +1351,8 @@ current effective input-options state.  Return the normalized state plist."
                (1+ target-index)))))
 
 (defun disco-room--message-id-required-at-point ()
-  "Return message ID at point, or signal user error."
-  (or (disco-room--message-id-at-point)
-      (user-error "disco: point is not on a message")))
+  "Return the sole operation target's ID, rejecting multiple selected messages."
+  (disco-msg-id (disco-msg-for-interactive)))
 
 (defun disco-room--forward-source-message (source-channel-id message-id)
   "Resolve SOURCE-CHANNEL-ID/MESSAGE-ID to a message object, or nil."
@@ -1732,7 +1737,7 @@ the attachment as a spoiler."
      (disco-room--channel-object)
      (disco-room--required-send-permissions)
      :action "sending stickers")
-    (if disco-room--send-in-flight
+    (if (disco-room--sending-p)
         (message "disco: send already in progress")
       (let ((room-buffer (current-buffer))
             (channel-id disco-room--channel-id)
@@ -1782,7 +1787,7 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
    (disco-room--sticker-unavailable-reason)
    "send stickers")
   (cond
-   (disco-room--send-in-flight
+   ((disco-room--sending-p)
     (message "disco: send already in progress"))
    ((disco-sticker-ready-p disco-room--guild-id)
     (disco-sticker-ensure-ready disco-room--guild-id)
@@ -2377,6 +2382,8 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
 
 ;;;; Interactive entry
 
+;;;; Interactive entry
+
 (defun disco-room-send-message (&optional prefix)
   "Capture and send the current semantic draft using PREFIX source format."
   (interactive "P")
@@ -2388,7 +2395,7 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
    (if (disco-room--composer-edit-active-p)
        "save edits"
      "send messages"))
-  (if disco-room--send-in-flight
+  (if (disco-room--sending-p)
       (message "disco: send already in progress")
     (let ((plan (disco-room--capture-send-plan prefix)))
       (cond
@@ -2409,164 +2416,66 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
     (disco-room-reply-to-message message-id)))
 
 (defun disco-room-reply-to-message (&optional message-id)
-  "Set pending reply target MESSAGE-ID for next send.
-
-When called interactively, defaults to message under point."
-  (interactive
-   (progn
-     (disco-room--ensure-action-available
-      (disco-room--reply-unavailable-reason)
-      "start replies")
-     (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
-            (fallback (or at-point (disco-room--latest-message-id)))
-            (raw (read-string
-                  (if fallback
-                      (format "Reply to message ID (default %s): " fallback)
-                    "Reply to message ID: "))))
-       (list (if (string-empty-p raw)
-                 (or fallback
-                     (user-error "disco: no target message available"))
-               raw)))))
+  "Set pending reply target MESSAGE-ID for next send.\n\nWhen called interactively, defaults to message under point."
+  (interactive (list (disco-msg-id (disco-msg-for-interactive))))
   (disco-room--ensure-action-available
-   (disco-room--reply-unavailable-reason)
-   "start replies")
+   (disco-room--reply-unavailable-reason) "start replies")
   (when (disco-room--composer-edit-active-p)
     (disco-room--composer-edit-clear t))
   (disco-room--set-composer-aux-state nil message-id)
-  (disco-room--update-frame)
-  (appkit-chatbuf-focus-input)
+  (disco-room--update-frame) (appkit-chatbuf-focus-input)
   (message "disco: next message will reply to %s" message-id))
 
-(defun disco-room--forward-msg (msg)
-  "Forward MSG into the current room, prompting only for optional extras."
-  (let* ((message-id (alist-get 'id msg))
-         (source-channel-id (or (alist-get 'channel_id msg) disco-room--channel-id))
-         (content-raw (string-trim (read-string "Optional forward comment: ")))
-         (forward-only (disco-room--read-forward-only source-channel-id message-id)))
-    (unless (and (stringp message-id) (not (string-empty-p message-id)))
-      (user-error "disco: message has no id to forward"))
-    (unless (and (stringp source-channel-id) (not (string-empty-p source-channel-id)))
-      (user-error "disco: message has no source channel id to forward"))
-    (disco-room-forward-message
-     message-id
-     source-channel-id
-     (unless (string-empty-p content-raw)
-       content-raw)
-     forward-only)))
+
+(defun disco-room--forward-msg (messages)
+  "Forward selected MESSAGES into this room in order, without using the draft."
+  (disco-room--ensure-action-available
+   (disco-room--forward-unavailable-reason) "forward messages")
+  (let* ((content (string-trim
+                   (read-string (if (> (length messages) 1)
+                                    "Optional comment for each forward: "
+                                  "Optional forward comment: "))))
+         (only (when (= (length messages) 1)
+                 (disco-room--read-forward-only
+                  (disco-msg-channel-id (car messages))
+                  (disco-msg-id (car messages)))))
+         (specs (mapcar (lambda (msg)
+                          (unless (disco-room--canonical-message-p msg)
+                            (user-error "disco: cannot forward a pending message"))
+                          (disco-room--forward-spec
+                           (disco-msg-id msg) (disco-msg-channel-id msg) content only))
+                        messages)))
+    (disco-room-operation-begin 'forward specs)))
+
+(defun disco-room--forward-spec (id source-channel content forward-only)
+  "Preflight a forward and return its owned request specification."
+  (let* ((source-channel (or source-channel disco-room--channel-id))
+         (content (and (stringp content) (string-trim content)))
+         (content (and content (not (string-empty-p content)) content)))
+    (disco-api--validate-message-content-length content "content")
+    (unless (and (disco-msg-normalize-id id) (disco-msg-normalize-id source-channel))
+      (user-error "disco: forwarding requires message and source channel IDs"))
+    (disco-permission-ensure-channel
+     (disco-room--channel-object) (disco-room--required-send-permissions)
+     :action "forwarding messages")
+    (disco-room--ensure-jump-permissions
+     source-channel (disco-room--resolve-target-channel source-channel))
+    (list :id id :source-channel source-channel :content content
+          :forward-only forward-only
+          :allowed-mentions (and content (disco-room--send-allowed-mentions)))))
 
 (defun disco-room-forward-message (&optional message-id source-channel-id content forward-only)
-  "Forward MESSAGE-ID from SOURCE-CHANNEL-ID into current room.
-
-CONTENT is optional text sent alongside the forwarded reference.
-FORWARD-ONLY optionally narrows embeds/attachments included in the forward."
-  (interactive
-   (progn
-     (disco-room--ensure-action-available
-      (disco-room--forward-unavailable-reason)
-      "forward messages")
-     (let* ((at-point (ignore-errors (disco-room--message-id-at-point)))
-            (fallback-message (or at-point (disco-room--latest-message-id)))
-            (message-raw (read-string
-                          (if fallback-message
-                              (format "Forward message ID (default %s): " fallback-message)
-                            "Forward message ID: ")))
-            (message-id (if (string-empty-p message-raw)
-                            (or fallback-message
-                                (user-error "disco: no message id provided"))
-                          message-raw))
-            (fallback-channel (or disco-room--channel-id ""))
-            (channel-raw (read-string
-                          (if (string-empty-p fallback-channel)
-                              "Source channel ID: "
-                            (format "Source channel ID (default %s): " fallback-channel))))
-            (source-channel-id (if (string-empty-p channel-raw)
-                                   (or fallback-channel
-                                       (user-error "disco: no source channel id provided"))
-                                 channel-raw))
-            (content-raw (string-trim (read-string "Optional forward comment: ")))
-            (forward-only (disco-room--read-forward-only source-channel-id message-id)))
-       (list message-id
-             source-channel-id
-             (unless (string-empty-p content-raw)
-               content-raw)
-             forward-only))))
-  (disco-room--ensure-action-available
-   (disco-room--forward-unavailable-reason)
-   "forward messages")
-  (let* ((target-channel-id disco-room--channel-id)
-         (source-channel-id (or source-channel-id disco-room--channel-id))
-         (source-channel
-          (and source-channel-id
-               (disco-room--resolve-target-channel source-channel-id)))
-         (normalized-content
-          (and (stringp content)
-               (let ((trimmed (string-trim content)))
-                 (unless (string-empty-p trimmed)
-                   trimmed))))
-         (room-buffer (current-buffer))
-         (view (disco-room--ensure-surface))
-         request-revision
-         (allowed-mentions
-          (and normalized-content (disco-room--send-allowed-mentions)))
-         settled-p)
-    (disco-api--validate-message-content-length normalized-content "content")
-    (unless (and message-id (not (string-empty-p (format "%s" message-id))))
-      (user-error "disco: message id cannot be empty"))
-    (unless (and source-channel-id
-                 (not (string-empty-p (format "%s" source-channel-id))))
-      (user-error "disco: source channel id cannot be empty"))
-    (disco-permission-ensure-channel
-     (disco-room--channel-object)
-     (disco-room--required-send-permissions)
-     :action "forwarding messages")
-    (disco-room--ensure-jump-permissions source-channel-id source-channel)
-    (setq request-revision
-          (disco-state-message-revision target-channel-id))
-    (setq disco-room--send-in-flight t)
-    (disco-room--queue-update view 'frame)
-
-    (cl-labels
-        ((room-active-p
-           ()
-           (disco-room--channel-buffer-p room-buffer target-channel-id view))
-         (finish-error
-           (error-data)
-           (unless settled-p
-             (setq settled-p t)
-             (when (room-active-p)
-               (with-current-buffer room-buffer
-                 (setq disco-room--send-in-flight nil)
-                 (disco-room--request-render view)
-                 (message "disco: forward failed: %s"
-                          (disco-room--async-error-message error-data))))))
-         (finish-success
-           (response)
-           (if (not (and (listp response) (alist-get 'id response)))
-               (finish-error
-                (list 'error "disco: forward response has no message id"))
-             (unless settled-p
-               (setq settled-p t)
-               (disco-state-merge-message-response
-                target-channel-id response request-revision)
-               (when (room-active-p)
-                 (with-current-buffer room-buffer
-                   (setq disco-room--send-in-flight nil)
-                   (disco-room--request-render view)
-                   (message "disco: forwarded message %s from channel %s"
-                            message-id source-channel-id)))))))
-      (condition-case err
-          (disco-api-forward-message-async
-           target-channel-id
-           message-id
-           source-channel-id
-           :content normalized-content
-           :forward-only forward-only
-           :allowed-mentions (and normalized-content allowed-mentions)
-           :on-success #'finish-success
-           :on-error #'finish-error)
-        (error
-         (finish-error err)
-         (signal (car err) (cdr err)))))))
+  "Forward selected messages interactively, or explicit MESSAGE-ID from Lisp.
+SOURCE-CHANNEL-ID identifies the source.  CONTENT is an optional comment;
+FORWARD-ONLY optionally narrows the single forward's embeds and attachments."
+  (interactive)
+  (if (called-interactively-p 'interactive)
+      (disco-room--forward-msg (disco-msg-targets-for-interactive))
+    (disco-room--ensure-action-available
+     (disco-room--forward-unavailable-reason) "forward messages")
+    (disco-room-operation-begin
+     'forward (list (disco-room--forward-spec
+                     message-id source-channel-id content forward-only)))))
 
 (defun disco-room-cancel-reply ()
   "Cancel pending composer reply/edit context."
@@ -2615,7 +2524,7 @@ opens the draft editor."
 (defun disco-room-edit-message ()
   "Enter composer edit mode for message at point in current room."
   (interactive)
-  (disco-room--edit-msg (disco-room--message-at-point)))
+  (disco-room--edit-msg (disco-msg-for-interactive)))
 
 (provide 'disco-room-compose)
 

@@ -51,7 +51,7 @@
 
 (defun disco-room--pin-message-unavailable-reason (&optional msg)
   "Return reason toggling a message pin is unavailable for MSG, or nil."
-  (let ((msg (or msg (ignore-errors (disco-room--message-at-point)))))
+  (let ((msg (or msg (ignore-errors (disco-msg-for-interactive)))))
     (cond
      ((not (listp msg))
       "point is not on a message")
@@ -161,7 +161,7 @@
   (interactive)
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (msg (or (disco-room--message-by-id target-id)
-                  (disco-room--message-at-point))))
+                  (disco-msg-for-interactive))))
     (disco-room--ensure-action-available
      (disco-room--pin-message-unavailable-reason msg)
      "toggle message pins")

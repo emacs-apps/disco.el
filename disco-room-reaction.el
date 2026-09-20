@@ -404,7 +404,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
 (defun disco-room-add-reaction (&optional emoji message-id)
   "Add EMOJI reaction to MESSAGE-ID at point."
   (interactive
-   (let* ((msg (or (disco-room--message-at-point)
+   (let* ((msg (or (disco-msg-for-interactive)
                    (user-error "disco: point is not on a message"))))
      (disco-room--ensure-action-available
       (disco-room--reaction-unavailable-reason msg)
@@ -473,7 +473,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
 (defun disco-room-remove-reaction (&optional emoji message-id)
   "Remove current user's EMOJI reaction from MESSAGE-ID at point."
   (interactive
-   (let* ((msg (or (disco-room--message-at-point)
+   (let* ((msg (or (disco-msg-for-interactive)
                    (user-error "disco: point is not on a message"))))
      (disco-room--ensure-action-available
       (disco-room--reaction-unavailable-reason msg)
@@ -542,7 +542,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
 (defun disco-room-toggle-reaction (&optional emoji message-id)
   "Toggle current user's EMOJI reaction on MESSAGE-ID at point."
   (interactive
-   (let* ((msg (or (disco-room--message-at-point)
+   (let* ((msg (or (disco-msg-for-interactive)
                    (user-error "disco: point is not on a message"))))
      (disco-room--ensure-action-available
       (disco-room--reaction-unavailable-reason msg)
@@ -558,7 +558,7 @@ versions or rooms without a catalog retain the unrestricted text fallback."
   (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
          (msg (or (disco-room--message-by-id target-id)
                   (and (null message-id)
-                       (disco-room--message-at-point))
+                       (disco-msg-for-interactive))
                   (user-error "disco: message not found in room state"))))
     (if (disco-room--message-has-own-reaction-p msg emoji)
         (disco-room-remove-reaction emoji target-id)

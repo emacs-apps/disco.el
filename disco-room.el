@@ -11,6 +11,10 @@
 (require 'subr-x)
 (require 'time-date)
 (require 'seq)
+(require 'disco-room-operation)
+
+(require 'appkit-selection)
+
 (require 'cl-lib)
 (require 'ewoc)
 (require 'plz)
@@ -100,6 +104,8 @@ This is a search boundary, not the remote/latest protocol frontier.")
 
 ;;; Interaction maps
 
+;;; Interaction maps
+
 (defvar-keymap disco-room-timeline-mode-map
   :doc "Timeline-only keymap active when point is outside the room draft."
   "q" #'quit-window
@@ -107,6 +113,8 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "l" #'disco-msg-copy-link
   "n" #'disco-msg-next
   "p" #'disco-msg-previous
+  "m" #'disco-msg-mark-toggle
+  "U" #'disco-msg-toggle-marks
   "o" #'disco-msg-operate
   "r" #'disco-msg-reply
   "f" #'disco-msg-forward
@@ -806,24 +814,10 @@ Message lines carry the `disco-message-id' text property."
     (appkit-translate-request-many (nreverse sources))))
 
 (defun disco-room--messages-in-range (begin end)
-  "Return distinct messages intersecting the half-open range BEGIN to END.
-Use exact row properties, not nearby-message fallback at an empty boundary.
-Only already rendered messages count; the composer is never included."
-  (let ((position begin)
-        (end (min end (or (appkit-chatbuf-prompt-start-position) (point-max))))
-        (seen (make-hash-table :test #'equal))
-        messages)
-    (while (< position end)
-      (when-let* ((id (get-text-property position 'disco-message-id))
-                  (channel (get-text-property position 'disco-message-channel-id))
-                  (key (cons channel id))
-                  ((not (gethash key seen)))
-                  (msg (disco-msg-at position)))
-        (puthash key t seen)
-        (push msg messages))
-      (setq position
-            (next-single-property-change position 'disco-message-id nil end)))
-    (nreverse messages)))
+  "Return messages intersecting the rendered half-open BEGIN..END range."
+  (delq nil
+        (mapcar (lambda (id) (disco-room--resolve-message id))
+                (appkit-chat-timeline-keys-in-range begin end))))
 
 (defun disco-room-translate-visible ()
   "Translate whole messages visible in the selected room window.
@@ -838,15 +832,11 @@ can resize rows; do not fetch or translate off-screen history."
       (window-start window) (window-end window t)))))
 
 (defun disco-room-translate-message ()
-  "Translate selected messages, or the message at point when no region is active.
-Translate each intersecting message's whole body, excluding spoilers even when
-revealed.  Skip rows without text.  Originals and draft text are never changed
-or used as rendered-buffer input to the backend."
+  "Translate captured, region-selected, marked, or point messages.
+Each whole body excludes spoilers even when revealed.  Skip rows without
+text, leaving originals and the composer untouched."
   (interactive)
-  (disco-room--translate-messages
-   (if (use-region-p)
-       (disco-room--messages-in-range (region-beginning) (region-end))
-     (list (disco-msg-for-interactive)))))
+  (disco-room--translate-messages (disco-msg-targets-for-interactive)))
 
 (defun disco-room-toggle-message-spoilers (message-id)
   "Toggle all rendered spoilers for MESSAGE-ID, telega-style."
@@ -1218,6 +1208,43 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
 
 ;;; Frame and projection
 
+(defun disco-room--selection ()
+  "Return this Surface's committed selection, or nil before attachment."
+  (when-let* ((surface (appkit-current-surface)))
+    (plist-get (appkit-surface-model surface) :selection)))
+
+(defun disco-room--marked-ids ()
+  "Return a copy of this Surface's marked message IDs."
+  (when-let* ((selection (disco-room--selection)))
+    (copy-sequence (appkit-selection-keys selection))))
+
+(defun disco-room--mark-message (operation id)
+  "Commit mark OPERATION for ID through the owning Surface."
+  (appkit-surface-send (disco-room--ensure-surface)
+                       (list 'message-mark operation id)))
+
+(defun disco-room--selection-transition (model operation id)
+  "Return a new room MODEL and render request for mark OPERATION on ID."
+  (let* ((selection (plist-get model :selection))
+         (next-selection
+          (pcase operation
+            ('clear-restore (appkit-selection-toggle selection))
+            ('toggle (appkit-selection-set
+                      selection id (not (appkit-selection-member-p selection id))))
+            ('unmark (appkit-selection-set selection id nil))
+            ('forget (appkit-selection-forget selection (list id)))
+            (_ (error "Unknown message mark operation: %S" operation))))
+         (next (copy-sequence model)))
+    (setf (plist-get next :selection) next-selection)
+    (appkit-next
+     :model next
+     :render (disco-room--render-request-create
+              :change (appkit-projection-change-create
+                       :frame-p t
+                       :keys (delete-dups
+                              (append (appkit-selection-keys selection)
+                                      (appkit-selection-keys next-selection))))))))
+
 (defun disco-room--header-text (&optional channel)
   "Build EWOC header text for the current room state."
   (let* ((channel (or channel (disco-room--channel-object)))
@@ -1226,21 +1253,29 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
          (composer-visible-p (disco-room--composer-visible-p channel))
          (context-text (and (not composer-visible-p)
                             (disco-room--input-footer-context-text)))
+         (marked-count (length (disco-room--marked-ids)))
+         (operation-status (when-let* ((surface (appkit-current-surface)))
+                             (disco-room-operation-status (appkit-surface-model surface))))
          (filter-line (disco-room--msg-filter-status-line))
          (composer-status-line (disco-room--composer-hidden-status-line channel))
          (text
           (with-temp-buffer
             (insert (format "Channel: %s%s" channel-name channel-suffix))
-            (when disco-room--send-in-flight
+            (when (disco-room--sending-p)
               (insert "   [sending...]"))
+            (when (> marked-count 0)
+              (insert (format "   [%d marked]" marked-count)))
             (insert "\n")
             (when (and (stringp context-text)
                        (not (string-empty-p context-text)))
               (insert context-text))
+            (when operation-status (insert operation-status "\n"))
             (when (stringp filter-line)
               (insert filter-line "\n"))
             (when (stringp composer-status-line)
               (insert composer-status-line "\n"))
+            (when (> marked-count 0)
+              (insert (format "   [%d marked]" marked-count)))
             (insert "\n")
             (buffer-string))))
     (add-text-properties
@@ -2064,46 +2099,30 @@ When QUIET is non-nil, suppress progress messages."
   (message "disco: breakline wrapping %s"
            (if appkit-chatbuf-wrap-long-lines "enabled" "disabled")))
 
-(defun disco-room--delete-msg (msg)
-  "Delete MSG in current room."
-  (let ((message-id (alist-get 'id msg)))
+(defun disco-room--delete-msg (messages)
+  "Delete MESSAGES after complete preflight and one batch confirmation."
+  (when (disco-room-operation-current)
+    (user-error "disco: another message batch is still in progress"))
+  (dolist (msg messages)
+    (unless (disco-room--canonical-message-p msg)
+      (user-error "disco: cannot delete a pending message"))
     (disco-room--ensure-action-available
-     (disco-room--delete-message-unavailable-reason msg)
-     "delete messages")
-    (when (y-or-n-p (format "Delete message %s? " message-id))
-      (let ((room-buffer (current-buffer))
-            (channel-id disco-room--channel-id)
-            (view (disco-room--ensure-surface)))
-        (disco-api-delete-message-async
-         channel-id
-         message-id
-         :on-success
-         (lambda (_response)
-           (when (disco-room--channel-buffer-p room-buffer channel-id view)
-             (with-current-buffer room-buffer
-               (disco-state-delete-message channel-id message-id)
-               (disco-room--repair-history-window-after-delete message-id)
-               (disco-room--request-render view)
-               (message "disco: deleted message %s" message-id))))
-         :on-error
-         (lambda (err)
-           (when (disco-room--channel-buffer-p room-buffer channel-id view)
-             (message "disco: delete failed for %s: %s"
-                      message-id
-                      (disco-room--async-error-message err)))))))))
+     (disco-room--delete-message-unavailable-reason msg) "delete messages"))
+  (when (y-or-n-p (format "Delete %d selected message%s? "
+                          (length messages) (if (= (length messages) 1) "" "s")))
+    (disco-room-operation-begin
+     'delete (mapcar (lambda (msg) (list :id (disco-msg-id msg))) messages))))
 
 (defun disco-room-delete-message ()
-  "Delete message at point in current room."
+  "Delete captured, region-selected, marked, or point messages."
   (interactive)
-  (disco-room--delete-msg (disco-room--message-at-point)))
+  (disco-room--delete-msg (disco-msg-targets-for-interactive)))
 
 ;;; Commands and keymaps
 
-(defun disco-room--operate-msg (_msg)
-  "Open the message transient for the current room.
-
-_MSG is ignored because the transient resolves availability from point."
-  (call-interactively #'disco-transient-msg-operate))
+(defun disco-room--operate-msg (selection)
+  "Open the message transient for captured SELECTION."
+  (disco-transient-msg-operate selection))
 
 (defvar-keymap disco-room-mode-map
   :doc "Keymap for `disco-room-mode'."
@@ -2205,6 +2224,8 @@ its same-mode buffer survives."
   (disco-room-compose-reset)
   (setq-local disco-room--pending-jump-message-id nil)
   (disco-room-search-reset)
+  (setq-local disco-msg-marked-ids-function #'disco-room--marked-ids)
+  (setq-local disco-msg-mark-function #'disco-room--mark-message)
   (setq-local disco-msg-resolve-function #'disco-room--resolve-message)
   (setq-local disco-msg-content-text-function #'disco-room--message-copy-text)
   (setq-local disco-msg-reply-function #'disco-room--reply-to-msg)
@@ -2255,6 +2276,7 @@ its same-mode buffer survives."
     (disco-room--reset-view-local-state channel-id channel-name)
     (appkit-next
      :model (list :channel-id channel-id
+                  :selection (appkit-selection-create)
                   :media-phase 'idle
                   :media-message nil)
      :render (disco-room--render-request-create
@@ -2262,7 +2284,17 @@ its same-mode buffer survives."
 
 (defun disco-room--surface-update (_context model message)
   "Advance the room Surface MODEL for MESSAGE."
+  (when (and (eq (car-safe message) 'gateway-event)
+             (eq (plist-get (cadr message) :type) 'message-delete))
+    (setq model (copy-sequence model))
+    (setf (plist-get model :selection)
+          (appkit-selection-forget
+           (plist-get model :selection)
+           (list (plist-get (cadr message) :message-id)))))
   (pcase message
+    (`(message-operation . ,_) (disco-room-operation-update model message))
+    (`(message-mark ,operation ,id)
+     (disco-room--selection-transition model operation id))
     ('synchronize (appkit-next :model model :render appkit-render-none))
     ((or 'refresh 'timeline 'frame 'geometry 'position
          `(rows-changed ,_) `(resources-changed ,_) `(gateway-event ,_))
@@ -2284,7 +2316,7 @@ its same-mode buffer survives."
          (`(gateway-event ,event)
           (let ((kind (plist-get event :type)))
             (appkit-projection-change-create
-             :frame-p (eq kind 'typing-start)
+             :frame-p (memq kind '(typing-start message-delete))
              :keys (when (memq kind '(message-reaction-add
                                       message-reaction-remove
                                       message-reaction-remove-all

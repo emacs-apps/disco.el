@@ -76,7 +76,7 @@
 
 (defun disco-room--poll-vote-unavailable-reason (&optional msg)
   "Return reason poll voting actions are unavailable for MSG, or nil."
-  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+  (let* ((msg (or msg (ignore-errors (disco-msg-for-interactive))))
          (poll (and (listp msg) (disco-msg-poll msg))))
     (cond
      ((null msg)
@@ -90,7 +90,7 @@
 
 (defun disco-room--poll-submit-unavailable-reason (&optional msg)
   "Return reason staged poll submit is unavailable for MSG, or nil."
-  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+  (let* ((msg (or msg (ignore-errors (disco-msg-for-interactive))))
          (base-reason (disco-room--poll-vote-unavailable-reason msg)))
     (or base-reason
         (let* ((target-id (alist-get 'id msg))
@@ -106,7 +106,7 @@
 
 (defun disco-room--poll-clear-unavailable-reason (&optional msg)
   "Return reason clear-poll-votes is unavailable for MSG, or nil."
-  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+  (let* ((msg (or msg (ignore-errors (disco-msg-for-interactive))))
          (base-reason (disco-room--poll-vote-unavailable-reason msg)))
     (or base-reason
         (let* ((poll (and (listp msg) (disco-msg-poll msg)))
@@ -116,7 +116,7 @@
 
 (defun disco-room--poll-expire-unavailable-reason (&optional msg)
   "Return reason end-poll is unavailable for MSG, or nil."
-  (let* ((msg (or msg (ignore-errors (disco-room--message-at-point))))
+  (let* ((msg (or msg (ignore-errors (disco-msg-for-interactive))))
          (poll (and (listp msg) (disco-msg-poll msg))))
     (cond
      ((null msg)

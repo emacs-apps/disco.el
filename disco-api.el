@@ -1701,7 +1701,7 @@ Discord sticker snowflakes."
 (cl-defun disco-api-create-message-async
     (channel-id &key content reply-to-message-id message-reference
                 allowed-mentions attachments poll nonce sticker-ids
-                on-success on-error)
+                owner on-success on-error)
   "Asynchronously create one message in CHANNEL-ID.
 
 Keyword arguments are the same as `disco-api-create-message'."
@@ -1733,13 +1733,15 @@ Keyword arguments are the same as `disco-api-create-message'."
            :raw-body body
            :extra-headers `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary)))
            :body-type 'binary
-           :on-success on-success
+           :owner owner
+     :on-success on-success
            :on-error on-error))
       (disco-api--request-async
        "POST"
        (format "/channels/%s/messages" channel-id)
        :payload payload
-       :on-success on-success
+       :owner owner
+     :on-success on-success
        :on-error on-error))))
 
 (cl-defun disco-api-send-message-with-attachments (channel-id &key content reply-to-message-id message-reference allowed-mentions attachments)
@@ -1917,7 +1919,7 @@ ALLOWED-MENTIONS controls mention parsing for optional CONTENT."
 
 (cl-defun disco-api-forward-message-async (channel-id source-message-id source-channel-id
                                                       &key content forward-only allowed-mentions
-                                                      on-success on-error)
+                                                      owner on-success on-error)
   "Asynchronously forward SOURCE-MESSAGE-ID from SOURCE-CHANNEL-ID to CHANNEL-ID."
   (let ((message-reference
          (append
@@ -1931,6 +1933,7 @@ ALLOWED-MENTIONS controls mention parsing for optional CONTENT."
      :content content
      :message-reference message-reference
      :allowed-mentions allowed-mentions
+     :owner owner
      :on-success on-success
      :on-error on-error)))
 
@@ -1963,12 +1966,13 @@ When ALLOWED-MENTIONS is non-nil, include it in the edit payload."
    nil
    nil))
 
-(cl-defun disco-api-delete-message-async (channel-id message-id &key on-success on-error)
+(cl-defun disco-api-delete-message-async (channel-id message-id &key owner on-success on-error)
   "Delete MESSAGE-ID from CHANNEL-ID asynchronously."
   (disco-api--request-async
    "DELETE"
    (format "/channels/%s/messages/%s" channel-id message-id)
-   :on-success on-success
+   :owner owner
+     :on-success on-success
    :on-error on-error))
 
 (provide 'disco-api)

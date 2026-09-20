@@ -180,7 +180,7 @@
 (defun disco-room-thread--open-from-message-unavailable-reason (&optional message)
   "Return reason opening starter thread for MESSAGE is unavailable, or nil."
   (let* ((message (or message
-                      (ignore-errors (disco-room--message-at-point))))
+                      (ignore-errors (disco-msg-for-interactive))))
          (message-id (and (listp message) (alist-get 'id message))))
     (cond
      ((not (listp message)) "point is not on a message")
@@ -209,7 +209,7 @@
 (defun disco-room-thread-open-from-message-at-point ()
   "Open starter thread associated with the message at point."
   (interactive)
-  (disco-room-thread-open-from-message (disco-room--message-at-point)))
+  (disco-room-thread-open-from-message (disco-msg-for-interactive)))
 
 (defun disco-room-thread-insert-reference (message prefix)
   "Insert a navigable starter-thread reference for MESSAGE using PREFIX."

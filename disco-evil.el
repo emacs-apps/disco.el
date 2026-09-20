@@ -151,6 +151,9 @@ When nil, leave Evil's initial-state selection untouched."
     "g r" #'disco-room-refresh
     "g ?" #'disco-msg-describe-message
     "!" #'disco-msg-add-reaction
+    "a" #'disco-msg-mark-toggle
+    "u" #'disco-msg-unmark
+    "U" #'disco-msg-toggle-marks
     "o" #'disco-msg-operate
     :m
     "c" #'undefined

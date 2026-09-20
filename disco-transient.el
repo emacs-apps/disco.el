@@ -505,53 +505,92 @@
     ("q" "Quit window" quit-window)]])
 
 (defun disco-room-menu--message-at-point ()
-  "Return message at point, suppressing user errors for menu checks."
-  (ignore-errors (disco-room--message-at-point)))
+  "Return the sole selected message for single-message menu predicates."
+  (ignore-errors (disco-msg-for-interactive)))
+
+(defun disco-room-menu--targets ()
+  "Return the captured operation targets, or nil if they became unavailable."
+  (ignore-errors (disco-msg-targets-for-interactive)))
+
+(defun disco-room-menu--single-message-p ()
+  "Return non-nil when exactly one captured target remains available."
+  (= (length (disco-room-menu--targets)) 1))
+
+(defun disco-room-menu--delete-unavailable-p ()
+  "Return non-nil unless every captured target can be deleted."
+  (or (disco-room-operation-current)
+      (null (disco-room-menu--targets))
+      (seq-some #'disco-room--delete-message-unavailable-reason
+                (disco-room-menu--targets))))
+
+(defun disco-room-menu--media-context ()
+  "Return the single target's captured card context, never a new point target."
+  (when (disco-room-menu--single-message-p)
+    (when-let* ((selection (disco-msg--menu-selection)))
+      (disco-msg-selection-media-context selection))))
+
+(defun disco-room-menu--media-inapt-p (action)
+  "Return non-nil unless captured media supports ACTION."
+  (let ((context (disco-room-menu--media-context)))
+    (or (null context) (appkit-media-card-action-inapt-reason action context))))
+
+(defun disco-room-menu--media-action (action)
+  "Run ACTION on the captured single target's media context."
+  (disco-msg-for-interactive)
+  (let ((context (disco-room-menu--media-context)))
+    (unless context (user-error "disco: no media in captured message selection"))
+    (appkit-media-card-call-action action context)))
 
 ;;;###autoload(autoload 'disco-transient-msg-operate "disco" nil t)
-(transient-define-prefix disco-transient-msg-operate ()
-  "Transient for msg-centric room actions at point."
-  [["Message"
-    ("c" "Copy dwim" disco-msg-copy-dwim)
-    ("l" "Copy link" disco-msg-copy-link)
+(transient-define-prefix disco-transient-msg-operate (&optional selection)
+  "Operate on a stable snapshot of selected messages."
+  [[:description (lambda () (format "Messages (%d selected)"
+                                    (length (disco-room-menu--targets))))
+    ("c" "Copy text" disco-msg-copy-text)
+    ("l" "Copy links" disco-msg-copy-link)
     ("Y" "Copy text" disco-msg-copy-text)
     ("t" "Translate" disco-room-translate-message)
-    ("i" "Describe" disco-msg-describe-message)
-    ("L" "Redisplay" disco-msg-redisplay)
+    ("i" "Describe" disco-msg-describe-message :inapt-if-not disco-room-menu--single-message-p)
+    ("L" "Redisplay" disco-msg-redisplay :inapt-if-not disco-room-menu--single-message-p)
     ("r" "Reply" disco-msg-reply
-     :if-not disco-room--reply-unavailable-reason)
-    ("f" "Forward" disco-msg-forward
-     :if-not disco-room--forward-unavailable-reason)
+     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
+                              (disco-room--reply-unavailable-reason))))
+    ("f" "Forward" disco-msg-forward :inapt-if disco-room--forward-unavailable-reason)
     ("e" "Edit" disco-msg-edit
-     :if-not (lambda ()
-               (disco-room--edit-start-unavailable-reason
-                (disco-room-menu--message-at-point))))
-    ("d" "Delete" disco-msg-delete
-     :if-not (lambda ()
-               (disco-room--delete-message-unavailable-reason
-                (disco-room-menu--message-at-point))))
+     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
+                              (disco-room--edit-start-unavailable-reason
+                               (disco-room-menu--message-at-point)))))
+    ("d" "Delete" disco-msg-delete :inapt-if disco-room-menu--delete-unavailable-p)
     ("P" "Pin / unpin" disco-msg-toggle-pin
-     :if-not (lambda ()
-               (disco-room--pin-message-unavailable-reason
-                (disco-room-menu--message-at-point))))
+     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
+                              (disco-room--pin-message-unavailable-reason
+                               (disco-room-menu--message-at-point)))))
     ("!" "Add reaction" disco-msg-add-reaction
-     :if-not disco-room--reaction-unavailable-reason)
+     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
+                              (disco-room--reaction-unavailable-reason
+                               (disco-room-menu--message-at-point)))))
     ("T" "Open thread" disco-msg-open-thread
-     :if-not disco-room-thread--open-from-message-unavailable-reason)]
+     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
+                              (disco-room-thread--open-from-message-unavailable-reason
+                               (disco-room-menu--message-at-point)))))]
    ["Poll"
-    ("p" "Poll actions…" disco-room-poll-transient
-     :if disco-room-poll-actionable-at-point-p)]
+    ("p" "Poll actions…" disco-room-poll-transient :if disco-room-poll-actionable-at-point-p)]
    ["Media"
-    ("o" "Open / play" appkit-media-card-open
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'open)))
-    ("D" "Download / retry" appkit-media-card-download
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'download)))
-    ("C" "Cancel download" appkit-media-card-cancel-download
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'cancel)))
-    ("s" "Save as" appkit-media-card-save-as
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'save-as)))
-    ("y" "Copy media URL" appkit-media-card-copy-url
-     :if-not (lambda () (appkit-media-card-action-inapt-reason 'copy-url)))]])
+    :if disco-room-menu--media-context
+    ("o" "Open / play" (lambda () (interactive) (disco-room-menu--media-action 'open))
+     :inapt-if (lambda () (disco-room-menu--media-inapt-p 'open)))
+    ("D" "Download / retry" (lambda () (interactive) (disco-room-menu--media-action 'download))
+     :inapt-if (lambda () (disco-room-menu--media-inapt-p 'download)))
+    ("C" "Cancel download" (lambda () (interactive) (disco-room-menu--media-action 'cancel))
+     :inapt-if (lambda () (disco-room-menu--media-inapt-p 'cancel)))
+    ("s" "Save as" (lambda () (interactive) (disco-room-menu--media-action 'save-as))
+     :inapt-if (lambda () (disco-room-menu--media-inapt-p 'save-as)))
+    ("y" "Copy media URL" (lambda () (interactive) (disco-room-menu--media-action 'copy-url))
+     :inapt-if (lambda () (disco-room-menu--media-inapt-p 'copy-url)))]]
+  (interactive (list (disco-msg-capture-selection)))
+  (setq selection (or selection (disco-msg-capture-selection)))
+  (disco-msg-selection-messages selection)
+  (transient-setup 'disco-transient-msg-operate nil nil :scope selection))
 
 ;;;###autoload(autoload 'disco-room-transient "disco" nil t)
 (transient-define-prefix disco-room-transient ()
@@ -560,7 +599,7 @@
     ("g" "Refresh room" disco-room-refresh)
     ("t" "Translate visible" disco-room-translate-visible)
     ("o" "Message actions..." disco-transient-msg-operate
-     :if disco-room-menu--message-at-point)
+     :if disco-room-menu--targets)
     ("c" "Send message" disco-room-send-message
      :if-not disco-room--send-message-unavailable-reason)
     ("f" "Attach file" disco-room-attach-file
@@ -647,7 +686,7 @@
              (not (disco-room--poll-expire-unavailable-reason message))))))
 
 ;;;###autoload(autoload 'disco-room-poll-transient "disco" nil t)
-(transient-define-prefix disco-room-poll-transient ()
+(transient-define-prefix disco-room-poll-transient (&optional selection)
   "Transient for the poll at point."
   :refresh-suffixes t
   [["Vote"
@@ -660,10 +699,13 @@
      :if-not disco-room--poll-clear-unavailable-reason)
     ("x" "End poll" disco-room-expire-poll
      :if-not disco-room--poll-expire-unavailable-reason)]]
-  (interactive)
+  (interactive (list (disco-msg-capture-selection)))
+  (setq selection (or selection (disco-msg-capture-selection)))
+  (unless (= (length (disco-msg-selection-refs selection)) 1)
+    (user-error "disco: poll actions require exactly one message"))
   (unless (disco-msg-poll (disco-room-menu--message-at-point))
     (user-error "disco: point is not on a poll"))
-  (transient-setup 'disco-room-poll-transient))
+  (transient-setup 'disco-room-poll-transient nil nil :scope selection))
 
 (provide 'disco-transient)
 

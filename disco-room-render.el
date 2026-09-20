@@ -1802,10 +1802,27 @@ Attachments, embeds, reply previews and spoiler bodies are never sent."
                   disco-room--guild-id)))))))
 
 (defun disco-room--ewoc-printer (row)
-  "EWOC pretty-printer for one projected room ROW."
-  (disco-room--insert-message (appkit-chat-timeline-row-payload row)
-                              (appkit-chat-timeline-row-context row)
-                              (appkit-current-surface)))
+  "Print ROW, projecting its mark from the committed Surface model."
+  (let* ((msg (appkit-chat-timeline-row-payload row))
+         (start (point)))
+    (disco-room--insert-message msg (appkit-chat-timeline-row-context row)
+                               (appkit-current-surface))
+    (when (member (disco-msg-id msg) (disco-msg-marked-ids))
+      (let ((end (point))
+            (position start))
+        (while (< position end)
+          (when (get-text-property position 'disco-message-id)
+            (add-face-text-property position
+                                    (next-single-property-change
+                                     position 'disco-message-id nil end)
+                                    'highlight t)
+            (let ((prefix (get-text-property position 'line-prefix)))
+              (put-text-property position (min end (1+ position)) 'line-prefix
+                                 (concat (propertize "[*] " 'face 'bold) prefix)))
+            (setq position end))
+          (when (< position end)
+            (setq position (next-single-property-change
+                            position 'disco-message-id nil end))))))))
 
 (provide 'disco-room-render)
 

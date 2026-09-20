@@ -8,6 +8,9 @@
 
 ;;; Code:
 
+(require 'cl-lib)
+(require 'appkit-chat-timeline)
+
 (require 'pp)
 (require 'seq)
 (require 'subr-x)
@@ -38,16 +41,16 @@ return a string or nil.")
   "Buffer-local function beginning a reply for a message.")
 
 (defvar-local disco-msg-forward-function nil
-  "Buffer-local function beginning a forward flow for a message.")
+  "Function forwarding a list of messages.")
 
 (defvar-local disco-msg-operate-function nil
-  "Buffer-local function opening a message actions menu for a message.")
+  "Function opening actions for a captured message selection.")
 
 (defvar-local disco-msg-edit-function nil
   "Buffer-local function beginning an edit flow for a message.")
 
 (defvar-local disco-msg-delete-function nil
-  "Buffer-local function deleting a message.")
+  "Function deleting a list of messages.")
 
 (defvar-local disco-msg-toggle-pin-function nil
   "Buffer-local function toggling whether a message is pinned.")
@@ -167,11 +170,108 @@ predicate."
                 (and msg (funcall msg-predicate msg)))
         msg))))
 
+(defvar-local disco-msg-marked-ids-function nil
+  "Function returning persistent marked IDs from the host's committed model.")
+
+(defvar-local disco-msg-mark-function nil
+  "Function submitting a mark operation to the host model.
+Called with OPERATION (`toggle', `unmark' or `clear-restore') and message ID.")
+
+(defun disco-msg-marked-ids ()
+  "Return persistent message marks from the host, or nil."
+  (when disco-msg-marked-ids-function
+    (funcall disco-msg-marked-ids-function)))
+
+(cl-defstruct (disco-msg-selection (:constructor disco-msg-selection--create))
+  buffer surface refs media-context)
+
+(defun disco-msg--menu-selection ()
+  "Return the message selection captured by the current transient, if any."
+  (when (fboundp 'transient-scope)
+    (let ((scope (transient-scope '(disco-transient-msg-operate disco-room-poll-transient))))
+      (and (disco-msg-selection-p scope) scope))))
+
+(defun disco-msg--resolve-key (key &optional channel)
+  "Resolve stable KEY in CHANNEL, rejecting missing or pending messages."
+  (let ((msg (if (functionp disco-msg-resolve-function)
+                 (funcall disco-msg-resolve-function key channel nil)
+               (and channel (disco-msg-find-in-channel channel key)))))
+    (unless (and msg (not (alist-get 'pending msg)))
+      (user-error "disco: selected message %s is no longer available" key))
+    msg))
+
+(defun disco-msg-selection-messages (selection)
+  "Resolve SELECTION against its original live Surface and latest messages."
+  (unless (and (eq (current-buffer) (disco-msg-selection-buffer selection))
+               (eq (appkit-current-surface) (disco-msg-selection-surface selection))
+               (appkit-surface-live-p (disco-msg-selection-surface selection)))
+    (user-error "disco: message selection belongs to a closed or replaced room"))
+  (mapcar (lambda (ref) (disco-msg--resolve-key (cdr ref) (car ref)))
+          (disco-msg-selection-refs selection)))
+
+(defun disco-msg-targets-for-interactive ()
+  "Return menu snapshot, active message region, marks, or point, in that order."
+  (or (if-let* ((selection (disco-msg--menu-selection)))
+          (disco-msg-selection-messages selection)
+        (let ((keys (cond
+                     ((use-region-p)
+                      (appkit-chat-timeline-keys-in-range
+                       (region-beginning) (region-end)))
+                     ((disco-msg-marked-ids)))))
+          (cond
+           (keys
+            (mapcar #'disco-msg--resolve-key
+                    (sort keys (lambda (a b)
+                                 (< (string-to-number a) (string-to-number b))))))
+           ((use-region-p) nil)
+           (t (when-let* ((msg (or (disco-msg-at (disco-msg--event-point last-input-event))
+                                  (disco-msg-at))))
+                (when (alist-get 'pending msg)
+                  (user-error "disco: message is still being sent"))
+                (list msg))))))
+      (user-error "disco: no messages selected")))
+
+(defun disco-msg-capture-selection (&optional messages)
+  "Capture stable identities of MESSAGES or the current operation targets."
+  (let ((surface (appkit-current-surface))
+        (messages (or messages (disco-msg-targets-for-interactive))))
+    (unless (appkit-surface-live-p surface)
+      (user-error "disco: message actions require a live room"))
+    (disco-msg-selection--create
+     :buffer (current-buffer) :surface surface
+     :refs (mapcar (lambda (msg) (cons (disco-msg-channel-id msg) (disco-msg-id msg)))
+                   messages)
+     :media-context
+     (when (and (= (length messages) 1)
+                (equal (disco-msg-id (car messages)) (disco-msg-id (disco-msg-at)))
+                (fboundp 'appkit-media-card-context-at-point))
+       (appkit-media-card-context-at-point)))))
+
+(defun disco-msg-mark-toggle ()
+  "Toggle the message at point, then advance to the next visible message."
+  (interactive)
+  (let ((msg (or (disco-msg-at) (user-error "disco: point is not on a message"))))
+    (when (alist-get 'pending msg) (user-error "disco: message is still being sent"))
+    (funcall disco-msg-mark-function 'toggle (disco-msg-id msg))
+    (ignore-errors (disco-msg-next))))
+
+(defun disco-msg-unmark ()
+  "Unmark the message at point without changing other marks."
+  (interactive)
+  (let ((msg (or (disco-msg-at) (user-error "disco: point is not on a message"))))
+    (funcall disco-msg-mark-function 'unmark (disco-msg-id msg))))
+
+(defun disco-msg-toggle-marks ()
+  "Clear marks, or restore the last cleared set."
+  (interactive)
+  (funcall disco-msg-mark-function 'clear-restore nil))
+
 (defun disco-msg-for-interactive ()
-  "Return message at mouse event or current point, or signal a user error."
-  (or (disco-msg-at (disco-msg--event-point last-input-event))
-      (disco-msg-at (point))
-      (user-error "disco: point is not on a message")))
+  "Return the sole operation target, rejecting a multiple-message selection."
+  (let ((messages (disco-msg-targets-for-interactive)))
+    (unless (= (length messages) 1)
+      (user-error "disco: this action requires exactly one message"))
+    (car messages)))
 
 (defun disco-msg-next (&optional n)
   "Move point to the Nth next visible message."
@@ -424,75 +524,60 @@ ID comparison is normalized for snowflake strings."
   "Return code span bounds around POS, or nil."
   (disco-msg--bounds-of-property-at-point 'disco-markdown-code pos))
 
-(defun disco-msg-copy-link (message)
-  "Copy Discord permalink for MESSAGE into the kill ring."
-  (interactive (list (disco-msg-for-interactive)))
-  (let ((link (disco-msg-link message)))
-    (unless (and (stringp link) (not (string-empty-p link)))
-      (user-error "disco: message link is unavailable"))
-    (kill-new link)
-    (message "disco: copied message link %s" link)))
+(defun disco-msg-copy-link (messages)
+  "Copy Discord permalinks for MESSAGES in selection order."
+  (interactive (list (disco-msg-targets-for-interactive)))
+  (let ((links (mapcar (lambda (msg)
+                         (or (disco-msg-link msg)
+                             (user-error "disco: message link is unavailable"))) messages)))
+    (kill-new (string-join links "\n"))
+    (message "disco: copied %d message links" (length links))))
 
-(defun disco-msg-copy-text (message &optional no-properties)
-  "Copy copy-ready text for MESSAGE into the kill ring.
-
+(defun disco-msg-copy-text (messages &optional no-properties)
+  "Copy text of MESSAGES, separated by blank lines.
 With NO-PROPERTIES non-nil, strip text properties before copying."
-  (interactive (list (disco-msg-for-interactive)
-                     current-prefix-arg))
-  (let ((text (disco-msg-content-text message)))
-    (unless text
-      (user-error "disco: nothing to copy"))
-    (kill-new (if no-properties
-                  (substring-no-properties text)
-                text))
-    (message "disco: copied message text (%d chars)" (length text))))
+  (interactive (list (disco-msg-targets-for-interactive) current-prefix-arg))
+  (let ((text (mapconcat (lambda (msg) (or (disco-msg-content-text msg) ""))
+                         messages "\n\n")))
+    (when (string-empty-p text) (user-error "disco: nothing to copy"))
+    (kill-new (if no-properties (substring-no-properties text) text))
+    (message "disco: copied %d messages" (length messages))))
 
-(defun disco-msg-copy-dwim (message &optional no-properties)
-  "Copy text at point in a telega-style DWIM manner.
-
-If the region is active, copy it.  If point is on a URL, copy the URL.  If
-point is inside a code span or code block, copy that code.  Otherwise copy the
-message text for MESSAGE.  With NO-PROPERTIES non-nil, strip text properties
-before copying."
-  (interactive (list (disco-msg-for-interactive)
+(defun disco-msg-copy-dwim (messages &optional no-properties)
+  "Copy MESSAGES, or contextual text for an unmarked single point target.
+Menu actions always copy their captured messages; direct invocation retains
+region, URL and code-span text copying when no persistent marks are active."
+  (interactive (list (if (and (region-active-p) (not (disco-msg--menu-selection)))
+                         nil (disco-msg-targets-for-interactive))
                      current-prefix-arg))
-  (let* ((code-bounds (and (not (region-active-p))
-                           (disco-msg--code-bounds-at-point)))
-         (url (and (not (region-active-p))
-                   (not code-bounds)
-                   (disco-msg--url-at-point)))
-         (text (cond
-                ((region-active-p)
-                 (prog1
-                     (buffer-substring (region-beginning) (region-end))
-                   (deactivate-mark)))
-                ((and (stringp url) (not (string-empty-p url)))
-                 url)
-                (code-bounds
-                 (buffer-substring (car code-bounds) (cdr code-bounds)))
-                (t nil))))
-    (if text
-        (let ((copied (if no-properties
-                          (substring-no-properties text)
-                        text)))
-          (kill-new copied)
-          (message "disco: copied text (%d chars)" (length copied)))
-      (disco-msg-copy-text message no-properties))))
+  (if (or (disco-msg--menu-selection)
+          (and (not (region-active-p))
+               (or (disco-msg-marked-ids) (> (length messages) 1))))
+      (disco-msg-copy-text messages no-properties)
+    (let* ((code (and (not (region-active-p)) (disco-msg--code-bounds-at-point)))
+           (url (and (not (region-active-p)) (not code) (disco-msg--url-at-point)))
+           (text (cond ((region-active-p)
+                        (prog1 (buffer-substring (region-beginning) (region-end))
+                          (deactivate-mark)))
+                       (code (buffer-substring (car code) (cdr code)))
+                       ((and (stringp url) (not (string-empty-p url))) url))))
+      (if text (kill-new (if no-properties (substring-no-properties text) text))
+        (disco-msg-copy-text messages no-properties)))))
 
 (defun disco-msg-reply (message)
   "Begin replying to MESSAGE in the current buffer context."
   (interactive (list (disco-msg-for-interactive)))
   (disco-msg--call-adapter disco-msg-reply-function message "replying to messages"))
 
-(defun disco-msg-forward (message)
-  "Begin forwarding MESSAGE in the current buffer context."
-  (interactive (list (disco-msg-for-interactive)))
-  (disco-msg--call-adapter disco-msg-forward-function message "forwarding messages"))
+(defun disco-msg-forward (messages)
+  "Apply forwarding messages to MESSAGES in selection order."
+  (interactive (list (disco-msg-targets-for-interactive)))
+  (disco-msg--call-adapter disco-msg-forward-function messages "forwarding messages"))
 
-(defun disco-msg-operate (message)
-  "Open message actions menu for MESSAGE in the current buffer context."
-  (interactive (list (disco-msg-for-interactive)))
-  (disco-msg--call-adapter disco-msg-operate-function message "message actions"))
+(defun disco-msg-operate (selection)
+  "Open message actions for stable SELECTION."
+  (interactive (list (disco-msg-capture-selection)))
+  (disco-msg--call-adapter disco-msg-operate-function selection "message actions"))
 
 (defun disco-msg--inspect-buffer-name (message)
   "Return inspect buffer name for MESSAGE."
@@ -578,10 +663,10 @@ Return the inspect buffer."
   (interactive (list (disco-msg-for-interactive)))
   (disco-msg--call-adapter disco-msg-edit-function message "editing messages"))
 
-(defun disco-msg-delete (message)
-  "Delete MESSAGE in the current buffer context."
-  (interactive (list (disco-msg-for-interactive)))
-  (disco-msg--call-adapter disco-msg-delete-function message "deleting messages"))
+(defun disco-msg-delete (messages)
+  "Apply deleting messages to MESSAGES in selection order."
+  (interactive (list (disco-msg-targets-for-interactive)))
+  (disco-msg--call-adapter disco-msg-delete-function messages "deleting messages"))
 
 (defun disco-msg-toggle-pin (message)
   "Toggle whether MESSAGE is pinned in the current buffer context."
