@@ -516,6 +516,8 @@
     ("l" "Copy link" disco-msg-copy-link)
     ("Y" "Copy text" disco-msg-copy-text)
     ("t" "Translate" disco-room-translate-message)
+    ("v" "Translate visible" disco-room-translate-visible)
+    ("R" "Translate region" disco-room-translate-region :if use-region-p)
     ("i" "Describe" disco-msg-describe-message)
     ("L" "Redisplay" disco-msg-redisplay)
     ("r" "Reply" disco-msg-reply

@@ -99,5 +99,45 @@
       (search-forward "secret")
       (should-error (disco-room-translate-message) :type 'user-error))))
 
+(ert-deftest disco-translate-region-selects-whole-rows-not-boundaries-or-draft ()
+  (let ((disco-room-show-avatars nil)
+        (disco-room-show-attachments nil)
+        (disco-embed-show-embeds nil)
+        sent)
+    (disco-room-test-with-surface "chat"
+      (let ((appkit-translate-backend-function
+             (lambda ()
+               (list :id 'region :label "Region"
+                     :start (lambda (source _language resolve _reject)
+                              (push (plist-get source :text) sent)
+                              (funcall resolve "译文")
+                              nil)))))
+        (disco-state-put-messages
+         "chat" '(((id . "500") (channel_id . "chat") (content . "Outside"))
+                  ((id . "400") (channel_id . "chat") (content . ""))
+                  ((id . "300") (channel_id . "chat") (content . "Second"))
+                  ((id . "200") (channel_id . "chat") (content . "||secret||"))
+                  ((id . "100") (channel_id . "chat") (content . "First\ncontinued"))))
+        (disco-room-test-establish-latest-window)
+        (appkit-chatbuf-input-replace "private draft")
+        (disco-room--sync-timeline)
+        (let ((end (ewoc-location (appkit-chat-timeline-node "500"))))
+          (goto-char (point-min))
+          (search-forward "continued")
+          (let ((transient-mark-mode t))
+            (set-mark end)
+            (activate-mark)
+            (call-interactively #'disco-room-translate-region)))
+        (disco-room-test-drain surface)
+        (should (equal (reverse sent) '("First\ncontinued" "Second")))
+        (should (equal "private draft" (appkit-chatbuf-input-string)))
+        ;; A range starting exactly at the composer must not fall back to
+        ;; the preceding message, nor export selected draft text.
+        (should-error
+         (disco-room-translate-region
+          (appkit-chatbuf-input-start-position) (point-max))
+         :type 'user-error)
+        (should (equal (reverse sent) '("First\ncontinued" "Second")))))))
+
 (provide 'disco-translate-test)
 ;;; disco-translate-test.el ends here

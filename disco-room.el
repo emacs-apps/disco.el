@@ -52,8 +52,8 @@
 (declare-function disco-room-transient "disco-transient" ())
 (declare-function disco-room-input-options-transient "disco-transient" ())
 (declare-function appkit-translate-enable "appkit-translate" (owner &optional notify))
-(declare-function appkit-translate-request "appkit-translate"
-                  (source &optional backend language force notify-or-surface surface))
+(declare-function appkit-translate-request-many "appkit-translate"
+                  (sources &optional backend language force notify-or-surface surface))
 
 (declare-function disco-api--validate-message-content-length "disco-api-normalize"
                   (content field-name))
@@ -108,8 +108,6 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "n" #'disco-msg-next
   "p" #'disco-msg-previous
   "o" #'disco-msg-operate
-  "t" #'disco-room-translate-message
-  "T" #'disco-msg-open-thread
   "r" #'disco-msg-reply
   "f" #'disco-msg-forward
   "e" #'disco-msg-edit
@@ -784,28 +782,77 @@ Message lines carry the `disco-message-id' text property."
       (user-error "disco: message has no id to redisplay"))
     (disco-room--invalidate-message-node message-id)))
 
+(defun disco-room--translate-messages (messages)
+  "Request translations of MESSAGES with text, leaving originals and draft intact."
+  (let* ((surface (appkit-current-surface))
+         (buffer (current-buffer))
+         (channel-id disco-room--channel-id)
+         sources)
+    (unless (disco-room--callback-active-p buffer channel-id surface)
+      (user-error "disco: translation requires a live room"))
+    (dolist (msg messages)
+      (unless (disco-room--message-system-divider-p msg)
+        (let ((source (disco-room--translation-source msg t)))
+          (unless (string-empty-p (string-trim (plist-get source :text)))
+            (push source sources)))))
+    (unless sources
+      (user-error "disco: no text to translate in these messages"))
+    (require 'appkit-translate)
+    (appkit-translate-enable
+     surface
+     (lambda (key)
+       (when (disco-room--callback-active-p buffer channel-id surface)
+         (disco-room--queue-update surface (list 'rows-changed (list (nth 2 key)))))))
+    (appkit-translate-request-many (nreverse sources))))
+
+(defun disco-room--messages-in-range (begin end)
+  "Return distinct messages intersecting the half-open range BEGIN to END.
+Use exact row properties, not nearby-message fallback at an empty boundary.
+Only already rendered messages count; the composer is never included."
+  (let ((position begin)
+        (end (min end (or (appkit-chatbuf-prompt-start-position) (point-max))))
+        (seen (make-hash-table :test #'equal))
+        messages)
+    (while (< position end)
+      (when-let* ((id (get-text-property position 'disco-message-id))
+                  (channel (get-text-property position 'disco-message-channel-id))
+                  (key (cons channel id))
+                  ((not (gethash key seen)))
+                  (msg (disco-msg-at position)))
+        (puthash key t seen)
+        (push msg messages))
+      (setq position
+            (next-single-property-change position 'disco-message-id nil end)))
+    (nreverse messages)))
+
+(defun disco-room-translate-region (begin end)
+  "Translate whole messages intersecting the active region from BEGIN to END.
+Skip messages without text, including spoiler-only and attachment-only rows.
+No history is fetched, and selected composer text is never sent."
+  (interactive
+   (if (use-region-p)
+       (list (region-beginning) (region-end))
+     (user-error "disco: select a message region first")))
+  (disco-room--translate-messages (disco-room--messages-in-range begin end)))
+
+(defun disco-room-translate-visible ()
+  "Translate whole messages visible in the selected room window.
+Partly visible messages are included.  Capture the range before any translation
+can resize rows; do not fetch or translate off-screen history."
+  (interactive)
+  (let ((window (selected-window)))
+    (unless (eq (window-buffer window) (current-buffer))
+      (user-error "disco: the room must be displayed in the selected window"))
+    (disco-room--translate-messages
+     (disco-room--messages-in-range
+      (window-start window) (window-end window t)))))
+
 (defun disco-room-translate-message ()
   "Translate the message at point without changing its original or the draft.
 Use the shared Appkit backend and target language, loading translation only
 on explicit request.  Spoiler bodies are excluded even when revealed."
   (interactive)
-  (let* ((surface (appkit-current-surface))
-         (buffer (current-buffer))
-         (channel-id disco-room--channel-id))
-    (unless (disco-room--callback-active-p buffer channel-id surface)
-      (user-error "disco: translation requires a live room"))
-    (let* ((msg (disco-msg-for-interactive))
-           (source (disco-room--translation-source msg t)))
-      (when (or (disco-room--message-system-divider-p msg)
-                (string-empty-p (string-trim (plist-get source :text))))
-        (user-error "disco: this message has no text to translate"))
-      (require 'appkit-translate)
-      (appkit-translate-enable
-       surface
-       (lambda (key)
-         (when (disco-room--callback-active-p buffer channel-id surface)
-           (disco-room--queue-update surface (list 'rows-changed (list (nth 2 key)))))))
-      (appkit-translate-request source))))
+  (car (disco-room--translate-messages (list (disco-msg-for-interactive)))))
 
 (defun disco-room-toggle-message-spoilers (message-id)
   "Toggle all rendered spoilers for MESSAGE-ID, telega-style."
