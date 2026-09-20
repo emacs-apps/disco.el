@@ -51,6 +51,9 @@
 (declare-function disco-transient-msg-operate "disco-transient" ())
 (declare-function disco-room-transient "disco-transient" ())
 (declare-function disco-room-input-options-transient "disco-transient" ())
+(declare-function appkit-translate-enable "appkit-translate" (owner &optional notify))
+(declare-function appkit-translate-request "appkit-translate"
+                  (source &optional backend language force notify-or-surface surface))
 
 (declare-function disco-api--validate-message-content-length "disco-api-normalize"
                   (content field-name))
@@ -105,7 +108,8 @@ This is a search boundary, not the remote/latest protocol frontier.")
   "n" #'disco-msg-next
   "p" #'disco-msg-previous
   "o" #'disco-msg-operate
-  "t" #'disco-msg-copy-text
+  "t" #'disco-room-translate-message
+  "T" #'disco-msg-open-thread
   "r" #'disco-msg-reply
   "f" #'disco-msg-forward
   "e" #'disco-msg-edit
@@ -779,6 +783,29 @@ Message lines carry the `disco-message-id' text property."
     (unless (and (stringp message-id) (not (string-empty-p message-id)))
       (user-error "disco: message has no id to redisplay"))
     (disco-room--invalidate-message-node message-id)))
+
+(defun disco-room-translate-message ()
+  "Translate the message at point without changing its original or the draft.
+Use the shared Appkit backend and target language, loading translation only
+on explicit request.  Spoiler bodies are excluded even when revealed."
+  (interactive)
+  (let* ((surface (appkit-current-surface))
+         (buffer (current-buffer))
+         (channel-id disco-room--channel-id))
+    (unless (disco-room--callback-active-p buffer channel-id surface)
+      (user-error "disco: translation requires a live room"))
+    (let* ((msg (disco-msg-for-interactive))
+           (source (disco-room--translation-source msg t)))
+      (when (or (disco-room--message-system-divider-p msg)
+                (string-empty-p (string-trim (plist-get source :text))))
+        (user-error "disco: this message has no text to translate"))
+      (require 'appkit-translate)
+      (appkit-translate-enable
+       surface
+       (lambda (key)
+         (when (disco-room--callback-active-p buffer channel-id surface)
+           (disco-room--queue-update surface (list 'rows-changed (list (nth 2 key)))))))
+      (appkit-translate-request source))))
 
 (defun disco-room-toggle-message-spoilers (message-id)
   "Toggle all rendered spoilers for MESSAGE-ID, telega-style."

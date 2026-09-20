@@ -514,7 +514,8 @@
   [["Message"
     ("c" "Copy dwim" disco-msg-copy-dwim)
     ("l" "Copy link" disco-msg-copy-link)
-    ("t" "Copy text" disco-msg-copy-text)
+    ("Y" "Copy text" disco-msg-copy-text)
+    ("t" "Translate" disco-room-translate-message)
     ("i" "Describe" disco-msg-describe-message)
     ("L" "Redisplay" disco-msg-redisplay)
     ("r" "Reply" disco-msg-reply

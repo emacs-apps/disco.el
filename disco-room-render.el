@@ -66,6 +66,8 @@
                   "disco-room-pin" (&optional channel-id))
 (declare-function disco-room--update-frame
                   "disco-room" (&optional channel draft))
+(declare-function appkit-translate-insert "appkit-translate"
+                  (source &optional prefix prefix-face surface))
 
 (defvar disco-room--channel-id)
 (defvar disco-room--channel-name)
@@ -1598,6 +1600,39 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
          :spoiler-message-id message-id)))
      (t nil))))
 
+(defun disco-room--translation-source (msg &optional include-text)
+  "Return a scoped translation source for MSG's displayed message body.
+INCLUDE-TEXT extracts semantic text only for an explicit request.  Forward
+snapshots and thread starters use their source message, not UI summaries.
+Attachments, embeds, reply previews and spoiler bodies are never sent."
+  (let* ((body (cond
+                ((= (disco-msg-type msg) 21)
+                 (disco-room--thread-starter-reference-message msg))
+                ((and (string-empty-p (or (alist-get 'content msg) ""))
+                      (disco-room--message-forwarded-p msg))
+                 (disco-room--message-forward-snapshot msg))
+                (t msg)))
+         (source
+          (list :key (list 'disco
+                           (or (alist-get 'channel_id msg) disco-room--channel-id)
+                           (alist-get 'id msg))
+                :version (list (disco-msg-type msg)
+                               (alist-get 'id body)
+                               (alist-get 'content body)
+                               (alist-get 'appkit_document body)
+                               (alist-get 'mentions body)
+                               (alist-get 'mention_channels body)
+                               (alist-get 'resolved body)
+                               'concealed-spoilers))))
+    (when include-text
+      (setq source
+            (plist-put
+             source :text
+             (if-let* ((document (disco-room--semantic-message-document body)))
+                 (disco-markdown-translation-text document)
+               ""))))
+    source))
+
 (defun disco-room--highlight-search-region (start end)
   "Apply the active room search highlight between START and END."
   (when-let* ((query (and (fboundp 'disco-room--active-highlight-query)
@@ -1743,6 +1778,9 @@ When PREFIX is non-nil, use it for non-card fallback indentation."
              (appkit-ui-prefix-string section-prefix-state nil "    ")))
         (disco-room--insert-message-stickers msg section-prefix-state)
         (disco-room--insert-forward-section msg section-prefix-state)
+        (when (featurep 'appkit-translate)
+          (appkit-translate-insert
+           (disco-room--translation-source msg) section-prefix-state))
         (disco-room-thread-insert-reference msg section-prefix-state)
         (disco-room--insert-message-attachments msg section-prefix-state owner)
         (disco-room--insert-message-embeds msg owner)

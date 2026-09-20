@@ -1378,6 +1378,54 @@ coordinates do not address TEXT."
     :message message
     :spoiler-message-id spoiler-message-id)))
 
+(defun disco-markdown-translation-text (document)
+  "Export semantic DOCUMENT for translation, excluding all spoiler bodies.
+Unlike copy export, this never reveals spoilers, even when the room does.
+Code remains literal; provider mentions and emoji retain their text fallbacks."
+  (cl-labels
+      ((clean
+        (node)
+        (cond
+         ((appkit-markup-document-p node)
+          (appkit-markup-document
+           (mapcar #'clean (appkit-markup-document-blocks node))))
+         ((appkit-markup-paragraph-p node)
+          (appkit-markup-paragraph
+           (mapcar #'clean (appkit-markup-paragraph-children node))))
+         ((appkit-markup-heading-p node)
+          (appkit-markup-heading
+           (appkit-markup-heading-level node)
+           (mapcar #'clean (appkit-markup-heading-children node))))
+         ((appkit-markup-quote-p node)
+          (appkit-markup-quote
+           (mapcar #'clean (appkit-markup-quote-blocks node))))
+         ((appkit-markup-list-p node)
+          (appkit-markup-list
+           (appkit-markup-list-style node)
+           (mapcar #'clean (appkit-markup-list-items node))
+           :start (appkit-markup-list-start node)))
+         ((appkit-markup-list-item-p node)
+          (appkit-markup-list-item
+           (mapcar #'clean (appkit-markup-list-item-blocks node))))
+         ((appkit-markup-link-p node)
+          (appkit-markup-link
+           (appkit-markup-link-url node)
+           (mapcar #'clean (appkit-markup-link-children node))))
+         ((appkit-markup-object-p node)
+          (let ((value (appkit-markup-object-value node)))
+            (if (and (disco-markdown-object-p value)
+                     (eq (disco-markdown-object-kind value) 'spoiler))
+                (appkit-markup-text "")
+              (appkit-markup-object
+               value (mapcar #'clean (appkit-markup-object-fallback node))
+               (appkit-markup-object-styles node)))))
+         ((appkit-markup-object-block-p node)
+          (appkit-markup-object-block
+           (appkit-markup-object-block-value node)
+           (mapcar #'clean (appkit-markup-object-block-fallback node))))
+         (t node))))
+    (appkit-markup-plain-text (clean document))))
+
 (defun disco-markdown--printer-escape (text)
   "Escape literal Discord Markdown TEXT."
   (replace-regexp-in-string
