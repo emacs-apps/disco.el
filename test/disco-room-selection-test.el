@@ -31,7 +31,7 @@
       (should (equal '("100" "300") (disco-room--marked-ids)))
       (disco-room-render)
       (disco-state-upsert-message "selection" '((id . "100") (channel_id . "selection")
-						(content . "replacement")))
+                                                (content . "replacement")))
       (should (equal "replacement" (alist-get 'content
                                               (car (disco-msg-selection-messages captured)))))
       (disco-msg-toggle-marks)

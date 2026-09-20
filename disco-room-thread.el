@@ -243,29 +243,27 @@
 
 (defun disco-room-thread-create-from-message
     (name message-id &optional auto-archive-duration
-	  rate-limit-per-user)
+          rate-limit-per-user)
   "Create thread NAME from MESSAGE-ID in the current channel."
   (interactive
-   (let*
-       ((msg (disco-msg-for-interactive))
-	(name (read-string "Thread name: "))
-	(duration (disco-thread-read-auto-archive-duration nil nil))
-	(slowmode
-	 (disco-room-thread--read-optional-nonnegative-int
-	  "Slowmode seconds (empty for none): ")))
+   (let* ((msg (disco-msg-for-interactive))
+          (name (read-string "Thread name: "))
+          (duration (disco-thread-read-auto-archive-duration nil nil))
+          (slowmode
+           (disco-room-thread--read-optional-nonnegative-int
+            "Slowmode seconds (empty for none): ")))
      (list name (disco-msg-id msg) duration slowmode)))
   (disco-room-thread--ensure-action-available
    (disco-room-thread--create-from-message-unavailable-reason)
    "create threads from messages")
   (disco-room-thread--ensure-parent-channel)
-  (let*
-      ((thread
-	(disco-api-create-thread-from-message
-	 (alist-get 'id (disco-room--channel-object)) message-id name
-	 auto-archive-duration rate-limit-per-user))
-       (thread-id (and (listp thread) (alist-get 'id thread)))
-       (thread-name
-	(or (and (listp thread) (alist-get 'name thread)) name)))
+  (let* ((thread
+          (disco-api-create-thread-from-message
+           (alist-get 'id (disco-room--channel-object)) message-id name
+           auto-archive-duration rate-limit-per-user))
+         (thread-id (and (listp thread) (alist-get 'id thread)))
+         (thread-name
+          (or (and (listp thread) (alist-get 'name thread)) name)))
     (when thread-id
       (disco-state-upsert-channel thread)
       (disco-room-open thread-id thread-name))
@@ -362,7 +360,8 @@
     (user-error "disco: thread name cannot be empty"))
   (unless (disco-room--channel-object)
     (user-error "disco: unknown thread in state"))
-  (disco-room-thread--commit-update (disco-api-update-thread (alist-get 'id (disco-room--channel-object)) :name name))
+  (disco-room-thread--commit-update (disco-api-update-thread (alist-get 'id (disco-room--channel-object))
+                                                             :name name))
   (message "disco: thread renamed to %s" name))
 
 (defun disco-room-thread-toggle-locked ()
