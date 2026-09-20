@@ -181,10 +181,21 @@ closes if its channel or guild is deleted.
 
 ** Message translation
 
-On a timeline message, press ~o~ to open the message menu: ~t~ translates
-the current message, ~T~ opens its thread, and ~Y~ copies its text.
+On a timeline message, press ~o~ to open the message menu.  Its ~t~ action
+is DWIM: translate all messages intersecting the active region, or just the
+current message when no region is active.  ~T~ opens the current message's
+thread, ~v~ translates the current window's visible messages, and ~Y~ copies text.
+
 Disco does not bind timeline ~t~ / ~T~ or ~g t~ for these actions, preserving
-native Evil/evil-snipe motions.  Evil's ~Z y~ and composer typing are unchanged.
+native Evil/evil-snipe motions.  Visual ~o~ still exchanges selection endpoints;
+use ~C-c ? o t~ to reach the same translation action without losing the region.
+Evil's ~Z y~ and composer typing are unchanged.
+
+~M-x disco-room-translate-message~ provides the same DWIM action;
+~M-x disco-room-translate-visible~ translates visible messages without a region.
+Both batch scopes include whole intersecting messages and skip rows without
+translatable text.  They never send selected draft text or fetch more history.
+The visible range is captured before translations can resize rows.
 
 ~M-x disco-room-translate-message~ loads the optional ~appkit-translate~
 component on demand.  Configure ~appkit-translate-target-language~ (default

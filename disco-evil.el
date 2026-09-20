@@ -177,7 +177,7 @@ Safe to call multiple times."
   (disco-evil-setup))
 
 (with-eval-after-load 'evil-snipe
-  (dolist (mode disco-evil--application-modes)
+  (dolist (mode (remq 'disco-room-mode disco-evil--application-modes))
     (let ((hook (intern (format "%s-hook" mode))))
       (add-hook hook #'turn-off-evil-snipe-mode)
       (add-hook hook #'turn-off-evil-snipe-override-mode))))

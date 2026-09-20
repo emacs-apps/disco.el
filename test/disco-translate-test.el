@@ -127,16 +127,18 @@
           (let ((transient-mark-mode t))
             (set-mark end)
             (activate-mark)
-            (call-interactively #'disco-room-translate-region)))
+            (call-interactively #'disco-room-translate-message)))
         (disco-room-test-drain surface)
         (should (equal (reverse sent) '("First\ncontinued" "Second")))
         (should (equal "private draft" (appkit-chatbuf-input-string)))
         ;; A range starting exactly at the composer must not fall back to
         ;; the preceding message, nor export selected draft text.
-        (should-error
-         (disco-room-translate-region
-          (appkit-chatbuf-input-start-position) (point-max))
-         :type 'user-error)
+        (goto-char (appkit-chatbuf-input-start-position))
+        (let ((transient-mark-mode t))
+          (set-mark (point-max))
+          (activate-mark)
+          (should-error (call-interactively #'disco-room-translate-message)
+                        :type 'user-error))
         (should (equal (reverse sent) '("First\ncontinued" "Second")))))))
 
 (provide 'disco-translate-test)

@@ -825,16 +825,6 @@ Only already rendered messages count; the composer is never included."
             (next-single-property-change position 'disco-message-id nil end)))
     (nreverse messages)))
 
-(defun disco-room-translate-region (begin end)
-  "Translate whole messages intersecting the active region from BEGIN to END.
-Skip messages without text, including spoiler-only and attachment-only rows.
-No history is fetched, and selected composer text is never sent."
-  (interactive
-   (if (use-region-p)
-       (list (region-beginning) (region-end))
-     (user-error "disco: select a message region first")))
-  (disco-room--translate-messages (disco-room--messages-in-range begin end)))
-
 (defun disco-room-translate-visible ()
   "Translate whole messages visible in the selected room window.
 Partly visible messages are included.  Capture the range before any translation
@@ -848,11 +838,15 @@ can resize rows; do not fetch or translate off-screen history."
       (window-start window) (window-end window t)))))
 
 (defun disco-room-translate-message ()
-  "Translate the message at point without changing its original or the draft.
-Use the shared Appkit backend and target language, loading translation only
-on explicit request.  Spoiler bodies are excluded even when revealed."
+  "Translate selected messages, or the message at point when no region is active.
+Translate each intersecting message's whole body, excluding spoilers even when
+revealed.  Skip rows without text.  Originals and draft text are never changed
+or used as rendered-buffer input to the backend."
   (interactive)
-  (car (disco-room--translate-messages (list (disco-msg-for-interactive)))))
+  (disco-room--translate-messages
+   (if (use-region-p)
+       (disco-room--messages-in-range (region-beginning) (region-end))
+     (list (disco-msg-for-interactive)))))
 
 (defun disco-room-toggle-message-spoilers (message-id)
   "Toggle all rendered spoilers for MESSAGE-ID, telega-style."
