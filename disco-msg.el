@@ -19,6 +19,9 @@
 (require 'disco-markdown)
 (require 'disco-state)
 
+(declare-function transient-scope "transient" (&optional prefixes classes))
+(declare-function appkit-media-card-context-at-point "appkit-media-card" (&optional position))
+
 (defconst disco-msg--reference-field-map
   '((id . message_id)
     (channel-id . channel_id)
@@ -221,7 +224,7 @@ Called with OPERATION (`toggle', `unmark' or `clear-restore') and message ID.")
           (cond
            (keys
             (mapcar #'disco-msg--resolve-key
-                    (sort keys (lambda (a b)
+                    (sort (copy-sequence keys) (lambda (a b)
                                  (< (string-to-number a) (string-to-number b))))))
            ((use-region-p) nil)
            (t (when-let* ((msg (or (disco-msg-at (disco-msg--event-point last-input-event))

@@ -179,13 +179,38 @@ History extends automatically near either visible edge.  ~M-<~ and
 Live Gateway events update create, update, and delete.  The room
 closes if its channel or guild is deleted.
 
+** Message selection and actions
+
+Marks select whole messages independently of the text region.  In Emacs state,
+~m~ toggles a mark and advances to the next message.  In Evil normal/motion
+state, ~a~ toggles and advances, ~u~ unmarks at point, and ~U~ clears or restores
+the last marked set.  Emacs state also uses ~U~ for clear/restore.
+
+Marked rows show ~[*]~ and the room header shows the count.  Moving point,
+paging, filtering and redraws do not clear marks.  Deleted messages are removed
+from both current and restorable marks; replacing or closing the Surface ends
+the selection.
+
+~o~ captures the active message region, otherwise marked messages, otherwise
+the message at point.  Moving point afterward does not retarget that menu.
+Copy text/links, translation, forwarding and deletion accept multiple messages;
+reply, edit, thread and other single-message actions are disabled for a batch.
+Direct single-message commands reject multiple targets as well.
+
+Deletion preflights the entire selection and asks once.  Forwarding sends each
+selected message into the current room in chronological order; an optional
+comment applies to each forward, without consuming the draft.  Both operations
+run one request at a time and report successes and failures in the room header.
+Successful targets are unmarked; failed targets remain marked for an explicit
+retry.  Closing the Surface prevents further dispatch and stale callbacks; it
+cannot undo a request already accepted by Discord.
+
 ** Message translation
 
 On a timeline message, press ~o~ to open the message menu.  Its ~t~ action
-is DWIM: translate all messages intersecting the active region, or just the
-current message when no region is active.  ~T~ opens the current message's
-thread, and ~Y~ copies text.  Visible-message translation belongs to the room
-menu: ~C-c ? t~ translates the current window's visible messages.
+translates the captured target set described above.  ~T~ opens a single
+message's thread, and ~c~ / ~Y~ copies text.  Visible-message translation
+belongs to the room menu: ~C-c ? t~ translates the current window's messages.
 
 Disco does not bind timeline ~t~ / ~T~ or ~g t~ for these actions, preserving
 native Evil/evil-snipe motions.  Visual ~o~ still exchanges selection endpoints;

@@ -1704,7 +1704,8 @@ Discord sticker snowflakes."
                 owner on-success on-error)
   "Asynchronously create one message in CHANNEL-ID.
 
-Keyword arguments are the same as `disco-api-create-message'."
+Keyword arguments are the same as `disco-api-create-message'.
+OWNER optionally owns the cancellable logical request across rate-limit delays."
   (let* ((normalized-attachments
           (mapcar #'disco-api--normalize-send-attachment (or attachments '())))
          (normalized-poll (disco-api--normalize-poll-request poll))
@@ -1920,7 +1921,8 @@ ALLOWED-MENTIONS controls mention parsing for optional CONTENT."
 (cl-defun disco-api-forward-message-async (channel-id source-message-id source-channel-id
                                                       &key content forward-only allowed-mentions
                                                       owner on-success on-error)
-  "Asynchronously forward SOURCE-MESSAGE-ID from SOURCE-CHANNEL-ID to CHANNEL-ID."
+  "Asynchronously forward SOURCE-MESSAGE-ID from SOURCE-CHANNEL-ID to CHANNEL-ID.
+OWNER optionally owns the cancellable logical request across rate-limit delays."
   (let ((message-reference
          (append
           (list `(type . 1)
@@ -1967,7 +1969,8 @@ When ALLOWED-MENTIONS is non-nil, include it in the edit payload."
    nil))
 
 (cl-defun disco-api-delete-message-async (channel-id message-id &key owner on-success on-error)
-  "Delete MESSAGE-ID from CHANNEL-ID asynchronously."
+  "Delete MESSAGE-ID from CHANNEL-ID asynchronously.
+OWNER optionally owns the cancellable logical request across rate-limit delays."
   (disco-api--request-async
    "DELETE"
    (format "/channels/%s/messages/%s" channel-id message-id)

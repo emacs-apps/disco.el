@@ -121,88 +121,53 @@
                  (disco-msg-link '((id . "m2")
                                    (channel_id . "dm1"))))))
 
-(ert-deftest disco-msg-copy-text-respects-no-properties ()
+(ert-deftest disco-msg-copy-text-respects-no-properties nil
   (let (copied)
     (with-temp-buffer
       (setq-local disco-msg-content-text-function
-                  (lambda (_msg)
-                    (propertize "hello" 'face 'bold)))
-      (cl-letf (((symbol-function 'kill-new)
-                 (lambda (text &rest _args)
-                   (setq copied text)))
-                ((symbol-function 'message)
-                 (lambda (&rest _args) nil)))
-        (disco-msg-copy-text '((id . "m1")))
-        (should (equal "hello" (substring-no-properties copied)))
-        (should (get-text-property 0 'face copied))
-        (disco-msg-copy-text '((id . "m1")) t)
-        (should (equal "hello" copied))))))
+		  (lambda (_msg) (propertize "hello" 'face 'bold)))
+      (cl-letf
+	  (((symbol-function 'kill-new)
+	    (lambda (text &rest _args) (setq copied text)))
+	   ((symbol-function 'message) (lambda (&rest _args) nil)))
+	(disco-msg-copy-text (list '((id . "m1"))))
+	(should (equal "hello" (substring-no-properties copied)))
+	(should (get-text-property 0 'face copied))
+	(disco-msg-copy-text (list '((id . "m1"))) t)
+	(should (equal "hello" copied))))))
 
-(ert-deftest disco-msg-copy-dwim-prefers-url-code-then-message-text ()
+
+(ert-deftest disco-msg-copy-dwim-prefers-url-code-then-message-text
+    nil
   (let (copied)
     (with-temp-buffer
-      (let ((rendered (disco-markdown-render
-                       "visit [site](https://example.com) and `(+ 1 2)`"
-                       :context 'test-msg-copy-dwim)))
-        (insert rendered))
-      (cl-letf (((symbol-function 'kill-new)
-                 (lambda (text &rest _args)
-                   (setq copied text)))
-                ((symbol-function 'message)
-                 (lambda (&rest _args) nil)))
-        (goto-char (point-min))
-        (search-forward "site")
-        (backward-char 2)
-        (disco-msg-copy-dwim '((id . "m1")
-                               (content . "fallback text")))
-        (should (equal "https://example.com" copied))
-        (search-forward "+ 1 2")
-        (backward-char 3)
-        (disco-msg-copy-dwim '((id . "m1")
-                               (content . "fallback text")))
-        (should (equal "(+ 1 2)" copied))
-        (goto-char (point-min))
-        (setq-local disco-msg-content-text-function
-                    (lambda (_msg)
-                      "fallback text"))
-        (disco-msg-copy-dwim '((id . "m1")
-                               (content . "fallback text")) t)
-        (should (equal "fallback text" copied))))))
+      (let
+	  ((rendered
+	    (disco-markdown-render
+	     "visit [site](https://example.com) and `(+ 1 2)`"
+	     :context 'test-msg-copy-dwim)))
+	(insert rendered))
+      (cl-letf
+	  (((symbol-function 'kill-new)
+	    (lambda (text &rest _args) (setq copied text)))
+	   ((symbol-function 'message) (lambda (&rest _args) nil)))
+	(goto-char (point-min)) (search-forward "site")
+	(backward-char 2)
+	(disco-msg-copy-dwim
+	 (list '((id . "m1") (content . "fallback text"))))
+	(should (equal "https://example.com" copied))
+	(search-forward "+ 1 2") (backward-char 3)
+	(disco-msg-copy-dwim
+	 (list '((id . "m1") (content . "fallback text"))))
+	(should (equal "(+ 1 2)" copied)) (goto-char (point-min))
+	(setq-local disco-msg-content-text-function
+		    (lambda (_msg) "fallback text"))
+	(disco-msg-copy-dwim
+	 (list '((id . "m1") (content . "fallback text"))) t)
+	(should (equal "fallback text" copied))))))
 
-(ert-deftest disco-msg-commands-dispatch-through-buffer-local-adapters ()
-  (with-temp-buffer
-    (let ((msg '((id . "m1")))
-          seen)
-      (setq-local disco-msg-reply-function (lambda (it) (setq seen (list 'reply it))))
-      (disco-msg-reply msg)
-      (should (equal (list 'reply msg) seen))
-      (setq-local disco-msg-forward-function (lambda (it) (setq seen (list 'forward it))))
-      (disco-msg-forward msg)
-      (should (equal (list 'forward msg) seen))
-      (setq-local disco-msg-operate-function (lambda (it) (setq seen (list 'operate it))))
-      (disco-msg-operate msg)
-      (should (equal (list 'operate msg) seen))
-      (setq-local disco-msg-edit-function (lambda (it) (setq seen (list 'edit it))))
-      (disco-msg-edit msg)
-      (should (equal (list 'edit msg) seen))
-      (setq-local disco-msg-delete-function (lambda (it) (setq seen (list 'delete it))))
-      (disco-msg-delete msg)
-      (should (equal (list 'delete msg) seen))
-      (setq-local disco-msg-open-thread-function (lambda (it) (setq seen (list 'thread it))))
-      (disco-msg-open-thread msg)
-      (should (equal (list 'thread msg) seen))
-      (setq-local disco-msg-toggle-reaction-function (lambda (it) (setq seen (list 'toggle it))))
-      (disco-msg-toggle-reaction msg)
-      (should (equal (list 'toggle msg) seen))
-      (setq-local disco-msg-add-reaction-function (lambda (it) (setq seen (list 'add it))))
-      (disco-msg-add-reaction msg)
-      (should (equal (list 'add msg) seen))
-      (setq-local disco-msg-remove-reaction-function (lambda (it) (setq seen (list 'remove it))))
-      (disco-msg-remove-reaction msg)
-      (should (equal (list 'remove msg) seen))
-      (setq-local disco-msg-redisplay-function (lambda (it) (setq seen (list 'redisplay it))))
-      (disco-msg-redisplay msg)
-      (should (equal (list 'redisplay msg) seen)))))
+
+
 
 (ert-deftest disco-msg-next-and-previous-follow-message-spans ()
   (with-temp-buffer

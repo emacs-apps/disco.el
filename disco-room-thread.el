@@ -242,37 +242,30 @@
         number))))
 
 (defun disco-room-thread-create-from-message
-    (name message-id &optional auto-archive-duration rate-limit-per-user)
+    (name message-id &optional auto-archive-duration
+	  rate-limit-per-user)
   "Create thread NAME from MESSAGE-ID in the current channel."
   (interactive
-   (progn
-     (disco-room-thread--ensure-action-available
-      (disco-room-thread--create-from-message-unavailable-reason)
-      "create threads from messages")
-     (let* ((name (read-string "Thread name: "))
-            (default-message-id (disco-room--latest-message-id))
-            (message-raw (read-string
-                          (if default-message-id
-                              (format "Message ID (default %s): " default-message-id)
-                            "Message ID: ")))
-            (message-id (if (string-empty-p message-raw)
-                            (or default-message-id
-                                (user-error "disco: no message id provided and no loaded messages"))
-                          message-raw))
-            (auto-archive-duration (disco-thread-read-auto-archive-duration nil nil))
-            (rate-limit-per-user
-             (disco-room-thread--read-optional-nonnegative-int
-              "Slowmode seconds (empty for none): ")))
-       (list name message-id auto-archive-duration rate-limit-per-user))))
+   (let*
+       ((msg (disco-msg-for-interactive))
+	(name (read-string "Thread name: "))
+	(duration (disco-thread-read-auto-archive-duration nil nil))
+	(slowmode
+	 (disco-room-thread--read-optional-nonnegative-int
+	  "Slowmode seconds (empty for none): ")))
+     (list name (disco-msg-id msg) duration slowmode)))
   (disco-room-thread--ensure-action-available
    (disco-room-thread--create-from-message-unavailable-reason)
    "create threads from messages")
   (disco-room-thread--ensure-parent-channel)
-  (let* ((thread (disco-api-create-thread-from-message
-                  (alist-get 'id (disco-room--channel-object))
-                  message-id name auto-archive-duration rate-limit-per-user))
-         (thread-id (and (listp thread) (alist-get 'id thread)))
-         (thread-name (or (and (listp thread) (alist-get 'name thread)) name)))
+  (let*
+      ((thread
+	(disco-api-create-thread-from-message
+	 (alist-get 'id (disco-room--channel-object)) message-id name
+	 auto-archive-duration rate-limit-per-user))
+       (thread-id (and (listp thread) (alist-get 'id thread)))
+       (thread-name
+	(or (and (listp thread) (alist-get 'name thread)) name)))
     (when thread-id
       (disco-state-upsert-channel thread)
       (disco-room-open thread-id thread-name))

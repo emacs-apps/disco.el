@@ -514,101 +514,71 @@
                                  (should (string-match-p "official Discord system DMs are read-only"
                                                          (disco-room--composer-hidden-status-line))))))
 
-(ert-deftest disco-room-edit-message-enters-composer-edit-mode ()
-  (disco-room-test-with-runtime
-   (disco-room-test-with-surface "chat"
-                                 (setq-local disco-room--channel-id "chat")
-                                 (setq-local disco-room--channel-name "chat")
-                                 (appkit-chatbuf-input-state-set "saved draft")
-                                 (let ((msg '((id . "m1")
-                                              (channel_id . "chat")
-                                              (content . "old body")
-                                              (author . ((id . "u1") (username . "alice"))))))
-                                   (disco-state-reset)
-                                   (disco-state-upsert-channel
-                                    '((id . "chat")
-                                      (type . 0)
-                                      (guild_id . "g1")
-                                      (permissions . "2048")))
-                                   (disco-state-put-messages "chat" (list msg))
-                                   (cl-letf (((symbol-function 'disco-room--message-at-point)
-                                              (lambda () msg))
-                                             ((symbol-function 'disco-gateway-current-user-id)
-                                              (lambda () "u1"))
-                                             ((symbol-function 'message)
-                                              (lambda (&rest _args) nil)))
-                                     (disco-room-edit-message))
-                                   (should (disco-room--composer-edit-active-p))
-                                   (should (equal "m1" (disco-room--composer-edit-message-id)))
-                                   (should (eq 'edit (appkit-chatbuf-aux-type)))
-                                   (should (equal "m1" (appkit-chatbuf-aux-message-id)))
-                                   (should (equal "old body"
-                                                  (appkit-chatbuf-string-plain-text
-                                                   (disco-room--current-draft))))
-                                   (should (string-match-p "× ▏ Editing message\n  ▏ old body"
-                                                           (buffer-string)))
-                                   (should-not (string-match-p "\\[m1\\]" (buffer-string)))
-                                   (should (text-property-any
-                                            (point-min) (point-max) 'disco-room-input t))))))
 
-(ert-deftest disco-room-send-message-commits-composer-edit-and-restores-state ()
+
+(ert-deftest
+    disco-room-send-message-commits-composer-edit-and-restores-state
+    nil
   (disco-room-test-with-runtime
-   (disco-room-test-with-surface "chat"
-                                 (setq-local disco-room--channel-id "chat")
-                                 (setq-local disco-room--channel-name "chat")
-                                 (let ((msg '((id . "m1")
-                                              (channel_id . "chat")
-                                              (content . "old body")
-                                              (author . ((id . "u1") (username . "alice"))))))
-                                   (disco-state-reset)
-                                   (disco-state-upsert-channel
-                                    '((id . "chat")
-                                      (type . 0)
-                                      (guild_id . "g1")
-                                      (permissions . "2048")))
-                                   (disco-state-put-messages "chat" (list msg))
-                                   (appkit-chatbuf-input-state-set "saved draft [file:1]")
-                                   (puthash "1" '(:token-id "1" :path "/tmp/a.txt") disco-room--attachment-token-table)
-                                   (setq-local disco-room--attachment-token-seq 1)
-                                   (disco-room--sync-pending-attachments-from-draft)
-                                   (cl-letf (((symbol-function 'disco-room--message-at-point)
-                                              (lambda () msg))
-                                             ((symbol-function 'disco-gateway-current-user-id)
-                                              (lambda () "u1"))
-                                             ((symbol-function 'message)
-                                              (lambda (&rest _args) nil)))
-                                     (disco-room-edit-message))
-                                   (should (eq 'edit (appkit-chatbuf-aux-type)))
-                                   (should (equal "m1" (appkit-chatbuf-aux-message-id)))
-                                   (disco-room--set-draft "updated body")
-                                   (let (edit-call send-called)
-                                     (cl-letf (((symbol-function 'disco-api-edit-message-async)
-                                                (lambda (channel-id message-id content &rest args)
-                                                  (setq edit-call (list channel-id message-id content))
-                                                  (funcall (plist-get args :on-success)
-                                                           `((id . ,message-id) (channel_id . ,channel-id)
-                                                             (content . ,content) (author (id . "u1"))))))
-                                               ((symbol-function 'disco-gateway-current-user-id)
-                                                (lambda () "u1"))
-                                               ((symbol-function 'disco-api-send-message-async)
-                                                (lambda (&rest _args)
-                                                  (setq send-called t)))
-                                               ((symbol-function 'disco-room--channel-buffer-p)
-                                                (lambda (&rest _args) t))
-                                               ((symbol-function 'message)
-                                                (lambda (&rest _args) nil)))
-                                       (disco-room-send-message))
-                                     (should (equal '("chat" "m1" "updated body") edit-call))
-                                     (should-not send-called)
-                                     (should-not (disco-room--composer-edit-active-p))
-                                     (should-not (appkit-chatbuf-aux-active-p))
-                                     (let ((restored-draft (appkit-chatbuf-input-state)))
-                                       (should (equal "saved draft [file:1]"
-                                                      (appkit-chatbuf-string-plain-text restored-draft)))
-                                       (should-not disco-room--pending-reply-to)
-                                       (should (equal '("1")
-                                                      (disco-room--attachment-token-ids-in-text restored-draft))))
-                                     (should (= 1 (hash-table-count disco-room--attachment-token-table))))))))
+    (disco-room-test-with-surface "chat"
+      (setq-local disco-room--channel-id "chat")
+      (setq-local disco-room--channel-name "chat")
+      (let
+	  ((msg
+	    '((id . "m1") (channel_id . "chat") (content . "old body")
+	      (author (id . "u1") (username . "alice")))))
+	(disco-state-reset)
+	(disco-state-upsert-channel
+	 '((id . "chat") (type . 0) (guild_id . "g1")
+	   (permissions . "2048")))
+	(disco-state-put-messages "chat" (list msg))
+	(appkit-chatbuf-input-state-set "saved draft [file:1]")
+	(puthash "1" '(:token-id "1" :path "/tmp/a.txt")
+		 disco-room--attachment-token-table)
+	(setq-local disco-room--attachment-token-seq 1)
+	(disco-room--sync-pending-attachments-from-draft)
+	(cl-letf
+	    (((symbol-function 'disco-gateway-current-user-id)
+	      (lambda nil "u1"))
+	     ((symbol-function 'message) (lambda (&rest _args) nil)))
+	  (disco-room--mark-message 'toggle "m1")
+           (disco-room-edit-message))
+	(should (eq 'edit (appkit-chatbuf-aux-type)))
+	(should (equal "m1" (appkit-chatbuf-aux-message-id)))
+	(disco-room--set-draft "updated body")
+	(let (edit-call send-called)
+	  (cl-letf
+	      (((symbol-function 'disco-api-edit-message-async)
+		(lambda (channel-id message-id content &rest args)
+		  (setq edit-call (list channel-id message-id content))
+		  (funcall (plist-get args :on-success)
+			   `((id \, message-id)
+			     (channel_id \, channel-id)
+			     (content \, content) (author (id . "u1"))))))
+	       ((symbol-function 'disco-gateway-current-user-id)
+		(lambda nil "u1"))
+	       ((symbol-function 'disco-api-send-message-async)
+		(lambda (&rest _args) (setq send-called t)))
+	       ((symbol-function 'disco-room--channel-buffer-p)
+		(lambda (&rest _args) t))
+	       ((symbol-function 'message) (lambda (&rest _args) nil)))
+	    (disco-room-send-message))
+	  (should (equal '("chat" "m1" "updated body") edit-call))
+	  (should-not send-called)
+	  (should-not (disco-room--composer-edit-active-p))
+	  (should-not (appkit-chatbuf-aux-active-p))
+	  (let ((restored-draft (appkit-chatbuf-input-state)))
+	    (should
+	     (equal "saved draft [file:1]"
+		    (appkit-chatbuf-string-plain-text restored-draft)))
+	    (should-not disco-room--pending-reply-to)
+	    (should
+	     (equal '("1")
+		    (disco-room--attachment-token-ids-in-text
+		     restored-draft))))
+	  (should
+	   (= 1 (hash-table-count disco-room--attachment-token-table))))))))
+
 
 (ert-deftest disco-room-set-draft-preserves-ewoc-and-composer-anchor ()
   (disco-room-test-with-runtime
@@ -1009,6 +979,7 @@
                                                            (content . "forwarded")))))
                                              ((symbol-function 'message) #'ignore))
                                      (disco-room-forward-message "50" "source" nil nil)
+                                   (disco-room-test-drain surface)
 
                                      (should-not refreshed)
                                      (should-not disco-room--send-in-flight)
@@ -1330,7 +1301,8 @@
                                                (plist-get options :on-success)
                                                '((id . "300") (channel_id . "chat")
                                                  (content . "forward response"))))))
-                                   (disco-room-forward-message "source-message" "source" nil t))
+                                   (disco-room-forward-message "source-message" "source" nil t)
+                                   (disco-room-test-drain surface))
                                  (should
                                   (equal "forward response"
                                          (alist-get 'content

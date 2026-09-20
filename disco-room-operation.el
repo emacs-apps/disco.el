@@ -8,11 +8,22 @@
 
 ;;; Code:
 
+(require 'appkit-surface)
+
 (require 'appkit-command)
 (require 'appkit-effect)
 (require 'appkit-selection)
 (require 'disco-api)
 (require 'disco-state)
+
+(declare-function disco-room--ensure-surface "disco-room" ())
+(declare-function disco-room--render-request-create "disco-room" (&rest arguments))
+(declare-function disco-room--repair-history-window-after-delete "disco-room" (id))
+(declare-function disco-room--forget-message-async-state "disco-room" (id))
+(declare-function disco-room--retire-deleted-composer-context "disco-room" (id))
+(declare-function disco-room--apply-filtered-message-delete "disco-room-search" (id))
+(declare-function disco-room--resolve-message "disco-room" (id &optional channel position))
+(declare-function disco-room--async-error-message "disco-room-compose" (error-data))
 
 (defvar disco-room--channel-id)
 
@@ -51,32 +62,57 @@
   (appkit-surface-send (disco-room--ensure-surface)
                        (list 'message-operation 'begin kind (copy-tree specs))))
 
-(defun disco-room-operation--start (_context input _observe resolve reject)
+(defun disco-room-operation--start
+    (_context input _observe resolve reject)
   "Start one request described by INPUT, settling only RESOLVE or REJECT."
-  (pcase-let ((`(,owner ,channel ,kind ,spec) input))
-    (let ((handle
-           (pcase kind
-             ('delete
-              (disco-api-delete-message-async
-               channel (plist-get spec :id) :owner owner
-               :on-success resolve :on-error reject))
-             ('forward
-              (disco-api-forward-message-async
-               channel (plist-get spec :id) (plist-get spec :source-channel)
-               :content (plist-get spec :content)
-               :forward-only (plist-get spec :forward-only)
-               :allowed-mentions (plist-get spec :allowed-mentions)
-               :owner owner
-               :on-success
-               (lambda (response)
-                 (if (and (listp response) (alist-get 'id response))
-                     (funcall resolve response)
-                   (funcall reject '(:message "forward response has no message id"))))
-               :on-error reject)))))
-      (when (appkit-handle-p handle)
-        (appkit-cancellation-create
-         :kind 'logical
-         :cancel (lambda () (appkit-cancel-handle handle)))))))
+  (condition-case condition
+      (pcase-let ((`(,owner ,channel ,kind ,spec) input))
+        (let
+            ((handle
+              (pcase kind
+                ('delete
+                 (disco-api-delete-message-async channel
+                                                 (plist-get spec :id)
+                                                 :owner owner
+                                                 :on-success resolve
+                                                 :on-error reject))
+                ('forward
+                 (disco-api-forward-message-async channel
+                                                  (plist-get spec :id)
+                                                  (plist-get spec
+                                                             :source-channel)
+                                                  :content
+                                                  (plist-get spec
+                                                             :content)
+                                                  :forward-only
+                                                  (plist-get spec
+                                                             :forward-only)
+                                                  :allowed-mentions
+                                                  (plist-get spec
+                                                             :allowed-mentions)
+                                                  :owner owner
+                                                  :on-success
+                                                  (lambda (response)
+                                                    (if
+                                                        (and
+                                                         (listp
+                                                          response)
+                                                         (alist-get
+                                                          'id response))
+                                                        (funcall
+                                                         resolve
+                                                         response)
+                                                      (funcall reject
+                                                               '(:message
+                                                                 "forward response has no message id"))))
+                                                  :on-error reject)))))
+          (when (appkit-handle-p handle)
+            (appkit-cancellation-create
+             :kind 'logical
+             :cancel
+             (lambda ()
+               (appkit-cancel-handle handle))))))
+    (error (funcall reject condition) nil)))
 
 (defun disco-room-operation--command (operation)
   "Return the Effect command for the first pending item of OPERATION."

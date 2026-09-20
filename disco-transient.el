@@ -632,7 +632,9 @@
     ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
    ["Thread"
     ("m" "Create from message" disco-room-thread-create-from-message
-     :if-not disco-room-thread--create-from-message-unavailable-reason)
+     :if-not (lambda ()
+               (or (not (disco-room-menu--single-message-p))
+                   (disco-room-thread--create-from-message-unavailable-reason))))
     ("n" "Create detached" disco-room-thread-create
      :if-not (lambda ()
                (disco-room-thread--create-unavailable-reason :any)))

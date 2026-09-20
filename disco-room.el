@@ -52,7 +52,7 @@
 (require 'disco-room-render)
 (require 'disco-runtime)
 
-(declare-function disco-transient-msg-operate "disco-transient" ())
+(declare-function disco-transient-msg-operate "disco-transient" (&optional selection))
 (declare-function disco-room-transient "disco-transient" ())
 (declare-function disco-room-input-options-transient "disco-transient" ())
 (declare-function appkit-translate-enable "appkit-translate" (owner &optional notify))
@@ -1214,9 +1214,9 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
     (plist-get (appkit-surface-model surface) :selection)))
 
 (defun disco-room--marked-ids ()
-  "Return a copy of this Surface's marked message IDs."
+  "Return this Surface's marked message IDs; callers must not mutate them."
   (when-let* ((selection (disco-room--selection)))
-    (copy-sequence (appkit-selection-keys selection))))
+    (appkit-selection-keys selection)))
 
 (defun disco-room--mark-message (operation id)
   "Commit mark OPERATION for ID through the owning Surface."
@@ -1253,6 +1253,7 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
          (composer-visible-p (disco-room--composer-visible-p channel))
          (context-text (and (not composer-visible-p)
                             (disco-room--input-footer-context-text)))
+         (sending (disco-room--sending-p))
          (marked-count (length (disco-room--marked-ids)))
          (operation-status (when-let* ((surface (appkit-current-surface)))
                              (disco-room-operation-status (appkit-surface-model surface))))
@@ -1261,7 +1262,7 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
          (text
           (with-temp-buffer
             (insert (format "Channel: %s%s" channel-name channel-suffix))
-            (when (disco-room--sending-p)
+            (when sending
               (insert "   [sending...]"))
             (when (> marked-count 0)
               (insert (format "   [%d marked]" marked-count)))
@@ -1274,8 +1275,6 @@ an Appkit entry sync; gateway events are projected by their enclosing room sync.
               (insert filter-line "\n"))
             (when (stringp composer-status-line)
               (insert composer-status-line "\n"))
-            (when (> marked-count 0)
-              (insert (format "   [%d marked]" marked-count)))
             (insert "\n")
             (buffer-string))))
     (add-text-properties
@@ -2122,7 +2121,9 @@ When QUIET is non-nil, suppress progress messages."
 
 (defun disco-room--operate-msg (selection)
   "Open the message transient for captured SELECTION."
-  (disco-transient-msg-operate selection))
+  (require 'disco-transient)
+  (disco-msg-selection-messages selection)
+  (transient-setup 'disco-transient-msg-operate nil nil :scope selection))
 
 (defvar-keymap disco-room-mode-map
   :doc "Keymap for `disco-room-mode'."
