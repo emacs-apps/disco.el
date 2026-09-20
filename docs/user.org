@@ -179,6 +179,28 @@ History extends automatically near either visible edge.  ~M-<~ and
 Live Gateway events update create, update, and delete.  The room
 closes if its channel or guild is deleted.
 
+** Message translation
+
+On a timeline message, press ~t~ to translate and ~T~ to open its thread.
+These bindings also apply in Evil normal/motion state and the ~o~ message
+menu.  The menu uses ~Y~ for copy text; Evil's ~Z y~ is unchanged.  Composer
+typing is unaffected.
+
+~M-x disco-room-translate-message~ loads the optional ~appkit-translate~
+component on demand.  Configure ~appkit-translate-target-language~ (default
+~"zh"~) and ~appkit-translate-backend-function~ in Appkit.  The default Respond
+backend needs its own installation and authentication; there is no automatic
+translation, login, retry, or fallback.
+
+Translations appear below the original body with status, ~Hide~, ~Show~ and
+~Translate again~ actions.  They belong to the current room Surface, are not
+saved into messages, and leave the composer draft intact.  Editing the source
+invalidates the displayed translation; closing the Surface cancels pending work.
+Source text comes from semantic Markdown, including forwarded snapshots and
+thread-starter references, never from rendered buffer text.  Spoiler bodies
+are excluded even when revealed.  Attachments, embeds, reply previews and
+synthetic system notices are not translated.
+
 ** Composer
 
 ~TAB~ completes ~@~, ~#~, and ~:~ tokens: guild members, roles,

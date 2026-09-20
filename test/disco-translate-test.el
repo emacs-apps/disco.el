@@ -51,7 +51,7 @@
              (appkit-translate-backend-function (lambda () backend)))
         (disco-state-put-messages "chat" (list message))
         (disco-room-test-establish-latest-window)
-        (appkit-chatbuf-input-state-set "untouched draft")
+        (appkit-chatbuf-input-replace "untouched draft")
         (disco-room--sync-timeline)
         (goto-char (point-min))
         (search-forward "Hello")
@@ -71,7 +71,7 @@
         (funcall (car callbacks) "当前译文")
         (disco-room-test-drain surface)
         (should (string-match-p "当前译文" (buffer-string)))
-        (should (equal "untouched draft" (disco-room--current-draft)))
+        (should (equal "untouched draft" (appkit-chatbuf-input-string)))
         (should (equal message original))
         (should (equal "Changed" (alist-get 'content (disco-room--message-by-id "100"))))
         ;; A new request is owned by this exact Surface, not its room id.

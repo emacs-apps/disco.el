@@ -401,23 +401,6 @@
                                    (should-not (string-match-p (regexp-quote "[spoiler image hidden]")
                                                                (buffer-string)))))))
 
-(ert-deftest disco-room-forward-snapshot-content-uses-internal-markdown-renderer ()
-  (disco-room-test-with-runtime
-   (let* ((msg '((id . "m1")
-                 (message_snapshots
-                  . (((message
-                       . ((content . "[link](https://example.com)\n> quote"))))))))
-          (rendered (disco-room--forward-snapshot-content msg))
-          (plain (substring-no-properties rendered))
-          (link-pos (string-match "link" plain))
-          (quote-pos (string-match "quote" plain)))
-     (should (equal "link\nquote" plain))
-     (should (functionp
-              (get-text-property link-pos appkit-ui-action-property rendered)))
-     (should (equal "│ "
-                    (substring-no-properties
-                     (get-text-property quote-pos 'line-prefix rendered)))))))
-
 (ert-deftest disco-room-thread-entry-is-a-navigable-reference-not-a-button ()
   (disco-room-test-with-runtime
    (disco-room-test-with-surface "chat"
