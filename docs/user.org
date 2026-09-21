@@ -186,7 +186,8 @@ Marks select whole messages independently of the text region.  In Emacs state,
 state, ~a~ toggles and advances, ~u~ unmarks at point, and ~U~ clears or restores
 the last marked set.  Emacs state also uses ~U~ for clear/restore.
 
-Marked rows show ~[*]~ and the room header shows the count.  Moving point,
+Marked messages show a continuous left-side strip, including wrapped lines.
+The room header shows the count.  Moving point,
 paging, filtering and redraws do not clear marks.  Deleted messages are removed
 from both current and restorable marks; replacing or closing the Surface ends
 the selection.

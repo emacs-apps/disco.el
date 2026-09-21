@@ -1808,21 +1808,12 @@ Attachments, embeds, reply previews and spoiler bodies are never sent."
     (disco-room--insert-message msg (appkit-chat-timeline-row-context row)
                                (appkit-current-surface))
     (when (member (disco-msg-id msg) (disco-msg-marked-ids))
-      (let ((end (point))
-            (position start))
-        (while (< position end)
-          (when (get-text-property position 'disco-message-id)
-            (add-face-text-property position
-                                    (next-single-property-change
-                                     position 'disco-message-id nil end)
-                                    'highlight t)
-            (let ((prefix (get-text-property position 'line-prefix)))
-              (put-text-property position (min end (1+ position)) 'line-prefix
-                                 (concat (propertize "[*] " 'face 'bold) prefix)))
-            (setq position end))
-          (when (< position end)
-            (setq position (next-single-property-change
-                            position 'disco-message-id nil end))))))))
+      (when-let* ((message-start
+                  (text-property-not-all start (point) 'disco-message-id nil)))
+        ;; Decorate every visual line, composing with avatars and content prefixes.
+        ;; Date and unread dividers preceding the message remain unmarked.
+        (appkit-ui-apply-line-prefix
+         message-start (point) (propertize " " 'face 'region))))))
 
 (provide 'disco-room-render)
 
