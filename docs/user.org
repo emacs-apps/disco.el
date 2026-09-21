@@ -187,6 +187,7 @@ state, ~a~ toggles and advances, ~u~ unmarks at point, and ~U~ clears or restore
 the last marked set.  Emacs state also uses ~U~ for clear/restore.
 
 Marked messages show a continuous left-side strip, including wrapped lines.
+Customize ~appkit-chat-selection-marker~ to change the shared selection style.
 The room header shows the count.  Moving point,
 paging, filtering and redraws do not clear marks.  Deleted messages are removed
 from both current and restorable marks; replacing or closing the Surface ends
