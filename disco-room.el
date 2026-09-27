@@ -852,17 +852,19 @@ text, leaving originals and the composer untouched."
     (disco-room--invalidate-message-node message-id)))
 
 (defun disco-room--filtered-message-by-id (message-id)
-  "Return filtered room message object for MESSAGE-ID, or nil."
-  (when-let* ((items (and (listp disco-room--msg-filter)
+  "Return active filtered room message object for MESSAGE-ID, or nil."
+  (when-let* ((items (and (disco-room--msg-filter-active-p)
                           (plist-get disco-room--msg-filter :items))))
     (seq-find (lambda (message)
                 (equal (alist-get 'id message) message-id))
               items)))
 
 (defun disco-room--message-by-id (message-id)
-  "Return room message object for MESSAGE-ID, or nil."
-  (or (disco-msg-find-in-channel disco-room--channel-id message-id)
-      (disco-room--filtered-message-by-id message-id)))
+  "Return the displayed MESSAGE-ID, falling back to the canonical cache.
+Filter rows own their search snapshots.  Cache-only messages remain available
+to explicit marks without adding them to the filtered projection."
+  (or (disco-room--filtered-message-by-id message-id)
+      (disco-msg-find-in-channel disco-room--channel-id message-id)))
 
 (defun disco-room--channel-message-by-id (channel-id message-id)
   "Return cached MESSAGE-ID from CHANNEL-ID, or nil."
@@ -1583,6 +1585,24 @@ optimistic row node while its nonce key becomes the server message id."
         (disco-room--sync-timeline :changed-resources resources)
         t))))
 
+(defun disco-room--apply-filtered-message-update (message)
+  "Merge live MESSAGE fields into matching search rows, preserving membership."
+  (let ((message-id (disco-room--message-id message)))
+    (when (disco-room--filtered-message-by-id message-id)
+      (setq disco-room--msg-filter
+            (plist-put
+             (copy-sequence disco-room--msg-filter) :items
+             (mapcar
+              (lambda (item)
+                (if (equal message-id (disco-room--message-id item))
+                    (let ((updated (copy-alist item)))
+                      (dolist (pair message)
+                        (setf (alist-get (car pair) updated nil 'remove)
+                              (cdr pair)))
+                      updated)
+                  item))
+              (plist-get disco-room--msg-filter :items)))))))
+
 (defun disco-room--apply-filtered-message-delete (message-id)
   "Remove MESSAGE-ID from the active filter and reject stale filter pages."
   (let* ((filter disco-room--msg-filter)
@@ -1595,8 +1615,8 @@ optimistic row node while its nonce key becomes the server message id."
          (removed-p (< (length remaining) (length items)))
          (request-invalidated-p disco-room--filter-in-flight))
     (when request-invalidated-p
-      ;; Load-more callbacks capture the old item list.  Invalidate them so a
-      ;; response cannot resurrect a Gateway-deleted search result.
+      ;; Pending search pages may still contain the deleted result.  Reject
+      ;; them so their response cannot resurrect it.
       (setq disco-room--filter-generation
             (1+ (or disco-room--filter-generation 0)))
       (setq disco-room--filter-in-flight nil))
@@ -1641,6 +1661,9 @@ optimistic row node while its nonce key becomes the server message id."
         ;; event.  Retire controller owners and matching composer aux state.
         (disco-room--forget-message-async-state message-id)
         (disco-room--retire-deleted-composer-context message-id))
+      (when (and (disco-room--msg-filter-active-p)
+                 (eq event-type 'message-update))
+        (disco-room--apply-filtered-message-update event-message))
       (when composer-context-p
         (disco-room--update-frame))
       (if (disco-room--msg-filter-active-p)
@@ -1659,6 +1682,8 @@ optimistic row node while its nonce key becomes the server message id."
                 (appkit-chat-history-request-cancel)
                 (appkit-chat-history-window-clear))
               (disco-room--apply-filtered-message-delete message-id))
+            (disco-room--sync-timeline
+             :changed-resources (list (list :message message-id)))
             'filtered)
         (when (eq event-type 'message-delete)
           (disco-room--repair-history-window-after-delete message-id))
@@ -2122,8 +2147,7 @@ When QUIET is non-nil, suppress progress messages."
 (defun disco-room--operate-msg (selection)
   "Open the message transient for captured SELECTION."
   (require 'disco-transient)
-  (disco-msg-selection-messages selection)
-  (transient-setup 'disco-transient-msg-operate nil nil :scope selection))
+  (disco-transient-msg-operate selection))
 
 (defvar-keymap disco-room-mode-map
   :doc "Keymap for `disco-room-mode'."
@@ -2184,8 +2208,7 @@ When QUIET is non-nil, suppress progress messages."
   "C-c C-t u" #'disco-room-thread-set-muted
   "C-c C-j" #'disco-room-thread-join
   "C-c C-l" #'disco-room-thread-leave
-  "C-c M-v" #'disco-avatar-refetch
-  "C-c ?" #'disco-room-transient)
+  "C-c M-v" #'disco-avatar-refetch)
 
 ;;; View lifecycle and session cleanup
 

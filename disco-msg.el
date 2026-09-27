@@ -191,7 +191,11 @@ Called with OPERATION (`toggle', `unmark' or `clear-restore') and message ID.")
 (defun disco-msg--menu-selection ()
   "Return the message selection captured by the current transient, if any."
   (when (fboundp 'transient-scope)
-    (let ((scope (transient-scope '(disco-transient-msg-operate disco-room-poll-transient))))
+    (let ((scope (transient-scope '(disco-room-transient
+                                    disco-message-transient
+                                    disco-selection-transient
+                                    disco-media-transient
+                                    disco-room-poll-transient))))
       (and (disco-msg-selection-p scope) scope))))
 
 (defun disco-msg--resolve-key (key &optional channel)

@@ -81,7 +81,7 @@ When nil, leave Evil's initial-state selection untouched."
     "g t" #'disco-root-toggle-section-at-point
     "TAB" #'disco-root-tab-dwim
     "<backtab>" #'disco-root-button-backward
-    "?" #'disco-root-transient
+    "g a" #'disco-root-transient
     :map disco-channel-directory-mode-map
     :nm
     "RET" #'disco-channel-directory-open-at-point
@@ -99,7 +99,7 @@ When nil, leave Evil's initial-state selection untouched."
     :nm
     "g r" #'disco-root-archived-threads-refresh
     "g +" #'disco-root-archived-threads-load-more
-    "?" #'disco-root-view--transient
+    "g a" #'disco-root-view--transient
     :map disco-room-pinned-messages-mode-map
     :nm
     "RET" #'appkit-ui-activate
@@ -126,8 +126,9 @@ When nil, leave Evil's initial-state selection untouched."
   ;; Message actions deliberately replace normal-state editing commands.
   (appkit-evil-map
     :map disco-room-mode-map
+    :nmv
+    "g a" #'disco-room-transient
     :nm
-    "?" #'disco-room-transient
     "g r" #'disco-room-refresh
     "S" #'disco-room-filter-search
     "_" #'disco-room-filter-cancel

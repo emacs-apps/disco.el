@@ -171,7 +171,7 @@ editable.
 | ~M-g s~ / ~M-g n~ / ~M-g p~ | keyboard search |
 | ~C-c C-o~ | room input options |
 | ~C-c M-v~ | clear avatar cache and refetch |
-| ~?~ / ~C-c ?~ | room transient |
+| ~?~ on the timeline / Evil ~g a~ | room transient |
 
 History extends automatically near either visible edge.  ~M-<~ and
 ~M->~ keep native beginning and end-of-buffer bindings.
@@ -195,9 +195,9 @@ the selection.
 
 ~o~ captures the active message region, otherwise marked messages, otherwise
 the message at point.  Moving point afterward does not retarget that menu.
-Copy text/links, translation, forwarding and deletion accept multiple messages;
-reply, edit, thread and other single-message actions are disabled for a batch.
-Direct single-message commands reject multiple targets as well.
+Single-message and batch operations have separate menus; both offer copy,
+translation, forwarding and deletion.  Direct single-message commands reject
+multiple targets.
 
 Deletion preflights the entire selection and asks once.  Forwarding sends each
 selected message into the current room in chronological order; an optional
@@ -209,38 +209,21 @@ cannot undo a request already accepted by Discord.
 
 ** Message translation
 
-On a timeline message, press ~o~ to open the message menu.  Its ~t~ action
-translates the captured target set described above.  ~T~ opens a single
-message's thread, and ~c~ / ~Y~ copies text.  Visible-message translation
-belongs to the room menu: ~C-c ? t~ translates the current window's messages.
+~o t~ translates the captured message selection.  The room menu's ~t~ translates
+the current window's messages: ~? t~ in Emacs state, ~g a t~ in Evil.
+In Evil visual state use ~g a o t~, leaving ~o~, ~t~ and ~T~ motions intact.
+Neither action fetches more history.
 
-Disco does not bind timeline ~t~ / ~T~ or ~g t~ for these actions, preserving
-native Evil/evil-snipe motions.  Visual ~o~ still exchanges selection endpoints;
-use ~C-c ? o t~ to reach the same translation action without losing the region.
-Evil's ~Z y~ and composer typing are unchanged.
-
-~M-x disco-room-translate-message~ provides the same DWIM action;
-~M-x disco-room-translate-visible~ translates visible messages without a region.
-Both batch scopes include whole intersecting messages and skip rows without
-translatable text.  They never send selected draft text or fetch more history.
-The visible range is captured before translations can resize rows.
-
-~M-x disco-room-translate-message~ loads the optional ~appkit-translate~
-component on demand.  Configure ~appkit-translate-target-language~ (default
-~"zh"~) and ~appkit-translate-backend-function~ in Appkit.  The default Respond
-backend needs its own installation and authentication; there is no automatic
-translation, login, retry, or fallback.
-
-Translations appear below the original body with status, ~Hide~, ~Show~ and
-~Translate again~ actions.  They belong to the current room Surface, are not
-saved into messages, and leave the composer draft intact.  Editing the source
-invalidates the displayed translation; closing the Surface cancels pending work.
-Source text comes from semantic Markdown, including forwarded snapshots and
-thread-starter references, never from rendered buffer text.  Spoiler bodies
-are excluded even when revealed.  Attachments, embeds, reply previews and
-synthetic system notices are not translated.
+Translations stay below the originals for this Surface.  Configure
+~appkit-translate-target-language~ (default ~"zh"~) and
+~appkit-translate-backend-function~; the default Respond backend needs its own
+authentication.  Spoilers, drafts, attachments and embeds are not exported.
+Filtered rows use their displayed snapshot, not a newer cached message.
 
 ** Composer
+
+The room menu's ~c~ opens composer operations; ~c a~ opens attachment management
+and ~c o~ opens input options.  ~T~ opens thread operations and ~I~ diagnostics.
 
 ~TAB~ completes ~@~, ~#~, and ~:~ tokens: guild members, roles,
 ~@everyone~ / ~@here~, channels, Unicode emoji, and guild custom
@@ -298,9 +281,8 @@ balanced.  An indivisible structural block that cannot fit is rejected; choose
 file mode rather than cutting provider syntax.
 
 Title and preview open or play the item.  An in-flight transfer
-control stays inline with Cancel.  Download, Save As, and Copy URL
-live in the message transient.  Audio keeps play, pause, and stop
-waveform controls inline.
+control stays inline with Cancel.  Download, Save As, and Copy URL live under
+the message menu's ~o~ media submenu.  Audio keeps playback controls inline.
 
 The Sticker picker searches names, tags, IDs, current-server Stickers,
 and Discord standard packs.  ~C-u C-c C-i~ restricts it to Favorite

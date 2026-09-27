@@ -141,5 +141,211 @@
                         :type 'user-error))
         (should (equal (reverse sent) '("First\ncontinued" "Second")))))))
 
+(ert-deftest disco-translate-filter-selections-use-displayed-snapshots ()
+  (dolist (selection-kind '(point region marks visible menu))
+    (let ((disco-room-show-avatars nil)
+          (disco-room-show-attachments nil)
+          (disco-embed-show-embeds nil)
+          sent)
+      (disco-room-test-with-surface "chat"
+        (let ((appkit-translate-backend-function
+               (lambda ()
+                 (list :id 'filtered :label "Filtered"
+                       :start (lambda (source _language resolve _reject)
+                                (push (plist-get source :text) sent)
+                                (funcall resolve "搜索译文")
+                                nil)))))
+          (disco-state-put-messages
+           "chat" '(((id . "900") (channel_id . "chat")
+                     (content . "Outside filter"))
+                    ((id . "100") (channel_id . "chat")
+                     (content . "New canonical message"))))
+          (setq disco-room--msg-filter
+                '(:active t :query "snapshot"
+                  :items (((id . "100") (channel_id . "chat")
+                           (content . "Old search snapshot")))))
+          (disco-room--sync-timeline)
+          (goto-char (point-min))
+          (search-forward "Old search snapshot")
+          (pcase selection-kind
+            ('region
+             (let ((transient-mark-mode t))
+               (set-mark (- (point) 8))
+               (activate-mark)
+               (disco-room-translate-message)
+               (deactivate-mark)))
+            ('marks
+             ;; Off-filter messages are eligible only when explicitly marked.
+             (appkit-surface-send surface '(message-mark toggle "100"))
+             (appkit-surface-send surface '(message-mark toggle "900"))
+             (disco-room-translate-message))
+            ('visible
+             (save-window-excursion
+               (switch-to-buffer (current-buffer))
+               (set-window-start (selected-window) (point-min))
+               (disco-room-translate-visible)))
+            ('menu
+             (let ((selection (disco-msg-capture-selection)))
+               (goto-char (point-max))
+               (cl-letf (((symbol-function 'disco-msg--menu-selection)
+                          (lambda () selection)))
+                 (disco-room-translate-message))))
+            (_ (disco-room-translate-message)))
+          (disco-room-test-drain surface)
+          (should (equal (reverse sent)
+                         (if (eq selection-kind 'marks)
+                             '("Old search snapshot" "Outside filter")
+                           '("Old search snapshot"))))
+          (should (equal '("100") (appkit-chat-timeline-keys)))
+          (should (string-match-p "搜索译文" (buffer-string)))
+          (should-not (string-match-p "New canonical message\\|Outside filter"
+                                      (buffer-string))))))))
+
+(ert-deftest disco-translate-filter-live-edits-retire-results-and-refresh-row ()
+  (let ((disco-room-show-avatars nil)
+        (disco-room-show-attachments nil)
+        (disco-embed-show-embeds nil)
+        callbacks sent page-callback)
+    (disco-room-test-with-surface "chat"
+      (let* ((snapshot '((id . "100") (channel_id . "chat")
+                         (content . "Old search snapshot")
+                         (author . ((id . "u1") (username . "Alice")))))
+             (appkit-translate-backend-function
+              (lambda ()
+                (list :id 'filter-edits :label "Filter edits"
+                      :start (lambda (source _language resolve _reject)
+                               (push (plist-get source :text) sent)
+                               (push resolve callbacks)
+                               nil)))))
+        (disco-state-put-messages
+         "chat" '(((id . "900") (channel_id . "chat")
+                   (content . "Outside filter"))
+                  ((id . "100") (channel_id . "chat")
+                   (content . "New canonical message"))))
+        (cl-letf (((symbol-function 'disco-room--search-current-channel-async)
+                   (lambda (&rest args)
+                     (setq page-callback (plist-get args :on-success)))))
+          (disco-room-search--run-filter '(:query "snapshot"))
+          (funcall page-callback
+                   `((total_results . 2) (messages . ((,snapshot)))))
+          (disco-room-test-drain surface)
+          (goto-char (point-min))
+          (search-forward "Old search snapshot")
+          (let ((selection (disco-msg-capture-selection)))
+            (disco-room-translate-message)
+            (funcall (car callbacks) "旧译文")
+            (disco-room-test-drain surface)
+            (should (string-match-p "旧译文" (buffer-string)))
+            ;; A pending next page must not restore the pre-edit snapshot.
+            (disco-room-filter-load-more)
+            (let ((edit '((id . "100") (channel_id . "chat")
+                          (content . "Edited search snapshot ||secret||"))))
+              (disco-gateway--upsert-message "chat" edit)
+              (disco-room--queue-update
+               surface (list 'gateway-event
+                             (list :type 'message-update
+                                   :channel-id "chat" :message edit))))
+            (disco-room-test-drain surface)
+            (should (string-match-p "Edited search snapshot" (buffer-string)))
+            (should-not (string-match-p "Old search snapshot\\|旧译文"
+                                        (buffer-string)))
+            (should (equal "Alice"
+                           (disco-room--message-author
+                            (disco-room--message-by-id "100"))))
+            ;; A captured menu keeps identities, not the previous body.
+            (cl-letf (((symbol-function 'disco-msg--menu-selection)
+                       (lambda () selection)))
+              (disco-room-translate-message))
+            (let ((edit '((id . "100") (channel_id . "chat")
+                          (content . "Latest search body"))))
+              (disco-gateway--upsert-message "chat" edit)
+              (disco-room--queue-update
+               surface (list 'gateway-event
+                             (list :type 'message-update
+                                   :channel-id "chat" :message edit))))
+            (disco-room-test-drain surface)
+            (funcall (car callbacks) "迟到译文")
+            (disco-room-test-drain surface)
+            (should-not (string-match-p "迟到译文" (buffer-string)))
+            (funcall page-callback
+                     `((total_results . 2)
+                       (messages . ((,snapshot)
+                                    (((id . "200") (channel_id . "chat")
+                                      (content . "Another result")))))))
+            (disco-room-test-drain surface)
+            (goto-char (point-min))
+            (search-forward "Latest search body")
+            (disco-room-translate-message)
+            (funcall (car callbacks) "当前搜索译文")
+            (disco-room-test-drain surface)
+            (should (equal (reverse sent)
+                           '("Old search snapshot"
+                             "Edited search snapshot "
+                             "Latest search body")))
+            (should (equal '("200" "100") (appkit-chat-timeline-keys)))
+            (should (string-match-p "当前搜索译文" (buffer-string)))
+            (goto-char (point-min))
+            (search-forward "当前搜索译文")
+            (should (equal "100" (get-text-property
+                                  (match-beginning 0) 'disco-message-id)))
+            (should-not (string-match-p
+                         "Old search snapshot\\|Edited search snapshot\\|Outside filter\\|旧译文\\|迟到译文"
+                         (buffer-string)))
+            (should (equal "Old search snapshot" (alist-get 'content snapshot)))))))))
+
+(ert-deftest disco-translate-thread-starter-loads-cached-parent-without-inline ()
+  (let ((disco-room-show-avatars nil)
+        (disco-room-show-attachments nil)
+        (disco-embed-show-embeds nil)
+        sent)
+    (disco-room-test-with-surface "thread"
+      (let ((appkit-translate-backend-function
+             (lambda ()
+               (list :id 'starter :label "Starter"
+                     :start (lambda (source _language resolve _reject)
+                              (push (plist-get source :text) sent)
+                              (funcall resolve "父消息译文")
+                              nil)))))
+        (disco-state-put-messages
+         "parent" '(((id . "100") (channel_id . "parent")
+                     (content . "**Cached parent** ||secret||")
+                     (author . ((id . "u1") (username . "Alice"))))))
+        (disco-state-put-messages
+         "thread" '(((id . "100") (channel_id . "thread") (type . 21)
+                     (referenced_message . nil)
+                     (message_reference . ((channel_id . "parent")
+                                           (message_id . "100"))))))
+        (disco-room-test-establish-latest-window)
+        (disco-room--sync-timeline)
+        (goto-char (point-min))
+        (search-forward "Cached parent")
+        (disco-room-translate-message)
+        (disco-room-test-drain surface)
+        (should (equal '("Cached parent ") sent))
+        (should (string-match-p "父消息译文" (buffer-string)))
+        (should (equal '("100") (appkit-chat-timeline-keys)))))))
+
+(ert-deftest disco-translate-thread-starter-fallback-rejects-self-reference ()
+  (disco-room-test-with-surface "thread"
+    (let ((source '((id . "50") (channel_id . "thread")
+                    (content . "Fallback parent")))
+          (starter '((id . "100") (channel_id . "thread") (type . 21)
+                     (content . "Synthetic starter"))))
+      (disco-state-put-messages "thread" (list starter source))
+      (dolist (channel '("parent" "thread"))
+        (let ((self (append starter
+                            `((message_reference . ((channel_id . ,channel)
+                                                    (message_id . "100")))))))
+          (should-not (disco-room--thread-starter-reference-message self))
+          (should (equal "" (plist-get (disco-room--translation-source self t)
+                                      :text)))))
+      (let ((fallback
+             (append starter
+                     '((message_reference . ((channel_id . "parent")
+                                             (message_id . "50")))))))
+        (should (equal "Fallback parent"
+                       (plist-get (disco-room--translation-source fallback t)
+                                  :text)))))))
+
 (provide 'disco-translate-test)
 ;;; disco-translate-test.el ends here

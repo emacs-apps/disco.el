@@ -459,7 +459,8 @@ When APPEND is non-nil, load the next page of matching messages."
            (let* ((page (disco-room-search--flatten-messages
                          (alist-get 'messages body)))
                   (items (if append
-                             (disco-room-search--merge-message-lists existing page)
+                             (disco-room-search--merge-message-lists
+                              (plist-get disco-room--msg-filter :items) page)
                            page))
                   (total (alist-get 'total_results body)))
              (setq-local disco-room--filter-in-flight nil)

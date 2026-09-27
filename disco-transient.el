@@ -4,8 +4,8 @@
 
 ;;; Commentary:
 
-;; Root, search, room, message, poll, and input-option menus.  The application
-;; entry point loads these menus alongside their business components.
+;; Room, message, selection, media, composition, thread, and search menus.
+;; The application entry point loads menus alongside their business components.
 
 ;;; Code:
 
@@ -512,10 +512,6 @@
   "Return the captured operation targets, or nil if they became unavailable."
   (ignore-errors (disco-msg-targets-for-interactive)))
 
-(defun disco-room-menu--single-message-p ()
-  "Return non-nil when exactly one captured target remains available."
-  (= (length (disco-room-menu--targets)) 1))
-
 (defun disco-room-menu--delete-unavailable-p ()
   "Return non-nil unless every captured target can be deleted."
   (or (disco-room-operation-current)
@@ -525,8 +521,8 @@
 
 (defun disco-room-menu--media-context ()
   "Return the single target's captured card context, never a new point target."
-  (when (disco-room-menu--single-message-p)
-    (when-let* ((selection (disco-msg--menu-selection)))
+  (when-let* ((selection (disco-msg--menu-selection)))
+    (when (= (length (disco-msg-selection-messages selection)) 1)
       (disco-msg-selection-media-context selection))))
 
 (defun disco-room-menu--media-inapt-p (action)
@@ -542,41 +538,79 @@
     (appkit-media-card-call-action action context)))
 
 ;;;###autoload(autoload 'disco-transient-msg-operate "disco" nil t)
-(transient-define-prefix disco-transient-msg-operate (&optional selection)
-  "Operate on a stable snapshot of selected messages."
-  [[:description (lambda () (format "Messages (%d selected)"
+(defun disco-transient-msg-operate (&optional selection)
+  "Route captured SELECTION to its single-message or batch menu."
+  (interactive)
+  (setq selection (or selection (disco-msg--menu-selection)
+                      (disco-msg-capture-selection)))
+  (if (= (length (disco-msg-selection-messages selection)) 1)
+      (disco-message-transient selection)
+    (disco-selection-transient selection)))
+
+;;;###autoload(autoload 'disco-message-transient "disco" nil t)
+(transient-define-prefix disco-message-transient (&optional selection)
+  "Operate on one captured message."
+  [["Message"
+    ("c" "Copy text" disco-msg-copy-text)
+    ("l" "Copy link" disco-msg-copy-link)
+    ("Y" "Copy text" disco-msg-copy-text)
+    ("t" "Translate" disco-room-translate-message)
+    ("i" "Describe" disco-msg-describe-message)
+    ("L" "Redisplay" disco-msg-redisplay)]
+   ["Actions"
+    ("r" "Reply" disco-msg-reply :inapt-if disco-room--reply-unavailable-reason)
+    ("f" "Forward" disco-msg-forward :inapt-if disco-room--forward-unavailable-reason)
+    ("e" "Edit" disco-msg-edit
+     :inapt-if (lambda ()
+                 (disco-room--edit-start-unavailable-reason
+                  (disco-room-menu--message-at-point))))
+    ("d" "Delete" disco-msg-delete :inapt-if disco-room-menu--delete-unavailable-p)
+    ("P" "Pin / unpin" disco-msg-toggle-pin
+     :inapt-if (lambda ()
+                 (disco-room--pin-message-unavailable-reason
+                  (disco-room-menu--message-at-point))))
+    ("!" "Add reaction" disco-msg-add-reaction
+     :inapt-if (lambda ()
+                 (disco-room--reaction-unavailable-reason
+                  (disco-room-menu--message-at-point))))]
+   ["Related"
+    ("T" "Open thread" disco-msg-open-thread
+     :inapt-if (lambda ()
+                 (disco-room-thread--open-from-message-unavailable-reason
+                  (disco-room-menu--message-at-point))))
+    ("n" "Create thread" disco-room-thread-create-from-message
+     :inapt-if disco-room-thread--create-from-message-unavailable-reason)
+    ("p" "Poll actions…" disco-room-poll-transient :if disco-room-poll-actionable-at-point-p)
+    ("o" "Media…" disco-media-transient :if disco-room-menu--media-context)]]
+  (interactive)
+  (setq selection (or selection (disco-msg--menu-selection)
+                      (disco-msg-capture-selection)))
+  (unless (= (length (disco-msg-selection-messages selection)) 1)
+    (user-error "disco: message actions require exactly one message"))
+  (transient-setup 'disco-message-transient nil nil :scope selection))
+
+;;;###autoload(autoload 'disco-selection-transient "disco" nil t)
+(transient-define-prefix disco-selection-transient (&optional selection)
+  "Operate on a captured batch of messages."
+  [[:description (lambda () (format "Selection (%d messages)"
                                     (length (disco-room-menu--targets))))
     ("c" "Copy text" disco-msg-copy-text)
     ("l" "Copy links" disco-msg-copy-link)
     ("Y" "Copy text" disco-msg-copy-text)
     ("t" "Translate" disco-room-translate-message)
-    ("i" "Describe" disco-msg-describe-message :inapt-if-not disco-room-menu--single-message-p)
-    ("L" "Redisplay" disco-msg-redisplay :inapt-if-not disco-room-menu--single-message-p)
-    ("r" "Reply" disco-msg-reply
-     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
-                              (disco-room--reply-unavailable-reason))))
     ("f" "Forward" disco-msg-forward :inapt-if disco-room--forward-unavailable-reason)
-    ("e" "Edit" disco-msg-edit
-     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
-                              (disco-room--edit-start-unavailable-reason
-                               (disco-room-menu--message-at-point)))))
-    ("d" "Delete" disco-msg-delete :inapt-if disco-room-menu--delete-unavailable-p)
-    ("P" "Pin / unpin" disco-msg-toggle-pin
-     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
-                              (disco-room--pin-message-unavailable-reason
-                               (disco-room-menu--message-at-point)))))
-    ("!" "Add reaction" disco-msg-add-reaction
-     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
-                              (disco-room--reaction-unavailable-reason
-                               (disco-room-menu--message-at-point)))))
-    ("T" "Open thread" disco-msg-open-thread
-     :inapt-if (lambda () (or (not (disco-room-menu--single-message-p))
-                              (disco-room-thread--open-from-message-unavailable-reason
-                               (disco-room-menu--message-at-point)))))]
-   ["Poll"
-    ("p" "Poll actions…" disco-room-poll-transient :if disco-room-poll-actionable-at-point-p)]
-   ["Media"
-    :if disco-room-menu--media-context
+    ("d" "Delete" disco-msg-delete :inapt-if disco-room-menu--delete-unavailable-p)]]
+  (interactive)
+  (setq selection (or selection (disco-msg--menu-selection)
+                      (disco-msg-capture-selection)))
+  (unless (> (length (disco-msg-selection-messages selection)) 1)
+    (user-error "disco: batch actions require multiple messages"))
+  (transient-setup 'disco-selection-transient nil nil :scope selection))
+
+;;;###autoload(autoload 'disco-media-transient "disco" nil t)
+(transient-define-prefix disco-media-transient (&optional selection)
+  "Operate on the media card captured with a message."
+  [["Media"
     ("o" "Open / play" (lambda () (interactive) (disco-room-menu--media-action 'open))
      :inapt-if (lambda () (disco-room-menu--media-inapt-p 'open)))
     ("D" "Download / retry" (lambda () (interactive) (disco-room-menu--media-action 'download))
@@ -587,88 +621,119 @@
      :inapt-if (lambda () (disco-room-menu--media-inapt-p 'save-as)))
     ("y" "Copy media URL" (lambda () (interactive) (disco-room-menu--media-action 'copy-url))
      :inapt-if (lambda () (disco-room-menu--media-inapt-p 'copy-url)))]]
-  (interactive (list (disco-msg-capture-selection)))
-  (setq selection (or selection (disco-msg-capture-selection)))
-  (disco-msg-selection-messages selection)
-  (transient-setup 'disco-transient-msg-operate nil nil :scope selection))
+  (interactive)
+  (setq selection (or selection (disco-msg--menu-selection)
+                      (disco-msg-capture-selection)))
+  (unless (and (= (length (disco-msg-selection-messages selection)) 1)
+               (disco-msg-selection-media-context selection))
+    (user-error "disco: no media in captured message selection"))
+  (transient-setup 'disco-media-transient nil nil :scope selection))
 
 ;;;###autoload(autoload 'disco-room-transient "disco" nil t)
 (transient-define-prefix disco-room-transient ()
-  "Room command menu for disco.el."
+  "Room navigation and operation menus."
   [["Timeline"
     ("g" "Refresh room" disco-room-refresh)
     ("t" "Translate visible" disco-room-translate-visible)
-    ("o" "Message actions..." disco-transient-msg-operate
+    ("o" "Message / selection…" disco-transient-msg-operate
      :if disco-room-menu--targets)
-    ("c" "Send message" disco-room-send-message
-     :if-not disco-room--send-message-unavailable-reason)
-    ("f" "Attach file" disco-room-attach-file
-     :if-not disco-room--attach-unavailable-reason)
-    ("D" "Remove attachment" disco-room-remove-attachment-token-at-point
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("x" "Clear attachments" disco-room-clear-attachments
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("v" "List attachments" disco-room-list-attachments
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("V" "Edit attachment desc" disco-room-edit-attachment-description
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("S" "Toggle attachment spoiler" disco-room-toggle-attachment-spoiler
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 1)))
-    ("O" "Reorder attachments" disco-room-reorder-attachments
-     :if-not (lambda ()
-               (disco-room--attachment-token-action-unavailable-reason 2)))
-    ("k" "Cancel reply/edit" disco-room-cancel-reply
-     :if disco-room--composer-aux-active-p)
-    ("p" "Send poll" disco-room-send-poll
-     :if-not disco-room--poll-unavailable-reason)
-    ("i" "Send Sticker" disco-room-send-sticker
-     :if-not disco-room--sticker-unavailable-reason)
     ("B" "Browse pinned msgs" disco-room-list-pinned-messages)
     ("P" "Ack pinned msgs" disco-room-ack-channel-pins)]
-   ["Thread"
-    ("m" "Create from message" disco-room-thread-create-from-message
-     :if-not (lambda ()
-               (or (not (disco-room-menu--single-message-p))
-                   (disco-room-thread--create-from-message-unavailable-reason))))
+   ["Operations"
+    ("c" "Compose…" disco-room-compose-transient)
+    ("T" "Threads…" disco-room-thread-transient)
+    ("I" "Diagnostics…" disco-room-diagnostics-transient)]
+   ["Search"
+    ("M-/" "Structured search…" disco-room-search-channel)
+    ("/" "Filter search" disco-room-filter-search)
+    ("F" "Cancel filter" disco-room-filter-cancel)]
+   ["Window"
+    ("q" "Quit window" quit-window)]]
+  (interactive)
+  ;; Capture before Transient and Evil finish deactivating the selected region.
+  (transient-setup
+   'disco-room-transient nil nil
+   :scope (when-let* ((targets (disco-room-menu--targets)))
+            (disco-msg-capture-selection targets))))
+
+;;;###autoload(autoload 'disco-room-compose-transient "disco" nil t)
+(transient-define-prefix disco-room-compose-transient ()
+  "Compose a message or manage the room draft."
+  [["Send"
+    ("c" "Send message" disco-room-send-message
+     :inapt-if disco-room--send-message-unavailable-reason)
+    ("p" "Send poll" disco-room-send-poll
+     :inapt-if disco-room--poll-unavailable-reason)
+    ("i" "Send sticker" disco-room-send-sticker
+     :inapt-if disco-room--sticker-unavailable-reason)]
+   ["Draft"
+    ("a" "Attachments…" disco-room-attachments-transient)
+    ("o" "Input options…" disco-room-input-options-transient)
+    ("k" "Cancel reply/edit" disco-room-cancel-reply
+     :inapt-if-not disco-room--composer-aux-active-p)]])
+
+;;;###autoload(autoload 'disco-room-attachments-transient "disco" nil t)
+(transient-define-prefix disco-room-attachments-transient ()
+  "Manage attachments in the current room draft."
+  [["Attachments"
+    ("f" "Attach file" disco-room-attach-file
+     :inapt-if disco-room--attach-unavailable-reason)
+    ("D" "Remove attachment" disco-room-remove-attachment-token-at-point
+     :inapt-if (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("x" "Clear attachments" disco-room-clear-attachments
+     :inapt-if (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("v" "List attachments" disco-room-list-attachments
+     :inapt-if (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("V" "Edit attachment desc" disco-room-edit-attachment-description
+     :inapt-if (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("S" "Toggle attachment spoiler" disco-room-toggle-attachment-spoiler
+     :inapt-if (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 1)))
+    ("O" "Reorder attachments" disco-room-reorder-attachments
+     :inapt-if (lambda ()
+               (disco-room--attachment-token-action-unavailable-reason 2)))]])
+
+;;;###autoload(autoload 'disco-room-thread-transient "disco" nil t)
+(transient-define-prefix disco-room-thread-transient ()
+  "Create threads or manage the current thread."
+  [["Thread"
     ("n" "Create detached" disco-room-thread-create
-     :if-not (lambda ()
+     :inapt-if (lambda ()
                (disco-room-thread--create-unavailable-reason :any)))
     ("r" "Rename thread" disco-room-thread-rename
-     :if-not disco-room-thread--update-unavailable-reason)
+     :inapt-if disco-room-thread--update-unavailable-reason)
     ("L" "Toggle locked" disco-room-thread-toggle-locked
-     :if-not disco-room-thread--update-unavailable-reason)
+     :inapt-if disco-room-thread--update-unavailable-reason)
     ("s" "Set slowmode" disco-room-thread-set-slowmode
-     :if-not disco-room-thread--update-unavailable-reason)
+     :inapt-if disco-room-thread--update-unavailable-reason)
     ("U" "Set auto-archive" disco-room-thread-set-auto-archive-duration
-     :if-not disco-room-thread--update-unavailable-reason)
+     :inapt-if disco-room-thread--update-unavailable-reason)
     ("E" "Edit thread settings" disco-room-thread-edit-settings
-     :if-not disco-room-thread--update-unavailable-reason)
+     :inapt-if disco-room-thread--update-unavailable-reason)
     ("M" "Set muted" disco-room-thread-set-muted
-     :if-not disco-room-thread--mute-unavailable-reason)
+     :inapt-if disco-room-thread--mute-unavailable-reason)
     ("j" "Join thread" disco-room-thread-join
-     :if-not disco-room-thread--join-unavailable-reason)
+     :inapt-if disco-room-thread--join-unavailable-reason)
     ("l" "Leave thread" disco-room-thread-leave
-     :if-not disco-room-thread--leave-unavailable-reason)
+     :inapt-if disco-room-thread--leave-unavailable-reason)
     ("a" "Toggle archived" disco-room-thread-toggle-archived
-     :if-not disco-room-thread--toggle-archived-unavailable-reason)
+     :inapt-if disco-room-thread--toggle-archived-unavailable-reason)
     ("A" "Parent archived threads..." disco-room-thread-open-parent-archived
      :if (lambda ()
-           (alist-get 'parent_id (disco-room--channel-object))))]
-   ["Inspect"
-    ("M-/" "Structured search..." disco-room-search-channel)
-    ("/" "Filter search" disco-room-filter-search)
-    ("F" "Cancel filter" disco-room-filter-cancel)
+           (alist-get 'parent_id (disco-room--channel-object))))]])
+
+;;;###autoload(autoload 'disco-room-diagnostics-transient "disco" nil t)
+(transient-define-prefix disco-room-diagnostics-transient ()
+  "Inspect room services and refresh cached avatars."
+  [["Diagnostics"
     ("M-v" "Refetch avatars" disco-avatar-refetch)
     ("H" "HTTP queue" disco-http-describe-queue)
     ("R" "Rate limits" disco-api-describe-rate-limits)
-    ("G" "Gateway status" disco-gateway-describe-status)]
-   ["Window"
-    ("q" "Quit window" quit-window)]])
+    ("G" "Gateway status" disco-gateway-describe-status)]])
 
 ;;;###autoload(autoload 'disco-room-input-options-transient "disco" nil t)
 (transient-define-prefix disco-room-input-options-transient ()
@@ -689,7 +754,7 @@
 
 ;;;###autoload(autoload 'disco-room-poll-transient "disco" nil t)
 (transient-define-prefix disco-room-poll-transient (&optional selection)
-  "Transient for the poll at point."
+  "Operate on the poll in the captured message selection."
   :refresh-suffixes t
   [["Vote"
     :if-not disco-room--poll-vote-unavailable-reason
@@ -701,12 +766,14 @@
      :if-not disco-room--poll-clear-unavailable-reason)
     ("x" "End poll" disco-room-expire-poll
      :if-not disco-room--poll-expire-unavailable-reason)]]
-  (interactive (list (disco-msg-capture-selection)))
-  (setq selection (or selection (disco-msg-capture-selection)))
-  (unless (= (length (disco-msg-selection-refs selection)) 1)
-    (user-error "disco: poll actions require exactly one message"))
-  (unless (disco-msg-poll (disco-room-menu--message-at-point))
-    (user-error "disco: point is not on a poll"))
+  (interactive)
+  (setq selection (or selection (disco-msg--menu-selection)
+                      (disco-msg-capture-selection)))
+  (let ((messages (disco-msg-selection-messages selection)))
+    (unless (= (length messages) 1)
+      (user-error "disco: poll actions require exactly one message"))
+    (unless (disco-msg-poll (car messages))
+      (user-error "disco: selected message is not a poll")))
   (transient-setup 'disco-room-poll-transient nil nil :scope selection))
 
 (provide 'disco-transient)

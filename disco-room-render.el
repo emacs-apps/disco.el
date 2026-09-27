@@ -1151,12 +1151,14 @@ messages; everything else is a system event shown as a centered divider."
                              disco-room--channel-id))
          (self-id (disco-msg-normalize-id (alist-get 'id msg))))
     (cond
-     ((listp inline)
+     ((consp inline)
       inline)
      ((not ref-id)
       nil)
      (t
-      (or (disco-room--channel-message-by-id ref-channel-id ref-id)
+      (or (unless (and (equal ref-channel-id disco-room--channel-id)
+                       (equal ref-id self-id))
+            (disco-room--channel-message-by-id ref-channel-id ref-id))
           (let ((fallback (disco-room--channel-message-by-id
                            disco-room--channel-id
                            ref-id)))
