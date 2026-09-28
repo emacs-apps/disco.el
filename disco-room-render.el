@@ -832,7 +832,7 @@ Returns empty string when no avatar is available."
     (attachment &key message-id spoiler-hidden owner)
   "Insert one typed rich attachment block for ATTACHMENT object.
 
-OWNER is the exact Appkit app captured by video playback actions."
+OWNER is the exact Generated Surface captured by every open action."
   (let ((toggle-action (and spoiler-hidden
                             (stringp message-id)
                             (lambda ()
@@ -847,7 +847,8 @@ OWNER is the exact Appkit app captured by video playback actions."
         :action-face 'disco-room-attachment-card-action
         :show-url disco-room-show-attachment-urls
         :spoiler-hidden spoiler-hidden
-        :spoiler-toggle-action toggle-action))
+        :spoiler-toggle-action toggle-action
+        :owner owner))
       ('video
        (disco-ins-insert-attachment-video
         attachment
@@ -879,7 +880,8 @@ OWNER is the exact Appkit app captured by video playback actions."
         :action-face 'disco-room-attachment-card-action
         :show-url disco-room-show-attachment-urls
         :spoiler-hidden spoiler-hidden
-        :spoiler-toggle-action toggle-action)))))
+        :spoiler-toggle-action toggle-action
+        :owner owner)))))
 
 (defun disco-room--media-card-fallback-context ()
   "Return primary attachment context for the message at point.
@@ -888,10 +890,9 @@ An exact card context property wins before this function is called; this is
 only the message-level fallback used by the shared media transient protocol."
   (when-let* ((view (appkit-current-surface))
               (_ (appkit-surface-live-p view))
-              (owner (appkit-surface-app view))
               (message (ignore-errors (disco-room--message-at-point)))
               (attachment (car (disco-room--message-effective-attachments message))))
-    (disco-media-attachment-card-context attachment owner)))
+    (disco-media-attachment-card-context attachment view)))
 
 (defun disco-room--normalize-list-sequence (value)
   "Normalize VALUE into a list, preserving list/vector elements."
@@ -1460,7 +1461,7 @@ UI affordances such as timestamps, reaction rows and attachment cards."
   "Insert attachment detail lines for MSG.
 
 PREFIX can be a fixed prefix string or mutable prefix-state.  OWNER is the
-exact Appkit app captured by video playback actions."
+exact Generated Surface captured by every open action."
   (when disco-room-show-attachments
     (let* ((message-id (alist-get 'id msg))
            (reveal-spoilers (disco-room--message-spoilers-revealed-p message-id)))
@@ -1493,7 +1494,7 @@ exact Appkit app captured by video playback actions."
                :url-face 'shadow))))))))
 
 (defun disco-room--insert-message-embeds (msg &optional owner)
-  "Insert embed detail lines for MSG with exact Appkit OWNER."
+  "Insert embed detail lines for MSG with exact Generated Surface OWNER."
   (disco-embed-insert-message-embeds
    (disco-room--message-with-effective-embeds msg)
    owner))
@@ -1665,7 +1666,7 @@ Attachments, embeds, reply previews and spoiler bodies are never sent."
     span))
 
 (defun disco-room--insert-message (msg context &optional owner)
-  "Insert one message MSG using projected render CONTEXT and Appkit OWNER."
+  "Insert MSG using projected render CONTEXT and exact Generated Surface OWNER."
   (if (disco-room--message-system-divider-p msg)
       (disco-room--insert-system-divider-message msg context)
     (let* ((compact (eq (plist-get context :compact) t))

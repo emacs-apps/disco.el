@@ -284,6 +284,10 @@ Title and preview open or play the item.  An in-flight transfer
 control stays inline with Cancel.  Download, Save As, and Copy URL live under
 the message menu's ~o~ media submenu.  Audio keeps playback controls inline.
 
+Document and photo actions, including body and URL fallbacks, keep their
+originating Surface.  Closing or replacing it cancels pending acquisition
+and prevents late presentation; an old action never borrows the new view.
+
 The Sticker picker searches names, tags, IDs, current-server Stickers,
 and Discord standard packs.  ~C-u C-c C-i~ restricts it to Favorite
 and Frequently Used Stickers from Discord account settings.  Static,

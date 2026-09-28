@@ -64,6 +64,78 @@
                                          (should-error (funcall action))
                                          (should-not started))))))))
 
+(ert-deftest disco-room-rendered-document-and-photo-open-own-their-lifecycle ()
+  (dolist (spec '(("owner-document.txt" "text/plain")
+                  ("owner-photo.png" "image/png")))
+    (dolist (entry '(card menu url body))
+      (ert-info ((format "%s via %s" (car spec) entry))
+        (let ((disco-room-use-rich-attachment-cards t)
+              (disco-room-show-attachment-urls t)
+              (disco-media-show-previews nil)
+              callbacks cancelled opened)
+          (cl-labels
+              ((acquire (_context _input _observe resolve _reject)
+                 (let ((id (length callbacks)))
+                   (push resolve callbacks)
+                   (appkit-cancellation-create
+                    :kind 'transport
+                    :cancel (lambda () (push id cancelled))))))
+            (cl-letf (((symbol-function 'appkit-media-image-acquisition-start)
+                       #'acquire)
+                      ((symbol-function 'appkit-media-acquisition-start)
+                       #'acquire)
+                      ((symbol-function 'appkit-media-open-file)
+                       (lambda (file) (push file opened))))
+              (disco-room-test-with-surface "attachment-owner"
+                (disco-state-put-messages
+                 "attachment-owner"
+                 `(((id . "owner-message")
+                    (channel_id . "attachment-owner")
+                    (content . "Attachment body")
+                    (attachments
+                     . (((id . "owner-attachment")
+                         (filename . ,(car spec))
+                         (content_type . ,(cadr spec))
+                         (url . ,(concat "https://example.invalid/" (car spec)))))))))
+                (disco-room-test-establish-latest-window)
+                (disco-room-render)
+                (goto-char (point-min))
+                (search-forward
+                 (pcase entry
+                   ('body "Attachment body")
+                   ('url (concat "https://example.invalid/" (car spec)))
+                   (_ (car spec))))
+                (goto-char (match-beginning 0))
+                (let* ((surface (appkit-current-surface))
+                       (context (appkit-media-card-context-at-point))
+                       (action (plist-get context :open-action)))
+                  (should (functionp action))
+                  (if (memq entry '(card url))
+                      (appkit-ui-activate-at (point))
+                    (appkit-media-card-open))
+                  (should (= 1 (length callbacks)))
+                  (should (eq 'opening
+                              (plist-get (appkit-surface-model surface)
+                                         :media-phase)))
+                  (funcall (car callbacks) "/tmp/disco-owned-attachment")
+                  (should-not opened)
+                  (disco-room-test-drain surface)
+                  (should (equal opened '("/tmp/disco-owned-attachment")))
+                  (appkit-media-card-open context)
+                  (should (= 2 (length callbacks)))
+                  (let ((late (car callbacks)))
+                    (appkit-surface-stop surface)
+                    (should (memq 1 cancelled))
+                    (let ((replacement (disco-room--ensure-surface)))
+                      (should (appkit-surface-live-p replacement))
+                      (should-not (eq replacement surface))
+                      (should-error (appkit-media-card-open context))
+                      (should (= 2 (length callbacks)))
+                      (funcall late "/tmp/disco-retired-attachment")
+                      (disco-room-test-drain replacement)
+                      (should (equal opened
+                                     '("/tmp/disco-owned-attachment"))))))))))))))
+
 (ert-deftest disco-room-thread-announcement-opens-referenced-channel ()
   (disco-room-test-with-runtime
    (disco-room-test-with-surface "parent"

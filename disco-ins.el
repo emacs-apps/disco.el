@@ -203,7 +203,7 @@ telega; otherwise fall back to a text placeholder line."
   "Insert preview block for ATTACHMENT when available.
 
 When REQUIRED is non-nil, insert a placeholder line when preview output cannot
-be shown yet.  OWNER is captured by an external video playback action."
+be shown yet.  OWNER is the exact Generated Surface captured by open actions."
   (let* ((kind (or kind (disco-media-attachment-kind attachment)))
          (video-p (eq kind 'video))
          (preview-source (disco-media-attachment-preview-image attachment))
@@ -271,8 +271,10 @@ be shown yet.  OWNER is captured by an external video playback action."
                                                            title-face meta-face
                                                            action-face show-url
                                                            spoiler-hidden
-                                                           spoiler-toggle-action)
-  "Insert one document-style attachment block for ATTACHMENT."
+                                                           spoiler-toggle-action owner)
+  "Insert one document-style attachment block for ATTACHMENT.
+
+OWNER is the exact Generated Surface captured by every open action."
   (let* ((kind (disco-media-attachment-kind attachment))
          (name (disco-media-attachment-display-name attachment))
          (details (delq nil (list (disco-media-attachment-size-label attachment)
@@ -284,7 +286,7 @@ be shown yet.  OWNER is captured by an external video playback action."
                       (disco-media-attachment-dimensions-label attachment)
                       (when (disco-media-attachment-ephemeral-p attachment)
                         "ephemeral"))))
-         (context (disco-media-attachment-card-context attachment)))
+         (context (disco-media-attachment-card-context attachment owner)))
     (when spoiler-hidden
       (setq context (plist-put context :open-action nil)))
     (appkit-chat-ins-insert-media-card
@@ -316,7 +318,8 @@ be shown yet.  OWNER is captured by an external video playback action."
           :prefix prefix-state
           :face meta-face
           :kind kind
-          :required nil)
+          :required nil
+          :owner owner)
          (disco-ins-insert-attachment-caption-line
           (alist-get 'description attachment)
           :prefix prefix-state
@@ -326,20 +329,22 @@ be shown yet.  OWNER is captured by an external video playback action."
             (disco-media-attachment-download-url attachment)
             :prefix prefix-state
             :face 'shadow
-            :action (lambda () (disco-media-open-attachment attachment)))))))))
+            :action (lambda () (disco-media-open-attachment attachment owner)))))))))
 
 (cl-defun disco-ins-insert-attachment-photo (attachment &key prefix border-face
                                                         title-face meta-face
                                                         action-face show-url
                                                         spoiler-hidden
-                                                        spoiler-toggle-action)
-  "Insert one photo-style attachment block for ATTACHMENT."
+                                                        spoiler-toggle-action owner)
+  "Insert one photo-style attachment block for ATTACHMENT.
+
+OWNER is the exact Generated Surface captured by every open action."
   (let* ((name (disco-media-attachment-display-name attachment))
          (meta-parts (delq nil (list (disco-media-attachment-dimensions-label attachment)
                                      (disco-media-attachment-size-label attachment)
                                      (when (disco-media-attachment-ephemeral-p attachment)
                                        "ephemeral"))))
-         (context (disco-media-attachment-card-context attachment)))
+         (context (disco-media-attachment-card-context attachment owner)))
     (when spoiler-hidden
       (setq context (plist-put context :open-action nil)))
     (appkit-chat-ins-insert-media-card
@@ -370,7 +375,8 @@ be shown yet.  OWNER is captured by an external video playback action."
           :prefix prefix-state
           :face meta-face
           :kind 'photo
-          :required t)
+          :required t
+          :owner owner)
          (disco-ins-insert-attachment-caption-line
           (alist-get 'description attachment)
           :prefix prefix-state
@@ -380,7 +386,7 @@ be shown yet.  OWNER is captured by an external video playback action."
             (disco-media-attachment-download-url attachment)
             :prefix prefix-state
             :face 'shadow
-            :action (lambda () (disco-media-open-attachment attachment))
+            :action (lambda () (disco-media-open-attachment attachment owner))
             :help-echo "Open image in Emacs")))))))
 
 (cl-defun disco-ins-insert-attachment-video
@@ -388,7 +394,7 @@ be shown yet.  OWNER is captured by an external video playback action."
                 show-url spoiler-hidden spoiler-toggle-action owner)
   "Insert one video-style attachment block for ATTACHMENT.
 
-OWNER is the exact Appkit app or view captured by every play action."
+OWNER is the exact Generated Surface captured by every play action."
   (let* ((name (disco-media-attachment-display-name attachment))
          (details (delq nil (list (disco-media-attachment-dimensions-label attachment)
                                   (disco-media-attachment-size-label attachment)
