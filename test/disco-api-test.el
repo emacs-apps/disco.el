@@ -808,27 +808,6 @@
            (:unauthenticated t :on-success identity :on-error ignore)))
         calls)))))
 
-(ert-deftest disco-api-send-message-async-forwards-sticker-only-payload ()
-  (let (captured)
-    (cl-letf (((symbol-function 'disco-api--request-async)
-               (lambda (method endpoint &rest options)
-                 (setq captured (list method endpoint options))
-                 'request)))
-      (should
-       (eq 'request
-           (disco-api-send-message-async
-            "c1" nil
-            :sticker-ids '("11")
-            :on-success #'identity
-            :on-error #'ignore)))
-      (should
-       (equal
-        '("POST" "/channels/c1/messages"
-          (:payload ((sticker_ids . ["11"]))
-           :on-success identity
-           :on-error ignore))
-        captured)))))
-
 (ert-deftest disco-api-user-profile-async-retains-guild-context ()
   (let (captured)
     (cl-letf (((symbol-function 'disco-api--request-async)

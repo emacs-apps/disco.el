@@ -19,7 +19,6 @@
 (require 'disco-markdown)
 (require 'disco-state)
 
-(declare-function transient-scope "transient" (&optional prefixes classes))
 (declare-function appkit-media-card-context-at-point "appkit-media-card" (&optional position))
 
 (defconst disco-msg--reference-field-map
@@ -188,15 +187,10 @@ Called with OPERATION (`toggle', `unmark' or `clear-restore') and message ID.")
 (cl-defstruct (disco-msg-selection (:constructor disco-msg-selection--create))
   buffer surface refs media-context)
 
-(defun disco-msg--menu-selection ()
-  "Return the message selection captured by the current transient, if any."
-  (when (fboundp 'transient-scope)
-    (let ((scope (transient-scope '(disco-room-transient
-                                    disco-message-transient
-                                    disco-selection-transient
-                                    disco-media-transient
-                                    disco-room-poll-transient))))
-      (and (disco-msg-selection-p scope) scope))))
+(defvar disco-msg-command-selection nil
+  "Dynamically bound stable selection for an ordinary message command.
+Callers may bind this domain-owned value when invoking an interactive command;
+message resolution never consults a user interface.")
 
 (defun disco-msg--resolve-key (key &optional channel)
   "Resolve stable KEY in CHANNEL, rejecting missing or pending messages."
@@ -217,9 +211,9 @@ Called with OPERATION (`toggle', `unmark' or `clear-restore') and message ID.")
           (disco-msg-selection-refs selection)))
 
 (defun disco-msg-targets-for-interactive ()
-  "Return menu snapshot, active message region, marks, or point, in that order."
-  (or (if-let* ((selection (disco-msg--menu-selection)))
-          (disco-msg-selection-messages selection)
+  "Return explicit command selection, region, marks, or point, in that order."
+  (or (if disco-msg-command-selection
+          (disco-msg-selection-messages disco-msg-command-selection)
         (let ((keys (cond
                      ((use-region-p)
                       (appkit-chat-timeline-keys-in-range
@@ -552,12 +546,12 @@ With NO-PROPERTIES non-nil, strip text properties before copying."
 
 (defun disco-msg-copy-dwim (messages &optional no-properties)
   "Copy MESSAGES, or contextual text for an unmarked single point target.
-Menu actions always copy their captured messages; direct invocation retains
-region, URL and code-span text copying when no persistent marks are active."
-  (interactive (list (if (and (region-active-p) (not (disco-msg--menu-selection)))
+An explicit command selection copies its captured messages; direct invocation
+retains region, URL and code-span copying when no persistent marks are active."
+  (interactive (list (if (and (region-active-p) (not disco-msg-command-selection))
                          nil (disco-msg-targets-for-interactive))
                      current-prefix-arg))
-  (if (or (disco-msg--menu-selection)
+  (if (or disco-msg-command-selection
           (and (not (region-active-p))
                (or (disco-msg-marked-ids) (> (length messages) 1))))
       (disco-msg-copy-text messages no-properties)

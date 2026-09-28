@@ -187,8 +187,7 @@
             ('menu
              (let ((selection (disco-msg-capture-selection)))
                (goto-char (point-max))
-               (cl-letf (((symbol-function 'disco-msg--menu-selection)
-                          (lambda () selection)))
+               (let ((disco-msg-command-selection selection))
                  (disco-room-translate-message))))
             (_ (disco-room-translate-message)))
           (disco-room-test-drain surface)
@@ -253,8 +252,7 @@
                            (disco-room--message-author
                             (disco-room--message-by-id "100"))))
             ;; A captured menu keeps identities, not the previous body.
-            (cl-letf (((symbol-function 'disco-msg--menu-selection)
-                       (lambda () selection)))
+            (let ((disco-msg-command-selection selection))
               (disco-room-translate-message))
             (let ((edit '((id . "100") (channel_id . "chat")
                           (content . "Latest search body"))))

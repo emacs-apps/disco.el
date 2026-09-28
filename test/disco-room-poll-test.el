@@ -278,4 +278,121 @@
                                          (alist-get 'content
                                                     (disco-room--channel-message-by-id "chat" "p1")))))))
 
+(defun disco-room-poll-test-seed-selection ()
+  "Seed two disjoint polls in the current room."
+  (disco-state-upsert-channel
+   `((id . ,disco-room--channel-id) (type . 0) (permissions . "8")))
+  (cl-loop for id in '("101" "102")
+           for answer in '(1 2)
+           do (disco-state-upsert-message
+               disco-room--channel-id
+               `((id . ,id) (channel_id . ,disco-room--channel-id)
+                 (author . ((id . "self"))) (content . "")
+                 (poll . ((question . ((text . ,id)))
+                          (allow_multiselect . t)
+                          (answers . (((answer_id . ,answer)
+                                       (poll_media . ((text . ,(number-to-string answer))))))))))))
+  (disco-room-test-establish-latest-window)
+  (disco-room-render))
+
+(ert-deftest disco-room-poll-menu-never-stages-another-messages-answer ()
+  (disco-room-test-with-surface "poll-selection"
+    (disco-room-poll-test-seed-selection)
+    (disco-room--mark-message 'toggle "101")
+    (goto-char (appkit-chat-timeline-key-position "102"))
+    (let ((inhibit-read-only t))
+      (put-text-property (point) (1+ (point)) 'disco-poll-answer-id 2))
+    (let ((transient-current-prefix
+           (make-instance 'disco-message-prefix
+                          :command 'disco-room-poll-transient
+                          :scope (disco-msg-capture-selection)))
+          offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt choices &rest _)
+                   (setq offered choices)
+                   (car choices))))
+        (disco-room-menu--with-selection
+         #'call-interactively #'disco-room-toggle-poll-answer))
+      (should (equal '("1: 1") offered))
+      (should (equal '(1) (disco-room--poll-draft-selection "101")))
+      (should-not (disco-room--poll-draft-selection-present-p "102"))
+      (should-error (disco-room-toggle-poll-answer 2 "101") :type 'user-error)
+      (should (equal '(1) (disco-room--poll-draft-selection "101")))
+      (disco-state-delete-message "poll-selection" "101")
+      (goto-char (appkit-chat-timeline-key-position "102"))
+      (should (disco-room-menu--message-unavailable-reason
+               #'disco-room--poll-vote-unavailable-reason))
+      (should-error
+       (disco-room-menu--with-selection
+        #'call-interactively #'disco-room-toggle-poll-answer)
+       :type 'user-error))))
+
+(ert-deftest disco-room-poll-answer-prompt-revalidates-owner-target-and-answer ()
+  (dolist (change '(stop replace delete answer permission))
+    (disco-room-test-with-surface "poll-selection"
+      (disco-room-poll-test-seed-selection)
+      (goto-char (point-max))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt choices &rest _)
+                   (pcase change
+                     ('stop (appkit-surface-stop surface))
+                     ('replace
+                      (appkit-surface-stop surface)
+                      (disco-room--ensure-surface))
+                     ('delete (disco-state-delete-message "poll-selection" "101"))
+                     ('answer
+                      (disco-state-upsert-message
+                       "poll-selection"
+                       '((id . "101") (channel_id . "poll-selection")
+                         (poll . ((question . ((text . "Changed")))
+                                  (answers . (((answer_id . 3)
+                                               (poll_media . ((text . "three")))))))))))
+                     ('permission
+                      (disco-state-upsert-channel
+                       '((id . "poll-selection") (type . 0) (permissions . "0")))))
+                   (car choices))))
+        (should-error (disco-room-toggle-poll-answer nil "101") :type 'user-error))
+      (should-not (disco-room--poll-draft-selection-present-p "101")))))
+
+(ert-deftest disco-room-poll-submit-rejects-answer-outside-target ()
+  (disco-room-test-with-surface "poll-selection"
+    (disco-room-poll-test-seed-selection)
+    (disco-room--poll-set-draft-selection "101" '(2))
+    (let (requests)
+      (cl-letf (((symbol-function 'disco-api-create-poll-vote-async)
+                 (lambda (&rest args) (push args requests))))
+        (should-error (disco-room-submit-poll-vote "101") :type 'user-error))
+      (should-not requests))))
+
+(ert-deftest disco-room-poll-expire-rejects-stale-confirmation ()
+  (dolist (change '(stop replace delete author permission))
+    (disco-room-test-with-surface "poll-selection"
+      (disco-room-poll-test-seed-selection)
+      (let ((disco-room-poll-confirm-expire t)
+            requests)
+        (cl-letf (((symbol-function 'disco-gateway-current-user-id) (lambda () "self"))
+                  ((symbol-function 'disco-api-expire-poll-async)
+                   (lambda (&rest args) (push args requests)))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _)
+                     (pcase change
+                       ('stop (appkit-surface-stop surface))
+                       ('replace
+                        (appkit-surface-stop surface)
+                        (disco-room--ensure-surface))
+                       ('delete (disco-state-delete-message "poll-selection" "101"))
+                       ('author
+                        (disco-state-upsert-message
+                         "poll-selection"
+                         '((id . "101") (channel_id . "poll-selection")
+                           (author . ((id . "other"))))))
+                       ('permission
+                        (disco-state-upsert-channel
+                         '((id . "poll-selection") (type . 0) (permissions . "0")))))
+                     t)))
+          (should-error (disco-room-expire-poll "101") :type 'user-error))
+        (should-not requests)
+        (when (eq change 'stop)
+          (should-not (appkit-surface-live-p (appkit-current-surface))))))))
+
 ;;; disco-room-poll-test.el ends here

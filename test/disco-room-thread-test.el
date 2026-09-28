@@ -107,3 +107,86 @@
                                 (disco-room-test-drain surface)
                                 (should (equal "new-name" (alist-get 'name (disco-state-channel "thread"))))
                                 (should (equal "new-name" disco-room--channel-name))))
+
+(defun disco-room-thread-test-seed ()
+  "Seed two thread starter candidates in the current fixture room."
+  (disco-state-upsert-channel
+   '((id . "chat") (type . 0) (guild_id . "g1") (permissions . "8")))
+  (dolist (id '("100" "200"))
+    (disco-state-upsert-message
+     "chat" `((id . ,id) (channel_id . "chat") (content . ,id))))
+  (disco-room-test-establish-latest-window)
+  (disco-room-render)
+  (goto-char (appkit-chat-timeline-key-position "100")))
+
+(ert-deftest disco-room-thread-creation-keeps-starter-when-prompt-moves-point ()
+  (disco-room-test-with-surface "chat"
+    (disco-room-thread-test-seed)
+    (let (request)
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (prompt &rest _)
+                   (goto-char (appkit-chat-timeline-key-position "200"))
+                   (if (string-prefix-p "Thread name" prompt) "topic" "")))
+                ((symbol-function 'disco-thread-read-auto-archive-duration)
+                 (lambda (&rest _) 60))
+                ((symbol-function 'disco-api-create-thread-from-message)
+                 (lambda (&rest args) (setq request args) nil)))
+        (call-interactively #'disco-room-thread-create-from-message))
+      (should (equal '("chat" "100" "topic" 60 nil) request)))))
+
+(ert-deftest disco-room-thread-creation-rechecks-after-all-prompts ()
+  (dolist (change '(stop replace delete permission thread))
+    (disco-room-test-with-surface "chat"
+      (disco-room-thread-test-seed)
+      (let ((prompts 0) requests)
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt &rest _)
+                     (cl-incf prompts)
+                     (if (= prompts 1)
+                         "topic"
+                       (pcase change
+                         ('stop (appkit-surface-stop surface))
+                         ('replace
+                          (appkit-surface-stop surface)
+                          (disco-room--ensure-surface))
+                         ('delete (disco-state-delete-message "chat" "100"))
+                         ('permission
+                          (disco-state-upsert-channel
+                           '((id . "chat") (type . 0) (guild_id . "g1")
+                             (permissions . "2048"))))
+                         ('thread
+                          (disco-state-upsert-channel
+                           '((id . "100") (parent_id . "chat") (type . 11)))))
+                       "")))
+                  ((symbol-function 'disco-thread-read-auto-archive-duration)
+                   (lambda (&rest _) 60))
+                  ((symbol-function 'disco-api-create-thread-from-message)
+                   (lambda (&rest args) (push args requests))))
+          (should-error (call-interactively #'disco-room-thread-create-from-message)
+                        :type 'user-error))
+        (should (= 2 prompts))
+        (should-not requests)
+        (when (eq change 'stop)
+          (should-not (appkit-surface-live-p (appkit-current-surface))))))))
+
+(ert-deftest disco-room-thread-detached-prompts-cannot-switch-owners ()
+  (disco-room-test-with-surface "chat"
+    (disco-room-thread-test-seed)
+    (let ((prompts 0) requests)
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (_prompt &rest _)
+                   (cl-incf prompts)
+                   (if (= prompts 1)
+                       (progn
+                         (appkit-surface-stop surface)
+                         (disco-room--ensure-surface)
+                         "topic")
+                     "")))
+                ((symbol-function 'disco-thread-read-detached-type) (lambda () 11))
+                ((symbol-function 'disco-thread-read-auto-archive-duration)
+                 (lambda (&rest _) 60))
+                ((symbol-function 'disco-api-create-thread)
+                 (lambda (&rest args) (push args requests))))
+        (should-error (call-interactively #'disco-room-thread-create) :type 'user-error))
+      (should (= 2 prompts))
+      (should-not requests))))

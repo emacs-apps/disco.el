@@ -173,14 +173,11 @@ directory surface, so it survives application sessions.")
     (pins . "Pins"))
   "Display labels for root search result tabs.")
 
-(defvar-local disco-root--search-query nil
-  "Current root search query string, or nil when search view is inactive.")
-
 (defvar-local disco-root--search-domain nil
   "Current root search domain plist.")
 
 (defvar-local disco-root--search-query-spec nil
-  "Parsed root search query plist for the active search session.")
+  "Canonical root search draft plist, shared by raw and structured editors.")
 
 (defvar-local disco-root--search-tabs nil
   "Alist of search tab symbol to tab-state plist for root search view.")
@@ -552,12 +549,32 @@ Live window points remain independent and are restored by `appkit-position'."
                    (cdr (car candidates))))))
 
 (defun disco-root--search-split-query-tokens (query)
-  "Split root search QUERY into shell-like tokens."
-  (condition-case err
-      (split-string-and-unquote (or query ""))
-    (error
-     (user-error "disco: invalid search query syntax: %s"
-                 (error-message-string err)))))
+  "Split root search QUERY into shell-like tokens, retaining their quotes."
+  (let* ((text (or query ""))
+         (limit (length text))
+         (scan 0)
+         start quoted escaped tokens)
+    (while (< scan limit)
+      (let ((char (aref text scan)))
+        (cond
+         (escaped (setq escaped nil))
+         ((eq char ?\\)
+          (unless start (setq start scan))
+          (setq escaped t))
+         ((eq char ?\")
+          (unless start (setq start scan))
+          (setq quoted (not quoted)))
+         ((and (not quoted) (memq char '(9 10 13 32)))
+          (when start
+            (push (substring text start scan) tokens)
+            (setq start nil)))
+         (t (unless start (setq start scan)))))
+      (setq scan (1+ scan)))
+    (when quoted
+      (user-error "disco: invalid search query syntax: unmatched quote"))
+    (when start
+      (push (substring text start) tokens))
+    (nreverse tokens)))
 
 (defun disco-root--search-split-filter-values (raw-value)
   "Split RAW-VALUE on commas, trimming whitespace and dropping empties."
@@ -568,11 +585,12 @@ Live window points remain independent and are restored by `appkit-position'."
           (push trimmed result))))
     (nreverse result)))
 
-(defun disco-root--search-quote-completion-candidate (value)
-  "Return VALUE quoted for root search completion when needed."
+(defun disco-root--search-quote-value (value &optional always)
+  "Quote search VALUE when needed, or unconditionally when ALWAYS is non-nil."
   (let ((text (format "%s" value)))
-    (if (string-match-p "[[:space:]]" text)
-        (format "\"%s\"" (replace-regexp-in-string "[\\\"]" "\\\\&" text))
+    (if (or always (string-match-p "[[:space:]\\\"]" text))
+        (format "\"%s\"" (replace-regexp-in-string
+                         "[\\\"]" (lambda (match) (concat "\\" match)) text t t))
       text)))
 
 (defun disco-root--search--register-candidate (label value seen result)
@@ -901,18 +919,21 @@ Live window points remain independent and are restored by `appkit-position'."
     (_ spec)))
 
 (defun disco-root--search-parse-query (query domain)
-  "Parse Discord-style root search QUERY for DOMAIN into a plist spec."
+  "Parse Discord-style root search QUERY for DOMAIN into a plist spec.
+Whole quoted tokens are literal content, even when they contain a filter name."
   (let ((tokens (disco-root--search-split-query-tokens query))
         (content-parts nil)
         (spec (list :sort-by 'timestamp :sort-order 'desc)))
-    (dolist (token tokens)
-      (if (string-match "\\`\\([^:[:space:]]+\\):\\(.*\\)\\'" token)
-          (let ((key (downcase (match-string 1 token)))
-                (raw-value (match-string 2 token)))
-            (if (member key disco-root--search-filter-names)
-                (setq spec (disco-root--search-parse-filter-token key raw-value domain spec))
-              (push token content-parts)))
-        (push token content-parts)))
+    (dolist (raw-token tokens)
+      (let ((token (car (split-string-and-unquote raw-token))))
+        (if (and (not (string-prefix-p "\"" raw-token))
+                 (string-match "\\`\\([^:[:space:]]+\\):\\(.*\\)\\'" token))
+            (let ((key (downcase (match-string 1 token)))
+                  (raw-value (match-string 2 token)))
+              (if (member key disco-root--search-filter-names)
+                  (setq spec (disco-root--search-parse-filter-token key raw-value domain spec))
+                (push token content-parts)))
+          (push token content-parts))))
     (setq spec (plist-put spec :content
                           (when content-parts
                             (string-join (nreverse content-parts) " "))))
@@ -956,14 +977,14 @@ Live window points remain independent and are restored by `appkit-position'."
   (pcase filter
     ((or "from" "mentions")
      (mapcar (lambda (cell)
-               (disco-root--search-quote-completion-candidate (car cell)))
+               (disco-root--search-quote-value (car cell)))
              (disco-root--search-user-candidates domain)))
     ("author-type"
      disco-root--search-author-type-values)
     ("in"
      (unless (eq (disco-root--search-domain-kind domain) 'channel)
        (mapcar (lambda (cell)
-                 (disco-root--search-quote-completion-candidate (car cell)))
+                 (disco-root--search-quote-value (car cell)))
                (disco-root--search-channel-candidates domain))))
     ("has"
      disco-root--search-has-values)
@@ -1050,9 +1071,7 @@ Live window points remain independent and are restored by `appkit-position'."
                 (copy-tree (or (disco-root--search-current-domain-at-point)
                                '(:kind dms :id nil :label "DMs")))))
   (setq-local disco-root--search-query-spec
-              (disco-root--search-normalize-spec disco-root--search-query-spec))
-  (unless (stringp disco-root--search-query)
-    (setq-local disco-root--search-query "")))
+              (disco-root--search-normalize-spec disco-root--search-query-spec)))
 
 (defun disco-root--search-value-summary (value)
   "Return concise string summary for VALUE."
@@ -1168,10 +1187,43 @@ Live window points remain independent and are restored by `appkit-position'."
       (push (format "[order:%s]" (plist-get spec :sort-order)) chips))
     (nreverse chips)))
 
-(defun disco-root--search-sync-query-display ()
-  "Synchronize display query string from current structured search spec."
-  (setq-local disco-root--search-query
-              (string-join (disco-root--search-summary-chips) "  ")))
+(defun disco-root--search-serialize-query (spec)
+  "Serialize canonical search SPEC as an editable Discord-style query.
+Use IDs rather than display labels.  Quote content separately from filters
+so whitespace, quotes, backslashes and literal filter names survive parsing.
+The search domain is separate from the query and is never serialized as `in:'."
+  (let (tokens)
+    (when-let* ((content (plist-get spec :content))
+                ((not (string-empty-p content))))
+      (push (disco-root--search-quote-value content t) tokens))
+    (dolist (entry '((:author-ids . "from")
+                     (:author-types . "author-type")
+                     (:channel-ids . "in")
+                     (:has . "has")))
+      (when-let* ((values (plist-get spec (car entry))))
+        (push (concat (cdr entry) ":" (string-join values ",")) tokens)))
+    (let ((mentions (append (plist-get spec :mentions)
+                            (when (plist-get spec :mention-everyone)
+                              '("everyone")))))
+      (when mentions
+        (push (concat "mentions:" (string-join mentions ",")) tokens)))
+    (when (plist-get spec :pinned)
+      (push (if (eq (plist-get spec :pinned) :false)
+                "pinned:false"
+              "pinned:true")
+            tokens))
+    (dolist (entry '((:max-id . "before")
+                     (:min-id . "after")
+                     (:slop . "slop")))
+      (when-let* ((value (plist-get spec (car entry))))
+        (push (format "%s:%s" (cdr entry) value) tokens)))
+    (when-let* ((sort (plist-get spec :sort-by))
+                ((not (eq sort 'timestamp))))
+      (push (format "sort:%s" sort) tokens))
+    (when-let* ((order (plist-get spec :sort-order))
+                ((not (eq order 'desc))))
+      (push (format "order:%s" order) tokens))
+    (string-join (nreverse tokens) " ")))
 
 (defun disco-root--search-user-completion-table (domain filter)
   "Return completion table for root search users in DOMAIN for FILTER."
@@ -1276,11 +1328,9 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
           (setq result (append result (list key value))))))
     result))
 
-(defun disco-root--search-set-spec-and-sync (spec)
-  "Store root search SPEC and refresh derived display state."
-  (setq-local disco-root--search-query-spec (disco-root--search-normalize-spec spec))
-  (disco-root--search-sync-query-display)
-  disco-root--search-query-spec)
+(defun disco-root--search-set-spec (spec)
+  "Store normalized root search SPEC as the canonical draft."
+  (setq-local disco-root--search-query-spec (disco-root--search-normalize-spec spec)))
 
 (defun disco-root--search-activate ()
   "Activate and dispatch the current root search draft."
@@ -1298,7 +1348,6 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   (disco-root--search-ensure-draft)
   (unless (disco-root--search-effective-spec-p disco-root--search-query-spec)
     (user-error "disco: set a search query or filter first"))
-  (disco-root--search-sync-query-display)
   (disco-root--search-activate)
   (message "disco: searching in %s"
            (disco-root--search-domain-label disco-root--search-domain)))
@@ -1308,20 +1357,16 @@ Return plist fragment with `:mentions' and optional `:mention-everyone'."
   (interactive)
   (disco-root--search-ensure-draft)
   (let* ((domain disco-root--search-domain)
-         (raw (disco-root--read-search-query domain (or disco-root--search-query ""))))
-    (setq-local disco-root--search-query raw)
-    (setq-local disco-root--search-query-spec
-                (disco-root--search-normalize-spec
-                 (disco-root--search-parse-query raw domain)))
-    (disco-root--search-sync-query-display)))
+         (raw (disco-root--read-search-query
+               domain (disco-root--search-serialize-query disco-root--search-query-spec))))
+    (disco-root--search-set-spec
+     (disco-root--search-parse-query raw domain))))
 
 (defun disco-root-search-clear ()
   "Reset the current root search draft spec to defaults."
   (interactive)
   (disco-root--search-ensure-draft)
-  (setq-local disco-root--search-query-spec (disco-root--search-default-spec))
-  (setq-local disco-root--search-query "")
-  (disco-root--search-sync-query-display)
+  (disco-root--search-set-spec (disco-root--search-default-spec))
   (message "disco: search filters cleared"))
 
 (defun disco-root-search-execute ()
@@ -1686,18 +1731,16 @@ When LOAD-MORE-TAB is non-nil, return only that tab with its stored cursor."
   (interactive
    (let* ((domain (disco-root--read-search-domain))
           (initial (and disco-root--search-active-p
-                        disco-root--search-query
                         (disco-root--search-domain-equal-p domain disco-root--search-domain)
-                        disco-root--search-query)))
+                        (disco-root--search-serialize-query disco-root--search-query-spec))))
      (list (disco-root--read-search-query domain initial)
            domain)))
   (let ((normalized-query (string-trim (or query ""))))
     (when (string-empty-p normalized-query)
       (user-error "disco: search query cannot be empty"))
-    (setq-local disco-root--search-query normalized-query)
-    (setq-local disco-root--search-domain (copy-tree domain))
-    (setq-local disco-root--search-query-spec
-                (disco-root--search-parse-query normalized-query domain))
+    (let ((spec (disco-root--search-parse-query normalized-query domain)))
+      (setq-local disco-root--search-domain (copy-tree domain))
+      (disco-root--search-set-spec spec))
     (disco-root--search-activate)
     (message "disco: searching %s in %s"
              normalized-query
@@ -1731,9 +1774,7 @@ buffer without CHANNEL, use the channel at point."
         (unless (and disco-root--search-domain
                      (disco-root--search-domain-equal-p disco-root--search-domain domain))
           (setq-local disco-root--search-domain domain)
-          (setq-local disco-root--search-query-spec (disco-root--search-default-spec))
-          (setq-local disco-root--search-query "")
-          (disco-root--search-sync-query-display)))
+          (disco-root--search-set-spec (disco-root--search-default-spec))))
       (with-current-buffer buf
         (call-interactively #'disco-root-search-transient)))))
 
@@ -2695,7 +2736,6 @@ Temporary search results and projection indexes do not."
   (setq-local disco-root--render-pending nil)
   (setq-local disco-root--header-state-cache nil)
   (setq-local disco-root--fill-column nil)
-  (setq-local disco-root--search-query nil)
   (setq-local disco-root--search-domain nil)
   (setq-local disco-root--search-query-spec nil)
   (setq-local disco-root--search-tabs nil)

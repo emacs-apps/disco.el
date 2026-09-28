@@ -22,9 +22,13 @@
   "Invoke COMMAND with SELECTION and return its prefix without displaying it."
   (cl-letf (((symbol-function 'transient-setup)
              (lambda (prefix &rest args)
-               (clone (get prefix 'transient--prefix)
-                      :scope (plist-get (nthcdr 2 args) :scope)))))
+               (make-instance 'disco-message-prefix :command prefix
+                              :scope (plist-get (nthcdr 2 args) :scope)))))
     (if selection (funcall command selection) (funcall command))))
+
+(defun disco-room-selection-test-call-suffix (command)
+  "Invoke COMMAND through the message menu's interactive selection adapter."
+  (disco-room-menu--with-selection #'call-interactively command))
 
 (ert-deftest disco-room-selection-routed-batch-keeps-targets-after-marks-change ()
   (disco-room-test-with-surface "selection"
@@ -33,15 +37,16 @@
     (disco-room--mark-message 'toggle "300")
     (let ((transient-current-prefix
            (disco-room-selection-test-open-menu #'disco-room--operate-msg
-                                                (disco-msg-capture-selection)))
-          (transient--prefix nil))
+                                                (disco-msg-capture-selection))))
       (disco-msg-toggle-marks)
       (goto-char (appkit-chat-timeline-key-position "200"))
-      (call-interactively #'disco-msg-copy-text)
+      (disco-room-selection-test-call-suffix #'disco-msg-copy-text)
       (should (equal "body 100\n\nbody 300" (current-kill 0 t)))
-      (should-error (call-interactively #'disco-msg-reply) :type 'user-error)
+      (should-error (disco-room-selection-test-call-suffix #'disco-msg-reply)
+                    :type 'user-error)
       (disco-state-delete-message "selection" "300")
-      (should-error (call-interactively #'disco-msg-delete) :type 'user-error)
+      (should-error (disco-room-selection-test-call-suffix #'disco-msg-delete)
+                    :type 'user-error)
       (should (disco-room--resolve-message "100"))
       (should (disco-room--resolve-message "200")))))
 
@@ -57,8 +62,7 @@
           (url . "https://cdn.discordapp.com/attachments/selection/100/note.txt"))
         surface)))
     (let ((transient-current-prefix
-           (disco-room-selection-test-open-menu #'disco-transient-msg-operate))
-          (transient--prefix nil))
+           (disco-room-selection-test-open-menu #'disco-transient-msg-operate)))
       (goto-char (appkit-chat-timeline-key-position "300"))
       (setq transient-current-prefix
             (disco-room-selection-test-open-menu #'disco-media-transient))
@@ -112,18 +116,19 @@
       (setq mark-active t)
       (let* ((selection (disco-msg-capture-selection))
              (transient-current-prefix
-              (clone (get 'disco-message-transient 'transient--prefix) :scope selection))
-             (transient--prefix nil))
+              (make-instance 'disco-message-prefix :command 'disco-message-transient
+                             :scope selection)))
         (deactivate-mark)
         (goto-char (appkit-chat-timeline-key-position "300"))
         (disco-state-upsert-message "selection" '((id . "100") (channel_id . "selection")
                                                   (content . "new body")))
-        (call-interactively #'disco-msg-copy-text)
+        (disco-room-selection-test-call-suffix #'disco-msg-copy-text)
         (should (equal "new body" (current-kill 0 t)))
-        (call-interactively #'disco-msg-copy-link)
+        (disco-room-selection-test-call-suffix #'disco-msg-copy-link)
         (should (equal "https://discord.com/channels/@me/selection/100" (current-kill 0 t)))
         (disco-state-delete-message "selection" "100")
-        (should-error (call-interactively #'disco-msg-copy-text) :type 'user-error)))
+        (should-error (disco-room-selection-test-call-suffix #'disco-msg-copy-text)
+                      :type 'user-error)))
     (disco-room--mark-message 'toggle "200")
     (should-error (call-interactively #'disco-msg-reply) :type 'user-error)
     (should-error (call-interactively #'disco-room-edit-message) :type 'user-error)
@@ -142,14 +147,13 @@
       (goto-char (1- (appkit-chat-timeline-key-position "300")))
       (setq mark-active t)
       (let ((transient-current-prefix
-             (disco-room-selection-test-open-menu #'disco-room-transient))
-            (transient--prefix nil))
+             (disco-room-selection-test-open-menu #'disco-room-transient)))
         (deactivate-mark)
         (goto-char (appkit-chat-timeline-key-position "300"))
         (disco-room--mark-message 'toggle "300")
         (setq transient-current-prefix
               (disco-room-selection-test-open-menu #'disco-transient-msg-operate))
-        (call-interactively #'disco-msg-copy-text)
+        (disco-room-selection-test-call-suffix #'disco-msg-copy-text)
         (should (equal "body 100\n\nbody 200" (current-kill 0 t)))
         (should (equal "unsent draft" (disco-room--current-draft)))))))
 
@@ -220,6 +224,92 @@
         (should (equal '("300") (disco-room--marked-ids)))
         (should (disco-room--resolve-message "200"))
         (should (equal "unsent draft" (disco-room--current-draft)))))))
+
+(ert-deftest disco-room-selection-ordinary-command-ignores-active-menu ()
+  (disco-room-test-with-surface "selection"
+    (disco-room-selection-test-seed)
+    (goto-char (appkit-chat-timeline-key-position "100"))
+    (let ((transient-current-prefix
+           (disco-room-selection-test-open-menu #'disco-message-transient)))
+      (goto-char (appkit-chat-timeline-key-position "200"))
+      (call-interactively #'disco-msg-copy-text)
+      (should (equal "body 200" (current-kill 0 t)))
+      (disco-room-selection-test-call-suffix #'disco-msg-copy-text)
+      (should (equal "body 100" (current-kill 0 t)))
+      (appkit-surface-stop surface)
+      (disco-room--ensure-surface)
+      (should-error (disco-room-selection-test-call-suffix #'disco-msg-copy-text)
+                    :type 'user-error))))
+
+(ert-deftest disco-room-selection-delete-rejects-stale-confirmation ()
+  (dolist (change '(stop replace delete permission))
+    (disco-room-test-with-surface "selection"
+      (disco-room-selection-test-seed)
+      (disco-state-upsert-message
+       "selection" '((id . "100") (channel_id . "selection")
+                     (author . ((id . "other"))) (content . "body 100")))
+      (goto-char (appkit-chat-timeline-key-position "100"))
+      (let (requests)
+        (cl-letf (((symbol-function 'disco-gateway-current-user-id) (lambda () "self"))
+                  ((symbol-function 'disco-api-delete-message-async)
+                   (lambda (&rest args) (push args requests)))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _)
+                     (pcase change
+                       ('stop (appkit-surface-stop surface))
+                       ('replace
+                        (appkit-surface-stop surface)
+                        (disco-room--ensure-surface))
+                       ('delete (disco-state-delete-message "selection" "100"))
+                       ('permission
+                        (disco-state-upsert-channel
+                         '((id . "selection") (type . 0) (permissions . "2048")))))
+                     t)))
+          (should-error (call-interactively #'disco-msg-delete) :type 'user-error))
+        (should-not requests)
+        (should-not (disco-room-operation-current))
+        (when (eq change 'stop)
+          (should-not (appkit-surface-live-p (appkit-current-surface))))))))
+
+(ert-deftest disco-room-selection-forward-rechecks-after-last-prompt ()
+  (dolist (change '(stop replace delete permission))
+    (disco-room-test-with-surface "selection"
+      (disco-room-selection-test-seed)
+      (goto-char (appkit-chat-timeline-key-position "100"))
+      (let (requests)
+        (cl-letf (((symbol-function 'disco-api-forward-message-async)
+                   (lambda (&rest args) (push args requests)))
+                  ((symbol-function 'read-string) (lambda (&rest _) "comment"))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _)
+                     (pcase change
+                       ('stop (appkit-surface-stop surface))
+                       ('replace
+                        (appkit-surface-stop surface)
+                        (disco-room--ensure-surface))
+                       ('delete (disco-state-delete-message "selection" "100"))
+                       ('permission
+                        (disco-state-upsert-channel
+                         '((id . "selection") (type . 0) (permissions . "0")))))
+                     nil)))
+          (should-error (call-interactively #'disco-msg-forward) :type 'user-error))
+        (should-not requests)
+        (should-not (disco-room-operation-current))
+        (when (memq change '(delete permission))
+          (should (equal "unsent draft" (disco-room--current-draft))))))))
+
+(ert-deftest disco-room-selection-explicit-dwim-copy-does-not-retarget-region ()
+  (disco-room-test-with-surface "selection"
+    (disco-room-selection-test-seed)
+    (goto-char (appkit-chat-timeline-key-position "100"))
+    (let ((disco-msg-command-selection (disco-msg-capture-selection))
+          (transient-mark-mode t))
+      (goto-char (appkit-chat-timeline-key-position "200"))
+      (set-mark (point))
+      (goto-char (1- (appkit-chat-timeline-key-position "300")))
+      (setq mark-active t)
+      (call-interactively #'disco-msg-copy-dwim)
+      (should (equal "body 100" (current-kill 0 t))))))
 
 (provide 'disco-room-selection-test)
 ;;; disco-room-selection-test.el ends here

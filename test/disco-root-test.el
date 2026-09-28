@@ -1364,7 +1364,7 @@
               (setq first-surface (appkit-current-surface))
               (setq-local disco-root--sort-mode 'name
                           disco-root--view-mode 'dms
-                          disco-root--search-query "old"
+                          disco-root--search-query-spec '(:content "old")
                           disco-root--search-tabs '((messages :loading t))))
             (disco-runtime-stop)
             (should-not (appkit-surface-live-p first-surface))
@@ -1374,7 +1374,7 @@
               (should-not (eq first-surface (appkit-current-surface)))
               (should (eq 'activity disco-root--sort-mode))
               (should (eq 'all disco-root--view-mode))
-              (should-not disco-root--search-query)
+              (should-not (disco-root--search-effective-spec-p disco-root--search-query-spec))
               (should-not disco-root--search-tabs))
             (should (= 2 sync-count)))
         (when (buffer-live-p first) (kill-buffer first))
@@ -1385,10 +1385,10 @@
   (with-temp-buffer
     (disco-root-mode)
     (setq-local disco-root--search-active-p t)
-    (setq-local disco-root--search-query "old")
+    (setq-local disco-root--search-query-spec '(:content "old"))
     (disco-root--reset-session-controller-state)
     (should-not disco-root--search-active-p)
-    (should-not disco-root--search-query)))
+    (should-not (disco-root--search-effective-spec-p disco-root--search-query-spec))))
 
 (ert-deftest disco-root-open-at-point-jumps-to-search-message ()
   (with-temp-buffer
@@ -1543,6 +1543,117 @@
         (should (eq 'asc (plist-get parsed :sort-order)))
         (should (equal "123" (plist-get parsed :max-id)))
         (should (equal "456" (plist-get parsed :min-id)))))))
+
+(ert-deftest disco-root-search-menu-refreshes-infix-after-clear-and-raw-edit ()
+  (require 'disco-transient)
+  (save-window-excursion
+    (with-temp-buffer
+      (disco-root-mode)
+      (switch-to-buffer (current-buffer))
+      (setq-local disco-root--search-domain '(:kind dms :id nil :label "DMs"))
+      (cl-labels ((invoke (command)
+                   (let ((keys (where-is-internal command transient--transient-map t)))
+                     (unless keys (ert-fail (format "No active command: %S" command)))
+                     (execute-kbd-macro keys))))
+        (unwind-protect
+            (progn
+              (call-interactively #'disco-root-search-transient)
+              (invoke #'disco-root-search--infix-pinned)
+              (should (eq t (plist-get disco-root--search-query-spec :pinned)))
+              (invoke #'disco-root-search-clear)
+              (should-not (disco-root--search-effective-spec-p disco-root--search-query-spec))
+              (invoke #'disco-root-search--infix-pinned)
+              (should (eq t (plist-get disco-root--search-query-spec :pinned)))
+              (cl-letf (((symbol-function 'disco-root--read-search-query)
+                         (lambda (_domain _initial) "pinned:false")))
+                (invoke #'disco-root-search-edit-raw-query))
+              (should (eq :false (plist-get disco-root--search-query-spec :pinned)))
+              (invoke #'disco-root-search--infix-pinned)
+              (should-not (disco-root--search-effective-spec-p disco-root--search-query-spec)))
+          (transient--emergency-exit))))))
+
+(ert-deftest disco-root-search-raw-editor-preserves-structured-query ()
+  (dolist (domain '((:kind guild :id "10" :label "Guild: name")
+                    (:kind dms :id nil :label "DMs")
+                    (:kind channel :id "20" :guild-id "10" :label "Channel name")))
+    (dolist (pinned '(nil t :false))
+      (dolist (content '(nil "from:123" "pinned:false"
+                         "  words  \"quoted\" \\path:\tline\nnext  "))
+        (with-temp-buffer
+          (setq-local disco-root--search-domain (copy-tree domain))
+          (let ((spec (list :content content
+                            :author-ids '("101" "102" "103" "104")
+                            :author-types '("user" "bot" "webhook")
+                            :mentions '("201" "202" "203" "204")
+                            :mention-everyone t
+                            :has '("link" "-file")
+                            :max-id "900" :min-id "100" :slop 0
+                            :sort-by 'relevance :sort-order 'asc)))
+            (unless (eq (plist-get domain :kind) 'channel)
+              (setq spec (plist-put spec :channel-ids '("301" "302" "303" "304"))))
+            (when pinned
+              (setq spec (plist-put spec :pinned pinned)))
+            (disco-root--search-set-spec spec)
+            (cl-letf (((symbol-function 'disco-root--read-search-query)
+                       (lambda (_domain initial) initial))
+                      ((symbol-function 'disco-root--search-user-candidates)
+                       (lambda (&rest _args)
+                         (ert-fail "Canonical IDs must not require name resolution")))
+                      ((symbol-function 'disco-root--search-channel-candidates)
+                       (lambda (&rest _args)
+                         (ert-fail "Canonical IDs must not require name resolution"))))
+              (disco-root-search-edit-raw-query))
+            (should (equal domain disco-root--search-domain))
+            (dolist (field '(:content :author-ids :author-types :mentions :mention-everyone
+                             :channel-ids :has :pinned :max-id :min-id :slop
+                             :sort-by :sort-order))
+              (should (equal (plist-get spec field)
+                             (plist-get disco-root--search-query-spec field))))))))))
+
+(ert-deftest disco-root-search-raw-edits-replace-draft-and-clear ()
+  (require 'disco-transient)
+  (with-temp-buffer
+    (setq-local disco-root--search-domain '(:kind guild :id "10" :label "Guild"))
+    (disco-root--search-set-spec
+     '(:content "old" :author-ids ("101") :channel-ids ("301") :pinned t))
+    (cl-letf (((symbol-function 'disco-root--read-search-query)
+               (lambda (_domain _initial)
+                 "\"has:link\" from:102,103 mentions:204,everyone pinned:false sort:relevance order:asc")))
+      (disco-root-search-edit-raw-query))
+    (should (equal "has:link" (plist-get disco-root--search-query-spec :content)))
+    (should (equal '("102" "103") (plist-get disco-root--search-query-spec :author-ids)))
+    (should (equal '("204") (plist-get disco-root--search-query-spec :mentions)))
+    (should (plist-get disco-root--search-query-spec :mention-everyone))
+    (should (eq :false (plist-get disco-root--search-query-spec :pinned)))
+    (should (eq 'relevance (plist-get disco-root--search-query-spec :sort-by)))
+    (should (eq 'asc (plist-get disco-root--search-query-spec :sort-order)))
+    (should-not (plist-get disco-root--search-query-spec :channel-ids))
+    (disco-root--search-transient-spec-setter :channel-ids '("302"))
+    (disco-root--search-transient-domain-setter
+     '(:kind channel :id "303" :label "Another channel"))
+    (cl-letf (((symbol-function 'disco-root--read-search-query)
+               (lambda (_domain initial) initial)))
+      (disco-root-search-edit-raw-query))
+    (should (equal '(:kind channel :id "303" :label "Another channel")
+                   disco-root--search-domain))
+    (should-not (plist-get disco-root--search-query-spec :channel-ids))
+    (should (eq :false (plist-get disco-root--search-query-spec :pinned)))
+    (disco-root-search-clear)
+    (cl-letf (((symbol-function 'disco-root--read-search-query)
+               (lambda (_domain initial) initial)))
+      (disco-root-search-edit-raw-query))
+    (should-not (disco-root--search-effective-spec-p disco-root--search-query-spec))))
+
+(ert-deftest disco-root-search-invalid-raw-edit-keeps-draft ()
+  (with-temp-buffer
+    (setq-local disco-root--search-domain '(:kind dms :id nil :label "DMs"))
+    (disco-root--search-set-spec '(:content "retained" :pinned t))
+    (let ((spec (copy-tree disco-root--search-query-spec)))
+      (dolist (raw '("pinned:invalid" "\"unclosed"))
+        (cl-letf (((symbol-function 'disco-root--read-search-query)
+                   (lambda (_domain _initial) raw)))
+          (should-error (disco-root-search-edit-raw-query) :type 'user-error))
+        (should (equal spec disco-root--search-query-spec))))))
 
 (ert-deftest disco-root-search-current-domain-at-point-prefers-channel ()
   (disco-state-reset)

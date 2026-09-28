@@ -2431,7 +2431,8 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
   "Forward selected MESSAGES into this room in order, without using the draft."
   (disco-room--ensure-action-available
    (disco-room--forward-unavailable-reason) "forward messages")
-  (let* ((content (string-trim
+  (let* ((selection (disco-msg-capture-selection messages))
+         (content (string-trim
                    (read-string (if (> (length messages) 1)
                                     "Optional comment for each forward: "
                                   "Optional forward comment: "))))
@@ -2439,12 +2440,16 @@ With prefix RANKED-ONLY, offer only Favorite and Frequently Used stickers."
                  (disco-room--read-forward-only
                   (disco-msg-channel-id (car messages))
                   (disco-msg-id (car messages)))))
+         (messages (disco-msg-selection-messages selection))
          (specs (mapcar (lambda (msg)
                           (unless (disco-room--canonical-message-p msg)
                             (user-error "disco: cannot forward a pending message"))
                           (disco-room--forward-spec
                            (disco-msg-id msg) (disco-msg-channel-id msg) content only))
                         messages)))
+    (disco-msg-selection-messages selection)
+    (disco-room--ensure-action-available
+     (disco-room--forward-unavailable-reason) "forward messages")
     (disco-room-operation-begin 'forward specs)))
 
 (defun disco-room--forward-spec (id source-channel content forward-only)

@@ -21,7 +21,6 @@
 
 (declare-function disco-room--async-error-message "disco-room" (err))
 (declare-function disco-room--channel-buffer-p "disco-room" (buffer channel-id view))
-(declare-function disco-room--ensure-surface "disco-room" ())
 (declare-function disco-room--event-self-p "disco-room" (event))
 (declare-function disco-room--message-at-point "disco-room" ())
 (declare-function disco-room--message-by-id "disco-room" (message-id))
@@ -390,38 +389,53 @@ versions or rooms without a catalog retain the unrestricted text fallback."
           (error "disco: reaction candidate has no insertion identity"))
         emoji))))
 
+(defun disco-room--reaction-command-arguments (msg prompt &optional own-only)
+  "Read a reaction for MSG and revalidate its owner before returning arguments."
+  (let* ((selection (disco-msg-capture-selection (list msg)))
+         (reactions (and own-only
+                         (seq-filter #'disco-msg-reaction-selected-p
+                                     (disco-msg-reactions msg)))))
+    (disco-room--ensure-action-available
+     (disco-room--reaction-unavailable-reason msg) "change reactions")
+    (when (and own-only (null reactions))
+      (user-error "disco: this message has no reaction from you"))
+    (let* ((default (if own-only (disco-msg-reaction-emoji (car reactions))
+                      (disco-room--default-reaction-emoji msg)))
+           (picked (disco-room--read-reaction-emoji prompt default msg own-only))
+           (current (car (disco-msg-selection-messages selection))))
+      (disco-room--ensure-action-available
+       (disco-room--reaction-unavailable-reason current) "change reactions")
+      (when (and own-only
+                 (not (disco-room--message-has-own-reaction-p current picked)))
+        (user-error "disco: this message no longer has that reaction from you"))
+      (list picked (disco-msg-id current)))))
+
+(defun disco-room--reaction-command-message (message-id)
+  "Resolve MESSAGE-ID or the interactive target in the current live room."
+  (car (disco-msg-selection-messages
+        (disco-msg-capture-selection
+         (list (if message-id
+                   (disco-msg--resolve-key message-id disco-room--channel-id)
+                 (disco-msg-for-interactive)))))))
+
 (defun disco-room--add-reaction-to-msg (msg)
   "Prompt for and add a reaction to MSG."
-  (disco-room--ensure-action-available
-   (disco-room--reaction-unavailable-reason msg)
-   "add reactions")
-  (let* ((default (disco-room--default-reaction-emoji msg))
-         (picked
-          (disco-room--read-reaction-emoji
-           "Add reaction" default msg)))
-    (disco-room-add-reaction picked (alist-get 'id msg))))
+  (apply #'disco-room-add-reaction
+         (disco-room--reaction-command-arguments msg "Add reaction")))
 
 (defun disco-room-add-reaction (&optional emoji message-id)
   "Add EMOJI reaction to MESSAGE-ID at point."
   (interactive
-   (let* ((msg (or (disco-msg-for-interactive)
-                   (user-error "disco: point is not on a message"))))
-     (disco-room--ensure-action-available
-      (disco-room--reaction-unavailable-reason msg)
-      "add reactions")
-     (let* ((default (disco-room--default-reaction-emoji msg))
-            (picked
-             (disco-room--read-reaction-emoji
-              "Add reaction" default msg)))
-       (list picked (alist-get 'id msg)))))
-  (disco-room--ensure-action-available
-   (disco-room--reaction-unavailable-reason)
-   "add reactions")
-  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
+   (disco-room--reaction-command-arguments
+    (disco-msg-for-interactive) "Add reaction"))
+  (let* ((msg (disco-room--reaction-command-message message-id))
+         (target-id (disco-msg-id msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-surface))
+         (view (appkit-current-surface))
          (emoji-text emoji))
+    (disco-room--ensure-action-available
+     (disco-room--reaction-unavailable-reason msg) "add reactions")
     (let ((op-token
            (disco-room--reaction-op-begin target-id emoji-text t)))
       (disco-api-add-reaction-async
@@ -455,48 +469,22 @@ versions or rooms without a catalog retain the unrestricted text fallback."
 
 (defun disco-room--remove-reaction-from-msg (msg)
   "Prompt for and remove a reaction from MSG."
-  (disco-room--ensure-action-available
-   (disco-room--reaction-unavailable-reason msg)
-   "remove reactions")
-  (let* ((reactions
-          (seq-filter
-           #'disco-msg-reaction-selected-p
-           (disco-msg-reactions msg))))
-    (unless reactions
-      (user-error "disco: this message has no reaction from you"))
-    (let* ((default (disco-msg-reaction-emoji (car reactions)))
-           (picked
-            (disco-room--read-reaction-emoji
-             "Remove reaction" default msg t)))
-      (disco-room-remove-reaction picked (alist-get 'id msg)))))
+  (apply #'disco-room-remove-reaction
+         (disco-room--reaction-command-arguments msg "Remove reaction" t)))
 
 (defun disco-room-remove-reaction (&optional emoji message-id)
   "Remove current user's EMOJI reaction from MESSAGE-ID at point."
   (interactive
-   (let* ((msg (or (disco-msg-for-interactive)
-                   (user-error "disco: point is not on a message"))))
-     (disco-room--ensure-action-available
-      (disco-room--reaction-unavailable-reason msg)
-      "remove reactions")
-     (let* ((reactions
-             (seq-filter
-              #'disco-msg-reaction-selected-p
-              (disco-msg-reactions msg))))
-       (unless reactions
-         (user-error "disco: this message has no reaction from you"))
-       (let* ((default (disco-msg-reaction-emoji (car reactions)))
-              (picked
-               (disco-room--read-reaction-emoji
-                "Remove reaction" default msg t)))
-         (list picked (alist-get 'id msg))))))
-  (disco-room--ensure-action-available
-   (disco-room--reaction-unavailable-reason)
-   "remove reactions")
-  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
+   (disco-room--reaction-command-arguments
+    (disco-msg-for-interactive) "Remove reaction" t))
+  (let* ((msg (disco-room--reaction-command-message message-id))
+         (target-id (disco-msg-id msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-surface))
+         (view (appkit-current-surface))
          (emoji-text emoji))
+    (disco-room--ensure-action-available
+     (disco-room--reaction-unavailable-reason msg) "remove reactions")
     (let ((op-token
            (disco-room--reaction-op-begin target-id emoji-text nil)))
       (disco-api-remove-own-reaction-async
@@ -530,36 +518,18 @@ versions or rooms without a catalog retain the unrestricted text fallback."
 
 (defun disco-room--toggle-reaction-on-msg (msg)
   "Prompt for and toggle a reaction on MSG."
-  (disco-room--ensure-action-available
-   (disco-room--reaction-unavailable-reason msg)
-   "toggle reactions")
-  (let* ((default (disco-room--default-reaction-emoji msg))
-         (picked
-          (disco-room--read-reaction-emoji
-           "Toggle reaction" default msg)))
-    (disco-room-toggle-reaction picked (alist-get 'id msg))))
+  (apply #'disco-room-toggle-reaction
+         (disco-room--reaction-command-arguments msg "Toggle reaction")))
 
 (defun disco-room-toggle-reaction (&optional emoji message-id)
   "Toggle current user's EMOJI reaction on MESSAGE-ID at point."
   (interactive
-   (let* ((msg (or (disco-msg-for-interactive)
-                   (user-error "disco: point is not on a message"))))
-     (disco-room--ensure-action-available
-      (disco-room--reaction-unavailable-reason msg)
-      "toggle reactions")
-     (let* ((default (disco-room--default-reaction-emoji msg))
-            (picked
-             (disco-room--read-reaction-emoji
-              "Toggle reaction" default msg)))
-       (list picked (alist-get 'id msg)))))
-  (disco-room--ensure-action-available
-   (disco-room--reaction-unavailable-reason)
-   "toggle reactions")
-  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
-         (msg (or (disco-room--message-by-id target-id)
-                  (and (null message-id)
-                       (disco-msg-for-interactive))
-                  (user-error "disco: message not found in room state"))))
+   (disco-room--reaction-command-arguments
+    (disco-msg-for-interactive) "Toggle reaction"))
+  (let* ((msg (disco-room--reaction-command-message message-id))
+         (target-id (disco-msg-id msg)))
+    (disco-room--ensure-action-available
+     (disco-room--reaction-unavailable-reason msg) "toggle reactions")
     (if (disco-room--message-has-own-reaction-p msg emoji)
         (disco-room-remove-reaction emoji target-id)
       (disco-room-add-reaction emoji target-id))))

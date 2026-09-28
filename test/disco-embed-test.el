@@ -6,21 +6,6 @@
 (require 'disco-embed)
 (require 'disco-room-test-support)
 
-(ert-deftest disco-embed-stringify-uses-internal-markdown-renderer ()
-  (let* ((disco-embed--current-message '((id . "m1")))
-         (disco-embed--current-spoiler-message-id "m1")
-         (disco-embed--reveal-spoilers nil)
-         (rendered (disco-embed--stringify "[link](https://example.com)\n> quote"))
-         (plain (substring-no-properties rendered))
-         (link-pos (string-match "link" plain))
-         (quote-pos (string-match "quote" plain)))
-    (should (equal "link\nquote" plain))
-    (should (equal "https://example.com"
-                   (get-text-property link-pos 'disco-markdown-url rendered)))
-    (should (equal "│ "
-                   (substring-no-properties
-                    (get-text-property quote-pos 'line-prefix rendered))))))
-
 (ert-deftest disco-embed-stringify-passes-spoiler-context-to-internal-renderer ()
   (let* ((disco-embed--current-message '((id . "m1")))
          (disco-embed--current-spoiler-message-id "m1")

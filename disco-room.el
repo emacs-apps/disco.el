@@ -2125,17 +2125,20 @@ When QUIET is non-nil, suppress progress messages."
 
 (defun disco-room--delete-msg (messages)
   "Delete MESSAGES after complete preflight and one batch confirmation."
-  (when (disco-room-operation-current)
-    (user-error "disco: another message batch is still in progress"))
-  (dolist (msg messages)
-    (unless (disco-room--canonical-message-p msg)
-      (user-error "disco: cannot delete a pending message"))
-    (disco-room--ensure-action-available
-     (disco-room--delete-message-unavailable-reason msg) "delete messages"))
-  (when (y-or-n-p (format "Delete %d selected message%s? "
-                          (length messages) (if (= (length messages) 1) "" "s")))
-    (disco-room-operation-begin
-     'delete (mapcar (lambda (msg) (list :id (disco-msg-id msg))) messages))))
+  (let ((selection (disco-msg-capture-selection messages)))
+    (when (disco-room-operation-current)
+      (user-error "disco: another message batch is still in progress"))
+    (dolist (msg (disco-msg-selection-messages selection))
+      (disco-room--ensure-action-available
+       (disco-room--delete-message-unavailable-reason msg) "delete messages"))
+    (when (y-or-n-p (format "Delete %d selected message%s? "
+                            (length messages) (if (= (length messages) 1) "" "s")))
+      (setq messages (disco-msg-selection-messages selection))
+      (dolist (msg messages)
+        (disco-room--ensure-action-available
+         (disco-room--delete-message-unavailable-reason msg) "delete messages"))
+      (disco-room-operation-begin
+       'delete (mapcar (lambda (msg) (list :id (disco-msg-id msg))) messages)))))
 
 (defun disco-room-delete-message ()
   "Delete captured, region-selected, marked, or point messages."

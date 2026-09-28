@@ -536,7 +536,7 @@ otherwise remove.  SELF-P non-nil makes the own-vote transition idempotent."
 
 (defun disco-room--poll-message-required (&optional message-id)
   "Return poll message object by MESSAGE-ID or point, or raise user error."
-  (let* ((target-id (or message-id (disco-room--message-id-required-at-point)))
+  (let* ((target-id (or message-id (disco-msg-id (disco-msg-for-interactive))))
          (msg (or (disco-room--message-by-id target-id)
                   (user-error "disco: message not found in room state")))
          (poll (disco-msg-poll msg)))
@@ -693,11 +693,16 @@ CONTENT is optional extra text sent alongside the poll."
 (defun disco-room--submit-poll-vote (message-id selected-answer-ids)
   "Submit SELECTED-ANSWER-IDS for poll MESSAGE-ID asynchronously."
   (let* ((msg (disco-room--poll-message-required message-id))
+         (selection (disco-msg-capture-selection (list msg)))
+         (msg (car (disco-msg-selection-messages selection)))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-surface))
+         (view (disco-msg-selection-surface selection))
          (target-id (alist-get 'id msg))
          (normalized (disco-msg-poll-normalize-answer-id-list selected-answer-ids)))
+    (dolist (answer normalized)
+      (unless (memq answer (mapcar #'cdr (disco-room--poll-answer-choices msg)))
+        (user-error "disco: answer %s does not belong to this poll" answer)))
     (disco-room--ensure-action-available
      (disco-room--poll-vote-unavailable-reason msg)
      "vote in polls")
@@ -738,10 +743,21 @@ CONTENT is optional extra text sent alongside the poll."
                         (disco-room--async-error-message err))))))))))
 
 (defun disco-room--pick-poll-answer-id (msg &optional explicit-answer-id)
-  "Return poll answer id from EXPLICIT-ANSWER-ID, point, or prompt for MSG."
-  (or explicit-answer-id
-      (disco-room--poll-answer-id-at-point)
-      (disco-room--read-poll-answer-id msg nil)))
+  "Read an answer belonging to MSG, retaining its exact room owner."
+  (let* ((selection (disco-msg-capture-selection (list msg)))
+         (picked
+          (or explicit-answer-id
+              (and (equal (disco-msg-id msg) (disco-msg-id (disco-msg-at)))
+                   (equal (disco-msg-channel-id msg)
+                          (disco-msg-channel-id (disco-msg-at)))
+                   (disco-room--poll-answer-id-at-point))
+              (disco-room--read-poll-answer-id msg nil)))
+         (current (car (disco-msg-selection-messages selection))))
+    (disco-room--ensure-action-available
+     (disco-room--poll-vote-unavailable-reason current) "stage poll votes")
+    (unless (memq picked (mapcar #'cdr (disco-room--poll-answer-choices current)))
+      (user-error "disco: answer %s does not belong to this poll" picked))
+    picked))
 
 (defun disco-room--stage-poll-selection (message-id selection)
   "Stage poll SELECTION for MESSAGE-ID and rerender room buffer."
@@ -760,6 +776,7 @@ In single-select polls, this replaces the staged selection."
      (disco-room--poll-vote-unavailable-reason msg)
      "stage poll votes")
     (let ((picked (disco-room--pick-poll-answer-id msg answer-id)))
+      (setq poll (disco-msg-poll (disco-room--poll-message-required target-id)))
       (disco-room--stage-poll-selection
        target-id
        (disco-room--poll-add-selection target-id poll picked)))))
@@ -775,6 +792,8 @@ In single-select polls, this replaces the staged selection."
      (disco-room--poll-vote-unavailable-reason msg)
      "stage poll vote removals")
     (let ((picked (disco-room--pick-poll-answer-id msg answer-id)))
+      (setq poll (disco-msg-poll (disco-room--poll-message-required target-id))
+            current (disco-room--poll-effective-selection target-id poll))
       (unless (member picked current)
         (user-error "disco: answer %s is not selected" picked))
       (disco-room--stage-poll-selection
@@ -794,6 +813,7 @@ send votes to Discord."
      (disco-room--poll-vote-unavailable-reason msg)
      "toggle staged poll votes")
     (let ((picked (disco-room--pick-poll-answer-id msg answer-id)))
+      (setq poll (disco-msg-poll (disco-room--poll-message-required target-id)))
       (disco-room--stage-poll-selection
        target-id
        (disco-room--poll-toggle-draft-selection target-id poll picked)))))
@@ -834,10 +854,11 @@ send votes to Discord."
   "End poll in MESSAGE-ID at point."
   (interactive)
   (let* ((msg (disco-room--poll-message-required message-id))
+         (selection (disco-msg-capture-selection (list msg)))
          (target-id (alist-get 'id msg))
          (room-buffer (current-buffer))
          (channel-id disco-room--channel-id)
-         (view (disco-room--ensure-surface))
+         (view (disco-msg-selection-surface selection))
          request-revision)
     (disco-room--ensure-action-available
      (disco-room--poll-expire-unavailable-reason msg)
@@ -848,6 +869,13 @@ send votes to Discord."
      :action "ending polls")
     (when (or (not disco-room-poll-confirm-expire)
               (y-or-n-p (format "End poll %s now? " target-id)))
+      (setq msg (car (disco-msg-selection-messages selection)))
+      (disco-room--ensure-action-available
+       (disco-room--poll-expire-unavailable-reason msg) "end polls")
+      (disco-permission-ensure-channel
+       (disco-room--channel-object)
+       (disco-room--poll-expire-required-permissions)
+       :action "ending polls")
       (setq request-revision
             (disco-state-message-revision channel-id))
       (disco-api-expire-poll-async

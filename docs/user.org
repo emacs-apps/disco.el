@@ -59,6 +59,12 @@ Its first action is ~Back to root~; optional empty result sections disappear
 after loading, while each live section keeps its own loading and ~Show more~
 state.  In Evil normal/motion state, ~l~ and ~L~ retain their native motions.
 
+The structured editor and raw query editor share one draft.  Clearing filters
+or editing the raw query immediately updates the structured fields.  Raw
+queries use canonical IDs rather than display chips and quote literal text;
+confirming an unchanged query preserves its domain, filters, whitespace and
+pinned state (any, yes, or no).
+
 Private channels (DM, group DM, ephemeral DM) appear in root.  Each row uses
 one whole-row delimiter around its complete context.  Stable Discord types
 select the delimiter: ={user}= for DM, =⦃user⦄= for ephemeral DM, =(group)=
@@ -198,6 +204,15 @@ the message at point.  Moving point afterward does not retarget that menu.
 Single-message and batch operations have separate menus; both offer copy,
 translation, forwarding and deletion.  Direct single-message commands reject
 multiple targets.
+Submenus and returning from them retain the same captured targets.  Ordinary
+commands use explicit targets or the current selection, not a previously open
+menu.
+
+After any confirmation or input prompt, deletion, forwarding, reactions,
+thread creation and ending polls recheck the original Surface, current targets
+and permissions.  A closed or replaced Surface cannot authorize the pending
+action.  Poll answer selection belongs to the captured poll, even when point
+is on another message's answer.
 
 Deletion preflights the entire selection and asks once.  Forwarding sends each
 selected message into the current room in chronological order; an optional

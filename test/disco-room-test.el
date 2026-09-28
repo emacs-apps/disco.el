@@ -407,41 +407,91 @@
       (equal "👍"
              (disco-room--read-reaction-emoji "Add reaction" "👍"))))))
 
-(ert-deftest disco-room-remove-reaction-picker-offers-only-own-identities ()
-  (disco-room-test-with-runtime
-   (let* ((msg
-           '((id . "m1")
-             (reactions
-              . (((emoji . ((id . nil) (name . "🔥"))) (me . :false))
-                 ((emoji . ((id . "42") (name . "mine"))) (me . t))))))
-          seen-message
-          seen-own-only
-          removed)
-     (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
-                (lambda (&optional _msg) nil))
-               ((symbol-function 'disco-room--read-reaction-emoji)
-                (lambda (_prompt _default message own-only)
-                  (setq seen-message message
-                        seen-own-only own-only)
-                  "<:mine:42>"))
-               ((symbol-function 'disco-room-remove-reaction)
-                (lambda (emoji message-id)
-                  (setq removed (list emoji message-id)))))
-       (disco-room--remove-reaction-from-msg msg)
-       (should seen-own-only)
-       (should (eq msg seen-message))
-       (should (equal '("<:mine:42>" "m1") removed))))))
 
 (ert-deftest disco-room-remove-reaction-picker-errors-without-own-reaction ()
-  (disco-room-test-with-runtime
-   (cl-letf (((symbol-function 'disco-room--reaction-unavailable-reason)
-              (lambda (&optional _msg) nil)))
-     (should-error
-      (disco-room--remove-reaction-from-msg
-       '((id . "m1")
-         (reactions
-          . (((emoji . ((id . nil) (name . "🔥"))) (me . :false))))))
-      :type 'user-error))))
+  (disco-room-test-with-surface "reaction"
+    (disco-state-upsert-channel
+     '((id . "reaction") (type . 0) (permissions . "8")))
+    (disco-state-upsert-message
+     "reaction"
+     '((id . "100") (channel_id . "reaction")
+       (reactions . (((emoji . ((name . "wave"))) (me . :false))))))
+    (let (prompted requests)
+      (cl-letf (((symbol-function 'disco-room--read-reaction-emoji)
+                 (lambda (&rest _) (setq prompted t) "wave"))
+                ((symbol-function 'disco-api-remove-own-reaction-async)
+                 (lambda (&rest args) (push args requests))))
+        (should-error
+         (disco-room--remove-reaction-from-msg (disco-room--message-by-id "100"))
+         :type 'user-error))
+      (should-not prompted)
+      (should-not requests))))
+
+(defun disco-room-test-seed-reaction-targets ()
+  "Seed two messages with an own reaction in the current fixture room."
+  (disco-state-upsert-channel
+   '((id . "reaction") (type . 0) (permissions . "8")))
+  (dolist (id '("100" "200"))
+    (disco-state-upsert-message
+     "reaction"
+     `((id . ,id) (channel_id . "reaction") (content . ,id)
+       (reactions . (((emoji . ((name . "wave"))) (me . t) (count . 1)))))))
+  (disco-room-test-establish-latest-window)
+  (disco-room-render)
+  (goto-char (appkit-chat-timeline-key-position "100")))
+
+(ert-deftest disco-room-reaction-toggle-keeps-target-and-rechecks-own-state ()
+  (disco-room-test-with-surface "reaction"
+    (disco-room-test-seed-reaction-targets)
+    (let (requests)
+      (cl-letf (((symbol-function 'disco-room--read-reaction-emoji)
+                 (lambda (&rest _)
+                   (goto-char (appkit-chat-timeline-key-position "200"))
+                   (disco-state-upsert-message
+                    "reaction"
+                    '((id . "100") (channel_id . "reaction")
+                      (reactions . (((emoji . ((name . "wave"))) (me . :false))))))
+                   "wave"))
+                ((symbol-function 'disco-api-add-reaction-async)
+                 (lambda (_channel id emoji &rest _)
+                   (push (list 'add id emoji) requests)))
+                ((symbol-function 'disco-api-remove-own-reaction-async)
+                 (lambda (_channel id emoji &rest _)
+                   (push (list 'remove id emoji) requests))))
+        (call-interactively #'disco-room-toggle-reaction))
+      (should (equal '((add "100" "wave")) requests)))))
+
+(ert-deftest disco-room-reaction-prompt-rejects-stale-authorization ()
+  (dolist (change '(stop replace delete permission reaction))
+    (disco-room-test-with-surface "reaction"
+      (disco-room-test-seed-reaction-targets)
+      (let (prompted requests)
+        (cl-letf (((symbol-function 'disco-room--read-reaction-emoji)
+                   (lambda (&rest _)
+                     (setq prompted t)
+                     (pcase change
+                       ('stop (appkit-surface-stop surface))
+                       ('replace
+                        (appkit-surface-stop surface)
+                        (disco-room--ensure-surface))
+                       ('delete (disco-state-delete-message "reaction" "100"))
+                       ('permission
+                        (disco-state-upsert-channel
+                         '((id . "reaction") (type . 0) (permissions . "2048"))))
+                       ('reaction
+                        (disco-state-upsert-message
+                         "reaction"
+                         '((id . "100") (channel_id . "reaction")
+                           (reactions . (((emoji . ((name . "wave"))) (me . :false))))))))
+                     "wave"))
+                  ((symbol-function 'disco-api-remove-own-reaction-async)
+                   (lambda (&rest args) (push args requests))))
+          (should-error (call-interactively #'disco-msg-remove-reaction)
+                        :type 'user-error))
+        (should prompted)
+        (should-not requests)
+        (when (eq change 'stop)
+          (should-not (appkit-surface-live-p (appkit-current-surface))))))))
 
 (ert-deftest disco-room-reaction-callback-only-requests-entry-sync ()
   (disco-room-test-with-runtime

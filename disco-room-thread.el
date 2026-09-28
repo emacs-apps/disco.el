@@ -155,9 +155,15 @@
            '(create-private-threads)
          '(create-public-threads)))))))
 
-(defun disco-room-thread--create-from-message-unavailable-reason ()
-  "Return reason creating a starter thread is unavailable, or nil."
-  (disco-room-thread--create-unavailable-reason 11))
+(defun disco-room-thread--create-from-message-unavailable-reason (&optional message)
+  "Return reason creating a starter thread for MESSAGE is unavailable, or nil."
+  (or (disco-room-thread--create-unavailable-reason 11)
+      (when message
+        (cond
+         ((not (disco-room--canonical-message-p message))
+          "message is still being sent")
+         ((disco-room-thread--message-has-thread-p message)
+          "message already has a starter thread")))))
 
 (defun disco-room-thread--message-has-thread-p (message)
   "Return non-nil when MESSAGE is known to have a starter thread."
@@ -247,14 +253,22 @@
   "Create thread NAME from MESSAGE-ID in the current channel."
   (interactive
    (let* ((msg (disco-msg-for-interactive))
-          (name (read-string "Thread name: "))
-          (duration (disco-thread-read-auto-archive-duration nil nil))
-          (slowmode
-           (disco-room-thread--read-optional-nonnegative-int
-            "Slowmode seconds (empty for none): ")))
-     (list name (disco-msg-id msg) duration slowmode)))
+          (selection (disco-msg-capture-selection (list msg))))
+     (disco-room-thread--ensure-action-available
+      (disco-room-thread--create-from-message-unavailable-reason msg)
+      "create threads from messages")
+     (let* ((name (read-string "Thread name: "))
+            (duration (disco-thread-read-auto-archive-duration nil nil))
+            (slowmode
+             (disco-room-thread--read-optional-nonnegative-int
+              "Slowmode seconds (empty for none): "))
+            (current (car (disco-msg-selection-messages selection))))
+       (list name (disco-msg-id current) duration slowmode))))
   (disco-room-thread--ensure-action-available
-   (disco-room-thread--create-from-message-unavailable-reason)
+   (disco-room-thread--create-from-message-unavailable-reason
+    (car (disco-msg-selection-messages
+          (disco-msg-capture-selection
+           (list (disco-msg--resolve-key message-id disco-room--channel-id))))))
    "create threads from messages")
   (disco-room-thread--ensure-parent-channel)
   (let* ((thread
@@ -277,17 +291,27 @@
      (disco-room-thread--ensure-action-available
       (disco-room-thread--create-unavailable-reason :any)
       "create detached threads")
-     (let* ((name (read-string "Thread name: "))
-            (type (unless (disco-thread-forum-or-media-channel-p
-                           (disco-room--channel-object))
-                    (disco-thread-read-detached-type)))
-            (auto-archive-duration (disco-thread-read-auto-archive-duration nil nil))
-            (invitable (when (equal type 12)
-                         (y-or-n-p "Invitable by non-moderators? ")))
-            (rate-limit-per-user
-             (disco-room-thread--read-optional-nonnegative-int
-              "Slowmode seconds (empty for none): ")))
-       (list name type auto-archive-duration invitable rate-limit-per-user))))
+     (let* ((buffer (current-buffer))
+            (surface (appkit-current-surface))
+            (channel-id disco-room--channel-id))
+       (unless (appkit-surface-live-p surface)
+         (user-error "disco: thread creation requires a live room"))
+       (let* ((name (read-string "Thread name: "))
+              (type (unless (disco-thread-forum-or-media-channel-p
+                             (disco-room--channel-object))
+                      (disco-thread-read-detached-type)))
+              (auto-archive-duration (disco-thread-read-auto-archive-duration nil nil))
+              (invitable (when (equal type 12)
+                           (y-or-n-p "Invitable by non-moderators? ")))
+              (rate-limit-per-user
+               (disco-room-thread--read-optional-nonnegative-int
+                "Slowmode seconds (empty for none): ")))
+         (unless (and (eq buffer (current-buffer))
+                      (eq surface (appkit-current-surface))
+                      (appkit-surface-live-p surface)
+                      (equal channel-id disco-room--channel-id))
+           (user-error "disco: thread creation belongs to a closed or replaced room"))
+         (list name type auto-archive-duration invitable rate-limit-per-user)))))
   (disco-room-thread--ensure-action-available
    (disco-room-thread--create-unavailable-reason (or type :any))
    "create detached threads")
