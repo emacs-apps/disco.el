@@ -1,6 +1,8 @@
 #+title: disco.el
 #+options: toc:nil num:nil
 
+Repository: [[https://github.com/emacs-apps/disco.el][emacs-apps/disco.el]].
+
 * What it is
 
 ~disco.el~ is an Emacs Discord client.  It uses a telega-style root
